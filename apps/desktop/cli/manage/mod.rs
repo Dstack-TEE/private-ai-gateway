@@ -425,14 +425,26 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                 key: Some(key),
             })?)
         }
-        Profiles::Verify { id, key_stdin } => {
+        Profiles::Verify {
+            id,
+            key_stdin,
+            replace_key,
+        } => {
             let state = client.state()?;
+            let protecting = state.session_active;
             let profile = find(state.profiles, id)?;
-            confirm(global, SAVE)?;
-            let key = (*key_stdin || !profile.credential_saved)
+            confirm(
+                global,
+                if protecting {
+                    "Protection is on. Verifying restarts it, which ends requests in flight. Save this profile and select it as active?"
+                } else {
+                    SAVE
+                },
+            )?;
+            let key = (*key_stdin || *replace_key || !profile.credential_saved)
                 .then(|| read_key(global, *key_stdin))
                 .transpose()?;
-            value(client.call(rpc::Verify {
+            let saved = client.call(rpc::Verify {
                 profile: ConfidentialProfileInput {
                     id: profile.id,
                     name: profile.name,
@@ -440,7 +452,18 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                     remote_url: profile.remote_url,
                 },
                 key,
-            })?)
+            })?;
+            // Report the session that resumes, not the moment it restarts.
+            let deadline = Instant::now() + Duration::from_secs(90);
+            let mut state = saved.state;
+            while protecting
+                && state.status == VerificationStatus::Verifying
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(200));
+                state = client.state()?;
+            }
+            value(AppStateWire::from(state))
         }
         Profiles::Edit {
             id,
@@ -1126,7 +1149,7 @@ fn read_key(global: &Global, stdin: bool) -> Result<String, String> {
     if stdin {
         if io::stdin().is_terminal() {
             return Err(
-                "Refusing to read a credential from a terminal with --key-stdin; pipe it in, or omit the flag for a hidden prompt when the profile has no saved credential."
+                "Refusing to read a credential from a terminal with --key-stdin; pipe it in, or use `pap profiles verify <id> --replace-key` for a hidden prompt."
                     .into(),
             );
         }

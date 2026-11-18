@@ -109,7 +109,7 @@ impl DesktopRuntime {
         // Different ports can be reserved without releasing the working listener.
         // Same-port address changes must release the original socket first.
         let prepared = if current.bind.port() != resolved.bind.port() {
-            Some(proxy::bind_std(resolved.bind)?)
+            Some(proxy::bind_std(resolved.bind).map_err(Error::invalid_state)?)
         } else {
             None
         };
@@ -117,7 +117,7 @@ impl DesktopRuntime {
         let listener = match prepared {
             Some(listener) => listener,
             None => proxy::bind_std(resolved.bind)
-                .map_err(|error| self.restore_after(&current, error.into()))?,
+                .map_err(|error| self.restore_after(&current, Error::invalid_state(error)))?,
         };
         let resolved = match self.save_local_api(config) {
             Ok(resolved) => resolved,

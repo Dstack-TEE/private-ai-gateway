@@ -1432,13 +1432,22 @@ fn send_error(
         rewritten: None,
         local_policy_applied: false,
     });
-    text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n")
+    let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n");
+    response
+        .extensions_mut()
+        .insert(agent_bridge::proxy::VerifierRefusal {
+            delivery_unknown: true,
+        });
+    response
 }
 
 fn text_response(status: StatusCode, body: impl Into<Body>) -> Response {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain")
+        .extension(agent_bridge::proxy::VerifierRefusal {
+            delivery_unknown: false,
+        })
         .body(body.into())
         .unwrap_or_else(|_| internal_error())
 }

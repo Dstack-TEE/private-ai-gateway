@@ -337,6 +337,75 @@ async fn a_rejected_service_key_is_reported_as_such() {
         .contains("the agent's token is fine"));
 }
 
+struct RefusingService;
+
+impl VerifiedService for RefusingService {
+    fn call(
+        self: Arc<Self>,
+        request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(async move {
+            if request.method() == "GET" {
+                return Json(json!({"data": [{"id": "text"}]})).into_response();
+            }
+            let mut response =
+                (StatusCode::BAD_GATEWAY, "upstream connection failed\n").into_response();
+            response.extensions_mut().insert(VerifierRefusal {
+                delivery_unknown: true,
+            });
+            response
+        })
+    }
+}
+
+/// What the verifier refuses in plain text reaches an agent in the error
+/// format it parses, on either API.
+#[tokio::test]
+async fn a_verifier_refusal_reaches_agents_in_their_error_format() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let session = |catalog: Option<Catalog>| Session {
+        generation: 1,
+        epoch: 1,
+        session_id: Some("test-session".to_string()),
+        service: Some(Arc::new(RefusingService) as Arc<dyn VerifiedService>),
+        verified: catalog.is_some(),
+        catalog,
+    };
+    state.publish(session(None));
+    let catalog = state.fetch_catalog(1, 1).await.unwrap();
+    state.publish(session(Some(catalog)));
+    state.set_api_key(Some("sk-real".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let openai: Value = client
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(openai["error"]["code"], "upstream_unreachable");
+    let anthropic = client
+        .post(format!("{proxy}/v1/messages"))
+        .bearer_auth("claude-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anthropic.status().as_u16(), 502);
+    let anthropic: Value = anthropic.json().await.unwrap();
+    assert_eq!(anthropic["type"], "error");
+    assert!(anthropic["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not reach the service"));
+}
+
 #[test]
 fn connection_named_headers_are_hop_by_hop() {
     let mut headers = HeaderMap::new();

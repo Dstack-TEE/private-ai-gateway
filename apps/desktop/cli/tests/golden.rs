@@ -247,7 +247,7 @@ Global Options:
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["6b26d72952e6150c705a89154afd8e6e6dd4d4855d799c6fafec49c887af454f"]
+        str!["7af13400ad074d65c8c2ce270cd1d86cd48118dc928c197958c162f0979cb569"]
     );
 }
 

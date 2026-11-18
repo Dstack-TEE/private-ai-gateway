@@ -218,3 +218,7 @@ case ":${PATH:-}:" in
   *:"$BIN_DIR":*) ;;
   *) printf 'Add %s to PATH, then open a new shell.\n' "$BIN_DIR" ;;
 esac
+printf 'Next:\n'
+printf '  pap profiles login <id>     sign in to RedPill or Phala (or: pap profiles add)\n'
+printf '  pap start                   verify the service and start protection\n'
+printf '  pap agents connect <agent>  route a coding agent through it (pap agents list)\n'
