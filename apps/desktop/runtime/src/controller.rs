@@ -275,7 +275,7 @@ impl DesktopRuntime {
             .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
         let listener = proxy::bind_std(local.bind);
         let (proxy_events_tx, proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
-        let proxy = ProxyState::new(proxy_events_tx)?;
+        let proxy = ProxyState::new(proxy_events_tx, proxy::VERIFICATION_WAIT)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join(USAGE_DATABASE)) {
             Ok(store) => (store, None),
             Err(error) => (
