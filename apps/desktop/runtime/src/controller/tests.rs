@@ -1702,6 +1702,105 @@ impl crate::verifier_session::VerifierTask for IdleTask {
     }
 }
 
+/// A verifier whose service lists one model while `answers` is set.
+struct AnsweringVerifier {
+    answers: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct AnsweringService {
+    answers: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl proxy::VerifiedService for AnsweringService {
+    fn call(
+        self: Arc<Self>,
+        _: axum::http::Request<axum::body::Body>,
+        _: Option<proxy::ForwardContext>,
+    ) -> proxy::VerifiedResponse {
+        use axum::response::IntoResponse;
+        Box::pin(async move {
+            if self.answers.load(Ordering::SeqCst) {
+                axum::Json(serde_json::json!({"data": [{"id": "model"}]})).into_response()
+            } else {
+                axum::http::StatusCode::BAD_GATEWAY.into_response()
+            }
+        })
+    }
+}
+
+impl VerifierLauncher for AnsweringVerifier {
+    fn spawn(
+        &self,
+        config: crate::verifier_session::VerifierConfig,
+        events: crate::verifier_session::VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn crate::verifier_session::VerifierTask>, String> {
+        let identity = serde_json::from_value(serde_json::json!({
+            "tee_type": "tdx",
+            "trust_level": "hardware_verified",
+            "keyset_digest": "sha256:keyset",
+            "keyset_not_after": 2_000_000_000_u64,
+            "tls_spki": null,
+            "source_provenance": {},
+            "service_capabilities": {"serving": "aggregator", "supported_e2ee_versions": []},
+            "verification": {"checks": []},
+        }))
+        .unwrap();
+        let service = Arc::new(AnsweringService {
+            answers: self.answers.clone(),
+        });
+        // The manager accepts events once `spawn` has returned its task.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            events(crate::verifier_session::VerifierEvent::Ready {
+                identity,
+                remote_url: config.remote_url,
+                service,
+            });
+        });
+        Ok(Box::new(IdleTask))
+    }
+}
+
+/// Containers, VPNs and temporary addresses change the address list all the
+/// time. A verified session whose service still answers is left alone: a
+/// restart would end every request in flight.
+#[test]
+fn an_address_change_restarts_only_a_session_whose_service_stopped_answering() {
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let answers = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let launcher = Arc::new(AnsweringVerifier {
+        answers: answers.clone(),
+    });
+    let runtime = test_runtime_with(&executor, directory.path(), launcher);
+    let started = runtime
+        .manager
+        .start(StartConfig {
+            remote_url: "https://inference.phala.com".into(),
+        })
+        .unwrap();
+    executor
+        .block_on(runtime.manager.wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            std::time::Duration::from_secs(5),
+        ))
+        .unwrap();
+    let generation = runtime.proxy.session().generation;
+
+    runtime.recovery.request();
+    runtime.recover_network().unwrap();
+    assert!(!runtime.recovery.needs_check());
+    assert_eq!(runtime.proxy.session().generation, generation);
+    assert!(runtime.proxy.session().verified);
+
+    answers.store(false, Ordering::SeqCst);
+    runtime.recovery.request();
+    let _ = runtime.recover_network();
+    assert_ne!(runtime.proxy.session().generation, generation);
+    assert!(!runtime.proxy.session().verified);
+}
+
 /// A profile save that fails leaves the state, the settings and the saved
 /// key as they were, whether verification or saving the file failed.
 #[test]
