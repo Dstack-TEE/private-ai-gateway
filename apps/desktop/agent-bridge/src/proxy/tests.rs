@@ -351,9 +351,9 @@ impl VerifiedService for RefusingService {
             }
             let mut response =
                 (StatusCode::BAD_GATEWAY, "upstream connection failed\n").into_response();
-            response.extensions_mut().insert(VerifierRefusal {
-                delivery_unknown: true,
-            });
+            response
+                .extensions_mut()
+                .insert(VerifierRefusal::Unreachable);
             response
         })
     }

@@ -21,6 +21,9 @@ pap agents list                # the coding agents found on this machine
 pap agents connect codex       # route one through the Local API
 ```
 
+Connect an agent after `pap start`: with protection off the connection is only
+saved, and the command exits `1` saying the agent still uses its own provider.
+
 With an API key instead of an account, replace the first step with
 `pap profiles add --id work --name Work --url <service URL>`, which asks for
 the key at a hidden prompt. `pap status` shows what protection is doing and why

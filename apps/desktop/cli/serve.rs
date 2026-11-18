@@ -1335,9 +1335,7 @@ fn delivery_interrupted_response(path: &str) -> Response {
     );
     response
         .extensions_mut()
-        .insert(agent_bridge::proxy::VerifierRefusal {
-            delivery_unknown: true,
-        });
+        .insert(agent_bridge::proxy::VerifierRefusal::Interrupted);
     response
 }
 
@@ -1451,9 +1449,7 @@ fn send_error(
     let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n");
     response
         .extensions_mut()
-        .insert(agent_bridge::proxy::VerifierRefusal {
-            delivery_unknown: true,
-        });
+        .insert(agent_bridge::proxy::VerifierRefusal::Unreachable);
     response
 }
 
@@ -1461,9 +1457,7 @@ fn text_response(status: StatusCode, body: impl Into<Body>) -> Response {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain")
-        .extension(agent_bridge::proxy::VerifierRefusal {
-            delivery_unknown: false,
-        })
+        .extension(agent_bridge::proxy::VerifierRefusal::NotSent)
         .body(body.into())
         .unwrap_or_else(|_| internal_error())
 }

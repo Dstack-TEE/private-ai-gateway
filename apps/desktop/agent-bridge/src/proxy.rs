@@ -124,10 +124,15 @@ pub type VerifiedResponse = Pin<Box<dyn Future<Output = Response> + Send + 'stat
 
 /// Marks a response the verifier wrote itself instead of relaying one from
 /// the service. Its plain-text body is the reason.
-#[derive(Clone, Copy)]
-pub struct VerifierRefusal {
-    /// The request may have reached the service before the failure.
-    pub delivery_unknown: bool,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VerifierRefusal {
+    /// Refused before anything was sent.
+    NotSent,
+    /// Stopped while being sent; it may have reached the service.
+    Interrupted,
+    /// The service could not be reached or dropped the connection; the
+    /// request may have reached it.
+    Unreachable,
 }
 pub type CatalogRefresher =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
@@ -868,7 +873,7 @@ async fn forward(
                 None,
             ),
             // Only a request that provably never left is safe to send again.
-            StatusCode::SERVICE_UNAVAILABLE if refusal.delivery_unknown => (
+            StatusCode::SERVICE_UNAVAILABLE if refusal == VerifierRefusal::Interrupted => (
                 "revoked",
                 format!("{PRODUCT_NAME} stopped the request: {reason}"),
                 None,
@@ -892,7 +897,7 @@ async fn forward(
             model,
             surface,
             rejection,
-            refusal.delivery_unknown,
+            refusal != VerifierRefusal::NotSent,
         );
     }
     if upstream.status() == StatusCode::UNAUTHORIZED {

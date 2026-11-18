@@ -603,11 +603,13 @@ fn agent_change(
         revision,
         options,
     })?;
-    if connect && status.recorded && !status.connected && !global.json {
-        eprintln!(
-            "Saved, but not applied: protection is off. Run pap start to route {} through the Local API.",
+    // Success would mean the agent is routed; it still uses its own provider.
+    if connect && status.recorded && !status.connected {
+        return Err(format!(
+            "Saved, but not applied: protection is off, so {} still uses its own provider. Run pap start to route it through the Local API.",
             status.name
-        );
+        )
+        .into());
     }
     agent_service_hint(client, global, id);
     value(status)

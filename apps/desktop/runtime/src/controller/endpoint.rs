@@ -54,12 +54,14 @@ impl DesktopRuntime {
         // The projections name the Local API URL. While the session goes on,
         // they are rewritten to the new address from the last verified
         // catalog, so agents never fall back to their own provider. Without
-        // one they are restored, and verification projects them again.
+        // one they keep the old address, which nothing answers, until
+        // verification projects them again.
         let reconnecting = reconnect || previous.reconnecting;
-        let catalog = (reconnecting && previous.session_active)
+        let continuing = reconnecting && previous.session_active;
+        let catalog = continuing
             .then(|| self.verified_catalog.lock().ok()?.clone())
             .flatten();
-        self.stop_verifier(reconnecting, catalog.is_none())?;
+        self.stop_verifier(reconnecting, !continuing)?;
         let result = self.rebind_local_api(config, current, resolved).await;
         if let Some(catalog) = catalog {
             if let Err(error) = self.retarget_agents(&catalog) {

@@ -723,7 +723,7 @@ impl SessionManager {
         changes.write();
     }
 
-    /// Whether the verified session's service still answers. Blocks the
+    /// Whether the verified session's service can still be reached. Blocks the
     /// calling thread, which must not be a runtime worker.
     pub fn service_answers(self: &Arc<Self>) -> bool {
         let Some(service) = self.lock().ok().and_then(|runtime| runtime.service.clone()) else {
@@ -733,16 +733,15 @@ impl SessionManager {
         else {
             return false;
         };
-        // Any answer the service gave counts, an error included: only what
-        // the verifier wrote itself means the service was not reached.
+        // Only a failed connection says the service is gone. An error it
+        // answered, a local refusal or a slow answer leaves the session to
+        // the verifier, which closes it when it must.
         self.task_runtime.block_on(async move {
             tokio::time::timeout(SERVICE_PROBE_TIMEOUT, service.call(request, None))
                 .await
-                .is_ok_and(|response| {
-                    response
-                        .extensions()
-                        .get::<agent_bridge::proxy::VerifierRefusal>()
-                        .is_none()
+                .map_or(true, |response| {
+                    response.extensions().get()
+                        != Some(&agent_bridge::proxy::VerifierRefusal::Unreachable)
                 })
         })
     }

@@ -270,8 +270,8 @@ unlocked OS keychain for a process running as you.
   failing, so a routine re-verification only delays them; after that they are
   refused at once with `503` and a `Retry-After` header. A Local
   API address change rewrites them to the new address, unless the backend has
-  not verified a catalog since it started; then they are restored until
-  verification projects them again.
+  not verified a catalog since it started; then they keep the old address,
+  which nothing answers, until verification projects them again.
   Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
   or disconnecting an agent restores its own configuration. Quitting the app
   from the tray or menu leaves the backend running and the agents pointed at
