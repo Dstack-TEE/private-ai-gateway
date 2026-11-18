@@ -149,7 +149,7 @@ async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
         ("opencode-token", &["text"]),
         (
             "local-tools-token",
-            &["text", "decisions", "image", "audio"],
+            &["audio", "decisions", "image", "text"],
         ),
     ] {
         let mut headers = HeaderMap::new();
