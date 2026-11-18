@@ -625,16 +625,15 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    // Protection is off: the connection is saved, and the command says the
-    // agent is not routed yet instead of reporting success.
+    // Connecting starts protection first; without a key it says what is
+    // missing instead of reporting a route that does not exist.
     let saved = backend
         .command(&["agents", "connect", "codex", "--yes", "--json"])
         .output()
         .unwrap();
     assert!(!saved.status.success());
     assert!(
-        String::from_utf8_lossy(&[saved.stdout, saved.stderr].concat())
-            .contains("Saved, but not applied")
+        String::from_utf8_lossy(&[saved.stdout, saved.stderr].concat()).contains("has no API key")
     );
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);

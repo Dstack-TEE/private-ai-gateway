@@ -76,7 +76,20 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             command: Service::Status,
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
-        Action::Start { profile, timeout } => start(&client, profile.as_deref(), *timeout)?,
+        Action::Start { profile, timeout } => {
+            // Protection the user turns on goes on across logins and crashes
+            // until they stop it, so the backend moves under the service
+            // manager before it starts protecting.
+            if desktop_core::supervisor::enable() {
+                if client.is_running()? {
+                    client.restart_service()?;
+                }
+                if !global.json {
+                    eprintln!("Protection now resumes at login and after a crash (systemctl --user disable private-ai-proxy turns that off).");
+                }
+            }
+            start(&client, profile.as_deref(), *timeout)?
+        }
         Action::Stop { offline: false } => {
             if !client.is_running()? {
                 return Err(
@@ -591,6 +604,10 @@ fn agent_change(
     let options = ConnectOptions {
         default_model: model,
     };
+    // Connecting means routing the agent, which needs protection on.
+    if connect && !dry_run && !client.state()?.is_protected() {
+        start(client, None, 90)?;
+    }
     let revision = match revision {
         Some(revision) => {
             confirm(

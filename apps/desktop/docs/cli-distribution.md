@@ -102,25 +102,17 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
-The CLI-only packages also install an optional systemd user unit,
+The CLI-only packages also install a systemd user unit,
 `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages do.
-Nothing enables it. Without it, the first command starts the backend. To start
-the backend at login instead, stop any backend a command started, then enable
-the unit:
-
-```sh
-pap --yes service stop
-systemctl --user enable --now private-ai-proxy
-```
+The first `pap start` enables it and moves a running backend under it, so the
+backend starts at login and after a crash and resumes the protection it left.
+`systemctl --user disable private-ai-proxy` turns that off; without it, or
+where no user service manager runs (containers, WSL without systemd), the
+first command starts the backend.
 
 `Restart=on-failure` restarts a crashed backend but not one stopped with `pap
-service stop`. After a package upgrade, the next command stops the old backend
-(a clean exit, so systemd does not restart it) and starts the new one itself,
-outside systemd. Hand the backend back to the unit with:
-
-```sh
-pap --yes service stop && systemctl --user restart private-ai-proxy
-```
+service stop`. While the unit is enabled, commands start the backend through
+it, also after a package upgrade.
 
 A plain `systemctl --user restart` would find that backend holding the instance
 lock: the unit's backend exits with status 75 (already running), and

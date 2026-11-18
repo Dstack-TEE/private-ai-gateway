@@ -182,7 +182,12 @@ impl Client {
             }
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = Some(crate::launch::spawn_background()?);
+        // Under the service manager a crashed backend is started again.
+        let mut child = if crate::supervisor::start() {
+            None
+        } else {
+            Some(crate::launch::spawn_background()?)
+        };
         // A backend that exits is reported immediately below; this only bounds a
         // live but slow start.
         let deadline = Instant::now() + BACKEND_START_TIMEOUT;
