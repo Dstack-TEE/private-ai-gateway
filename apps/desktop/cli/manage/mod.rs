@@ -1076,16 +1076,34 @@ fn update(client: &Client) -> Result<Value, CallError> {
         )
         .into());
     }
-    // A backend that cannot be asked, such as another release's, is not resumed.
-    let protecting = client.is_running().unwrap_or(false)
-        && client.state().is_ok_and(|state| state.session_active);
-    desktop_core::updates::run(&notice.commands)
-        .map_err(|error| format!("{error}; the update was not installed."))?;
-    if protecting {
-        desktop_core::updates::run(&["private-ai-proxy start".into()]).map_err(|error| {
-            format!("Updated to {version}, but protection did not start again: {error}.")
-        })?;
+    // The manual steps stop the backend for good, which restores connected
+    // agents to their own provider. Here it stops as for a restart instead:
+    // agents stay pointed at the Local API, which nothing answers meanwhile,
+    // and the session waits for the backend that starts afterwards.
+    let running = client.is_running()?;
+    let protecting = running && client.state()?.session_active;
+    if running {
+        client.stop_for_restart()?;
     }
+    let steps: Vec<String> = notice
+        .commands
+        .iter()
+        .filter(|step| *step != desktop_core::updates::STOP_STEP)
+        .cloned()
+        .collect();
+    let installed = desktop_core::updates::run(&steps);
+    // Whichever release is installed now takes the session up again.
+    let resumed = if protecting {
+        desktop_core::updates::run(&["private-ai-proxy start".into()])
+    } else if running {
+        desktop_core::updates::run(&["private-ai-proxy service start".into()])
+    } else {
+        Ok(())
+    };
+    installed.map_err(|error| format!("{error}; the update was not installed."))?;
+    resumed.map_err(|error| {
+        format!("Updated to {version}, but the backend did not start again: {error}.")
+    })?;
     let mut updated = value(&notice)?;
     updated["protectionResumed"] = json!(protecting);
     Ok(updated)

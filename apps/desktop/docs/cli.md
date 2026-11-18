@@ -792,8 +792,10 @@ channel (`settings set update-channel beta|stable`) has a newer release and the
 exact upgrade steps for this installation. `pap update` runs those steps, printing each
 one, for the installations a package manager owns
 (CLI-only DEB, RPM and Arch packages, the Arch desktop package, and npm, except
-on Windows); the first step stops the backend, and protection that was on is
-started again by the installed release (`pap start`). For a desktop app or a portable archive it says where to update
+on Windows). The backend stops as for a restart: connected agents stay pointed
+at the Local API, which nothing answers during the installation, and the
+installed release resumes protection that was on. If the installation fails,
+the previous release does. For a desktop app or a portable archive it says where to update
 instead; see
 [Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
 through `settings`; they do not grant OS notification permission.

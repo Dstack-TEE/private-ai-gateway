@@ -260,6 +260,10 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
     check(configured, channel, version, installation).await
 }
 
+/// The first of the steps shown for a manual upgrade. It ends protection and
+/// restores connected agents, as stopping by hand should.
+pub const STOP_STEP: &str = "private-ai-proxy --yes service stop";
+
 /// Runs upgrade `steps` in order, in a scratch directory for what they
 /// download, and stops at the first that fails. Each step and its output go
 /// to stderr, leaving stdout to the caller's own result.
@@ -318,7 +322,7 @@ fn upgrade_steps(
         shlex::try_join(words.iter().copied())
             .map_err(|_| "Cannot write the upgrade command".to_string())
     };
-    let stop = command(&["private-ai-proxy", "--yes", "service", "stop"])?;
+    let stop = STOP_STEP.to_string();
     Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
         Installation::DesktopPacman => (
