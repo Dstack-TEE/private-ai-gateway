@@ -131,6 +131,70 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
     server.abort();
     let _ = server.await;
 }
+/// The backend refreshes on a timer, so a refresh must neither raise an
+/// error over a working session nor clear one something else reported.
+#[tokio::test]
+async fn a_refresh_of_a_verified_session_changes_only_its_catalog() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/models",
+        get({
+            let calls = calls.clone();
+            move || {
+                let body = match calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => serde_json::json!({"data": [{"id": "first"}]}),
+                    1 => serde_json::json!({"error": "unavailable"}),
+                    _ => serde_json::json!({"data": [{"id": "second"}]}),
+                };
+                async move { Json(body) }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    {
+        let mut runtime = manager.lock().unwrap();
+        runtime.identity_ready = true;
+        runtime.service = Some(http_service(&base));
+    }
+    proxy.publish(Session {
+        service: Some(http_service(&base)),
+        ..Session::default()
+    });
+    manager.refresh_catalog().await.unwrap();
+    manager.report_error("agents failed".into());
+
+    manager.refresh_catalog().await.unwrap_err();
+    let kept = manager.snapshot();
+    assert_eq!(kept.status, VerificationStatus::Verified);
+    assert_eq!(kept.error.as_deref(), Some("agents failed"));
+    assert_eq!(kept.catalog.unwrap().models[0].id, "first");
+    assert!(proxy.session().verified);
+
+    let refreshed = manager.refresh_catalog().await.unwrap();
+    assert_eq!(refreshed.error.as_deref(), Some("agents failed"));
+    let catalog = refreshed.catalog.unwrap();
+    assert_eq!(catalog.models[0].id, "second");
+    assert_eq!(catalog.removed, ["first"]);
+    assert!(proxy.session().catalog.unwrap().get("second").is_some());
+    server.abort();
+    let _ = server.await;
+}
+
 struct WaitingTask;
 impl VerifierTask for WaitingTask {
     fn stop(&mut self) -> Result<(), String> {
