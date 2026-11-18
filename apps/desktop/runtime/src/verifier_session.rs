@@ -746,10 +746,13 @@ impl SessionManager {
         }
         let outcome = match result {
             Ok(catalog) => {
+                // A refresh leaves an error other work reported in place.
+                if runtime.state.status != VerificationStatus::Verified {
+                    runtime.state.error = None;
+                }
                 runtime.state.status = VerificationStatus::Verified;
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
-                runtime.state.error = None;
                 let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
                 runtime.last_catalog = Some(summary.clone());
                 runtime.state.catalog = Some(summary);
@@ -770,8 +773,8 @@ impl SessionManager {
             Err(error) => {
                 let message = format!("Cannot read the verified model list: {error}");
                 if runtime.state.status == VerificationStatus::Verified {
-                    // A failed manual refresh keeps the session it had.
-                    runtime.state.error = Some(message.clone());
+                    // A failed refresh keeps the session and catalog it had;
+                    // only its caller hears of it.
                     Err(message)
                 } else {
                     // The first catalog read failed: never leave a running
