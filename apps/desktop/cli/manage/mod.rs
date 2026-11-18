@@ -77,20 +77,21 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
         Action::Start { profile, timeout } => {
-            // Protection the user turns on goes on across logins and crashes
-            // until they stop it, so the backend moves under the service
-            // manager before it starts protecting.
+            let state = start(&client, profile.as_deref(), *timeout)?;
+            // Protection the user turned on goes on across logins and crashes
+            // until they stop it: the backend moves under the service manager
+            // and resumes the session there.
             if desktop_core::supervisor::automatic()
                 && desktop_core::supervisor::enable() == Ok(true)
             {
-                if client.is_running()? {
-                    client.restart_service()?;
-                }
+                client.restart_service()?;
                 if !global.json {
                     eprintln!("Protection now resumes at login and after a crash (pap service disable turns that off).");
                 }
+                start(&client, profile.as_deref(), *timeout)?
+            } else {
+                state
             }
-            start(&client, profile.as_deref(), *timeout)?
         }
         Action::Stop { offline: false } => {
             if !client.is_running()? {
@@ -287,8 +288,35 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable => {
-            desktop_core::supervisor::disable()?;
+            // Removing the registration ends a backend the service manager
+            // runs, so it is stopped as for a restart and started again
+            // outside it, keeping the protection session.
+            let supervised = desktop_core::supervisor::enabled() && client.is_running()?;
+            if supervised {
+                client.stop_for_restart()?;
+            }
+            let disabled = desktop_core::supervisor::disable();
+            if supervised {
+                Client::ensure_service()?;
+            }
+            disabled?;
             Ok(json!({"startAtLogin": false}))
+        }
+        Service::Run => {
+            // The service manager's command. A backend a command already
+            // started is left to run: exiting cleanly is not restarted.
+            if client.is_running()? {
+                return Ok(Value::Null);
+            }
+            let backend = desktop_core::launch::service_executable()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let error = desktop_core::launch::child_command(&backend).exec();
+                Err(format!("Cannot run {}: {error}", backend.display()).into())
+            }
+            #[cfg(not(unix))]
+            Err(format!("Run {} directly", backend.display()).into())
         }
         Service::Status => status(client),
     }

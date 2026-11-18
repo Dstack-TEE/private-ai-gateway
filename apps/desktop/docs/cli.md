@@ -30,12 +30,13 @@ With an API key instead of an account, replace the first step with
 the key at a hidden prompt. `pap status` shows what protection is doing and why
 at any time.
 
-Protection that is on stays on until `pap stop`. On Linux, the first
-`pap start` of a package or npm installation enables a systemd user service,
-so the backend starts at login and after a crash and resumes protection;
-`pap service disable` turns that off and `pap service enable` turns it on for
-any Linux installation
-([Standalone CLI](cli-distribution.md#standalone-cli)). Elsewhere, run
+Protection that is on stays on until `pap stop`. On Linux and macOS, the first
+`pap start` registers the backend with the user's service manager (a systemd
+user service, a launchd agent), so it starts at login and after a crash and
+resumes protection; `pap service disable` turns that off and
+`pap service enable` on again
+([Standalone CLI](cli-distribution.md#standalone-cli)). The desktop app has its
+own Open at Login. On Windows, and where no user service manager runs, run
 `pap service start` after a restart of the machine; until then connected agents
 cannot reach the Local API.
 
