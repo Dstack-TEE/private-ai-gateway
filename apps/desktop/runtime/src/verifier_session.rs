@@ -34,6 +34,8 @@ use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
+/// How long a verified session's service gets to answer a probe.
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct SessionManager {
     inner: Mutex<RuntimeState>,
@@ -286,7 +288,9 @@ impl SessionManager {
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}").into());
+            return Err(Error::invalid_state(format!(
+                "The Local API is unavailable: {error}. Free the port or choose another with `pap settings set local-api.port <port>`."
+            )));
         }
         if runtime.task.is_some() {
             return Err(Error::already_running(&runtime.state));
@@ -647,6 +651,18 @@ impl SessionManager {
 
     /// A request the local proxy answered itself, before any receipt.
     pub fn record_proxy_event(&self, event: ProxyEvent) {
+        // The only trace of a request an agent saw fail, next to the session
+        // changes around it.
+        if event.status >= 400 && !event.detail.is_empty() {
+            tracing::warn!(
+                "Local API {} {} -> {} for {}: {}",
+                event.method,
+                event.path,
+                event.status,
+                event.agent.as_deref().unwrap_or("an unknown client"),
+                event.detail
+            );
+        }
         if event.path == "/v1/models" {
             return;
         }
@@ -705,6 +721,17 @@ impl SessionManager {
         let changes = self.send(&mut runtime);
         drop(runtime);
         changes.write();
+    }
+
+    /// Whether the verified session's service still answers. Blocks the
+    /// calling thread, which must not be a runtime worker.
+    pub fn service_answers(self: &Arc<Self>) -> bool {
+        let manager = self.clone();
+        self.task_runtime.block_on(async move {
+            tokio::time::timeout(SERVICE_PROBE_TIMEOUT, manager.refresh_catalog())
+                .await
+                .is_ok_and(|read| read.is_ok())
+        })
     }
 
     /// Refresh discovery without revoking the current verified session.

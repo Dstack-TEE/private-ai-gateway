@@ -77,7 +77,15 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
         Action::Start { profile, timeout } => start(&client, profile.as_deref(), *timeout)?,
-        Action::Stop { offline: false } => value(client.call(rpc::Stop)?)?,
+        Action::Stop { offline: false } => {
+            if !client.is_running()? {
+                return Err(
+                    "Backend is not running. Run pap stop --offline to restore agents without it."
+                        .into(),
+                );
+            }
+            value(client.call(rpc::Stop)?)?
+        }
         Action::Stop { offline: true } => restore_agents_offline(&client)?,
         Action::Profiles { command } => profiles(&client, global, command)?,
         Action::Agents { command } => agents(&client, global, command)?,
@@ -126,7 +134,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         Action::App {
             command: App::Open { web },
         } => open_app(&client, global, *web)?,
-        Action::Update => update()?,
+        Action::Update => update(&client)?,
         Action::Doctor => {
             let report = doctor(&client);
             output::print(action, global, &report)?;
@@ -275,6 +283,16 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
     if profile.is_some_and(|profile| profile != state.active_profile_id) {
         return Err("Profile selection was changed by another client.".into());
     }
+    if state.profiles.is_empty() {
+        return Err("No profile yet. Sign in with pap profiles login <id>, or add a service and key with pap profiles add.".into());
+    }
+    if !state.api_key_saved {
+        return Err(format!(
+            "The active profile has no API key. Add one with pap profiles verify {}.",
+            state.active_profile_id
+        )
+        .into());
+    }
     let settled = |state: &AppState| !state.configuration_verification;
     if state.status == VerificationStatus::Verified && settled(&state) {
         return value(AppStateWire::from(state));
@@ -316,6 +334,9 @@ fn unverified(state: &AppState) -> CallError {
     };
     let mut message = format!("Protection did not become verified. {error}");
     if state.reconnecting {
+        if !message.ends_with('.') {
+            message.push('.');
+        }
         message.push_str(" The backend retries in the background until pap stop.");
     }
     if state.verification_failed {
@@ -559,6 +580,12 @@ fn agent_change(
         revision,
         options,
     })?;
+    if connect && status.recorded && !status.connected && !global.json {
+        eprintln!(
+            "Saved, but not applied: protection is off. Run pap start to route {} through the Local API.",
+            status.name
+        );
+    }
     agent_service_hint(client, global, id);
     value(status)
 }
@@ -1002,8 +1029,9 @@ fn settings_diagnostics(
 
 /// `update`: runs the upgrade steps `doctor` shows for this installation.
 /// Like other self-updating CLIs it does not ask first: the command is the
-/// request, and each step is printed as it runs.
-fn update() -> Result<Value, CallError> {
+/// request, and each step is printed as it runs. The steps stop the backend,
+/// so protection that was on is started again by the installed release.
+fn update(client: &Client) -> Result<Value, CallError> {
     let notice = update_notice()?;
     let Some(version) = &notice.version else {
         return value(notice);
@@ -1023,8 +1051,19 @@ fn update() -> Result<Value, CallError> {
         )
         .into());
     }
-    desktop_core::updates::install(&notice)?;
-    value(notice)
+    // A backend that cannot be asked, such as another release's, is not resumed.
+    let protecting = client.is_running().unwrap_or(false)
+        && client.state().is_ok_and(|state| state.session_active);
+    desktop_core::updates::run(&notice.commands)
+        .map_err(|error| format!("{error}; the update was not installed."))?;
+    if protecting {
+        desktop_core::updates::run(&["private-ai-proxy start".into()]).map_err(|error| {
+            format!("Updated to {version}, but protection did not start again: {error}.")
+        })?;
+    }
+    let mut updated = value(&notice)?;
+    updated["protectionResumed"] = json!(protecting);
+    Ok(updated)
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
@@ -1087,7 +1126,7 @@ fn read_key(global: &Global, stdin: bool) -> Result<String, String> {
     if stdin {
         if io::stdin().is_terminal() {
             return Err(
-                "Refusing to read a credential from a terminal with --key-stdin; omit the flag for a hidden prompt."
+                "Refusing to read a credential from a terminal with --key-stdin; pipe it in, or omit the flag for a hidden prompt when the profile has no saved credential."
                     .into(),
             );
         }

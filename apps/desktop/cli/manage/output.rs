@@ -121,9 +121,14 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Diagnostics { .. } => exported(value),
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
-                "Updated {} → {}. Run pap start to resume protection.",
+                "Updated {} → {}.{}",
                 text(&value["currentVersion"]),
-                safe(version)
+                safe(version),
+                if value["protectionResumed"] == true {
+                    " Protection is on again."
+                } else {
+                    ""
+                }
             ),
             None => format!("Up to date ({}).", text(&value["currentVersion"])),
         },
@@ -173,7 +178,7 @@ fn agents(value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
+        return "Backend not running. Agents connected through it cannot reach the Local API.\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
