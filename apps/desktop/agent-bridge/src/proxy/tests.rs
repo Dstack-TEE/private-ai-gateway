@@ -106,7 +106,10 @@ async fn mock_upstream() -> String {
 
 fn state() -> (Arc<ProxyState>, mpsc::Receiver<ProxyEvent>) {
     let (sender, receiver) = mpsc::channel(4);
-    (ProxyState::new(sender).unwrap(), receiver)
+    (
+        ProxyState::new(sender, std::time::Duration::ZERO).unwrap(),
+        receiver,
+    )
 }
 
 fn tokens() -> TokenSet {
@@ -171,6 +174,65 @@ async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
     assert_eq!(error.code, "model_endpoint_unavailable");
 }
 
+/// A request that arrives while a session is being verified waits for it.
+/// Once the session has been unverified for longer than the wait, requests
+/// are refused at once and told when to come back; a stopped session
+/// refuses at once too.
+#[tokio::test(start_paused = true)]
+async fn requests_wait_out_a_brief_verification_only() {
+    let wait = Duration::from_secs(30);
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, wait).unwrap();
+    state.set_tokens(tokens());
+    let request = || {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer codex-token".parse().unwrap());
+        models(State(state.clone()), headers)
+    };
+    let pending = || Session {
+        session_id: Some("session".into()),
+        ..Session::default()
+    };
+    let refused_after = |response: Response, started: tokio::time::Instant| {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        (
+            started.elapsed(),
+            response.headers().get(header::RETRY_AFTER).cloned(),
+        )
+    };
+
+    let started = tokio::time::Instant::now();
+    let stopped = refused_after(request().await, started);
+    assert_eq!(stopped, (Duration::ZERO, None));
+
+    state.publish(pending());
+    let waiting = tokio::spawn(request());
+    tokio::time::sleep(wait / 2).await;
+    assert!(!waiting.is_finished());
+    state.publish(Session {
+        verified: true,
+        service: Some(http_service("http://127.0.0.1:1")),
+        catalog: Some(Catalog::from_remote(&json!({"data": [{"id": "text"}]}), 1).unwrap()),
+        ..pending()
+    });
+    assert_eq!(waiting.await.unwrap().status(), StatusCode::OK);
+
+    let retry = Some(HeaderValue::from(VERIFICATION_RETRY_SECS));
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (wait, retry.clone())
+    );
+    // A retry of the same outage republishes the session and waits no more.
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (Duration::ZERO, retry)
+    );
+}
+
 async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
     state.publish(Session {
         generation,
@@ -189,6 +251,49 @@ async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u6
         verified: true,
         catalog: Some(catalog),
     });
+}
+
+/// A model the service added since the last read works on its first
+/// request; a misspelled one costs a single read.
+#[tokio::test]
+async fn an_unknown_model_reads_the_catalog_again_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    state.set_catalog_refresher(Box::new({
+        let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+        move || {
+            let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+            Box::pin(async move {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let catalog =
+                    Catalog::from_remote(&json!({"data": [{"id": "new-model"}]}), 2).unwrap();
+                state.publish(Session {
+                    generation: 1,
+                    epoch: 1,
+                    session_id: Some("test-session".to_string()),
+                    service: Some(http_service(&upstream)),
+                    verified: true,
+                    catalog: Some(catalog),
+                });
+            })
+        }
+    }));
+    let proxy = spawn(router(state.clone())).await;
+    let status = |model: &'static str| {
+        let request = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": model, "messages": [] }));
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(status("new-model").await, 200);
+    assert_eq!(status("misspelled").await, 404);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
 #[test]

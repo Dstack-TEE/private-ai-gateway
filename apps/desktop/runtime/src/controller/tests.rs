@@ -87,7 +87,7 @@ fn test_runtime_with(
     launcher: Arc<dyn VerifierLauncher>,
 ) -> Arc<DesktopRuntime> {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -1037,7 +1037,7 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
     let resumes = || {
         let (events, _) = tokio::sync::mpsc::channel(8);
         SessionManager::new(
-            ProxyState::new(events).unwrap(),
+            ProxyState::new(events, std::time::Duration::ZERO).unwrap(),
             Arc::new(UsageStore::open(usage.clone()).unwrap()),
             Arc::new(NoVerifier),
             executor.handle().clone(),
