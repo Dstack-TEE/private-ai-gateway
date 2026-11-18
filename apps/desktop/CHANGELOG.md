@@ -1,11 +1,36 @@
 # Changelog
 
-## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.3...desktop-v0.9.0) (2026-11-18)
+## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
 
+Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, network changes and routine commands that used to interrupt it, and adds `pap update` and `pap service restart`.
 
-### Documentation
+### ⚠ BREAKING CHANGES
 
-* **desktop:** state what the verification wait covers and what it does not ([#598](https://github.com/Dstack-TEE/private-ai-gateway/issues/598)) ([65c1602](https://github.com/Dstack-TEE/private-ai-gateway/commit/65c1602f007400dd9f944af33cd4be222babb46c))
+* **`blocked` is gone from the state.** `status` and `protection.phase` in `pap status --json` and the management API no longer report `blocked`; a session that lost verification reports the error states and is retried ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **`pap agents connect` fails when it did not route the agent.** With protection off it saves the connection and exits 1, saying the agent still uses its own provider, instead of reporting success ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+
+### Features
+
+* **`pap update`.** Installs the newer release of the saved update channel for package-manager installations (CLI-only DEB, RPM and Arch packages, the Arch desktop package, npm outside Windows). Connected agents stay on the proxy during the installation, and the installed release resumes protection; if the installation fails, the previous release does ([#581](https://github.com/Dstack-TEE/private-ai-gateway/pull/581), [#586](https://github.com/Dstack-TEE/private-ai-gateway/pull/586), [#592](https://github.com/Dstack-TEE/private-ai-gateway/pull/592), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **`pap service restart`.** Restarts the backend and resumes the protection session ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **Requests wait out a brief re-verification.** For the first 30 seconds after verification is lost, new requests wait for it instead of failing; after that they are refused with `503` and `Retry-After` ([#583](https://github.com/Dstack-TEE/private-ai-gateway/pull/583), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **The model list stays current.** It is read again every 10 minutes while protected and when a request names a model it lacks, and connected agents' configurations follow ([#582](https://github.com/Dstack-TEE/private-ai-gateway/pull/582), [#584](https://github.com/Dstack-TEE/private-ai-gateway/pull/584)).
+* **`pap profiles verify --replace-key`.** Replaces a saved API key at a hidden prompt ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+
+### Bug Fixes
+
+* **A session no longer stays stuck after a gateway key rotation.** After the service's key set changed, protection could stay in "verifying" until `pap stop` and `pap start`. Any lost verification now retires the verifier and is retried with a fresh verification on a backoff ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **`pap profiles verify` no longer interrupts protection.** On the profile that is protecting it stopped and restarted the session, which cut requests in flight and returned `gateway_not_verified` meanwhile. It now attests the service again where it runs ([#596](https://github.com/Dstack-TEE/private-ai-gateway/pull/596)).
+* **A network address change no longer restarts the session.** Containers, VPNs and temporary IPv6 addresses changed the address list and each change restarted protection. The session is now rebuilt only when the service can no longer be reached ([#588](https://github.com/Dstack-TEE/private-ai-gateway/pull/588), [#593](https://github.com/Dstack-TEE/private-ai-gateway/pull/593), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **Agents are not sent to their own provider unasked.** A Local API address change before the first verified model list, and `pap update`, restored connected agents' own configuration for a while; they now stay pointed at the proxy ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590), [#592](https://github.com/Dstack-TEE/private-ai-gateway/pull/592)).
+* **Errors say what to do.** A rejected API key is reported as the key saved in the proxy (`service_key_rejected`) rather than as the agent's token; failures to reach the service reach agents in the OpenAI or Anthropic error format; an interrupted request says its delivery is unknown instead of advising a retry; and `pap status`, `pap start` and `pap stop` name the next command when there is no backend, profile or key, or the Local API port is taken ([#587](https://github.com/Dstack-TEE/private-ai-gateway/pull/587), [#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+* **Refused requests are logged.** The service log records each request the Local API refused or failed, with its client and reason, and why protection restarted ([#588](https://github.com/Dstack-TEE/private-ai-gateway/pull/588)).
+* **Models are listed newest first**, then by id, in `GET /v1/models`, the app and agents' pickers ([#585](https://github.com/Dstack-TEE/private-ai-gateway/pull/585)).
+* **Web UI sessions stay signed in**, and the web UI gains page basics ([#577](https://github.com/Dstack-TEE/private-ai-gateway/pull/577)).
+
+### Verification
+
+Checked on the published 0.9.0-beta.3 against the live service: the live end-to-end suite for every supported agent; streams kept open across repeated `pap profiles verify` and across address changes; unattended recovery after the service presented a TLS key outside its attested set; a soak across a periodic model list refresh. Not exercised: a gateway key rotation performed by the operator, and manual runs on macOS and Windows beyond their CI jobs.
 
 ## [0.9.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.2...desktop-v0.9.0-beta.3) (2026-11-18)
 
