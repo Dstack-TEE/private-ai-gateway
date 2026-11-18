@@ -252,6 +252,10 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             }
             Ok(json!({"status": "stopped"}))
         }
+        Service::Restart => {
+            client.restart_service()?;
+            value(client.version()?)
+        }
         Service::Status => status(client),
     }
 }

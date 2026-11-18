@@ -284,6 +284,9 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+`service restart` restarts the backend without ending the protection session:
+agents stay pointed at the Local API, which answers again once the new backend
+has verified the service.
 When no backend is running, `service stop` restores nothing, and agents may
 still point at the Local API: after an update that was not relaunched, a crash,
 or a Windows sign-out. `stop --offline` does what `stop` does, without a
