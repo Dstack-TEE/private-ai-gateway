@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.1...desktop-v0.9.0-beta.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **desktop:** exit 1 from `pap profiles verify` when protection does not return ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** make `pap update` hold the installation lock, resume with its own command, and not report a failure while the new backend resumes ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** rebuild a session whose connection a network change left dead instead of leaving requests to time out ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** send a request that waited through a restart instead of refusing it with `credentials_changed` ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** stop making agents wait when a profile is saved with protection off ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+
 ## [0.9.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0-beta.1) (2026-11-18)
 
 
