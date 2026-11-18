@@ -275,7 +275,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
 }
 
 #[tokio::test]
-async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catalog() {
+async fn a_failed_reverification_retires_the_verifier_for_a_retry() {
     use axum::{routing::get, Json, Router};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -309,7 +309,7 @@ async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catal
         .unwrap();
     let session_id = started.session_id.unwrap();
     let generation = proxy.session().generation;
-    let mut identity = IdentityEvent {
+    let identity = IdentityEvent {
         tee_type: "tdx".into(),
         trust_level: "hardware_verified".into(),
         keyset_digest: "sha256:initial".into(),
@@ -344,33 +344,27 @@ async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catal
             },
         )
         .unwrap();
-    let blocked = manager.snapshot();
-    assert_eq!(blocked.status, VerificationStatus::Blocked);
-    assert!(blocked.catalog.is_none());
+    // Agents are refused from here on, so no request can make this verifier
+    // verify again: it is retired and recovery starts a fresh one.
+    let lost = manager.snapshot();
+    assert_eq!(lost.status, VerificationStatus::Error);
+    assert!(lost.catalog.is_none());
+    assert!(lost.reconnecting && crate::recovery::should_retry(&lost));
     assert!(!proxy.session().verified);
-    assert!(manager.is_running().unwrap());
-    // Agents are refused while blocked, so only the backend's retry can
-    // verify again.
-    assert!(blocked.reconnecting && crate::recovery::should_retry(&blocked));
+    assert!(!manager.is_running().unwrap());
 
-    identity.keyset_digest = "sha256:renewed".into();
-    identity.keyset_not_after += 86_400;
-    manager
-        .handle_event(generation, VerifierEvent::IdentityRenewed { identity })
-        .unwrap();
-    assert_eq!(manager.snapshot().status, VerificationStatus::Verifying);
-    assert!(!proxy.session().verified);
-    let recovered = manager
-        .wait_for_verification(&session_id, Duration::from_secs(2))
-        .await
-        .unwrap();
-    assert_eq!(recovered.status, VerificationStatus::Verified);
-    assert_eq!(recovered.catalog.unwrap().models[0].id, "model-1");
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-    assert_eq!(proxy.session().generation, generation);
+    // What the retired verifier still reports cannot reopen the session.
+    for event in [
+        VerifierEvent::IdentityRenewed {
+            identity: identity.clone(),
+        },
+        VerifierEvent::IdentityUpdated { identity },
+    ] {
+        manager.handle_event(generation, event).unwrap();
+        assert_eq!(manager.snapshot().status, VerificationStatus::Error);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(proxy.session().epoch > verified_epoch);
-    assert!(proxy.session().verified);
-    assert!(manager.is_running().unwrap());
     manager.stop().unwrap();
     server.abort();
     let _ = server.await;
@@ -535,7 +529,11 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     manager
         .handle_event(
             proxy.session().generation,
-            VerifierEvent::IdentityUpdated { identity },
+            VerifierEvent::Ready {
+                identity,
+                remote_url: "https://tee.example".into(),
+                service: http_service("http://127.0.0.1:1"),
+            },
         )
         .unwrap();
     let identified = manager.snapshot();
@@ -690,7 +688,7 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
 }
 
 #[test]
-fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() {
+fn a_lost_verification_keeps_the_session_until_stopped() {
     for verification_only in [false, true] {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let (events, _) = tokio::sync::mpsc::channel(8);
@@ -722,7 +720,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             )
             .unwrap();
         assert!(usage.active_session().unwrap().is_some());
-        let running = manager.is_running().unwrap();
+        assert!(!manager.is_running().unwrap());
         manager
             .handle_event(
                 generation,
@@ -732,9 +730,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 },
             )
             .unwrap();
-        assert_eq!(manager.snapshot().status, VerificationStatus::Blocked);
         assert!(usage.active_session().unwrap().is_some());
-        assert_eq!(manager.is_running().unwrap(), running);
         manager
             .handle_event(
                 generation,
@@ -749,11 +745,11 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             .fail(generation, "event sink failed".into())
             .unwrap();
         let state = manager.snapshot();
-        assert_eq!(state.status, VerificationStatus::Blocked);
+        assert_eq!(state.status, VerificationStatus::Error);
         assert_eq!(state.configuration_verification, verification_only);
         assert_eq!(crate::recovery::should_retry(&state), !verification_only);
         assert!(!proxy.session().verified);
-        // A retry or relaunch resumes the blocked session; only a stop ends it.
+        // A retry or relaunch resumes the session; only a stop ends it.
         assert!(state.session_active);
         manager.stop().unwrap();
         assert!(usage.active_session().unwrap().is_none());

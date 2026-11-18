@@ -61,7 +61,7 @@ function PrivacyVerification({ state }: { state: AppState }): React.JSX.Element 
         : "No recent receipts. Each request is verified separately in Usage.",
     },
   ];
-  const verdictTone = verified ? "success" : state.status === "blocked" || state.status === "error" ? "danger" : "neutral";
+  const verdictTone = verified ? "success" : state.status === "error" ? "danger" : "neutral";
   const VerdictIcon = verified ? ShieldCheck : state.status === "verifying" ? RefreshCw : ShieldX;
   return (
     <section aria-label="Privacy">

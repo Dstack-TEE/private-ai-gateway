@@ -159,15 +159,12 @@ struct RuntimeState {
 impl RuntimeState {
     /// Verification is lost: the epoch moves so a catalog read still in
     /// flight can neither publish nor clear this state, and the identity must
-    /// be reported again before anything opens. The status is an error unless
-    /// a security block holds. The session goes on while the user still
-    /// intends it.
+    /// be reported again before anything opens. The session goes on while
+    /// the user still intends it.
     fn lose_verification(&mut self) {
         self.epoch += 1;
         self.identity_ready = false;
-        if self.state.status != VerificationStatus::Blocked {
-            self.state.status = VerificationStatus::Error;
-        }
+        self.state.status = VerificationStatus::Error;
         self.state.reconnecting = crate::recovery::connection_intended(&self.state);
         self.state.progress = None;
         self.state.catalog = None;
@@ -391,10 +388,7 @@ impl SessionManager {
                 let _ = task.stop();
                 return Err("Protection start was superseded".into());
             }
-            if matches!(
-                runtime.state.status,
-                VerificationStatus::Error | VerificationStatus::Blocked
-            ) {
+            if runtime.state.status == VerificationStatus::Error {
                 let _ = task.stop();
             } else {
                 runtime.task = Some(task);
@@ -428,7 +422,7 @@ impl SessionManager {
                 }
                 match state.status {
                     VerificationStatus::Verified => return Ok(state),
-                    VerificationStatus::Blocked | VerificationStatus::Error => {
+                    VerificationStatus::Error => {
                         let failure = self.lock()?.failure.clone();
                         return Err(failure.unwrap_or_else(|| {
                             state
@@ -834,10 +828,7 @@ impl SessionManager {
             return Ok(());
         }
         runtime.task = None;
-        if !matches!(
-            runtime.state.status,
-            VerificationStatus::Error | VerificationStatus::Blocked
-        ) {
+        if runtime.state.status != VerificationStatus::Error {
             runtime.state.error = Some(match error {
                 Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
                 None => "Verifier stopped unexpectedly".to_string(),
