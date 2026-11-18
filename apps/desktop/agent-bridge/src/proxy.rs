@@ -76,6 +76,8 @@ const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
 pub const VERIFICATION_WAIT: Duration = Duration::from_secs(30);
 /// The `Retry-After` of a request refused while a session awaits verification.
 const VERIFICATION_RETRY_SECS: u64 = 5;
+/// The error code for a model the catalog lacks.
+const MODEL_NOT_FOUND: &str = "model_not_found";
 /// An unknown model reads the catalog again at most this often, so a model
 /// the service just added works at once and a misspelled one costs one read.
 const CATALOG_MISS_REFRESH: Duration = Duration::from_secs(60);
@@ -635,7 +637,7 @@ async fn relay(
     let mut admitted = check_catalog(&state, model.as_deref(), surface);
     if admitted
         .as_ref()
-        .is_err_and(|rejection| rejection.code == "model_not_found")
+        .is_err_and(|rejection| rejection.code == MODEL_NOT_FOUND)
     {
         state.refresh_catalog_for_miss().await;
         admitted = check_catalog(&state, model.as_deref(), surface);
@@ -712,7 +714,7 @@ fn check_catalog(
     let entry = catalog.get(model).ok_or_else(|| {
         Rejection::new(
             StatusCode::NOT_FOUND,
-            "model_not_found",
+            MODEL_NOT_FOUND,
             format!("`{model}` is not in the verified model list; `pap models list` shows the available ones"),
         )
     })?;

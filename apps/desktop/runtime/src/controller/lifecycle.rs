@@ -26,7 +26,7 @@ impl DesktopRuntime {
     }
 
     pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), Error> {
-        let Ok(_operation) = self.lifecycle.try_lock() else {
+        let Ok(operation) = self.lifecycle.try_lock() else {
             return Ok(());
         };
         if self.closing() {
@@ -68,14 +68,28 @@ impl DesktopRuntime {
         // Addresses also change when containers, VPNs and temporary IPv6
         // addresses come and go. Restarting ends every request in flight, so
         // a verified session is rebuilt only if its service stopped answering.
-        if !retry && state.status == VerificationStatus::Verified && self.recovery.online() {
-            if self.manager.service_answers() {
-                return Ok(());
-            }
-            tracing::info!(
-                "The network changed and the service no longer answers; restarting protection"
-            );
-        }
+        let _operation =
+            if !retry && state.status == VerificationStatus::Verified && self.recovery.online() {
+                // The probe waits on the network, so other operations go first;
+                // one that changed the session settles the question itself.
+                let generation = self.proxy.session().generation;
+                drop(operation);
+                if self.manager.service_answers() {
+                    return Ok(());
+                }
+                let Ok(operation) = self.lifecycle.try_lock() else {
+                    return Ok(());
+                };
+                if self.proxy.session().generation != generation {
+                    return Ok(());
+                }
+                tracing::info!(
+                    "The network changed and the service no longer answers; restarting protection"
+                );
+                operation
+            } else {
+                operation
+            };
         self.recovery.clear_wait();
         if let Err(error) = self.stop_with_reconnect(true) {
             self.manager.cancel_reconnection();
