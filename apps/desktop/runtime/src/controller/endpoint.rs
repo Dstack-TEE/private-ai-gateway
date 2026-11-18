@@ -50,6 +50,18 @@ impl DesktopRuntime {
         if current.config == resolved.config && previous.endpoint_error.is_none() {
             return Ok(previous);
         }
+        // Only the name clients use changes: the listener stays, so the
+        // session does too, and connected agents are pointed at the new name.
+        if current.bind == resolved.bind && previous.endpoint_error.is_none() {
+            let resolved = self.save_local_api(config)?;
+            self.manager
+                .set_endpoint(resolved.config, Ok(resolved.endpoint));
+            let catalog = self.verified_catalog.lock().ok().and_then(|c| c.clone());
+            if let Some(catalog) = catalog.filter(|_| previous.session_active) {
+                self.retarget_agents(&catalog)?;
+            }
+            return Ok(self.state());
+        }
         let reconnect = self.manager.is_running()? && !previous.configuration_verification;
         // The projections name the Local API URL. While the session goes on,
         // they are rewritten to the new address from the last verified
