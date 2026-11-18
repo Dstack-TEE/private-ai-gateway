@@ -78,6 +78,8 @@ impl DesktopRuntime {
                     return Ok(());
                 }
                 let Ok(operation) = self.lifecycle.try_lock() else {
+                    // Whatever holds the lock leaves the dead session; look again.
+                    self.recovery.request();
                     return Ok(());
                 };
                 if self.proxy.session().generation != generation {

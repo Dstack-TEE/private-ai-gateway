@@ -75,7 +75,10 @@ impl SessionManager {
             self.proxy.publish(Session {
                 generation,
                 epoch,
-                session_id: Some(runtime.session_id.clone()),
+                session_id: runtime
+                    .state
+                    .session_active
+                    .then(|| runtime.session_id.clone()),
                 service: runtime.service.clone(),
                 ..Session::default()
             });

@@ -88,7 +88,7 @@ pub enum Action {
     },
     /// Report independent local installation and backend diagnostics without starting services.
     Doctor,
-    /// Install the newer release of the saved update channel, if there is one. This stops the backend and protection.
+    /// Install the newer release of the saved update channel, if there is one. The backend restarts and resumes protection.
     Update,
     /// Export a redacted diagnostics report to a new file.
     Diagnostics {

@@ -154,7 +154,7 @@ Commands:
   cli          Manage installation of the private-ai-proxy command
   app          Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
   doctor       Report independent local installation and backend diagnostics without starting services
-  update       Install the newer release of the saved update channel, if there is one. This stops the backend and protection
+  update       Install the newer release of the saved update channel, if there is one. The backend restarts and resumes protection
   diagnostics  Export a redacted diagnostics report to a new file
   completions  Generate shell completions from the current command definition
   verify       Verify an ACI service and print the identity checks

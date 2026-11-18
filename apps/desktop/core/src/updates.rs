@@ -260,6 +260,11 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
     check(configured, channel, version, installation).await
 }
 
+/// One step from its words, quoted as a POSIX shell would read them.
+pub fn step(words: &[&str]) -> Result<String, String> {
+    shlex::try_join(words.iter().copied()).map_err(|_| "Cannot write the upgrade command".into())
+}
+
 /// The first of the steps shown for a manual upgrade. It ends protection and
 /// restores connected agents, as stopping by hand should.
 pub const STOP_STEP: &str = "private-ai-proxy --yes service stop";
@@ -318,10 +323,7 @@ fn upgrade_steps(
     let tag = format!("desktop-v{version}");
     let asset =
         |name: &str| -> Result<String, String> { Ok(crate::endpoint(root, &[&tag, name])?.into()) };
-    let command = |words: &[&str]| {
-        shlex::try_join(words.iter().copied())
-            .map_err(|_| "Cannot write the upgrade command".to_string())
-    };
+    let command = step;
     let stop = STOP_STEP.to_string();
     Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),

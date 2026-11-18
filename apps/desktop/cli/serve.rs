@@ -371,8 +371,8 @@ impl ProxyState {
 
     /// Block forwards until a fresh verify re-establishes trust: cancel the
     /// gate of the identity the change was `observed` under and report the
-    /// rotation (the managed backend rebuilds its session on
-    /// `keyset_changed`). Only the block that closes the current identity's
+    /// rotation (the managed backend rebuilds its session on any
+    /// block). Only the block that closes the current identity's
     /// gate reports it: an observation made under an identity since
     /// replaced, or one already blocked, only cancels a closed gate.
     fn block_for_keyset_change(&self, observed: &TrustedIdentity, reason: String) {
@@ -415,7 +415,7 @@ impl ProxyState {
     /// before it started waiting: an attempt that failed since is shared, not
     /// repeated (single flight). Only the caller that ran a failed attempt
     /// reports it, and not once the verifier is stopping: a managed backend
-    /// stops this verifier on `keyset_changed` to rebuild the session, and
+    /// stops this verifier on any block to rebuild the session, and
     /// that expected stop is not a verification failure.
     ///
     /// `refused_pins` heals a stale TLS pin: a send whose handshake that pin
@@ -1076,7 +1076,13 @@ async fn proxy_inference(
                     Ok(prepared) => prepared,
                     Err(reason) => {
                         tracing::warn!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
-                        return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
+                        // The first send already reached the service.
+                        let mut refused =
+                            text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
+                        refused
+                            .extensions_mut()
+                            .insert(agent_bridge::proxy::VerifierRefusal::Interrupted);
+                        return refused;
                     }
                 };
                 match race_delivery(&delivery, send(&prepared)).await {
@@ -1269,7 +1275,7 @@ where
         return Err(failed(error));
     }
     if let Err(reason) = state.reverify_blocked(attempts, Some(&pins)).await {
-        // A managed verifier stops on `keyset_changed` while the backend
+        // A managed verifier stops on a block while the backend
         // rebuilds its session; the request is retryable, not failed.
         if state.shutdown.is_cancelled() {
             return Err(Box::new(delivery_revoked_response(path)));

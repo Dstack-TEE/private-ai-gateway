@@ -35,7 +35,10 @@ use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
 /// How long a verified session's service gets to answer a probe.
+#[cfg(not(test))]
 const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct SessionManager {
     inner: Mutex<RuntimeState>,
@@ -351,7 +354,10 @@ impl SessionManager {
         }
         drop(runtime);
 
-        self.publish_unverified(generation, 0, Some(session_id.clone()));
+        // Agents wait for a session the user intends, not for the
+        // verification of a profile being saved.
+        let intended = continuing || !verification_only;
+        self.publish_unverified(generation, 0, intended.then(|| session_id.clone()));
         self.publish();
         let state = self.snapshot();
         let weak = Arc::downgrade(self);
@@ -733,13 +739,14 @@ impl SessionManager {
         else {
             return false;
         };
-        // Only a failed connection says the service is gone. An error it
-        // answered, a local refusal or a slow answer leaves the session to
-        // the verifier, which closes it when it must.
+        // An error the service answered or a local refusal leaves the
+        // session to the verifier, which closes it when it must. No answer
+        // in time is a connection the address change left dead: nothing
+        // else would notice it before a request waited out its timeout.
         self.task_runtime.block_on(async move {
             tokio::time::timeout(SERVICE_PROBE_TIMEOUT, service.call(request, None))
                 .await
-                .map_or(true, |response| {
+                .is_ok_and(|response| {
                     response.extensions().get()
                         != Some(&agent_bridge::proxy::VerifierRefusal::Unreachable)
                 })
@@ -916,9 +923,13 @@ impl SessionManager {
         runtime.service = None;
         runtime.verification_only = false;
         runtime.lose_verification();
-        let (epoch, session_id) = (runtime.epoch, runtime.session_id.clone());
+        let session_id = runtime
+            .state
+            .session_active
+            .then(|| runtime.session_id.clone());
+        let epoch = runtime.epoch;
         drop(runtime);
-        self.publish_unverified(generation, epoch, Some(session_id));
+        self.publish_unverified(generation, epoch, session_id);
         if let Some(mut task) = task {
             let _ = task.stop();
         }
