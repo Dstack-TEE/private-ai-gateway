@@ -795,7 +795,7 @@ exact upgrade steps for this installation. `pap update` runs those steps, printi
 one, for the installations a package manager owns
 (CLI-only DEB, RPM and Arch packages, the Arch desktop package, and npm, except
 on Windows). The backend stops as for a restart: connected agents stay pointed
-at the Local API, which nothing answers during the installation, and the
+at the Local API, which does not listen during the installation, and the
 installed release resumes protection that was on. If the installation fails,
 the previous release does. For a desktop app or a portable archive it says where to update
 instead; see

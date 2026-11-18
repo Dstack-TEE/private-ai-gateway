@@ -99,8 +99,8 @@ a profile switch or a settings change keep linked agents pointed at the Local
 API, which refuses them until protection is verified again, so their requests
 never fall back to the original provider. A Local API address change during
 the session rewrites them to the new address from the last verified catalog;
-when this backend has not verified a catalog yet, they keep the old address,
-which nothing answers, until verification projects them again. If neither the new address nor the old
+when this backend has not verified a catalog yet, they keep the previous address,
+where the Local API no longer listens, until verification projects them again. If neither the new address nor the old
 one can be bound, agents stay pointed at an address with no listener, which
 refuses them. External edits are preserved and incomplete restoration is kept
 retryable.
