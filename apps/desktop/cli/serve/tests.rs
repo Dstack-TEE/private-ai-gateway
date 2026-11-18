@@ -3145,7 +3145,7 @@ async fn bridge_multipart_uses_managed_constraints() {
     enable_multipart(&verifier);
 
     let (events, _events) = mpsc::channel(8);
-    let local = bridge::ProxyState::new(events).unwrap();
+    let local = bridge::ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let mut tokens = TokenSet::default();
     tokens.insert("local-token".into(), LOCAL_TOOLS_AGENT.into());
     local.set_tokens(tokens);

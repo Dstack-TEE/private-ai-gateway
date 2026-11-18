@@ -81,7 +81,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         axum::serve(listener, app).await.unwrap();
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -253,7 +253,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
         .unwrap();
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -358,7 +358,7 @@ async fn a_failed_reverification_retires_the_verifier_for_a_retry() {
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -441,7 +441,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     use desktop_core::protocol::{self, ErrorCode};
 
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -495,7 +495,7 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
     use desktop_core::protocol::{self, ErrorCode};
 
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -614,7 +614,7 @@ async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
 fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -652,7 +652,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -677,7 +677,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
 #[tokio::test(start_paused = true)]
 async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -720,7 +720,7 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
 fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -756,7 +756,7 @@ fn a_lost_verification_keeps_the_session_until_stopped() {
     for verification_only in [false, true] {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let (events, _) = tokio::sync::mpsc::channel(8);
-        let proxy = ProxyState::new(events).unwrap();
+        let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
         let usage = Arc::new(UsageStore::memory().unwrap());
         let manager = Arc::new(SessionManager::new(
             proxy.clone(),
@@ -824,7 +824,7 @@ fn a_lost_verification_keeps_the_session_until_stopped() {
 fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -915,7 +915,7 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
 #[tokio::test]
 async fn stale_verifier_generation_cannot_record_activity() {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = SessionManager::new(
         proxy,
         Arc::new(UsageStore::memory().unwrap()),
@@ -964,7 +964,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
 async fn a_verdict_saves_the_checked_receipt_with_its_record() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let manager = SessionManager::new(
-        ProxyState::new(events).unwrap(),
+        ProxyState::new(events, std::time::Duration::ZERO).unwrap(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
@@ -1147,7 +1147,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
 fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy,
         Arc::new(UsageStore::memory().unwrap()),
@@ -1191,7 +1191,7 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let stopped = Arc::new(AtomicBool::new(false));
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),

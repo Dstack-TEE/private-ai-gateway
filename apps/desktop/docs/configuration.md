@@ -265,7 +265,10 @@ unlocked OS keychain for a process running as you.
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to
   their original provider. The backend keeps retrying the verification, backing
-  off to at most a minute, until it passes or protection is stopped. A Local
+  off to at most a minute, until it passes or protection is stopped. For the
+  first 30 seconds after verification is lost, requests wait for it instead of
+  failing, so a routine re-verification only delays them; after that they are
+  refused at once with `503` and a `Retry-After` header. A Local
   API address change rewrites them to the new address, unless the backend has
   not verified a catalog since it started; then they are restored until
   verification projects them again.
