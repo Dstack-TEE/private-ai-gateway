@@ -863,6 +863,8 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
     let competing: Value = serde_json::from_slice(&competing.stdout).unwrap();
     assert_eq!(started["instanceId"], competing["instanceId"]);
     assert!(started["processId"].as_u64().is_some());
+    let restarted = backend.run(&["service", "restart"]);
+    assert_ne!(restarted["instanceId"], started["instanceId"]);
     backend.run(&["service", "stop", "--yes"]);
 }
 

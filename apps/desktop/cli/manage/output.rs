@@ -44,6 +44,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Service { command } => match command {
             Service::Start => "Backend started.".into(),
             Service::Stop => "Backend stopped.".into(),
+            Service::Restart => "Backend restarted.".into(),
             Service::Status => status(value),
         },
         Action::App {

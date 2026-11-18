@@ -713,6 +713,18 @@ impl SessionManager {
         changes.write();
     }
 
+    /// Ask a blocked session's verifier to verify again. The Local API refuses
+    /// agents while blocked, so no request reaches the verifier to do it.
+    pub fn reverify_blocked(&self) -> Result<(), String> {
+        let runtime = self.lock()?;
+        if runtime.state.status == VerificationStatus::Blocked {
+            if let Some(service) = runtime.service.clone() {
+                self.task_runtime.spawn(service.reverify());
+            }
+        }
+        Ok(())
+    }
+
     /// Refresh discovery without revoking the current verified session.
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
         let (generation, epoch) = {

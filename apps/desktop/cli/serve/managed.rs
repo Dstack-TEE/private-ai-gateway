@@ -47,6 +47,13 @@ impl VerifiedService for ProxyState {
             proxy_request(self, parts.method, parts.uri, parts.headers, body, context).await
         })
     }
+
+    fn reverify(self: Arc<Self>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+        Box::pin(async move {
+            // The failure is already reported as a `Blocked` event.
+            let _ = self.ensure_unblocked().await;
+        })
+    }
 }
 
 pub struct InProcessVerifierLauncher {

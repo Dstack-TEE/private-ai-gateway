@@ -158,6 +158,13 @@ pub fn should_retry(state: &AppState) -> bool {
         ) || state.endpoint_error.is_some())
 }
 
+/// A blocked session keeps its verifier, which verifies again only when asked.
+pub fn should_reverify(state: &AppState) -> bool {
+    state.session_active
+        && !state.configuration_verification
+        && state.status == VerificationStatus::Blocked
+}
+
 pub fn should_recover(
     status: VerificationStatus,
     configuration_verification: bool,
