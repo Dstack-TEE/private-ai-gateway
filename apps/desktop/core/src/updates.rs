@@ -260,6 +260,31 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
     check(configured, channel, version, installation).await
 }
 
+/// Runs the upgrade steps of `notice` in order, in a scratch directory for
+/// what they download, and stops at the first that fails. Each step and its
+/// output go to stderr, leaving stdout to the caller's own result.
+pub fn install(notice: &UpdateNotice) -> Result<(), String> {
+    let directory = tempfile::tempdir()
+        .map_err(|error| format!("Cannot create a download directory: {error}"))?;
+    for step in &notice.commands {
+        let words = shlex::split(step).ok_or("The upgrade command is invalid")?;
+        let (program, arguments) = words
+            .split_first()
+            .ok_or("The upgrade command is invalid")?;
+        eprintln!("$ {step}");
+        let status = std::process::Command::new(program)
+            .args(arguments)
+            .current_dir(directory.path())
+            .stdout(std::io::stderr())
+            .status()
+            .map_err(|error| format!("Cannot run `{step}`: {error}"))?;
+        if !status.success() {
+            return Err(format!("`{step}` failed; the update was not installed."));
+        }
+    }
+    Ok(())
+}
+
 /// `root` and `version` come from the compiled feed and a parsed SemVer, so the
 /// steps contain no text from the downloaded manifest. Commands are POSIX
 /// shell words joined by `shlex`.
@@ -361,6 +386,30 @@ mod tests {
 
     const FEED: &str =
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
+
+    #[cfg(unix)]
+    #[test]
+    fn install_runs_the_steps_in_order_and_stops_at_the_first_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let touch = |name: &str| {
+            let path = directory.path().join(name);
+            shlex::try_join(["touch", path.to_str().unwrap()]).unwrap()
+        };
+        let notice = UpdateNotice {
+            installation: Installation::Npm,
+            channel: UpdateChannel::Stable,
+            current_version: "0.1.0".into(),
+            version: Some("0.2.0".into()),
+            commands: vec![touch("first"), "false".into(), touch("second")],
+            download_url: None,
+        };
+        assert_eq!(
+            install(&notice).unwrap_err(),
+            "`false` failed; the update was not installed."
+        );
+        assert!(directory.path().join("first").exists());
+        assert!(!directory.path().join("second").exists());
+    }
 
     #[test]
     fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {
