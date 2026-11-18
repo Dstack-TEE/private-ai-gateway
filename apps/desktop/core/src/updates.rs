@@ -261,8 +261,8 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
 }
 
 /// Runs the upgrade steps of `notice` in order, in a scratch directory for
-/// what they download, and stops at the first that fails. Their output goes
-/// to stderr, leaving stdout to the caller's own result.
+/// what they download, and stops at the first that fails. Each step and its
+/// output go to stderr, leaving stdout to the caller's own result.
 pub fn install(notice: &UpdateNotice) -> Result<(), String> {
     let directory = tempfile::tempdir()
         .map_err(|error| format!("Cannot create a download directory: {error}"))?;
@@ -271,6 +271,7 @@ pub fn install(notice: &UpdateNotice) -> Result<(), String> {
         let (program, arguments) = words
             .split_first()
             .ok_or("The upgrade command is invalid")?;
+        eprintln!("$ {step}");
         let status = std::process::Command::new(program)
             .args(arguments)
             .current_dir(directory.path())

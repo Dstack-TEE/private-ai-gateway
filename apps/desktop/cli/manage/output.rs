@@ -120,7 +120,8 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Diagnostics { .. } => exported(value),
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
-                "Updated to {}. Run pap start to resume protection.",
+                "Updated {} → {}. Run pap start to resume protection.",
+                text(&value["currentVersion"]),
                 safe(version)
             ),
             None => format!("Up to date ({}).", text(&value["currentVersion"])),

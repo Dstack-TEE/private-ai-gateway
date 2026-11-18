@@ -126,7 +126,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         Action::App {
             command: App::Open { web },
         } => open_app(&client, global, *web)?,
-        Action::Update => update(global)?,
+        Action::Update => update()?,
         Action::Doctor => {
             let report = doctor(&client);
             output::print(action, global, &report)?;
@@ -997,16 +997,19 @@ fn settings_diagnostics(
 }
 
 /// `update`: runs the upgrade steps `doctor` shows for this installation.
-fn update(global: &Global) -> Result<Value, CallError> {
+/// Like other self-updating CLIs it does not ask first: the command is the
+/// request, and each step is printed as it runs.
+fn update() -> Result<Value, CallError> {
     let notice = update_notice()?;
     let Some(version) = &notice.version else {
         return value(notice);
     };
-    let steps = notice.commands.join("\n  ");
     // A running Windows executable cannot be replaced.
     if cfg!(windows) || notice.commands.is_empty() {
         let how = match &notice.download_url {
-            _ if !notice.commands.is_empty() => format!("Run:\n  {steps}"),
+            _ if !notice.commands.is_empty() => {
+                format!("Run:\n  {}", notice.commands.join("\n  "))
+            }
             Some(url) => format!("Download {url} and extract it into a fresh directory."),
             None => "Update it in the desktop app (Settings > About) or with its package manager."
                 .into(),
@@ -1016,10 +1019,6 @@ fn update(global: &Global) -> Result<Value, CallError> {
         )
         .into());
     }
-    confirm(
-        global,
-        &format!("Install {version} by running\n  {steps}\n?"),
-    )?;
     desktop_core::updates::install(&notice)?;
     value(notice)
 }

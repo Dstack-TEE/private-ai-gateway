@@ -758,8 +758,8 @@ reports that no receipt is saved, as it does before the audit finishes.
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop app or the OS installer. `doctor` also reports whether the saved update
 channel (`settings set update-channel beta|stable`) has a newer release and the
-exact upgrade steps for this installation. `pap update` runs those steps after
-confirmation (`--yes` skips it) for the installations a package manager owns
+exact upgrade steps for this installation. `pap update` runs those steps, printing each
+one, for the installations a package manager owns
 (CLI-only DEB, RPM and Arch packages, the Arch desktop package, and npm, except
 on Windows); the first step stops the backend, so start protection again
 afterwards. For a desktop app or a portable archive it says where to update
