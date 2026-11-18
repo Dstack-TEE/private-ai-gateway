@@ -253,6 +253,49 @@ async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u6
     });
 }
 
+/// A model the service added since the last read works on its first
+/// request; a misspelled one costs a single read.
+#[tokio::test]
+async fn an_unknown_model_reads_the_catalog_again_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    state.set_catalog_refresher(Box::new({
+        let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+        move || {
+            let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+            Box::pin(async move {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let catalog =
+                    Catalog::from_remote(&json!({"data": [{"id": "new-model"}]}), 2).unwrap();
+                state.publish(Session {
+                    generation: 1,
+                    epoch: 1,
+                    session_id: Some("test-session".to_string()),
+                    service: Some(http_service(&upstream)),
+                    verified: true,
+                    catalog: Some(catalog),
+                });
+            })
+        }
+    }));
+    let proxy = spawn(router(state.clone())).await;
+    let status = |model: &'static str| {
+        let request = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": model, "messages": [] }));
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(status("new-model").await, 200);
+    assert_eq!(status("misspelled").await, 404);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn connection_named_headers_are_hop_by_hop() {
     let mut headers = HeaderMap::new();

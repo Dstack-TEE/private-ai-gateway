@@ -305,6 +305,15 @@ impl DesktopRuntime {
             task_runtime.clone(),
             initial_state,
         ));
+        let weak = Arc::downgrade(&manager);
+        proxy.set_catalog_refresher(Box::new(move || {
+            let manager = weak.upgrade();
+            Box::pin(async move {
+                if let Some(manager) = manager {
+                    let _ = manager.refresh_catalog().await;
+                }
+            })
+        }));
         let runtime = Arc::new(Self {
             manager: manager.clone(),
             proxy: proxy.clone(),

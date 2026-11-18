@@ -195,7 +195,9 @@ image and transcription surfaces require an explicit `image` or
 `transcription` output modality.
 
 The catalog is read when a session is verified and again every 10 minutes
-while it is protected (`pap models list --refresh` reads it at once). A failed
+while it is protected (`pap models list --refresh` reads it at once). A request
+for a model it lacks also reads it again, at most once a minute, so a model the
+service just added works on its first request. A failed
 refresh keeps the catalog the session has. When the catalog changes, connected
 agents' configurations are rewritten from it; an agent that reads its models
 only at startup, such as Codex's app server, needs a restart to see them

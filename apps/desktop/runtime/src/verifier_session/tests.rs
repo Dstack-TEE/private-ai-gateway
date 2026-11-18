@@ -158,7 +158,7 @@ async fn a_refresh_of_a_verified_session_changes_only_its_catalog() {
         axum::serve(listener, app).await.unwrap();
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
