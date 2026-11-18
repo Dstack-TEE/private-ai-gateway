@@ -71,6 +71,9 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
 #[cfg(test)]
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
+/// An unknown model reads the catalog again at most this often, so a model
+/// the service just added works at once and a misspelled one costs one read.
+const CATALOG_MISS_REFRESH: Duration = Duration::from_secs(60);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = desktop_core::sse::MAX_LINE_BYTES;
 // Image JSON includes base64 output; match the gateway's buffered response cap.
@@ -113,6 +116,8 @@ pub struct ForwardContext {
 }
 
 pub type VerifiedResponse = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+pub type CatalogRefresher =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
 /// An already-attested forwarding service. Implementations must retain the
 /// verifier's TLS pinning, policy and receipt-audit behavior.
@@ -174,6 +179,10 @@ pub struct ProxyState {
     gate: RwLock<CancellationToken>,
     events: mpsc::Sender<ProxyEvent>,
     in_flight: Arc<Semaphore>,
+    /// Reads and publishes the catalog again; set by the session's owner.
+    catalog_refresher: std::sync::OnceLock<CatalogRefresher>,
+    /// When an unknown model last made the catalog be read again.
+    catalog_miss: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     #[cfg(test)]
     pause: std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
@@ -189,9 +198,30 @@ impl ProxyState {
             gate: RwLock::new(CancellationToken::new()),
             events,
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            catalog_refresher: std::sync::OnceLock::new(),
+            catalog_miss: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             pause: std::sync::Mutex::new(None),
         }))
+    }
+
+    /// How a request for a model the catalog lacks has it read again.
+    pub fn set_catalog_refresher(&self, refresher: CatalogRefresher) {
+        let _ = self.catalog_refresher.set(refresher);
+    }
+
+    /// Reads the catalog again for an unknown model, unless one just did.
+    /// Requests that arrive meanwhile wait for that read and share it.
+    async fn refresh_catalog_for_miss(&self) {
+        let Some(refresh) = self.catalog_refresher.get() else {
+            return;
+        };
+        let mut last = self.catalog_miss.lock().await;
+        if last.is_some_and(|last| last.elapsed() < CATALOG_MISS_REFRESH) {
+            return;
+        }
+        refresh().await;
+        *last = Some(tokio::time::Instant::now());
     }
 
     /// Cancel every delivery admitted so far; called after any state change
@@ -516,7 +546,15 @@ async fn relay(
             return reject(&state, Some(agent), "POST", path, None, surface, rejection)
         }
     };
-    if let Err(rejection) = check_catalog(&state, model.as_deref(), surface) {
+    let mut admitted = check_catalog(&state, model.as_deref(), surface);
+    if admitted
+        .as_ref()
+        .is_err_and(|rejection| rejection.code == "model_not_found")
+    {
+        state.refresh_catalog_for_miss().await;
+        admitted = check_catalog(&state, model.as_deref(), surface);
+    }
+    if let Err(rejection) = admitted {
         return reject(&state, Some(agent), "POST", path, model, surface, rejection);
     }
     // Take the delivery token first, then re-validate session and credentials:
