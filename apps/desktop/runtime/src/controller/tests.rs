@@ -1739,7 +1739,11 @@ impl proxy::VerifiedService for AnsweringService {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
         Box::pin(async move {
             VERIFIED_AGAIN.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            if self.answers.load(Ordering::SeqCst) == ANSWERS {
+                Ok(())
+            } else {
+                Err("the report did not verify".to_string())
+            }
         })
     }
 
@@ -1851,8 +1855,9 @@ fn verifying_the_protecting_profile_does_not_interrupt_it() {
     use desktop_core::contracts::ServiceProvider;
     let executor = tokio::runtime::Runtime::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
+    let answers = Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS));
     let launcher = Arc::new(AnsweringVerifier {
-        answers: Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS)),
+        answers: answers.clone(),
     });
     let runtime = test_runtime_with(&executor, directory.path(), launcher);
     let input = || ConfidentialProfileInput {
@@ -1878,12 +1883,26 @@ fn verifying_the_protecting_profile_does_not_interrupt_it() {
         .block_on(runtime.verify_configuration(input(), None))
         .unwrap();
     assert!(state.is_protected());
+    // The session's evidence is the verifier's; saving the profile leaves it.
+    assert!(state.identity.is_some() && state.catalog.is_some());
+    assert!(state.profiles[0].verified_at.is_some());
     assert_eq!(VERIFIED_AGAIN.load(Ordering::SeqCst), asked + 1);
     let after = runtime.proxy.session();
     assert_eq!(
         (after.generation, after.epoch, after.verified),
         (session.generation, session.epoch, true)
     );
+
+    // A service that does not verify again is reported, not verified a
+    // second time behind a stopped session, and its time is not recorded.
+    let verified_at = state.profiles[0].verified_at;
+    answers.store(UNREACHABLE, Ordering::SeqCst);
+    let error = executor
+        .block_on(runtime.verify_configuration(input(), None))
+        .unwrap_err();
+    assert!(error.to_string().contains("did not verify again"));
+    assert_eq!(runtime.state().profiles[0].verified_at, verified_at);
+    assert_eq!(runtime.proxy.session().generation, session.generation);
     runtime.stop().unwrap();
 }
 

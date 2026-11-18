@@ -1,4 +1,5 @@
 use super::*;
+use crate::verifier_session::Reverified;
 
 impl DesktopRuntime {
     pub async fn save_configuration(
@@ -86,29 +87,52 @@ impl DesktopRuntime {
             remote_url: candidate.remote_url.clone(),
         };
 
-        // The profile that is protecting, unchanged, is verified where it
-        // runs: stopping it to verify it would only cut its requests.
-        let in_place = verify
-            && !profile_changed
-            && !replace_key
-            && initial.active_profile_id == id
-            && self.manager.verify_running().await;
-        let reconnect = reconnect && !in_place;
+        // The profile that is protecting, unchanged, is attested where it
+        // runs: stopping it to verify it would only cut its requests. The
+        // verifier owns the session's state throughout; only the time of a
+        // successful attestation is saved.
+        if verify && !profile_changed && !replace_key && initial.active_profile_id == id {
+            match self.manager.verify_running().await {
+                Reverified::NotProtecting => {}
+                Reverified::Kept => {
+                    candidate.verified_at = Some(desktop_core::now_secs());
+                    self.update_config(|settings| {
+                        settings.upsert(id.clone(), candidate)?;
+                        Ok(())
+                    })?;
+                    self.publish_profiles()?;
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    });
+                }
+                Reverified::Changed => {
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    })
+                }
+                Reverified::Failed(reason) => {
+                    return Err(Error::invalid_state(format!(
+                        "The service did not verify again: {reason}. Protection is retried automatically."
+                    )))
+                }
+            }
+        }
         if reconnect {
             self.pause_protection()?;
         }
         let previous = self.state();
-        // Every failure below leaves the state as it was, and the key
-        // unloaded unless the session went on.
+        // Every failure below leaves the key unloaded and the state as it was.
         let rollback = |error: Error| {
-            if !in_place {
-                self.proxy.set_api_key(None);
-            }
+            self.proxy.set_api_key(None);
             self.manager.restore_snapshot(previous.clone());
             error
         };
 
-        if verify && !in_place {
+        if verify {
             self.proxy.set_api_key(Some(candidate_key.clone()));
             let started = match self
                 .manager
@@ -139,7 +163,7 @@ impl DesktopRuntime {
                 }));
             }
             stop_result.map_err(|error| rollback(error.into()))?;
-        } else if !verify {
+        } else {
             self.manager.stop_with_reconnect(initial.session_active)?;
             self.proxy.set_api_key(None);
         }

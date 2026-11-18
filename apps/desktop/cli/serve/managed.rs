@@ -53,8 +53,20 @@ impl VerifiedService for ProxyState {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
         Box::pin(async move {
             // One verification at a time, as for a rotation.
-            let _serialized = self.reverify.lock().await;
-            self.reverify().await
+            let serialized = self.reverify.lock().await;
+            let verified = self.reverify().await;
+            drop(serialized);
+            // A service that no longer verifies is closed and retried like
+            // one a request found so.
+            if let Err(reason) = &verified {
+                if !self.shutdown.is_cancelled() {
+                    (self.event_sink)(VerifierEvent::Blocked {
+                        code: None,
+                        reason: reason.clone(),
+                    });
+                }
+            }
+            verified
         })
     }
 }

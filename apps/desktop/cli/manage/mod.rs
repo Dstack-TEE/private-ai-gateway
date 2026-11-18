@@ -471,7 +471,8 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             let deadline = Instant::now() + Duration::from_secs(90);
             let mut state = saved.state;
             while protecting
-                && state.status == VerificationStatus::Verifying
+                && state.status != VerificationStatus::Verified
+                && (state.status == VerificationStatus::Verifying || state.reconnecting)
                 && Instant::now() < deadline
             {
                 std::thread::sleep(Duration::from_millis(200));
