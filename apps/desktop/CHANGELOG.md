@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.9.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0-beta.1) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desktop:** `status` in the state no longer reports `blocked`, and `protection.phase` no longer reports `blocked`; both report the error states instead.
+
+### Features
+
+* **desktop:** add `pap update` ([#581](https://github.com/Dstack-TEE/private-ai-gateway/issues/581)) ([52690d7](https://github.com/Dstack-TEE/private-ai-gateway/commit/52690d7c81be69702f17459c773fbf7509fc37ab))
+* **desktop:** let requests wait out a brief re-verification ([#583](https://github.com/Dstack-TEE/private-ai-gateway/issues/583)) ([9e1a001](https://github.com/Dstack-TEE/private-ai-gateway/commit/9e1a0019cd417d36694ccdefe6c043249eeb8b01))
+* **desktop:** read the catalog again for an unknown model ([#584](https://github.com/Dstack-TEE/private-ai-gateway/issues/584)) ([7c7f2c3](https://github.com/Dstack-TEE/private-ai-gateway/commit/7c7f2c3b9ec404d6b905b3948c3397b6bdb94460))
+* **desktop:** refresh the model catalog while protected ([#582](https://github.com/Dstack-TEE/private-ai-gateway/issues/582)) ([5923da5](https://github.com/Dstack-TEE/private-ai-gateway/commit/5923da55828036cb16bab5a5a6cc81c68e26f5fb))
+* **desktop:** start protection again after `pap update` ([#586](https://github.com/Dstack-TEE/private-ai-gateway/issues/586)) ([4fb2827](https://github.com/Dstack-TEE/private-ai-gateway/commit/4fb282707c8385af3d66d320d80f04f162406341))
+
+
+### Bug Fixes
+
+* **desktop:** finish the dead ends a user meets from the terminal ([#590](https://github.com/Dstack-TEE/private-ai-gateway/issues/590)) ([bb012b8](https://github.com/Dstack-TEE/private-ai-gateway/commit/bb012b8a45eb14f2ad06494aec2b0376305632e8))
+* **desktop:** keep agents routed while `pap update` installs ([#592](https://github.com/Dstack-TEE/private-ai-gateway/issues/592)) ([251ccb4](https://github.com/Dstack-TEE/private-ai-gateway/commit/251ccb44ff233f62b0a5540cd6a8f6d24db9b2e0))
+* **desktop:** keep the session when an address changes and the service answers ([#588](https://github.com/Dstack-TEE/private-ai-gateway/issues/588)) ([ef8ee4a](https://github.com/Dstack-TEE/private-ai-gateway/commit/ef8ee4a93881157853a7b2136a2cf8f69e4bdac1))
+* **desktop:** keep web UI sessions signed in and add page basics ([#577](https://github.com/Dstack-TEE/private-ai-gateway/issues/577)) ([7584f49](https://github.com/Dstack-TEE/private-ai-gateway/commit/7584f49bd46d18f6c502d0c408f1e8328b611e08))
+* **desktop:** list models newest first ([#585](https://github.com/Dstack-TEE/private-ai-gateway/issues/585)) ([c1bfcbe](https://github.com/Dstack-TEE/private-ai-gateway/commit/c1bfcbe93a39d83b7cc35ae3f8dfb63be04c1071))
+* **desktop:** recover a blocked session and add `pap service restart` ([#580](https://github.com/Dstack-TEE/private-ai-gateway/issues/580)) ([679fc0f](https://github.com/Dstack-TEE/private-ai-gateway/commit/679fc0fbcfb088e147e037efa4167e41ea77e49b))
+* **desktop:** say what to do in the errors users actually hit ([#587](https://github.com/Dstack-TEE/private-ai-gateway/issues/587)) ([5d22578](https://github.com/Dstack-TEE/private-ai-gateway/commit/5d22578e0908a178cd2bd210c511fdcaffda59ef))
+
 ## [0.8.5](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.4...desktop-v0.8.5) (2026-11-14)
 
 Private AI Proxy 0.8.5 fixes the RedPill account and top-up links and updates dependencies.
