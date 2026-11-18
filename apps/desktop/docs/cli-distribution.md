@@ -106,9 +106,15 @@ The CLI-only packages also install a systemd user unit,
 `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages do.
 The first `pap start` enables it and moves a running backend under it, so the
 backend starts at login and after a crash and resumes the protection it left.
-`systemctl --user disable private-ai-proxy` turns that off; without it, or
-where no user service manager runs (containers, WSL without systemd), the
-first command starts the backend.
+An npm installation gets the same unit written to
+`~/.config/systemd/user/private-ai-proxy.service`, and `pap service enable`
+writes it for any other Linux installation, pointing at that installation's
+backend; run it again after an upgrade that moves the backend, as the install
+script's versioned directories do. A unit of that name that this command did
+not write is never used or changed.
+`pap service disable` turns it off. Without it, or where no user service
+manager runs (containers, WSL without systemd), the first command starts the
+backend.
 
 `Restart=on-failure` restarts a crashed backend but not one stopped with `pap
 service stop`. While the unit is enabled, commands start the backend through

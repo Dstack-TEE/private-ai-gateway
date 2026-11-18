@@ -112,6 +112,10 @@ pub enum Service {
     Stop,
     /// Restart the backend. Protection resumes and agents stay connected.
     Restart,
+    /// Start the backend at login and after a crash, resuming protection that was on (Linux, systemd user service).
+    Enable,
+    /// Stop starting the backend at login. A running backend goes on.
+    Disable,
     /// Show backend and protection state without starting the backend.
     Status,
 }
