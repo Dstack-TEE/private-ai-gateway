@@ -286,7 +286,9 @@ impl SessionManager {
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}").into());
+            return Err(Error::invalid_state(format!(
+                "The Local API is unavailable: {error}. Free the port or choose another with `pap settings set local-api.port <port>`."
+            )));
         }
         if runtime.task.is_some() {
             return Err(Error::already_running(&runtime.state));

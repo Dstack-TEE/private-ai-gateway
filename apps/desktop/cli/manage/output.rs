@@ -173,7 +173,7 @@ fn agents(value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
+        return "Backend not running. Agents connected through it cannot reach the Local API.\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {

@@ -296,6 +296,47 @@ async fn an_unknown_model_reads_the_catalog_again_once() {
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
+/// The service's 401 is about the key this proxy sent, not the agent's token.
+#[tokio::test]
+async fn a_rejected_service_key_is_reported_as_such() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "text"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": {"message": "Invalid API key provided"}})),
+                    )
+                }),
+            ),
+    )
+    .await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-revoked".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "service_key_rejected");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("the agent's token is fine"));
+}
+
 #[test]
 fn connection_named_headers_are_hop_by_hop() {
     let mut headers = HeaderMap::new();
