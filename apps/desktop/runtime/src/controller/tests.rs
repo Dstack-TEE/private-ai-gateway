@@ -940,6 +940,21 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_ne!(moved, reprojected);
     assert!(String::from_utf8_lossy(&moved).contains(&format!("127.0.0.1:{port}")));
     assert_eq!(refusal(&token), "gateway_not_verified");
+    // Before this backend has verified a catalog there is nothing to rewrite
+    // them from: they keep the address they have, never their own provider.
+    *runtime.verified_catalog.lock().unwrap() = None;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    executor
+        .block_on(runtime.apply_local_api(ListenConfig {
+            port,
+            ..ListenConfig::default()
+        }))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), moved);
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::UpdateRestart, true))
         .unwrap();
@@ -1722,7 +1737,11 @@ impl proxy::VerifiedService for AnsweringService {
             if self.answers.load(Ordering::SeqCst) {
                 axum::Json(serde_json::json!({"data": [{"id": "model"}]})).into_response()
             } else {
-                axum::http::StatusCode::BAD_GATEWAY.into_response()
+                let mut refused = axum::http::StatusCode::BAD_GATEWAY.into_response();
+                refused
+                    .extensions_mut()
+                    .insert(proxy::VerifierRefusal::Unreachable);
+                refused
             }
         })
     }

@@ -121,6 +121,19 @@ pub struct ForwardContext {
 }
 
 pub type VerifiedResponse = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
+
+/// Marks a response the verifier wrote itself instead of relaying one from
+/// the service. Its plain-text body is the reason.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VerifierRefusal {
+    /// Refused before anything was sent.
+    NotSent,
+    /// Stopped while being sent; it may have reached the service.
+    Interrupted,
+    /// The service could not be reached or dropped the connection; the
+    /// request may have reached it.
+    Unreachable,
+}
 pub type CatalogRefresher =
     Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
 
@@ -843,6 +856,50 @@ async fn forward(
             );
         }
     };
+    if let Some(refusal) = upstream.extensions().get::<VerifierRefusal>().copied() {
+        // Agents parse the provider's error envelope, not plain text.
+        let status = upstream.status();
+        let reason = to_bytes(upstream.into_body(), 4096)
+            .await
+            .map(|body| String::from_utf8_lossy(&body).trim().to_string())
+            .unwrap_or_default();
+        let (code, message, retry) = match status {
+            StatusCode::BAD_GATEWAY => (
+                "upstream_unreachable",
+                format!(
+                    "{PRODUCT_NAME} could not reach the service ({reason}); check the network. \
+                     `pap status` shows details"
+                ),
+                None,
+            ),
+            // Only a request that provably never left is safe to send again.
+            StatusCode::SERVICE_UNAVAILABLE if refusal == VerifierRefusal::Interrupted => (
+                "revoked",
+                format!("{PRODUCT_NAME} stopped the request: {reason}"),
+                None,
+            ),
+            StatusCode::SERVICE_UNAVAILABLE => (
+                "gateway_not_verified",
+                format!("{PRODUCT_NAME} did not send the request: {reason}"),
+                Some(VERIFICATION_RETRY_SECS),
+            ),
+            _ => ("invalid_request_error", reason, None),
+        };
+        let rejection = Rejection::new(status, code, message).retry_after(retry);
+        return reject_with_context(
+            &state,
+            generation,
+            request_id,
+            session_id.to_string(),
+            Some(agent.to_string()),
+            "POST",
+            path,
+            model,
+            surface,
+            rejection,
+            refusal != VerifierRefusal::NotSent,
+        );
+    }
     if upstream.status() == StatusCode::UNAUTHORIZED {
         // The agent's token was exchanged for the saved key, so the service
         // refused that key. Its own wording reads as the agent's fault.
@@ -851,7 +908,7 @@ async fn forward(
             "service_key_rejected",
             format!(
                 "The service rejected the API key saved in {PRODUCT_NAME}; the agent's token is \
-                 fine. Replace the key (`pap profiles verify <profile> --key-stdin`) or sign in \
+                 fine. Replace the key (`pap profiles verify <profile> --replace-key`) or sign in \
                  again (`pap profiles login <profile>`)"
             ),
         );

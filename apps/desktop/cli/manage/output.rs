@@ -193,6 +193,7 @@ fn status(value: &Value) -> String {
                 "Not protected (verification failed)"
             }
         }
+        _ if state["endpointError"].is_string() => "Not protected (Local API unavailable)",
         _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",

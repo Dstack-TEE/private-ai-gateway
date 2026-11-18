@@ -243,7 +243,7 @@ pub enum Profiles {
     },
     /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
     Login(AccountLoginOptions),
-    /// Verify a new profile's service with its credential, then save and select it. Nothing is saved when verification fails.
+    /// Verify a new profile's service, then save it with its credential and select it. Nothing is saved when verification fails.
     Add {
         #[arg(long, help = "Unique profile ID")]
         id: String,
@@ -267,6 +267,9 @@ pub enum Profiles {
         /// Read a replacement credential from stdin.
         #[arg(long)]
         key_stdin: bool,
+        /// Replace the saved credential, entered at a hidden prompt.
+        #[arg(long, conflicts_with = "key_stdin")]
+        replace_key: bool,
     },
     /// Edit and save an existing profile.
     #[command(

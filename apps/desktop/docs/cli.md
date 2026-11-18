@@ -12,6 +12,28 @@ run the same executable with the same commands. On an interactive terminal
 outside `--json` and `--json-events`, `aci` prints a one-line note pointing to
 `pap`. Use `pap` or `private-ai-proxy` in new scripts and documentation.
 
+## First Run
+
+```sh
+pap profiles login work        # sign in to RedPill or Phala in the browser
+pap start                      # verify the service and start protection
+pap agents list                # the coding agents found on this machine
+pap agents connect codex       # route one through the Local API
+```
+
+Connect an agent after `pap start`: with protection off the connection is only
+saved, and the command exits `1` saying the agent still uses its own provider.
+
+With an API key instead of an account, replace the first step with
+`pap profiles add --id work --name Work --url <service URL>`, which asks for
+the key at a hidden prompt. `pap status` shows what protection is doing and why
+at any time.
+
+After a restart of the machine, `pap service start` starts the backend and
+resumes protection that was on; until then connected agents cannot reach the
+Local API. The Linux packages ship a systemd user unit that does this at login
+([Standalone CLI](cli-distribution.md#standalone-cli)).
+
 ## Discover Commands
 
 Start with `pap --help` and `<command> --help`.
@@ -641,9 +663,15 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe. The service is verified with
-the credential before anything is saved: when verification fails, nothing is
-saved and the command exits `1` with the reason, as `start` reports it. Credentials use a hidden prompt
+restart protection; it is not a read-only probe: with protection on,
+`profiles verify` says so before it asks, and reports the session once it has
+resumed. The service is verified before anything is saved: when verification
+fails, nothing is saved and the command exits `1` with the reason, as `start`
+reports it. Verification attests the service and reads its model list; a
+service that lists models without authentication does not reject a wrong key
+there, so a bad key first shows as `service_key_rejected` on a request.
+Replace a saved key with `pap profiles verify <id> --replace-key` (hidden
+prompt) or `--key-stdin`. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
