@@ -729,6 +729,21 @@ impl SessionManager {
         changes.write();
     }
 
+    /// Attests the running session's service again without interrupting it.
+    /// False when nothing runs, the attestation fails, or the service turned
+    /// out to be another one, which ends the session.
+    pub async fn verify_running(&self) -> bool {
+        let service = self.lock().ok().and_then(|runtime| {
+            (runtime.state.is_protected())
+                .then(|| runtime.service.clone())
+                .flatten()
+        });
+        match service {
+            Some(service) => service.verify_again().await.is_ok() && self.snapshot().is_protected(),
+            None => false,
+        }
+    }
+
     /// Whether the verified session's service can still be reached. Blocks the
     /// calling thread, which must not be a runtime worker.
     pub fn service_answers(self: &Arc<Self>) -> bool {

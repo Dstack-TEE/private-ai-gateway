@@ -47,6 +47,16 @@ impl VerifiedService for ProxyState {
             proxy_request(self, parts.method, parts.uri, parts.headers, body, context).await
         })
     }
+
+    fn verify_again(
+        self: Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async move {
+            // One verification at a time, as for a rotation.
+            let _serialized = self.reverify.lock().await;
+            self.reverify().await
+        })
+    }
 }
 
 pub struct InProcessVerifierLauncher {

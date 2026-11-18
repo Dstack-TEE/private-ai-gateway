@@ -86,18 +86,29 @@ impl DesktopRuntime {
             remote_url: candidate.remote_url.clone(),
         };
 
+        // The profile that is protecting, unchanged, is verified where it
+        // runs: stopping it to verify it would only cut its requests.
+        let in_place = verify
+            && !profile_changed
+            && !replace_key
+            && initial.active_profile_id == id
+            && self.manager.verify_running().await;
+        let reconnect = reconnect && !in_place;
         if reconnect {
             self.pause_protection()?;
         }
         let previous = self.state();
-        // Every failure below leaves the key unloaded and the state as it was.
+        // Every failure below leaves the state as it was, and the key
+        // unloaded unless the session went on.
         let rollback = |error: Error| {
-            self.proxy.set_api_key(None);
+            if !in_place {
+                self.proxy.set_api_key(None);
+            }
             self.manager.restore_snapshot(previous.clone());
             error
         };
 
-        if verify {
+        if verify && !in_place {
             self.proxy.set_api_key(Some(candidate_key.clone()));
             let started = match self
                 .manager
@@ -128,7 +139,7 @@ impl DesktopRuntime {
                 }));
             }
             stop_result.map_err(|error| rollback(error.into()))?;
-        } else {
+        } else if !verify {
             self.manager.stop_with_reconnect(initial.session_active)?;
             self.proxy.set_api_key(None);
         }

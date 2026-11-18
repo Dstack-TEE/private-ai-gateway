@@ -147,6 +147,12 @@ pub trait VerifiedService: Send + Sync {
         request: Request<Body>,
         context: Option<ForwardContext>,
     ) -> VerifiedResponse;
+
+    /// Attests the service again with a fresh nonce, without interrupting
+    /// what it forwards: an unchanged identity keeps its delivery gate.
+    fn verify_again(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async { Err("This service cannot be verified in place".to_string()) })
+    }
 }
 
 /// One stage of a request observed by the local proxy. Forwarded requests can

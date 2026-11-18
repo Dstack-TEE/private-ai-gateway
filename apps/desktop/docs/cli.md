@@ -663,8 +663,10 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe: with protection on,
-`profiles verify` says so before it asks, and reports the session once it has
+restart protection; it is not a read-only probe. `profiles verify` on the
+profile that is protecting, without a new key, attests the service again where
+it runs and interrupts nothing; with a new key or another profile it says that
+protection restarts before it asks, and reports the session once it has
 resumed. The service is verified before anything is saved: when verification
 fails, nothing is saved and the command exits `1` with the reason, as `start`
 reports it. Verification attests the service and reads its model list; a
