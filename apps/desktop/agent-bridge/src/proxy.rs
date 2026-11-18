@@ -702,8 +702,8 @@ async fn forward(
         let rejection = Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "revoked",
-            "Credentials or the verified session were revoked while the request was being sent; \
-             its delivery could not be confirmed",
+            "Credentials or the verified session were revoked before the service answered; \
+             whether the request was delivered is unknown",
         );
         return reject_after_send(
             &state, generation, request_id, session_id, agent, path, model, surface, rejection,
