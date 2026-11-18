@@ -145,24 +145,15 @@ impl Backoff {
 }
 
 pub fn connection_intended(state: &AppState) -> bool {
-    state.session_active
-        && !state.configuration_verification
-        && state.status != VerificationStatus::Blocked
+    state.session_active && !state.configuration_verification
 }
 
 pub fn should_retry(state: &AppState) -> bool {
     connection_intended(state)
         && (matches!(
             state.status,
-            VerificationStatus::Error | VerificationStatus::Stopped
+            VerificationStatus::Error | VerificationStatus::Blocked | VerificationStatus::Stopped
         ) || state.endpoint_error.is_some())
-}
-
-/// A blocked session keeps its verifier, which verifies again only when asked.
-pub fn should_reverify(state: &AppState) -> bool {
-    state.session_active
-        && !state.configuration_verification
-        && state.status == VerificationStatus::Blocked
 }
 
 pub fn should_recover(
@@ -200,9 +191,9 @@ mod tests {
         state.configuration_verification = true;
         assert!(!should_retry(&state));
         state.configuration_verification = false;
+        // A failed re-verification may be transient, so a block is retried too.
         state.status = VerificationStatus::Blocked;
-        assert!(!should_retry(&state));
-        state.status = VerificationStatus::Error;
+        assert!(should_retry(&state));
         state.session_active = false;
         assert!(!should_retry(&state));
     }

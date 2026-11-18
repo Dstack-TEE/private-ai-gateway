@@ -122,12 +122,6 @@ pub trait VerifiedService: Send + Sync {
         request: Request<Body>,
         context: Option<ForwardContext>,
     ) -> VerifiedResponse;
-
-    /// Verify the service again if its identity is blocked. The outcome is
-    /// reported the way the service reports any re-verification.
-    fn reverify(self: Arc<Self>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
-        Box::pin(async {})
-    }
 }
 
 /// One stage of a request observed by the local proxy. Forwarded requests can

@@ -40,23 +40,13 @@ impl DesktopRuntime {
             || (state.reconnecting
                 && state.status == VerificationStatus::Stopped
                 && self.recovery.pending());
-        let blocked = crate::recovery::should_reverify(&state);
-        if !retry && !blocked && !self.recovery.needs_check() {
+        if !retry && !self.recovery.needs_check() {
             return Ok(());
         }
         if state.status == VerificationStatus::Verifying && self.recovery.online() {
             return Ok(());
         }
         self.recovery.clear_request();
-        if blocked {
-            // A failed re-verification may be transient (the gateway restarting,
-            // the network down), so it is retried on the same backoff; requests
-            // stay refused until one passes.
-            if self.recovery.retry_due() {
-                self.manager.reverify_blocked()?;
-            }
-            return Ok(());
-        }
         if !retry
             && !crate::recovery::should_recover(
                 state.status,

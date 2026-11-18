@@ -349,7 +349,9 @@ async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catal
     assert!(blocked.catalog.is_none());
     assert!(!proxy.session().verified);
     assert!(manager.is_running().unwrap());
-    assert!(!crate::recovery::should_retry(&blocked));
+    // Agents are refused while blocked, so only the backend's retry can
+    // verify again.
+    assert!(blocked.reconnecting && crate::recovery::should_retry(&blocked));
 
     identity.keyset_digest = "sha256:renewed".into();
     identity.keyset_not_after += 86_400;
@@ -372,102 +374,6 @@ async fn same_family_reverification_recovers_a_blocked_session_and_reloads_catal
     manager.stop().unwrap();
     server.abort();
     let _ = server.await;
-}
-
-struct ReverifyingService {
-    asked: Arc<std::sync::atomic::AtomicUsize>,
-    done: Arc<tokio::sync::Notify>,
-}
-
-impl agent_bridge::proxy::VerifiedService for ReverifyingService {
-    fn call(
-        self: Arc<Self>,
-        _request: axum::http::Request<axum::body::Body>,
-        _context: Option<agent_bridge::proxy::ForwardContext>,
-    ) -> agent_bridge::proxy::VerifiedResponse {
-        Box::pin(async {
-            axum::response::IntoResponse::into_response(axum::Json(
-                serde_json::json!({"data": [{"id": "model"}]}),
-            ))
-        })
-    }
-
-    fn reverify(
-        self: Arc<Self>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
-        Box::pin(async move {
-            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.done.notify_one();
-        })
-    }
-}
-
-/// Agents are refused while a session is blocked, so nothing but the backend
-/// can make its verifier verify again.
-#[tokio::test]
-async fn only_a_blocked_session_asks_its_verifier_to_verify_again() {
-    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let done = Arc::new(tokio::sync::Notify::new());
-    let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(SessionManager::new(
-        proxy.clone(),
-        Arc::new(UsageStore::memory().unwrap()),
-        Arc::new(WaitingSidecar),
-        Handle::current(),
-        AppState::default(),
-    ));
-    let started = manager
-        .start(StartConfig {
-            remote_url: "https://inference.phala.com".into(),
-        })
-        .unwrap();
-    let generation = proxy.session().generation;
-    manager
-        .handle_event(
-            generation,
-            VerifierEvent::Ready {
-                identity: IdentityEvent {
-                    tee_type: "tdx".into(),
-                    trust_level: "hardware_verified".into(),
-                    keyset_digest: "sha256:initial".into(),
-                    keyset_not_after: 2_000_000_000,
-                    tls_spki: None,
-                    source_provenance: IdentitySourceProvenance::default(),
-                    service_capabilities: ServiceCapabilities::default(),
-                    verification: serde_json::json!({"checks": []}),
-                },
-                remote_url: "https://inference.phala.com".into(),
-                service: Arc::new(ReverifyingService {
-                    asked: asked.clone(),
-                    done: done.clone(),
-                }),
-            },
-        )
-        .unwrap();
-    manager
-        .wait_for_verification(&started.session_id.unwrap(), Duration::from_secs(2))
-        .await
-        .unwrap();
-    manager.reverify_blocked().unwrap();
-
-    manager
-        .handle_event(
-            generation,
-            VerifierEvent::Blocked {
-                code: None,
-                reason: "re-verification failed: network unavailable".into(),
-            },
-        )
-        .unwrap();
-    assert!(crate::recovery::should_reverify(&manager.snapshot()));
-    manager.reverify_blocked().unwrap();
-    tokio::time::timeout(Duration::from_secs(2), done.notified())
-        .await
-        .unwrap();
-    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
-    manager.stop().unwrap();
-    assert!(!crate::recovery::should_reverify(&manager.snapshot()));
 }
 
 /// A failure the verifier authored, such as an unreachable host, answers the
@@ -845,9 +751,9 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         let state = manager.snapshot();
         assert_eq!(state.status, VerificationStatus::Blocked);
         assert_eq!(state.configuration_verification, verification_only);
-        assert!(!crate::recovery::should_retry(&state));
+        assert_eq!(crate::recovery::should_retry(&state), !verification_only);
         assert!(!proxy.session().verified);
-        // A relaunch resumes the blocked session; only a stop ends it.
+        // A retry or relaunch resumes the blocked session; only a stop ends it.
         assert!(state.session_active);
         manager.stop().unwrap();
         assert!(usage.active_session().unwrap().is_none());
