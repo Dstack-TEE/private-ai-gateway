@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.2...desktop-v0.9.0-beta.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **desktop:** verify the protecting profile where it runs instead of stopping and restarting protection, which cut requests and returned `gateway_not_verified` on every `pap profiles verify` ([b0270b6](https://github.com/Dstack-TEE/private-ai-gateway/commit/b0270b669a145de7c4fc92ac69216412cc3d44d2))
+
 ## [0.9.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.1...desktop-v0.9.0-beta.2) (2026-11-18)
 
 
