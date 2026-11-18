@@ -121,9 +121,14 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Diagnostics { .. } => exported(value),
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
-                "Updated {} → {}. Run pap start to resume protection.",
+                "Updated {} → {}.{}",
                 text(&value["currentVersion"]),
-                safe(version)
+                safe(version),
+                if value["protectionResumed"] == true {
+                    " Protection is on again."
+                } else {
+                    ""
+                }
             ),
             None => format!("Up to date ({}).", text(&value["currentVersion"])),
         },

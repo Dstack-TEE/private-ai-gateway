@@ -126,7 +126,7 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         Action::App {
             command: App::Open { web },
         } => open_app(&client, global, *web)?,
-        Action::Update => update()?,
+        Action::Update => update(&client)?,
         Action::Doctor => {
             let report = doctor(&client);
             output::print(action, global, &report)?;
@@ -1002,8 +1002,9 @@ fn settings_diagnostics(
 
 /// `update`: runs the upgrade steps `doctor` shows for this installation.
 /// Like other self-updating CLIs it does not ask first: the command is the
-/// request, and each step is printed as it runs.
-fn update() -> Result<Value, CallError> {
+/// request, and each step is printed as it runs. The steps stop the backend,
+/// so protection that was on is started again by the installed release.
+fn update(client: &Client) -> Result<Value, CallError> {
     let notice = update_notice()?;
     let Some(version) = &notice.version else {
         return value(notice);
@@ -1023,8 +1024,19 @@ fn update() -> Result<Value, CallError> {
         )
         .into());
     }
-    desktop_core::updates::install(&notice)?;
-    value(notice)
+    // A backend that cannot be asked, such as another release's, is not resumed.
+    let protecting = client.is_running().unwrap_or(false)
+        && client.state().is_ok_and(|state| state.session_active);
+    desktop_core::updates::run(&notice.commands)
+        .map_err(|error| format!("{error}; the update was not installed."))?;
+    if protecting {
+        desktop_core::updates::run(&["private-ai-proxy start".into()]).map_err(|error| {
+            format!("Updated to {version}, but protection did not start again: {error}.")
+        })?;
+    }
+    let mut updated = value(&notice)?;
+    updated["protectionResumed"] = json!(protecting);
+    Ok(updated)
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
