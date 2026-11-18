@@ -406,6 +406,41 @@ async fn a_verifier_refusal_reaches_agents_in_their_error_format() {
         .contains("could not reach the service"));
 }
 
+/// A restart ends most outages, and a restart replaces the service key.
+/// A request that waited through it is sent with the new one.
+#[tokio::test]
+async fn a_request_that_waited_through_a_restart_is_sent() {
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, Duration::from_secs(10)).unwrap();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-before".to_string()));
+    state.publish(Session {
+        generation: 1,
+        epoch: 2,
+        session_id: Some("test-session".to_string()),
+        ..Session::default()
+    });
+    let proxy = spawn(router(state.clone())).await;
+    let waiting = tokio::spawn(
+        reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
+            .send(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished());
+    state.set_api_key(None);
+    state.set_api_key(Some("sk-after".to_string()));
+    verified(&state, &upstream, 2, 1).await;
+    let response = waiting.await.unwrap().unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let echoed: Value = response.json().await.unwrap();
+    assert_eq!(echoed["authorization"], "Bearer sk-after");
+}
+
 #[test]
 fn connection_named_headers_are_hop_by_hop() {
     let mut headers = HeaderMap::new();

@@ -584,13 +584,19 @@ async fn relay(
     surface: Surface,
     path: &'static str,
 ) -> Response {
+    // Only a recognized caller waits.
+    if let Err(rejection) = state.authorize(&headers, path) {
+        return reject(&state, None, "POST", path, None, surface, rejection);
+    }
+    state.verification_settled().await;
+    // The restart that ends an outage changes the credential epoch; what was
+    // read before the wait would refuse the request it waited for.
     let auth = match state.authorize(&headers, path) {
         Ok(auth) => auth,
         Err(rejection) => return reject(&state, None, "POST", path, None, surface, rejection),
     };
     let agent = auth.agent.clone();
-    state.verification_settled().await;
-    let Ok(_permit) = state.in_flight.clone().try_acquire_owned() else {
+    let Ok(mut permit) = state.in_flight.clone().try_acquire_owned() else {
         let rejection = Rejection::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
@@ -639,9 +645,24 @@ async fn relay(
         .as_ref()
         .is_err_and(|rejection| rejection.code == MODEL_NOT_FOUND)
     {
+        // The read may take a while and must not hold a place in flight.
+        drop(permit);
         state.refresh_catalog_for_miss().await;
         admitted = check_catalog(&state, model.as_deref(), surface);
+        permit = match state.in_flight.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let rejection = Rejection::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "Too many requests are in flight through the Local API; retry shortly",
+                )
+                .retry_after(Some(1));
+                return reject(&state, Some(agent), "POST", path, model, surface, rejection);
+            }
+        };
     }
+    let _permit = permit;
     if let Err(rejection) = admitted {
         return reject(&state, Some(agent), "POST", path, model, surface, rejection);
     }
@@ -904,14 +925,20 @@ async fn forward(
     }
     if upstream.status() == StatusCode::UNAUTHORIZED {
         // The agent's token was exchanged for the saved key, so the service
-        // refused that key. Its own wording reads as the agent's fault.
+        // refused that key. Its own wording alone reads as the agent's fault.
+        let reason = to_bytes(upstream.into_body(), 4096)
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+            .and_then(|body| Some(format!(" ({})", body["error"]["message"].as_str()?)))
+            .unwrap_or_default();
         let rejection = Rejection::new(
             StatusCode::UNAUTHORIZED,
             "service_key_rejected",
             format!(
-                "The service rejected the API key saved in {PRODUCT_NAME}; the agent's token is \
-                 fine. Replace the key (`pap profiles verify <profile> --replace-key`) or sign in \
-                 again (`pap profiles login <profile>`)"
+                "The service rejected the API key saved in {PRODUCT_NAME}{reason}; the agent's \
+                 token is fine. Replace the key (`pap profiles verify <profile> --replace-key`) \
+                 or sign in again (`pap profiles login <profile>`)"
             ),
         );
         return reject_after_send(

@@ -300,11 +300,19 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
     let started = if state.status == VerificationStatus::Verifying && settled(&state) {
         state
     } else {
-        client
-            .call(rpc::Start {
-                config: state.config,
-            })?
-            .state
+        match client.call(rpc::Start {
+            config: state.config,
+        }) {
+            Ok(started) => started.state,
+            // A backend that just launched may be resuming the session itself.
+            Err(error) => {
+                let state = client.state()?;
+                if !state.session_active || !settled(&state) {
+                    return Err(error);
+                }
+                state
+            }
+        }
     };
     let deadline = Instant::now() + Duration::from_secs(timeout);
     loop {
@@ -463,6 +471,9 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
                 std::thread::sleep(Duration::from_millis(200));
                 state = client.state()?;
             }
+            if protecting && state.status != VerificationStatus::Verified {
+                return Err(unverified(&state));
+            }
             value(AppStateWire::from(state))
         }
         Profiles::Edit {
@@ -605,8 +616,13 @@ fn agent_change(
     })?;
     // Success would mean the agent is routed; it still uses its own provider.
     if connect && status.recorded && !status.connected {
+        let next = if client.state()?.session_active {
+            "protection is not verified yet; it is applied once it is (pap status shows why)"
+        } else {
+            "protection is off; run pap start to route it through the Local API"
+        };
         return Err(format!(
-            "Saved, but not applied: protection is off, so {} still uses its own provider. Run pap start to route it through the Local API.",
+            "Saved, but not applied, so {} still uses its own provider: {next}.",
             status.name
         )
         .into());
@@ -1077,33 +1093,38 @@ fn update(client: &Client) -> Result<Value, CallError> {
         .into());
     }
     // The manual steps stop the backend for good, which restores connected
-    // agents to their own provider. Here it stops as for a restart instead:
-    // agents stay pointed at the Local API, which nothing answers meanwhile,
-    // and the session waits for the backend that starts afterwards.
+    // agents to their own provider. An update stops it as for a restart
+    // instead: agents stay pointed at the Local API, which nothing answers
+    // meanwhile, the session waits, and no other command starts a backend
+    // during the installation. If it fails, the previous release resumes.
     let running = client.is_running()?;
     let protecting = running && client.state()?.session_active;
-    if running {
-        client.stop_for_restart()?;
-    }
     let steps: Vec<String> = notice
         .commands
         .iter()
         .filter(|step| *step != desktop_core::updates::STOP_STEP)
         .cloned()
         .collect();
-    let installed = desktop_core::updates::run(&steps);
-    // Whichever release is installed now takes the session up again.
-    let resumed = if protecting {
-        desktop_core::updates::run(&["private-ai-proxy start".into()])
-    } else if running {
-        desktop_core::updates::run(&["private-ai-proxy service start".into()])
-    } else {
-        Ok(())
-    };
-    installed.map_err(|error| format!("{error}; the update was not installed."))?;
-    resumed.map_err(|error| {
-        format!("Updated to {version}, but the backend did not start again: {error}.")
-    })?;
+    // Read now: the installation replaces this file, and the release it
+    // puts at this path is the one to start, whatever `PATH` finds first.
+    let command =
+        std::env::current_exe().map_err(|error| format!("Cannot locate this command: {error}"))?;
+    let command = command.to_str().ok_or("This command's path is not UTF-8")?;
+    client
+        .install_update(|| desktop_core::updates::run(&steps))
+        .map_err(|error| format!("The update was not installed: {error}"))?;
+    // The installed release takes the session up again.
+    if running {
+        let resume: &[&str] = if protecting {
+            &["start"]
+        } else {
+            &["service", "start"]
+        };
+        let step = desktop_core::updates::step(&[&[command], resume].concat())?;
+        desktop_core::updates::run(&[step]).map_err(|error| {
+            format!("Updated to {version}, but the backend did not start again: {error}.")
+        })?;
+    }
     let mut updated = value(&notice)?;
     updated["protectionResumed"] = json!(protecting);
     Ok(updated)

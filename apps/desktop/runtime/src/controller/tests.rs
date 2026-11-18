@@ -1717,13 +1717,17 @@ impl crate::verifier_session::VerifierTask for IdleTask {
     }
 }
 
-/// A verifier whose service lists one model while `answers` is set.
+const ANSWERS: u8 = 0;
+const UNREACHABLE: u8 = 1;
+const HANGS: u8 = 2;
+
+/// A verifier whose service lists one model while it `ANSWERS`.
 struct AnsweringVerifier {
-    answers: Arc<std::sync::atomic::AtomicBool>,
+    answers: Arc<std::sync::atomic::AtomicU8>,
 }
 
 struct AnsweringService {
-    answers: Arc<std::sync::atomic::AtomicBool>,
+    answers: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl proxy::VerifiedService for AnsweringService {
@@ -1734,7 +1738,11 @@ impl proxy::VerifiedService for AnsweringService {
     ) -> proxy::VerifiedResponse {
         use axum::response::IntoResponse;
         Box::pin(async move {
-            if self.answers.load(Ordering::SeqCst) {
+            let answers = self.answers.load(Ordering::SeqCst);
+            if answers == HANGS {
+                std::future::pending::<()>().await;
+            }
+            if answers == ANSWERS {
                 axum::Json(serde_json::json!({"data": [{"id": "model"}]})).into_response()
             } else {
                 let mut refused = axum::http::StatusCode::BAD_GATEWAY.into_response();
@@ -1786,38 +1794,42 @@ impl VerifierLauncher for AnsweringVerifier {
 /// restart would end every request in flight.
 #[test]
 fn an_address_change_restarts_only_a_session_whose_service_stopped_answering() {
-    let executor = tokio::runtime::Runtime::new().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let answers = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let launcher = Arc::new(AnsweringVerifier {
-        answers: answers.clone(),
-    });
-    let runtime = test_runtime_with(&executor, directory.path(), launcher);
-    let started = runtime
-        .manager
-        .start(StartConfig {
-            remote_url: "https://inference.phala.com".into(),
-        })
-        .unwrap();
-    executor
-        .block_on(runtime.manager.wait_for_verification(
-            started.session_id.as_deref().unwrap(),
-            std::time::Duration::from_secs(5),
-        ))
-        .unwrap();
-    let generation = runtime.proxy.session().generation;
+    // A connection the change left dead gives no answer at all.
+    for gone in [UNREACHABLE, HANGS] {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let answers = Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS));
+        let launcher = Arc::new(AnsweringVerifier {
+            answers: answers.clone(),
+        });
+        let runtime = test_runtime_with(&executor, directory.path(), launcher);
+        let started = runtime
+            .manager
+            .start(StartConfig {
+                remote_url: "https://inference.phala.com".into(),
+            })
+            .unwrap();
+        executor
+            .block_on(runtime.manager.wait_for_verification(
+                started.session_id.as_deref().unwrap(),
+                std::time::Duration::from_secs(5),
+            ))
+            .unwrap();
+        let generation = runtime.proxy.session().generation;
 
-    runtime.recovery.request();
-    runtime.recover_network().unwrap();
-    assert!(!runtime.recovery.needs_check());
-    assert_eq!(runtime.proxy.session().generation, generation);
-    assert!(runtime.proxy.session().verified);
+        runtime.recovery.request();
+        runtime.recover_network().unwrap();
+        assert!(!runtime.recovery.needs_check());
+        assert_eq!(runtime.proxy.session().generation, generation);
+        assert!(runtime.proxy.session().verified);
 
-    answers.store(false, Ordering::SeqCst);
-    runtime.recovery.request();
-    let _ = runtime.recover_network();
-    assert_ne!(runtime.proxy.session().generation, generation);
-    assert!(!runtime.proxy.session().verified);
+        answers.store(gone, Ordering::SeqCst);
+        runtime.recovery.request();
+        // The restart itself fails here: this runtime has no profile to start.
+        let _ = runtime.recover_network();
+        assert_ne!(runtime.proxy.session().generation, generation, "{gone}");
+        assert!(!runtime.proxy.session().verified);
+    }
 }
 
 /// A profile save that fails leaves the state, the settings and the saved
