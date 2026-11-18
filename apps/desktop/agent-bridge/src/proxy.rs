@@ -385,7 +385,10 @@ impl ProxyState {
             _ => Err(Rejection::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "gateway_not_verified",
-                "The gateway is not verified; requests are blocked until verification succeeds",
+                format!(
+                    "{PRODUCT_NAME} is not protecting right now, so the request was not sent. \
+                     It is retried automatically; `pap status` shows the reason"
+                ),
             )
             .retry_after(
                 session
@@ -423,7 +426,8 @@ impl ProxyState {
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
                     format!(
-                        "The agent token is not recognized; reconnect the agent in {PRODUCT_NAME}"
+                        "The agent token is not active. If protection is off, start it \
+                         (`pap start`); otherwise reconnect the agent in {PRODUCT_NAME}"
                     ),
                 )
             })?;
@@ -696,7 +700,7 @@ fn check_catalog(
         Rejection::new(
             StatusCode::NOT_FOUND,
             "model_not_found",
-            format!("`{model}` is not in the verified model list"),
+            format!("`{model}` is not in the verified model list; `pap models list` shows the available ones"),
         )
     })?;
     if !entry.supports(surface) {
@@ -839,6 +843,22 @@ async fn forward(
             );
         }
     };
+    if upstream.status() == StatusCode::UNAUTHORIZED {
+        // The agent's token was exchanged for the saved key, so the service
+        // refused that key. Its own wording reads as the agent's fault.
+        let rejection = Rejection::new(
+            StatusCode::UNAUTHORIZED,
+            "service_key_rejected",
+            format!(
+                "The service rejected the API key saved in {PRODUCT_NAME}; the agent's token is \
+                 fine. Replace the key (`pap profiles verify <profile> --key-stdin`) or sign in \
+                 again (`pap profiles login <profile>`)"
+            ),
+        );
+        return reject_after_send(
+            &state, generation, request_id, session_id, agent, path, model, surface, rejection,
+        );
+    }
     let status = upstream.status().as_u16();
     let streamed = upstream
         .headers()

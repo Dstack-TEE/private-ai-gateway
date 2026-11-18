@@ -105,6 +105,15 @@ impl DesktopRuntime {
     pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
+        // A port that was busy at launch may be free by now.
+        let state = self.state();
+        if state.endpoint_error.is_some() {
+            let resolved = settings_config::resolve_local_api(state.local_api)?;
+            if self.restore_endpoint(&resolved).is_ok() {
+                self.manager
+                    .set_endpoint(resolved.config, Ok(resolved.endpoint));
+            }
+        }
         self.start_inner(config)
     }
 
