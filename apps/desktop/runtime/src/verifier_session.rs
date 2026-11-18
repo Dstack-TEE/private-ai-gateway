@@ -726,11 +726,24 @@ impl SessionManager {
     /// Whether the verified session's service still answers. Blocks the
     /// calling thread, which must not be a runtime worker.
     pub fn service_answers(self: &Arc<Self>) -> bool {
-        let manager = self.clone();
+        let Some(service) = self.lock().ok().and_then(|runtime| runtime.service.clone()) else {
+            return false;
+        };
+        let Ok(request) = axum::http::Request::get("/v1/models").body(axum::body::Body::empty())
+        else {
+            return false;
+        };
+        // Any answer the service gave counts, an error included: only what
+        // the verifier wrote itself means the service was not reached.
         self.task_runtime.block_on(async move {
-            tokio::time::timeout(SERVICE_PROBE_TIMEOUT, manager.refresh_catalog())
+            tokio::time::timeout(SERVICE_PROBE_TIMEOUT, service.call(request, None))
                 .await
-                .is_ok_and(|read| read.is_ok())
+                .is_ok_and(|response| {
+                    response
+                        .extensions()
+                        .get::<agent_bridge::proxy::VerifierRefusal>()
+                        .is_none()
+                })
         })
     }
 

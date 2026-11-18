@@ -867,6 +867,12 @@ async fn forward(
                 ),
                 None,
             ),
+            // Only a request that provably never left is safe to send again.
+            StatusCode::SERVICE_UNAVAILABLE if refusal.delivery_unknown => (
+                "revoked",
+                format!("{PRODUCT_NAME} stopped the request: {reason}"),
+                None,
+            ),
             StatusCode::SERVICE_UNAVAILABLE => (
                 "gateway_not_verified",
                 format!("{PRODUCT_NAME} did not send the request: {reason}"),

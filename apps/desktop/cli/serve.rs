@@ -1080,7 +1080,7 @@ async fn proxy_inference(
                     }
                 };
                 match race_delivery(&delivery, send(&prepared)).await {
-                    None => return delivery_revoked_response(&path),
+                    None => return delivery_interrupted_response(&path),
                     Some(Ok(retried)) => resp = retried,
                     Some(Err(e)) => {
                         return send_error(&state, Method::POST, path, e, context.clone())
@@ -1261,7 +1261,7 @@ where
     let pins = state.client.pinned_spkis(&state.host);
     let attempts = state.reverify_attempts.load(Ordering::SeqCst);
     let error = match race_delivery(&admitted.delivery, send()).await {
-        None => return Err(Box::new(delivery_revoked_response(path))),
+        None => return Err(Box::new(delivery_interrupted_response(path))),
         Some(Ok(resp)) => return Ok(resp),
         Some(Err(e)) => e,
     };
@@ -1288,7 +1288,7 @@ where
     // a new delivery gate; send under that one.
     *admitted = current;
     match race_delivery(&admitted.delivery, send()).await {
-        None => Err(Box::new(delivery_revoked_response(path))),
+        None => Err(Box::new(delivery_interrupted_response(path))),
         Some(Ok(resp)) => Ok(resp),
         Some(Err(e)) => Err(failed(e)),
     }
@@ -1323,6 +1323,22 @@ fn delivery_revoked_response(path: &str) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         "verification changed before the request was sent; retry once the gateway is verified again\n",
     )
+}
+
+/// The delivery gate closed while the request was being sent: it may have
+/// reached the service, so nothing here tells the caller to send it again.
+fn delivery_interrupted_response(path: &str) -> Response {
+    tracing::warn!("!! {path} -> 503 verification changed while the request was being sent");
+    let mut response = text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "verification changed while the request was being sent; whether it was delivered is unknown\n",
+    );
+    response
+        .extensions_mut()
+        .insert(agent_bridge::proxy::VerifierRefusal {
+            delivery_unknown: true,
+        });
+    response
 }
 
 /// A response digest gates new sends until one fresh verification establishes

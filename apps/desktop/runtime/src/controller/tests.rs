@@ -1722,7 +1722,11 @@ impl proxy::VerifiedService for AnsweringService {
             if self.answers.load(Ordering::SeqCst) {
                 axum::Json(serde_json::json!({"data": [{"id": "model"}]})).into_response()
             } else {
-                axum::http::StatusCode::BAD_GATEWAY.into_response()
+                let mut refused = axum::http::StatusCode::BAD_GATEWAY.into_response();
+                refused.extensions_mut().insert(proxy::VerifierRefusal {
+                    delivery_unknown: false,
+                });
+                refused
             }
         })
     }
