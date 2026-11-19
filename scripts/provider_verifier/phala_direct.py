@@ -14,6 +14,7 @@ from typing import Any
 from .common import (
     emit,
     failed,
+    fetch_failure,
     json_evidence_bundle,
     provider_options,
     tdx_debug_enabled,
@@ -97,7 +98,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         failed(
             provider,
-            f"failed to fetch PhalaDirect attestation report: {exc}",
+            f"failed to fetch PhalaDirect attestation report: {fetch_failure(exc)}",
             verifier_id=verifier_id,
         )
         return

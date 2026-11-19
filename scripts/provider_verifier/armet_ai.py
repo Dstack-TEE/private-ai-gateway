@@ -37,6 +37,7 @@ from .common import (
     emit,
     evidence_bundle,
     failed,
+    fetch_failure,
     provider_options,
     request_timeout_seconds,
     tdx_debug_enabled,
@@ -229,7 +230,7 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     try:
         body, content_type = await asyncio.to_thread(fetch_report, url, params, headers, timeout)
     except Exception as exc:  # noqa: BLE001
-        reject(f"failed to fetch armet-ai attestation report: {exc}")
+        reject(f"failed to fetch armet-ai attestation report: {fetch_failure(exc)}")
         return
 
     # Evidence is the exact response bytes the checks below consumed.

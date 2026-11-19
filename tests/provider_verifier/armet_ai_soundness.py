@@ -290,6 +290,16 @@ def check() -> list[str]:
     rejects("no pins", "no accepted_subjects", subjects=())
     rejects("http origin", "must be https", origin="http://model.example")
     rejects("fetch error", "failed to fetch", fetch_error=RuntimeError("boom"))
+    # An HTTP client's error text names the URL, nonce included; the reason
+    # clients and receipts see names the status only.
+    unavailable = RuntimeError("503 Server Error for url: https://node.internal/report?nonce=abc")
+    unavailable.response = type("Response", (), {"status_code": 503})()
+    out, _ = _run(fetch_error=unavailable)
+    expect(
+        "fetch error reason is the status",
+        out.get("reason") == "failed to fetch armet-ai attestation report: HTTP 503",
+        out.get("reason"),
+    )
     rejects("not json", "not JSON", raw_body=b"<html>")
     rejects("version 1 report", "version must be 2", version=1)
     rejects("stale nonce echo", "nonce did not match", echo_nonce="00" * 32)

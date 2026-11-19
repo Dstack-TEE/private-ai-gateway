@@ -56,6 +56,18 @@ def failed(provider: str, reason: str, **extra: Any) -> None:
     )
 
 
+def fetch_failure(exc: Exception) -> str:
+    """What went wrong fetching evidence, for a reason clients and receipts see.
+
+    An HTTP client's exception text carries the request URL, with the
+    provider's internal host and the nonce in its query. The status, or else
+    the kind of failure, says what a reader can act on.
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return f"HTTP {status}" if status else type(exc).__name__
+
+
 def sha256_json(value: Any) -> str:
     body = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
