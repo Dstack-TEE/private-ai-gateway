@@ -1722,6 +1722,10 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
             | UpstreamVerificationError::NoEligibleAttestedSession(_),
         )
         | ServiceError::EarlyResponseKeysetExpired => ErrorSource::Gateway,
+        // A 500 is the gateway's own fault (keys, receipts, the session
+        // store): reported as an upstream's, it would count against the
+        // health of a route that did nothing wrong.
+        _ if errors::client_error_status(err) == 500 => ErrorSource::Gateway,
         _ => ErrorSource::Upstream,
     }
 }
@@ -1908,6 +1912,25 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report's source decides whose health a failure counts against.
+    #[test]
+    fn a_gateway_fault_is_never_reported_as_the_upstreams() {
+        use super::{forward_error_source, ErrorSource, ServiceError};
+        use crate::aci::upstream::UpstreamError;
+
+        for own in [
+            ServiceError::SessionStore("disk full".into()),
+            ServiceError::Keyset("seal failed".into()),
+            ServiceError::NoReceiptKey,
+        ] {
+            assert_eq!(forward_error_source(&own), ErrorSource::Gateway, "{own:?}");
+        }
+        assert_eq!(
+            forward_error_source(&UpstreamError::Transport("refused".into()).into()),
+            ErrorSource::Upstream
+        );
+    }
 
     fn twin(route_id: &str, format: ProviderFormat) -> RouteCandidate {
         RouteCandidate {
