@@ -59,7 +59,7 @@ pub fn upstream_message(upstream_status: u16) -> &'static str {
         401..=403 => "The upstream provider is currently unavailable",
         404 => "The requested model or resource was not found",
         413 => "The request is too large",
-        429 => "Rate limit exceeded. Please retry after some time.",
+        429 => "The model is at capacity right now. Please retry shortly.",
         503 => "The model is currently unavailable. Please try again later.",
         504 => "The upstream provider timed out",
         _ => "The upstream provider returned an error",

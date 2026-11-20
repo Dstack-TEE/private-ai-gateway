@@ -2462,7 +2462,7 @@ mod identity_tests {
         assert_eq!(body["code"], "rate_limit_exceeded");
         assert_eq!(
             body["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
 
         let mut body = json!({
@@ -2523,7 +2523,7 @@ mod identity_tests {
         assert_eq!(body["error"]["code"], 429);
         assert_eq!(
             body["error"]["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
 
         // A precise code outranks a generic type: relayed on the code (as its

@@ -561,7 +561,7 @@ fn declared_kind_is_quota_exhausted(error: &serde_json::Map<String, Value>) -> b
 /// The client-facing parts for an upstream that refused because it is unpaid.
 ///
 /// Two things have to happen here, and neither can happen anywhere else. The
-/// client must not be told to retry: a 429's "retry after some time" promises a
+/// client must not be told to retry: a 429's "retry shortly" promises a
 /// recovery that will not come, and relaying the provider's own wording (which
 /// a 4xx otherwise earns) would tell the caller *their* balance is empty when
 /// it is this gateway's. So it takes the status an upstream 402 already takes —
@@ -901,7 +901,7 @@ mod tests {
         let value: Value = serde_json::from_slice(&envelope).unwrap();
         assert_eq!(
             value["error"]["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
     }
 

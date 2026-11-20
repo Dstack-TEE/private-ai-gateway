@@ -1809,7 +1809,7 @@ async fn owner_preserves_sanitized_rate_limit_codes_and_failure_terminals() {
         }
         assert_eq!(
             error["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
         let reports = snapshot["reports"].as_array().unwrap();
         assert_eq!(reports.len(), 1);
