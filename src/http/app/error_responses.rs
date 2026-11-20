@@ -19,14 +19,6 @@ pub(super) fn unsupported_e2ee_response() -> Response {
     )
 }
 
-pub(super) fn invalid_signing_algo_response() -> Response {
-    error_response(
-        StatusCode::BAD_REQUEST,
-        "invalid_signing_algo",
-        "Invalid signing algorithm. Must be 'ed25519' or 'ecdsa'",
-    )
-}
-
 pub(super) fn e2ee_error_response(err: E2eeError) -> Response {
     internal_error_response(ServiceError::E2ee(err))
 }

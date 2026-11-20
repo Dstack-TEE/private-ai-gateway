@@ -24,6 +24,7 @@ pub use crate::sse_protocol::{
 };
 
 use super::types::ErrorClass;
+use crate::aci::keys::KeyError;
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::{E2eeError, ServiceError, UpstreamVerificationError};
 use crate::error_payload::envelope;
@@ -111,6 +112,12 @@ fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
         ServiceError::E2ee(E2eeError::EncryptionFailed) => (500, None, None),
         ServiceError::E2ee(e2ee) => (400, Some(e2ee_error_type(e2ee)), Some(e2ee.to_string())),
         ServiceError::EarlyResponseKeysetExpired => (503, None, Some(err.to_string())),
+        // The caller named the algorithm; the gateway did not fail.
+        ServiceError::Key(KeyError::UnsupportedAlgo(_)) => (
+            400,
+            Some("invalid_signing_algo"),
+            Some("Invalid signing algorithm. Must be 'ed25519' or 'ecdsa'".to_string()),
+        ),
         // The caller's own input: a malformed nonce, or a Host the gateway
         // has no TLS domain for.
         ServiceError::InvalidNonce(_)
@@ -193,11 +200,12 @@ pub fn client_error(surface: Surface, err: &ServiceError, request_id: Option<&st
     let (status, refusal_type, message) = classify(err);
     let class = ErrorClass::from(err);
     let request_id = request_id.unwrap_or_default();
-    // Only the gateway's own fault is logged in its own words. Every other
-    // error's text is built from a request or an upstream response — a serde
-    // error on an upstream body can quote the model's output — and plaintext
-    // stays inside the workload (§1), which the log is not. The class says
-    // what kind of failure it was.
+    // Only the gateway's own fault is logged in its own words: its text comes
+    // from the gateway's keys, receipts and stores. Every other error's text
+    // is built from a request or an upstream response — a serde error on an
+    // upstream body can quote the model's output — and plaintext stays inside
+    // the workload (§1), which the log is not. The class says what kind of
+    // failure it was.
     match status {
         500 => {
             tracing::error!(error = %err, detail = ?err, ?class, request_id, "request failed inside the gateway")
@@ -1071,6 +1079,14 @@ mod tests {
                 "internal_error",
                 "api_error",
                 "The gateway encountered an internal error",
+            ),
+            // The caller's own input is not a gateway fault, and is not logged.
+            (
+                ServiceError::Key(crate::aci::keys::KeyError::UnsupportedAlgo(secret.into())),
+                400,
+                "invalid_signing_algo",
+                "invalid_signing_algo",
+                "Invalid signing algorithm. Must be 'ed25519' or 'ecdsa'",
             ),
             // Transport text carries the upstream's URL.
             (

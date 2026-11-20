@@ -133,8 +133,15 @@ pub(super) enum AciServiceVerificationError {
     #[error("ACI report binding failed: {0}")]
     AciBinding(#[from] AciReportValidationError),
     /// A binding failure reported by a §9.1 check, which lends its cause.
-    #[error("ACI report binding failed: {0}")]
-    ReportBinding(String),
+    #[error("ACI report binding failed: {message}")]
+    ReportBinding {
+        failure: VerificationFailure,
+        message: String,
+    },
+    /// Quote bytes that are hex but not a quote: malformed evidence, where
+    /// [`Self::QuoteVerification`] is a quote that was judged.
+    #[error("DCAP quote verification failed: {0}")]
+    UnparsableQuote(String),
     #[error("upstream attestation did not match verifier policy")]
     PolicyRejected,
     #[error(
@@ -183,7 +190,7 @@ pub(super) enum AciServiceVerificationError {
 
 impl AciServiceVerificationError {
     /// The cause a receipt records for this error.
-    fn failure(&self) -> VerificationFailure {
+    pub(super) fn failure(&self) -> VerificationFailure {
         use VerificationFailure as F;
         match self {
             Self::Transport(_) | Self::HttpStatus { .. } | Self::Collateral(_) | Self::Timeout => {
@@ -193,13 +200,14 @@ impl AciServiceVerificationError {
             | Self::MissingQuote
             | Self::InvalidQuoteHex(_)
             | Self::InvalidQuoteReportDataHex(_)
+            | Self::UnparsableQuote(_)
             | Self::InvalidEventLog(_) => F::EvidenceInvalid,
             Self::QuoteVerification(_) | Self::TeeTypeMismatch { .. } => F::QuoteInvalid,
-            Self::AciBinding(AciReportValidationError::KeysetExpired) => F::KeysetExpired,
-            Self::AciBinding(_)
-            | Self::ReportBinding(_)
-            | Self::QuoteReportDataEvidenceMismatch
-            | Self::QuoteReportDataMismatch => F::BindingMismatch,
+            Self::AciBinding(binding) => binding_failure(binding),
+            Self::ReportBinding { failure, .. } => *failure,
+            Self::QuoteReportDataEvidenceMismatch | Self::QuoteReportDataMismatch => {
+                F::BindingMismatch
+            }
             Self::MissingProvenance => F::ProvenanceNotAccepted,
             Self::KeyCustody(_) | Self::InvalidKeyCustody(_) | Self::KmsRootRejected => {
                 F::CustodyNotVerified
@@ -211,6 +219,22 @@ impl AciServiceVerificationError {
             | Self::DownstreamTlsBindingHostMismatch { .. }
             | Self::DownstreamTlsBindingNotInKeyset => F::NoChannelBinding,
         }
+    }
+}
+
+/// The cause of a §9.1(2) binding failure: a report that cannot be read is
+/// malformed evidence, and only a comparison that disagrees is a mismatch.
+fn binding_failure(err: &AciReportValidationError) -> VerificationFailure {
+    match err {
+        AciReportValidationError::UnsupportedApiVersion(_)
+        | AciReportValidationError::InvalidKeyset(_)
+        | AciReportValidationError::InvalidReportDataHex(_)
+        | AciReportValidationError::InvalidNonce(_) => VerificationFailure::EvidenceInvalid,
+        AciReportValidationError::WorkloadKeysetDigestMismatch { .. }
+        | AciReportValidationError::ReportDataMismatch { .. } => {
+            VerificationFailure::BindingMismatch
+        }
+        AciReportValidationError::KeysetExpired => VerificationFailure::KeysetExpired,
     }
 }
 
@@ -233,7 +257,10 @@ impl From<&CheckResult> for AciServiceVerificationError {
             FailureCause::Binding(AciReportValidationError::KeysetExpired) => {
                 Self::AciBinding(AciReportValidationError::KeysetExpired)
             }
-            FailureCause::Binding(binding) => Self::ReportBinding(binding.to_string()),
+            FailureCause::Binding(binding) => Self::ReportBinding {
+                failure: binding_failure(binding),
+                message: binding.to_string(),
+            },
             FailureCause::Quote(QuoteStepError::MissingQuote) => Self::MissingQuote,
             FailureCause::Quote(QuoteStepError::InvalidQuoteHex(m)) => {
                 Self::InvalidQuoteHex(m.clone())
@@ -249,6 +276,9 @@ impl From<&CheckResult> for AciServiceVerificationError {
             }
             FailureCause::Quote(QuoteStepError::Collateral { reason, .. }) => {
                 Self::Collateral(reason.clone())
+            }
+            FailureCause::Quote(QuoteStepError::UnparsableQuote(m)) => {
+                Self::UnparsableQuote(m.clone())
             }
             FailureCause::Quote(quote) => Self::QuoteVerification(quote.to_string()),
             FailureCause::Expired { .. } => {
@@ -270,7 +300,7 @@ impl From<QuoteStepError> for AciServiceVerificationError {
         match e {
             QuoteStepError::MissingQuote => Self::MissingQuote,
             QuoteStepError::InvalidQuoteHex(m) => Self::InvalidQuoteHex(m),
-            QuoteStepError::UnparsableQuote(m) => Self::QuoteVerification(m),
+            QuoteStepError::UnparsableQuote(m) => Self::UnparsableQuote(m),
             QuoteStepError::InvalidEvidenceReportDataHex(m) => Self::InvalidQuoteReportDataHex(m),
             QuoteStepError::EvidenceReportDataMismatch => Self::QuoteReportDataEvidenceMismatch,
             QuoteStepError::ReportDataSlotMismatch { .. } => Self::QuoteReportDataMismatch,
