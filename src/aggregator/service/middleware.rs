@@ -57,8 +57,10 @@ use std::time::{Duration, Instant};
 fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> Option<u16> {
     match err {
         UpstreamError::Timeout(_) => Some(504),
-        UpstreamError::InvalidRequest(reason) => {
-            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, reason = %reason, "candidate skipped before sending: the route cannot carry this request");
+        // The reason is written for the caller and can quote the request, so
+        // it is served, not logged.
+        UpstreamError::InvalidRequest(_) => {
+            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, "candidate skipped before sending: the route cannot carry this request");
             None
         }
         // A withheld non-2xx is forwarded as a response before it gets here;
