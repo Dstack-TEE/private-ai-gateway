@@ -322,17 +322,14 @@ impl UpstreamVerifier for AlwaysFailed {
 }
 
 /// A verifier whose reason was built from what failed underneath it.
-struct FailedWithRawDetail;
-
-const RAW_VERIFIER_DETAIL: &str = "failed to fetch attestation report: 503 Server Error for url: \
-    https://node-7.provider.example.com/v1/attestation/report?nonce=abc";
+struct FailedWithRawDetail(&'static str);
 
 #[async_trait]
 impl UpstreamVerifier for FailedWithRawDetail {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
-            reason: Some(RAW_VERIFIER_DETAIL.to_string()),
+            reason: Some(self.0.to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
         }
     }
@@ -1305,37 +1302,45 @@ async fn empty_tool_calls_are_stripped_and_visible_as_differing_hashes() {
 // ---------------------------------------------------------------------------
 
 /// A refusal's reason reaches the client and the signed receipt, so a verifier
-/// that put a URL in it must not get that URL into either.
+/// that put the upstream's address in it must not get it into either.
 #[tokio::test]
 async fn refusal_withholds_a_verifier_reason_that_names_the_upstream() {
-    let h = harness_with(
-        RecordingUpstream::default(),
-        Arc::new(FailedWithRawDetail),
-        false,
-    );
-    let resp = h
-        .requester
-        .post(
-            "/v1/chat/completions",
-            CONSTRAINED_REQUEST,
-            &[("authorization", "Bearer requester-a")],
-        )
-        .await;
-    assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(
-        json_body(&resp)["error"]["message"],
-        "upstream verifier reported failed: details withheld"
-    );
-    let receipt = h
-        .service
-        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
-        .unwrap();
-    let payload = receipt_payload(&receipt);
-    assert_eq!(
-        payload_event(&payload, "upstream.verified")["reason"],
-        "upstream verifier reported failed: details withheld"
-    );
-    assert!(!payload.to_string().contains("provider.example.com"));
+    for raw in [
+        "failed to fetch attestation report: 503 Server Error for url: \
+         https://node-7.provider.example.com/v1/attestation/report?nonce=abc",
+        // The upstream's own host, bare and under a TLD no shape rule knows.
+        "failed to fetch attestation report: \
+         HTTPSConnectionPool(host='surface-upstream.example', port=443): Read timed out.",
+    ] {
+        let h = harness_with(
+            RecordingUpstream::default(),
+            Arc::new(FailedWithRawDetail(raw)),
+            false,
+        );
+        let resp = h
+            .requester
+            .post(
+                "/v1/chat/completions",
+                CONSTRAINED_REQUEST,
+                &[("authorization", "Bearer requester-a")],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(&resp)["error"]["message"],
+            "upstream verifier reported failed: details withheld",
+            "{raw}"
+        );
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "upstream.verified")["reason"],
+            "upstream verifier reported failed: details withheld",
+            "{raw}"
+        );
+    }
 }
 
 #[tokio::test]

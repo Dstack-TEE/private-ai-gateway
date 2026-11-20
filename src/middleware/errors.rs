@@ -449,6 +449,13 @@ fn is_hostname_like(word: &str) -> bool {
             .all(|p| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
 }
 
+/// Whether `message` names the host of `origin` (`https://host[:port]`). The
+/// gateway knows its upstream's host exactly, so this catches it under any
+/// TLD, where [`looks_identifying`] has to guess from shape.
+pub(crate) fn names_origin_host(message: &str, origin: &str) -> bool {
+    url_host(origin).is_some_and(|host| message_references_host(message, host))
+}
+
 /// The host component of an `http(s)://` URL (`https://a.example/x?y` -> `a.example`).
 /// Used to correlate an upstream error message with a request image URL when the
 /// message names only the host (e.g. a DNS failure) rather than the full URL.

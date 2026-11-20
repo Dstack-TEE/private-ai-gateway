@@ -46,10 +46,12 @@ const MAX_VERIFICATION_REASON_CHARS: usize = 300;
 
 /// Whether a verifier's reason is a sentence about the verdict, as opposed to
 /// text that names a host or was lifted from a response or a process.
-fn is_publishable_reason(reason: &str) -> bool {
+fn is_publishable_reason(reason: &str, upstream_origin: Option<&str>) -> bool {
+    use crate::middleware::errors::{looks_identifying, names_origin_host};
     reason.chars().count() <= MAX_VERIFICATION_REASON_CHARS
         && !reason.chars().any(char::is_control)
-        && !crate::middleware::errors::looks_identifying(reason)
+        && !looks_identifying(reason)
+        && !upstream_origin.is_some_and(|origin| names_origin_host(reason, origin))
 }
 
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
@@ -726,8 +728,12 @@ impl AciService {
             // The reason is served to the client and committed to the receipt
             // (§7.5), and a verifier may have built it from whatever failed
             // underneath it.
+            let origin = event
+                .url_origin
+                .as_deref()
+                .or(prepared.url_origin.as_deref());
             if let Some(reason) = event.reason.as_mut() {
-                if !is_publishable_reason(reason) {
+                if !is_publishable_reason(reason, origin) {
                     tracing::warn!(upstream = %event.upstream_name, model = %event.model_id, verifier = %event.verifier_id, reason = %reason, "upstream verification reason withheld from the client");
                     *reason = WITHHELD_VERIFICATION_REASON.to_string();
                 }

@@ -25,7 +25,7 @@ use crate::aci::upstream::request_id::{request_id_from_body, request_id_from_hea
 use crate::aci::upstream::UpstreamError;
 use crate::aggregator::service::ResponseContext;
 use crate::aggregator::service::{
-    decode_source, error_records, AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext,
+    decode_source, error_records, AciService, ChatCompletionRequest, E2eeRequestContext,
     E2eeResponseInfo, FailedAttempt, ForwardCandidate, GatewayRequestContext,
     MiddlewareForwardResult, MiddlewareReceiptDraft, MiddlewareReceiptJournal, ReceiptOwner,
     ServiceError, ServiceResponseStream, UpstreamVerificationError,
@@ -854,7 +854,9 @@ async fn run_inner(
             // client-attributable failures — rather than reaching the
             // finalizer, which would refuse a stream already built.
             if e2ee.is_some() && !forward.is_sse {
-                let err = ServiceError::E2ee(E2eeError::EncryptionFailed);
+                let err = ServiceError::Upstream(UpstreamError::InvalidRequest(
+                    "this streamed response cannot be end-to-end encrypted".into(),
+                ));
                 meter.disarm();
                 return service_error_response(outcome_ctx, err, None);
             }
