@@ -46,6 +46,14 @@ def verifier_id_for(provider: str) -> str:
 
 
 def failed(provider: str, reason: str, **extra: Any) -> None:
+    """Report a failed verification.
+
+    `reason` is for the gateway's log and the operator; it may quote whatever
+    failed. Receipts and clients never see it: they get the gateway's fixed
+    sentence for `failure`, which a caller passes as
+    `failure="evidence_unavailable"` when the evidence could not be fetched at
+    all. Without it the gateway says only that the upstream was not verified.
+    """
     emit(
         {
             "result": "failed",

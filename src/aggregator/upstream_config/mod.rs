@@ -667,7 +667,7 @@ impl UpstreamConfigManager {
                         model_id,
                         result: "failed".to_string(),
                         refreshed_nonces: 0,
-                        reason: event.reason,
+                        reason: event.diagnostic,
                     });
                     continue;
                 }
@@ -700,7 +700,7 @@ impl UpstreamConfigManager {
                                 model_id,
                                 result: "failed".to_string(),
                                 refreshed_nonces: 0,
-                                reason: refreshed_event.reason,
+                                reason: refreshed_event.diagnostic,
                             });
                             continue;
                         }
@@ -825,7 +825,7 @@ async fn refresh_upstream(
             state.not_before =
                 remaining.map_or(refresh_started + period, |remaining| completed + remaining);
         }
-        if let Some(reason) = &event.reason {
+        if let Some(reason) = &event.diagnostic {
             tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), reason = %reason, "upstream verification refresh finished");
         } else {
             tracing::info!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), "upstream verification refresh finished");

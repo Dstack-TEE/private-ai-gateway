@@ -82,7 +82,7 @@ async fn completion_is_sealed_verified_and_signed() {
         event.result,
         VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     eprintln!(
         "verified: {}",

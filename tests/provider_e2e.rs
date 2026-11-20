@@ -1123,7 +1123,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         assert_eq!(upstream_verified["required"], false);
         assert_eq!(
             upstream_verified["reason"],
-            "no enforceable verified binding"
+            "no enforceable channel binding"
         );
         assert!(upstream_verified.get("session_id").is_none());
 
@@ -1428,7 +1428,7 @@ async fn privatemode_observes_legacy_and_rotating_secret_ids_without_claiming_bi
             event.result,
             VerificationResult::Verified,
             "{:?}",
-            event.reason
+            event.diagnostic
         );
         let evidence = event.evidence.unwrap();
         let claims = event.provider_claims.unwrap();
@@ -1493,7 +1493,7 @@ async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_writt
             event.result,
             VerificationResult::Verified,
             "{:?}",
-            event.reason
+            event.diagnostic
         );
         event.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].clone()
     };
@@ -1832,7 +1832,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     assert_eq!(upstream_verified["required"], false);
     assert_eq!(
         upstream_verified["reason"],
-        "no enforceable verified binding"
+        "no enforceable channel binding"
     );
     assert!(upstream_verified.get("session_id").is_none());
 }
@@ -2118,10 +2118,10 @@ async fn chutes_provider_requires_exact_catalog_match() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["error"]["type"], "not_found_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("exact chute_id match"));
+    assert_eq!(
+        error["error"]["message"],
+        "The requested model or resource was not found"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
     assert!(instance_requests.lock().unwrap().is_empty());
 }

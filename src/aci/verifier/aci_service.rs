@@ -23,7 +23,9 @@ use super::{
     current_unix_secs, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
 };
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -124,8 +126,8 @@ impl AciServiceVerifierPolicy {
 pub(super) enum AciServiceVerificationError {
     #[error("upstream attestation request failed: {0}")]
     Transport(String),
-    #[error("upstream attestation returned HTTP {status}")]
-    HttpStatus { status: u16 },
+    #[error("upstream attestation returned HTTP {status}: {body}")]
+    HttpStatus { status: u16, body: String },
     #[error("invalid upstream attestation JSON: {0}")]
     InvalidJson(String),
     #[error("ACI report binding failed: {0}")]
@@ -449,14 +451,17 @@ impl AciServiceUpstreamVerifier {
             .get(&url)
             .send()
             .await
-            .map_err(|e| AciServiceVerificationError::Transport(e.without_url().to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
-            .map_err(|e| AciServiceVerificationError::Transport(e.without_url().to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
         if !(200..300).contains(&status) {
-            return Err(AciServiceVerificationError::HttpStatus { status });
+            return Err(AciServiceVerificationError::HttpStatus {
+                status,
+                body: String::from_utf8_lossy(&body).to_string(),
+            });
         }
 
         let report: AttestationReport = serde_json::from_slice(&body)
@@ -557,7 +562,15 @@ impl AciServiceUpstreamVerifier {
                 verifier_id: self.verifier_id.clone(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some(err.to_string()),
+                failure: match err {
+                    AciServiceVerificationError::Transport(_)
+                    | AciServiceVerificationError::HttpStatus { .. }
+                    | AciServiceVerificationError::Collateral(_) => {
+                        VerificationFailure::EvidenceUnavailable
+                    }
+                    _ => VerificationFailure::NotVerified,
+                },
+                diagnostic: Some(err.to_string()),
                 ..Default::default()
             },
         }

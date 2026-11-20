@@ -108,7 +108,8 @@ async fn run() -> Result<(), String> {
         verifier_id: "live-probe/bypass/v1".to_string(),
         result: VerificationResult::Verified,
         required: true,
-        reason: None,
+        failure: Default::default(),
+        diagnostic: None,
         evidence: None,
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),

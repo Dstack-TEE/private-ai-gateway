@@ -71,11 +71,12 @@ const CHANNEL_BINDING_MESSAGE: &str =
 /// The status, the `error.type` when it is not the status's default, and the
 /// message when the error has one written for the caller.
 ///
-/// A message is served only where the gateway wrote it about the caller's own
-/// request: a refusal (§10), an E2EE or nonce fault, a request it could not
-/// route or shape. Everything else — transport text, upstream statuses, the
+/// A message is served only where the gateway wrote it for the caller: a
+/// refusal (§10), an E2EE or nonce fault, a request a route cannot carry.
+/// Everything else — routing and transport text, upstream statuses, the
 /// gateway's own faults — gets fixed per-status wording, because its `Display`
-/// names hosts, keys and internals that belong in the log.
+/// names hosts, routes and internals that belong in the log. No message is
+/// inspected or filtered here: what may be served is decided by the type.
 fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
     match err {
         // §10. A pinned-session miss is not a verification failure: the
@@ -101,11 +102,12 @@ fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
         ServiceError::InvalidNonce(_)
         | ServiceError::DownstreamTlsDomainMissing
         | ServiceError::DownstreamTlsDomainUnknown(_) => (400, None, Some(err.to_string())),
-        ServiceError::Upstream(UpstreamError::Routing(message)) => {
-            (404, None, scrub_identifying_markers(message))
-        }
+        // Routing text names routes and backends; the miss itself is all the
+        // caller needs.
+        ServiceError::Upstream(UpstreamError::Routing(_)) => (404, None, None),
+        // Written about the caller's own request, by that variant's contract.
         ServiceError::Upstream(UpstreamError::InvalidRequest(message)) => {
-            (400, None, scrub_identifying_markers(message))
+            (400, None, Some(message.clone()))
         }
         // The gateway's own connect/read deadline expired: the upstream was
         // reachable but never answered in time.
@@ -447,13 +449,6 @@ fn is_hostname_like(word: &str) -> bool {
         && parts[..parts.len() - 1]
             .iter()
             .all(|p| p.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-}
-
-/// Whether `message` names the host of `origin` (`https://host[:port]`). The
-/// gateway knows its upstream's host exactly, so this catches it under any
-/// TLD, where [`looks_identifying`] has to guess from shape.
-pub(crate) fn names_origin_host(message: &str, origin: &str) -> bool {
-    url_host(origin).is_some_and(|host| message_references_host(message, host))
 }
 
 /// The host component of an `http(s)://` URL (`https://a.example/x?y` -> `a.example`).
@@ -986,6 +981,7 @@ mod tests {
     #[test]
     fn a_service_error_is_served_by_class_never_by_its_own_text() {
         use super::{client_error, Surface};
+        use crate::aci::receipt::VerificationFailure;
         use crate::aci::upstream::UpstreamError;
         use crate::aggregator::service::{E2eeError, ServiceError, UpstreamVerificationError};
 
@@ -1051,22 +1047,14 @@ mod tests {
                 "api_error",
                 "The upstream provider returned an error",
             ),
-            // Written by the gateway about the caller's request: served.
             (
-                UpstreamError::Routing("no upstream route for model \"m\"".into()).into(),
-                404,
-                "not_found_error",
-                "not_found_error",
-                "no upstream route for model \"m\"",
-            ),
-            // ...unless it names a host after all.
-            (
-                UpstreamError::Routing(format!("unknown target {secret}")).into(),
+                UpstreamError::Routing(format!("unknown target route {secret}")).into(),
                 404,
                 "not_found_error",
                 "not_found_error",
                 "The requested model or resource was not found",
             ),
+            // Written by the gateway about the caller's request: served.
             (
                 UpstreamError::InvalidRequest("invalid media metadata".into()).into(),
                 400,
@@ -1082,11 +1070,13 @@ mod tests {
                 "E2EE replay detected",
             ),
             (
-                UpstreamVerificationError::VerifierFailed("quote expired".into()).into(),
+                UpstreamVerificationError::VerifierFailed(VerificationFailure::EvidenceUnavailable)
+                    .into(),
                 503,
                 "upstream_verification_failed",
                 "upstream_verification_failed",
-                "upstream verifier reported failed: quote expired",
+                "upstream verification failed: the upstream's attestation evidence could not \
+                 be obtained",
             ),
             (
                 UpstreamVerificationError::NoEligibleAttestedSession("m".into()).into(),

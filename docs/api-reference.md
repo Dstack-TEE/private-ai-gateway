@@ -612,12 +612,24 @@ the gateway log with the request id and is not returned.
 
 | Condition | Response |
 | --- | --- |
-| Upstream verification refused the request | `503 upstream_verification_failed` or `412 session_not_accepted`, with `X-Receipt-Id`. A verifier reason that names a host or exceeds 300 characters is replaced with `details withheld`. |
+| Upstream verification refused the request | `503 upstream_verification_failed` or `412 session_not_accepted`, with `X-Receipt-Id`. The message and the receipt's `reason` name the cause from the fixed list below. |
 | No route serves the model | `404 not_found_error`. |
 | The route cannot carry the request | `400 invalid_request_error`. |
 | The upstream did not answer in time | `504 timeout_error`. |
 | The upstream could not be reached, broke off, or failed its channel binding | `502`. |
 | The gateway itself failed | `500 internal_error` (`api_error` on `/v1/messages`). |
+
+A failed `upstream.verified` event carries one of these reasons. A verifier's
+own account of the failure, which may quote a URL or a response, goes to the
+gateway log and the operator's status view only.
+
+| Reason | Meaning |
+| --- | --- |
+| `the upstream's attestation evidence could not be obtained` | The evidence could not be fetched or the verifier could not run. A later attempt may succeed. |
+| `the upstream's attestation was not verified` | The verifier did not accept the upstream. |
+| `no enforceable channel binding` | Verification pinned nothing the gateway can enforce. |
+| `no upstream verifier configured` | The route has no verifier. |
+| `upstream withheld an unverified response without a serving instance` | The response could not be attributed to a verified instance. |
 
 The gateway passes actionable upstream client errors through in its own
 envelope, maps upstream authentication failures to gateway errors, and maps a

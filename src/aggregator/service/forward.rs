@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult, VerificationRound,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -36,23 +36,6 @@ use super::{
     UpstreamVerificationError, UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS,
     CHAT_COMPLETIONS_PATH,
 };
-
-/// What stands in for a verifier's reason that cannot be published.
-const WITHHELD_VERIFICATION_REASON: &str = "details withheld";
-
-/// Longest verification reason served as written. A verifier's own sentence
-/// fits; an interpolated response body or traceback does not.
-const MAX_VERIFICATION_REASON_CHARS: usize = 300;
-
-/// Whether a verifier's reason is a sentence about the verdict, as opposed to
-/// text that names a host or was lifted from a response or a process.
-fn is_publishable_reason(reason: &str, upstream_origin: Option<&str>) -> bool {
-    use crate::middleware::errors::{looks_identifying, names_origin_host};
-    reason.chars().count() <= MAX_VERIFICATION_REASON_CHARS
-        && !reason.chars().any(char::is_control)
-        && !looks_identifying(reason)
-        && !upstream_origin.is_some_and(|origin| names_origin_host(reason, origin))
-}
 
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
 /// each non-success variant to its own policy — abort (single forward) or fail
@@ -140,9 +123,7 @@ impl AdmittedUpstream {
             self.requires_instance = false;
             self.event.channel_bindings.clear();
             self.event.result = VerificationResult::Failed;
-            self.event.reason = Some(
-                "upstream withheld an unverified response without a serving instance".to_string(),
-            );
+            self.event.failure = VerificationFailure::UnattributedResponse;
         }
         self
     }
@@ -725,19 +706,6 @@ impl AciService {
             // may report the upstream result, but the service owns the
             // client-facing decision recorded in the receipt (§7.5).
             event.required = verification_required;
-            // The reason is served to the client and committed to the receipt
-            // (§7.5), and a verifier may have built it from whatever failed
-            // underneath it.
-            let origin = event
-                .url_origin
-                .as_deref()
-                .or(prepared.url_origin.as_deref());
-            if let Some(reason) = event.reason.as_mut() {
-                if !is_publishable_reason(reason, origin) {
-                    tracing::warn!(upstream = %event.upstream_name, model = %event.model_id, verifier = %event.verifier_id, reason = %reason, "upstream verification reason withheld from the client");
-                    *reason = WITHHELD_VERIFICATION_REASON.to_string();
-                }
-            }
         }
 
         let missing_verifier_result = upstream_verification_event.is_none();
@@ -748,7 +716,7 @@ impl AciService {
             verifier_id: "none".to_string(),
             result: VerificationResult::Failed,
             required: verification_required,
-            reason: Some("no upstream verifier configured".to_string()),
+            failure: VerificationFailure::NoVerifier,
             ..Default::default()
         });
         self.metrics.record_upstream_verification(&event);
@@ -761,12 +729,11 @@ impl AciService {
                 ));
             }
             if event.result != VerificationResult::Verified {
-                let reason = event
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "upstream verification failed".to_string());
+                // The verifier's own account stays here; the refusal and its
+                // receipt carry the cause from the closed set.
+                tracing::warn!(upstream = %event.upstream_name, model = %event.model_id, verifier = %event.verifier_id, failure = %event.failure, diagnostic = event.diagnostic.as_deref().unwrap_or_default(), "required upstream verification failed");
                 return Err(ServiceError::UpstreamVerification(
-                    UpstreamVerificationError::VerifierFailed(reason),
+                    UpstreamVerificationError::VerifierFailed(event.failure),
                 ));
             }
             // §1.2: verification must obtain an *enforceable* channel binding.
@@ -775,7 +742,7 @@ impl AciService {
             if event.channel_bindings.is_empty() {
                 return Err(ServiceError::UpstreamVerification(
                     UpstreamVerificationError::VerifierFailed(
-                        "no enforceable channel binding".to_string(),
+                        VerificationFailure::NoChannelBinding,
                     ),
                 ));
             }
@@ -1220,10 +1187,12 @@ impl AciService {
             Some(session_id) => builder.add_upstream_verified_with_session(event, &session_id),
             None => builder.add_upstream_verified_failed(
                 &event.model_id,
-                event
-                    .reason
-                    .as_deref()
-                    .unwrap_or("no enforceable verified binding"),
+                // A verified result with no session pinned nothing (§1.2).
+                match event.result {
+                    VerificationResult::Verified => VerificationFailure::NoChannelBinding,
+                    VerificationResult::Failed => event.failure,
+                }
+                .as_str(),
                 event.required,
                 Some(&event.upstream_name),
             ),

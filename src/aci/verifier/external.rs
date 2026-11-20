@@ -20,7 +20,8 @@ use tokio::time::Instant;
 
 use super::CachedProviderEvent;
 use crate::aci::receipt::{
-    ChannelBinding, UpstreamVerifiedEvent, VerificationResult, VerificationRound,
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+    VerificationRound,
 };
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
@@ -290,17 +291,17 @@ impl ExternalProviderVerifier {
             Ok(input) => input,
             Err(err) => {
                 return self
-                    .failed_event(request, format!("failed to encode verifier input: {err}"));
+                    .unavailable_event(request, format!("failed to encode verifier input: {err}"));
             }
         };
         let output = match self.run(input).await {
             Ok(output) => output,
-            Err(err) => return self.failed_event(request, err),
+            Err(err) => return self.unavailable_event(request, err),
         };
         let output: ExternalProviderVerifierOutput = match serde_json::from_slice(&output) {
             Ok(output) => output,
             Err(err) => {
-                return self.failed_event(
+                return self.unavailable_event(
                     request,
                     format!("provider verifier returned invalid JSON: {err}"),
                 );
@@ -409,17 +410,11 @@ impl ExternalProviderVerifier {
         })?
         .map_err(|e| format!("provider verifier process failed: {e}"))?;
         if !output.status.success() {
-            // stderr is a traceback: it goes to the log, not into a reason
-            // that receipts and clients carry.
-            tracing::warn!(
-                provider = %self.provider,
-                status = %output.status,
-                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                "provider verifier exited unsuccessfully"
-            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!(
-                "provider verifier exited with status {}",
-                output.status
+                "provider verifier exited with status {}: {}",
+                output.status,
+                stderr.trim()
             ));
         }
         Ok(output.stdout)
@@ -471,7 +466,8 @@ impl ExternalProviderVerifier {
                 .unwrap_or_else(|| format!("{}/external-verifier/v1", self.provider)),
             result,
             required: request.required,
-            reason: output.reason.clone(),
+            failure: output.failure,
+            diagnostic: output.reason.clone(),
             evidence,
             channel_bindings,
             // Optional reviewed profiles are checked at session projection (after
@@ -525,6 +521,18 @@ impl ExternalProviderVerifier {
             .map_err(|e| format!("failed to record Chutes provider session: {e}"))
     }
 
+    /// The verifier could not run or answer: nothing was judged.
+    fn unavailable_event(
+        &self,
+        request: UpstreamVerificationRequest,
+        reason: impl Into<String>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            failure: VerificationFailure::EvidenceUnavailable,
+            ..self.failed_event(request, reason)
+        }
+    }
+
     fn failed_event(
         &self,
         request: UpstreamVerificationRequest,
@@ -538,7 +546,7 @@ impl ExternalProviderVerifier {
             verifier_id: format!("{}/external-verifier/v1", self.provider),
             result: VerificationResult::Failed,
             required: request.required,
-            reason: Some(reason.into()),
+            diagnostic: Some(reason.into()),
             ..Default::default()
         }
     }
@@ -579,6 +587,10 @@ impl ExternalProviderVerifierCacheKey {
 struct ExternalProviderVerifierOutput {
     result: String,
     verifier_id: Option<String>,
+    /// Why it failed, from the closed set receipts and clients are told.
+    #[serde(default)]
+    failure: VerificationFailure,
+    /// The verifier's own account, for the log and the operator only.
     reason: Option<String>,
     evidence: Option<Value>,
     #[serde(default)]

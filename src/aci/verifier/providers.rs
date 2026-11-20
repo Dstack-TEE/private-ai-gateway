@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::UpstreamProvider;
@@ -602,7 +602,8 @@ impl RoutingUpstreamVerifier {
             verifier_id: "routing-upstream-verifier/v1".to_string(),
             result: VerificationResult::Failed,
             required: request.required,
-            reason: Some(reason),
+            failure: VerificationFailure::NoVerifier,
+            diagnostic: Some(reason),
             ..Default::default()
         }
     }

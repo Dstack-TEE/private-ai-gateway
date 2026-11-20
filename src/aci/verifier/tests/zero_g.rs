@@ -271,7 +271,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
         event.result,
         VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     assert_eq!(
         event.channel_bindings,

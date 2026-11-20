@@ -98,6 +98,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             f"failed to fetch PhalaDirect attestation report: {exc}",
+            failure="evidence_unavailable",
             verifier_id=verifier_id,
         )
         return
