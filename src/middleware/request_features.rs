@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::request_transform::{chat_thinking_type_switch, Endpoint};
+use super::request_transform::{chat_thinking_disabled, Endpoint};
 use super::types::{ReasoningConfig, ReasoningEffort};
 
 /// HMAC-SHA256 key for the cache-affinity prefix hash. The gateway derives it
@@ -557,24 +557,22 @@ fn reasoning_intent(
             },
         };
     }
-    // OpenAI-format bodies: the chat-template switches and the top-level
-    // `thinking.type` switch, judged with the same
+    // OpenAI-format bodies: the chat-template switches and a top-level
+    // `thinking.type: "disabled"`, judged with the same
     // precedence as chat_template_reasoning_intent (any explicit "on" wins;
     // conflicting aliases state no intent to disable).
     if endpoint == Endpoint::ChatComplete {
-        let kwargs = params
+        let mut disabled = chat_thinking_disabled(params);
+        if let Some(kwargs) = params
             .get("chat_template_kwargs")
-            .and_then(Value::as_object);
-        let switches = ["thinking", "enable_thinking"]
-            .into_iter()
-            .map(|key| kwargs.and_then(|kwargs| kwargs.get(key)?.as_bool()))
-            .chain([chat_thinking_type_switch(params)]);
-        let mut disabled = false;
-        for switch in switches {
-            match switch {
-                Some(true) => return ReasoningIntent::Enabled,
-                Some(false) => disabled = true,
-                None => {}
+            .and_then(Value::as_object)
+        {
+            for key in ["thinking", "enable_thinking"] {
+                match kwargs.get(key).and_then(Value::as_bool) {
+                    Some(true) => return ReasoningIntent::Enabled,
+                    Some(false) => disabled = true,
+                    None => {}
+                }
             }
         }
         if disabled {

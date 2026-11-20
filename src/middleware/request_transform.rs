@@ -667,23 +667,22 @@ fn chat_template_reasoning_intent(
     {
         return None;
     }
-    let kwargs = params
+    let mut disabled = chat_thinking_disabled(params);
+    if let Some(kwargs) = params
         .get("chat_template_kwargs")
-        .and_then(Value::as_object);
-    let switches = ["thinking", "enable_thinking"]
-        .into_iter()
-        .map(|key| kwargs.and_then(|kwargs| kwargs.get(key)?.as_bool()))
-        .chain([chat_thinking_type_switch(params)]);
-    let mut disabled = false;
-    for switch in switches {
-        match switch {
-            // Any switch left on ends the derivation, which covers both rules
-            // above at once: a plain "on" is never translated, and a caller who
-            // sets the switches against each other has stated no intent to
-            // read, so the body is left alone rather than a side picked.
-            Some(true) => return None,
-            Some(false) => disabled = true,
-            None => {}
+        .and_then(Value::as_object)
+    {
+        for key in ["thinking", "enable_thinking"] {
+            match kwargs.get(key).and_then(Value::as_bool) {
+                // Any switch left on ends the derivation, which covers both
+                // rules above at once: a plain "on" is never translated, and a
+                // caller who sets the switches against each other has stated
+                // no intent to read, so the body is left alone rather than a
+                // side picked.
+                Some(true) => return None,
+                Some(false) => disabled = true,
+                None => {}
+            }
         }
     }
     disabled.then(|| ReasoningConfig {
@@ -692,15 +691,14 @@ fn chat_template_reasoning_intent(
     })
 }
 
-/// A Chat body's top-level `thinking: {"type": "enabled" | "disabled"}`, the
-/// switch some OpenAI-compatible APIs and SDKs use, as on/off. Any other shape
-/// states nothing.
-pub(crate) fn chat_thinking_type_switch(params: &Value) -> Option<bool> {
-    match params.get("thinking")?.get("type")?.as_str()? {
-        "enabled" => Some(true),
-        "disabled" => Some(false),
-        _ => None,
-    }
+/// Whether a Chat body carries a top-level `thinking: {"type": "disabled"}`,
+/// the off switch some OpenAI-compatible APIs and SDKs use.
+pub(crate) fn chat_thinking_disabled(params: &Value) -> bool {
+    params
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled")
 }
 
 fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
