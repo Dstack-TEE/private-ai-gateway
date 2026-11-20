@@ -631,6 +631,11 @@ gateway log and the operator's status view only.
 | `no upstream verifier configured` | The route has no verifier. |
 | `upstream withheld an unverified response without a serving instance` | The response could not be attributed to a verified instance. |
 
+A refusal receipt records the refusal's own message as the reason: one of the
+sentences above prefixed with `upstream verification failed: `, or the
+gateway's fixed sentence when no route or pinned session was eligible or no
+verifier result was supplied.
+
 The gateway passes actionable upstream client errors through in its own
 envelope, maps upstream authentication failures to gateway errors, and maps a
 recognized provider capacity-exhaustion response to `429`.
