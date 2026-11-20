@@ -35,6 +35,7 @@ from secretvm.verify import (
 from .common import (
     emit,
     failed,
+    failure_of,
     provider_options,
     raw_http_bundle_evidence,
     raw_http_item,
@@ -456,4 +457,10 @@ async def verify_secret_ai(request: dict[str, Any]) -> None:
             }
         )
     except Exception as exc:  # noqa: BLE001 - bridge returns failures as JSON
-        failed(provider, str(exc), evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            str(exc),
+            failure=failure_of(exc),
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )

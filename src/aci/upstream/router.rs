@@ -187,7 +187,9 @@ impl UpstreamBackend for ModelRouterBackend {
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let body_model_id = request_model_id(&req.body).ok_or_else(|| {
-            UpstreamError::Routing("request body must contain a string model field".to_string())
+            UpstreamError::InvalidRequest(
+                "request body must contain a string model field".to_string(),
+            )
         })?;
         let route = match req.target_route_id.as_deref() {
             Some(route_id) => self.route_for_id(route_id)?,

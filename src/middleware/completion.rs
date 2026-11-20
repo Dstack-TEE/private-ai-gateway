@@ -821,14 +821,16 @@ async fn run_inner(
                 (mapped, body)
             };
 
-            finalize_buffered(
+            let mut response = finalize_buffered(
                 forward.receipt,
                 client_status,
                 final_body,
                 "application/json",
                 e2ee,
                 outcome_ctx,
-            )
+            );
+            errors::relay_retry_after(&mut response, &forward.upstream_headers);
+            response
         }
         Ok(MiddlewareForwardResult::Stream(forward)) => {
             // Normalized, not relayed: providers spell the content type
@@ -964,7 +966,9 @@ async fn run_inner(
                 Some(class),
                 request_id_from_headers(&forward.error.upstream_headers),
             );
-            finalize_generated(status, body, &[], e2ee, outcome_ctx)
+            let mut response = finalize_generated(status, body, &[], e2ee, outcome_ctx);
+            errors::relay_retry_after(&mut response, &forward.error.upstream_headers);
+            response
         }
         // Every candidate was attempted and failed without an HTTP response to
         // relay (a chain that ends in an upstream HTTP status — including an
@@ -1737,7 +1741,7 @@ fn service_error_response(
         _ => e2ee,
     };
     let error = errors::client_error(surface, &err, Some(request_id));
-    let body = errors::envelope_bytes(surface, error.error_type, &error.message, Some(request_id));
+    let body = error.body(surface, Some(request_id));
     // §7.5: a fail-closed refusal is receipt-committed, exactly like the
     // direct path (`http/app/backend.rs::refusal_response`).
     if !matches!(err, ServiceError::UpstreamVerification(_)) {

@@ -128,6 +128,10 @@ pub struct UpstreamStreamResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
+    /// No route can serve the request: an unknown model, or a route the
+    /// gateway cannot resolve. The text names routes and backends and is for
+    /// the log; a client is told only that the model was not found (404). A
+    /// malformed request is [`Self::InvalidRequest`].
     #[error("upstream routing error: {0}")]
     Routing(String),
     /// The caller's request cannot be forwarded as sent; nothing reached the

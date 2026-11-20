@@ -1082,6 +1082,10 @@ ACI defines these types, with the HTTP status a service SHOULD use:
 | `upstream_verification_failed` | 503 | Upstream verification was required and did not produce an enforceable verified binding. The prompt was not forwarded. |
 | `session_not_accepted` | 412 | The request pinned sessions (§5.3) and none of them could serve it. The prompt was not forwarded. |
 
+A service MAY set `code` to a token that narrows the type, for example the
+cause of an `upstream_verification_failed`. Clients that do not recognize a
+`code` ignore it.
+
 A service MAY use a different status where an HTTP intermediary requires it
 (for example 429 for rate limiting), but SHOULD preserve the `type` so
 clients can branch on it. Unrecognized types are treated as opaque, and

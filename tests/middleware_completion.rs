@@ -1181,9 +1181,12 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
 
 fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
     assert!(!headers.contains_key("x-typesafe-request-id"));
-    for (name, _) in LEAKY_UPSTREAM_HEADERS {
+    for (name, value) in LEAKY_UPSTREAM_HEADERS {
+        // `x-request-id` is also the gateway's own header for its own id; the
+        // upstream's value must never be what it carries.
+        let relayed = headers.get(*name).and_then(|v| v.to_str().ok());
         assert!(
-            headers.get(*name).is_none(),
+            relayed.is_none() || (*name == "x-request-id" && relayed != Some(*value)),
             "{name} reached the client; response headers must be an allowlist"
         );
     }

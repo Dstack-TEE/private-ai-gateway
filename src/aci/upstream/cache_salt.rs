@@ -28,11 +28,12 @@ impl CacheSaltField {
         {
             return Ok(());
         }
-        let mut body: Value = serde_json::from_slice(&request.body)
-            .map_err(|e| UpstreamError::Routing(e.to_string()))?;
-        let object = body
-            .as_object_mut()
-            .ok_or_else(|| UpstreamError::Routing("request body must be an object".into()))?;
+        let mut body: Value = serde_json::from_slice(&request.body).map_err(|e| {
+            UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}"))
+        })?;
+        let object = body.as_object_mut().ok_or_else(|| {
+            UpstreamError::InvalidRequest("request body must be a JSON object".into())
+        })?;
         object.remove("cache_salt");
         object.remove("user_cache_secret");
         let (field, provider) = match self {

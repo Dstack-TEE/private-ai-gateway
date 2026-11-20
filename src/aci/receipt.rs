@@ -122,6 +122,18 @@ pub enum VerificationFailure {
 }
 
 impl VerificationFailure {
+    /// The cause as a token: `error.code` on a refusal, and the `failure`
+    /// value a provider verifier writes.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::EvidenceUnavailable => "evidence_unavailable",
+            Self::NoChannelBinding => "no_channel_binding",
+            Self::NoVerifier => "no_verifier",
+            Self::UnattributedResponse => "unattributed_response",
+            Self::NotVerified => "not_verified",
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::EvidenceUnavailable => {

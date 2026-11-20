@@ -1326,6 +1326,7 @@ async fn refusal_names_the_cause_and_never_the_verifiers_own_words() {
     let reason = "upstream verification failed: the upstream's attestation evidence could not \
                   be obtained";
     assert_eq!(json_body(&resp)["error"]["message"], reason);
+    assert_eq!(json_body(&resp)["error"]["code"], "evidence_unavailable");
     let receipt = h
         .service
         .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
