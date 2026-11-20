@@ -9,7 +9,7 @@ import gzip
 import sys
 from typing import Any
 
-from .common import emit, failed, failure_of, json_evidence_bundle, provider_options, verifier_id_for
+from .common import emit, failed, json_evidence_bundle, provider_options, verifier_id_for
 
 
 def tinfoil_report_data(raw: dict[str, Any], intel_quote: str) -> bytes:
@@ -62,12 +62,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             doc = await asyncio.to_thread(_verify)
     except Exception as exc:
-        failed(
-            provider,
-            f"Tinfoil verification failed: {exc}",
-            failure=failure_of(exc),
-            verifier_id=verifier_id,
-        )
+        failed(provider, f"Tinfoil verification failed: {exc}", verifier_id=verifier_id)
         return
 
     steps = {

@@ -26,7 +26,7 @@ from provider_verifier import (
     verify_secret_ai,
     verify_tinfoil,
 )
-from provider_verifier.common import failed, failure_of
+from provider_verifier.common import failed
 
 __all__ = [
     "verify_armet_ai",
@@ -68,7 +68,7 @@ async def main() -> None:
         else:
             failed(str(provider), f"unsupported provider: {provider!r}")
     except Exception as exc:
-        failed(str(provider), str(exc), failure=failure_of(exc))
+        failed(str(provider), str(exc))
 
 
 if __name__ == "__main__":

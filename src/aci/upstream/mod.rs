@@ -136,7 +136,7 @@ pub enum UpstreamError {
     Routing(String),
     /// The caller's request cannot be forwarded as sent; nothing reached the
     /// upstream. Reported to the client as a 400 carrying this text, so it
-    /// says only what is wrong with the request.
+    /// says only what is wrong with the request and never names the upstream.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("upstream transport error: {0}")]

@@ -122,7 +122,7 @@ impl ZeroGProviderBackend {
     ) -> Result<(reqwest::Response, ResponseOpener, SignatureCheck), UpstreamError> {
         if req.request.path.as_deref().unwrap_or(CHAT_COMPLETIONS_PATH) != CHAT_COMPLETIONS_PATH {
             return Err(UpstreamError::InvalidRequest(
-                "0G Private Computer serves only /v1/chat/completions".to_string(),
+                "this model serves only /v1/chat/completions".to_string(),
             ));
         }
         let request: Map<String, Value> =

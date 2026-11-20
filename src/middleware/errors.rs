@@ -193,14 +193,17 @@ pub fn client_error(surface: Surface, err: &ServiceError, request_id: Option<&st
     let (status, refusal_type, message) = classify(err);
     let class = ErrorClass::from(err);
     let request_id = request_id.unwrap_or_default();
-    match status {
-        500 => {
+    match (status, err) {
+        (500, _) => {
             tracing::error!(error = %err, detail = ?err, ?class, request_id, "request failed inside the gateway")
         }
-        s if s >= 500 => tracing::warn!(error = %err, ?class, status, request_id, "request failed"),
-        // A rejected request's error text can quote the request, which is the
-        // caller's and never the log's.
-        _ => tracing::debug!(?class, status, request_id, "request rejected"),
+        // A rejected or refused request's error text can quote the request —
+        // its body, or the model it named — which is the caller's and never
+        // the log's. What the verifier found is logged where it was found.
+        (..=499, _) | (_, ServiceError::UpstreamVerification(_)) => {
+            tracing::debug!(?class, status, request_id, "request rejected")
+        }
+        _ => tracing::warn!(error = %err, ?class, status, request_id, "request failed"),
     }
     ClientError {
         status,
@@ -231,26 +234,6 @@ pub fn service_error_response(
 ) -> Response {
     let error = client_error(surface, err, request_id);
     parts_response(error.status, error.body(surface, request_id))
-}
-
-/// Pass on how long the upstream asked the caller to wait, when the response
-/// is one a caller retries. Only the delay-seconds form: a number says nothing
-/// about who answered.
-pub fn relay_retry_after(
-    response: &mut Response,
-    upstream_headers: &std::collections::HashMap<String, String>,
-) {
-    if !matches!(response.status().as_u16(), 429 | 503) {
-        return;
-    }
-    let seconds = upstream_headers
-        .get("retry-after")
-        .and_then(|value| value.trim().parse::<u32>().ok());
-    if let Some(seconds) = seconds {
-        response
-            .headers_mut()
-            .insert(axum::http::header::RETRY_AFTER, HeaderValue::from(seconds));
-    }
 }
 
 /// Serialize the surface error envelope to bytes (for the E2EE generated path).
@@ -1013,29 +996,6 @@ mod scrub_tests {
 #[cfg(test)]
 mod tests {
     use super::is_upstream_capacity_signal;
-
-    #[test]
-    fn retry_after_is_relayed_only_as_seconds_and_only_on_a_retryable_answer() {
-        use super::{parts_response, relay_retry_after};
-        use std::collections::HashMap;
-
-        let relayed = |status: u16, value: &str| {
-            let mut response = parts_response(status, Vec::new());
-            let upstream = HashMap::from([("retry-after".to_string(), value.to_string())]);
-            relay_retry_after(&mut response, &upstream);
-            response
-                .headers()
-                .get("retry-after")
-                .map(|v| v.to_str().unwrap().to_string())
-        };
-        assert_eq!(relayed(429, "30").as_deref(), Some("30"));
-        assert_eq!(relayed(503, " 5 ").as_deref(), Some("5"));
-        // A date, or anything else an upstream writes there, is not passed on.
-        assert_eq!(relayed(429, "Wed, 21 Oct 2026 07:28:00 GMT"), None);
-        // Not an answer a caller retries on a timer.
-        assert_eq!(relayed(502, "30"), None);
-        assert_eq!(relayed(200, "30"), None);
-    }
 
     #[test]
     fn a_service_error_is_served_by_class_never_by_its_own_text() {

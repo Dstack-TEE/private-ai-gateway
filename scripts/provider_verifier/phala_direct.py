@@ -83,22 +83,32 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     params = {"signing_algo": "ecdsa", "nonce": nonce, "version": "2"}
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
-    def _fetch_report() -> dict[str, Any]:
+    def _fetch_report() -> requests.Response:
         response = requests.get(
             attestation_url, params=params, headers=headers, timeout=timeout
         )
         response.raise_for_status()
-        return response.json()
+        return response
 
     try:
         # requests is blocking; run it off the event loop (as with the dstack call,
         # and consistent with the rest of the bridge's HTTP).
-        report = await asyncio.to_thread(_fetch_report)
+        response = await asyncio.to_thread(_fetch_report)
     except Exception as exc:  # noqa: BLE001
         failed(
             provider,
             f"failed to fetch PhalaDirect attestation report: {exc}",
             failure="evidence_unavailable",
+            verifier_id=verifier_id,
+        )
+        return
+    # A report that arrived but is not JSON was fetched: it did not verify.
+    try:
+        report = response.json()
+    except ValueError as exc:
+        failed(
+            provider,
+            f"PhalaDirect attestation report is not JSON: {exc}",
             verifier_id=verifier_id,
         )
         return

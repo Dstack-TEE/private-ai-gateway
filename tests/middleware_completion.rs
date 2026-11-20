@@ -1174,6 +1174,10 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
     ("server", "acme-edge/1.0"),
     ("inference-id", "29abc41a-c5c0-56d7-818a-c56c8c0fb272"),
     ("x-request-id", "fa57b5a8-4967-4e5c-9ab8-103a9feeeb14"),
+    // How long an upstream asks callers to wait, and whether it says so at
+    // all, differs by provider.
+    ("retry-after", "7"),
+    ("retry-after-ms", "7000"),
     ("alt-svc", r#"h3=":8443"; ma=86400"#),
     ("x-vendor-call-gateway", "true"),
     ("set-cookie", "edge_sess=0893731c1786104409;path=/"),
@@ -2866,12 +2870,17 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
     // pass and this stays a test about attribution. 429 would take the delayed
     // capacity-retry path, which the capacity_retry_* suite covers on its own.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"error":"unavailable"}"#.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
     let mut input = chat_input();
     input.stream = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, _) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503, "the upstream status must reach the client");
+    assert_no_upstream_headers(&headers);
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
     assert_eq!(

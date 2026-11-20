@@ -14,7 +14,6 @@ __all__ = [
     "emit",
     "verifier_id_for",
     "failed",
-    "failure_of",
     "sha256_json",
     "sha256_json_prefixed",
     "sha256_bytes_prefixed",
@@ -52,8 +51,10 @@ def failed(provider: str, reason: str, **extra: Any) -> None:
     `reason` is for the gateway's log and the operator; it may quote whatever
     failed. Receipts and clients never see it: they get the gateway's fixed
     sentence for `failure`, which a caller passes as
-    `failure="evidence_unavailable"` when the evidence could not be fetched at
-    all. Without it the gateway says only that the upstream was not verified.
+    `failure="evidence_unavailable"` at the one operation that fetches the
+    evidence, when that operation failed. Without it the gateway says only
+    that the upstream was not verified, which is also the answer for evidence
+    that arrived malformed and for an exception whose cause is unknown.
     """
     if extra.get("failure") is None:
         extra.pop("failure", None)
@@ -65,22 +66,6 @@ def failed(provider: str, reason: str, **extra: Any) -> None:
             **extra,
         }
     )
-
-
-def failure_of(exc: BaseException) -> str | None:
-    """The `failure` for an exception caught around a whole verification.
-
-    `evidence_unavailable` when the exception, or one it was raised from, is
-    the operating system or the network failing (`OSError`, which `requests`,
-    `urllib`, `socket` and `ssl` errors all are): nothing was judged. Anything
-    else is left for the gateway to report as not verified.
-    """
-    seen: BaseException | None = exc
-    while seen is not None:
-        if isinstance(seen, OSError):
-            return "evidence_unavailable"
-        seen = seen.__cause__ or seen.__context__
-    return None
 
 
 def sha256_json(value: Any) -> str:

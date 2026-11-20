@@ -125,15 +125,13 @@ async fn forward_to_backend_inner(
                 // error vocabulary; `normalize_upstream_error` scrubs it and subsumes
                 // the image-URL remap this arm used to do on its own. The service
                 // applies the same normalization to a buffered error.
-                let mut response = normalize_upstream_error(
+                normalize_upstream_error(
                     surface_for_path(input.endpoint_path),
                     forward.upstream_status,
                     &forward.upstream_body,
                     &input.received_body,
                     None,
-                );
-                errors::relay_retry_after(&mut response, &forward.upstream_headers);
-                response
+                )
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
             Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -194,9 +192,7 @@ async fn forward_to_backend_inner(
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            let mut response = (status, resp_headers, forward.upstream_body).into_response();
-            errors::relay_retry_after(&mut response, &forward.upstream_headers);
-            response
+            (status, resp_headers, forward.upstream_body).into_response()
         }
         // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
         Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
