@@ -91,10 +91,12 @@ pub(super) struct SessionGroup {
 fn canonical_bindings(bindings: &[ChannelBinding]) -> Result<Vec<ChannelBinding>, ServiceError> {
     let mut canonical = BTreeMap::new();
     for binding in bindings {
-        let value =
-            serde_json::to_value(binding).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
-        let bytes =
-            digest::jcs_bytes(&value).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
+        // Fixed text, as for the fingerprint below: a binding's members come
+        // from a verifier.
+        let canonicalization_failed =
+            || ServiceError::SessionStore("channel binding canonicalization failed".to_string());
+        let value = serde_json::to_value(binding).map_err(|_| canonicalization_failed())?;
+        let bytes = digest::jcs_bytes(&value).map_err(|_| canonicalization_failed())?;
         canonical.insert(bytes, binding.clone());
     }
     Ok(canonical.into_values().collect())
@@ -1100,7 +1102,13 @@ impl AciService {
         };
         let fingerprint = material
             .fingerprint()
-            .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
+            // Fixed text: the error names the offending member, and the
+            // material carries provider-supplied claim names.
+            .map_err(|_| {
+                ServiceError::SessionStore(
+                    "channel fingerprint canonicalization failed".to_string(),
+                )
+            })?;
 
         let mut expires_at = now
             .checked_add(self.config.attested_session_ttl_seconds)
