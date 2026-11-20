@@ -98,7 +98,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Tinfoil verification returned no TLS public key fingerprint",
-            failure="evidence_invalid",
+            failure="no_channel_binding",
             evidence=evidence,
             verifier_id=verifier_id,
         )

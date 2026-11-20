@@ -132,6 +132,9 @@ pub(super) enum AciServiceVerificationError {
     InvalidJson(String),
     #[error("ACI report binding failed: {0}")]
     AciBinding(#[from] AciReportValidationError),
+    /// A binding failure reported by a §9.1 check, which lends its cause.
+    #[error("ACI report binding failed: {0}")]
+    ReportBinding(String),
     #[error("upstream attestation did not match verifier policy")]
     PolicyRejected,
     #[error(
@@ -192,7 +195,9 @@ impl AciServiceVerificationError {
             | Self::InvalidQuoteReportDataHex(_)
             | Self::InvalidEventLog(_) => F::EvidenceInvalid,
             Self::QuoteVerification(_) | Self::TeeTypeMismatch { .. } => F::QuoteInvalid,
+            Self::AciBinding(AciReportValidationError::KeysetExpired) => F::KeysetExpired,
             Self::AciBinding(_)
+            | Self::ReportBinding(_)
             | Self::QuoteReportDataEvidenceMismatch
             | Self::QuoteReportDataMismatch => F::BindingMismatch,
             Self::MissingProvenance => F::ProvenanceNotAccepted,
@@ -223,9 +228,29 @@ impl From<&CheckResult> for AciServiceVerificationError {
             }
         };
         match cause {
-            FailureCause::Binding(_) | FailureCause::Quote(_) => {
-                Self::QuoteVerification(cause.to_string())
+            // Kept apart, and a quote step kept as its own kind: the receipt
+            // names which check failed, and these are different checks.
+            FailureCause::Binding(AciReportValidationError::KeysetExpired) => {
+                Self::AciBinding(AciReportValidationError::KeysetExpired)
             }
+            FailureCause::Binding(binding) => Self::ReportBinding(binding.to_string()),
+            FailureCause::Quote(QuoteStepError::MissingQuote) => Self::MissingQuote,
+            FailureCause::Quote(QuoteStepError::InvalidQuoteHex(m)) => {
+                Self::InvalidQuoteHex(m.clone())
+            }
+            FailureCause::Quote(QuoteStepError::InvalidEvidenceReportDataHex(m)) => {
+                Self::InvalidQuoteReportDataHex(m.clone())
+            }
+            FailureCause::Quote(QuoteStepError::EvidenceReportDataMismatch) => {
+                Self::QuoteReportDataEvidenceMismatch
+            }
+            FailureCause::Quote(QuoteStepError::ReportDataSlotMismatch { .. }) => {
+                Self::QuoteReportDataMismatch
+            }
+            FailureCause::Quote(QuoteStepError::Collateral { reason, .. }) => {
+                Self::Collateral(reason.clone())
+            }
+            FailureCause::Quote(quote) => Self::QuoteVerification(quote.to_string()),
             FailureCause::Expired { .. } => {
                 Self::AciBinding(AciReportValidationError::KeysetExpired)
             }

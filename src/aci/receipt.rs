@@ -119,6 +119,8 @@ pub enum VerificationFailure {
     QuoteInvalid,
     /// The evidence is not bound to this verification's nonce, keys or model.
     BindingMismatch,
+    /// The attested keyset is past its `not_after` (§9.1(3)).
+    KeysetExpired,
     /// The measured workload is not one the operator's policy accepts.
     ProvenanceNotAccepted,
     /// The key custody evidence did not verify.
@@ -142,11 +144,12 @@ pub enum VerificationFailure {
 
 impl VerificationFailure {
     #[cfg(test)]
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::EvidenceUnavailable,
         Self::EvidenceInvalid,
         Self::QuoteInvalid,
         Self::BindingMismatch,
+        Self::KeysetExpired,
         Self::ProvenanceNotAccepted,
         Self::CustodyNotVerified,
         Self::PolicyRejected,
@@ -165,6 +168,7 @@ impl VerificationFailure {
             Self::EvidenceInvalid => "evidence_invalid",
             Self::QuoteInvalid => "quote_invalid",
             Self::BindingMismatch => "binding_mismatch",
+            Self::KeysetExpired => "keyset_expired",
             Self::ProvenanceNotAccepted => "provenance_not_accepted",
             Self::CustodyNotVerified => "custody_not_verified",
             Self::PolicyRejected => "policy_rejected",
@@ -184,6 +188,7 @@ impl VerificationFailure {
             Self::BindingMismatch => {
                 "the upstream's attestation is not bound to this verification's nonce, keys or model"
             }
+            Self::KeysetExpired => "the upstream's attested keyset has expired",
             Self::ProvenanceNotAccepted => {
                 "the upstream's measured workload is not accepted by this gateway's policy"
             }

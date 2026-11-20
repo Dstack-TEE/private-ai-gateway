@@ -640,6 +640,7 @@ the operator's status view.
 | `evidence_invalid` | `the upstream's attestation evidence is malformed or incomplete` | The evidence arrived but a required part is missing or unparsable. |
 | `quote_invalid` | `the upstream's hardware attestation did not verify` | The hardware quote, or the GPU attestation with it, did not verify. |
 | `binding_mismatch` | `the upstream's attestation is not bound to this verification's nonce, keys or model` | The evidence does not commit to the fresh nonce, the channel key, or the requested model. |
+| `keyset_expired` | `the upstream's attested keyset has expired` | The upstream's keyset is past its `not_after`. |
 | `provenance_not_accepted` | `the upstream's measured workload is not accepted by this gateway's policy` | The measurement, compose hash, or source provenance is not one the operator accepts. |
 | `custody_not_verified` | `the upstream's key custody did not verify` | The key custody evidence did not verify. |
 | `policy_rejected` | `the upstream's platform state is not accepted by this gateway's policy` | For example an out-of-date TCB or a debug-mode TD. |

@@ -179,6 +179,7 @@ async fn public_verification_rejects_a_keyset_expiring_before_the_response() {
     fixture.control.release.add_permits(1);
     let result = pending.await.unwrap();
     assert_eq!(result.result, VerificationResult::Failed);
+    assert_eq!(result.failure, VerificationFailure::KeysetExpired);
     assert!(result.diagnostic.unwrap().contains("expired"));
     assert!(fixture.verifier.cached(&fixture.request).is_none());
 }

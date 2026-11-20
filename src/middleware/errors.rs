@@ -188,23 +188,24 @@ pub fn client_error_status(err: &ServiceError) -> u16 {
     classify(err).0
 }
 
-/// Turn a [`ServiceError`] into what the client is told, and log the error
-/// itself — the only place its full text goes.
+/// Turn a [`ServiceError`] into what the client is told, and log it.
 pub fn client_error(surface: Surface, err: &ServiceError, request_id: Option<&str>) -> ClientError {
     let (status, refusal_type, message) = classify(err);
     let class = ErrorClass::from(err);
     let request_id = request_id.unwrap_or_default();
-    match (status, err) {
-        (500, _) => {
+    // Only the gateway's own fault is logged in its own words. Every other
+    // error's text is built from a request or an upstream response — a serde
+    // error on an upstream body can quote the model's output — and plaintext
+    // stays inside the workload (§1), which the log is not. The class says
+    // what kind of failure it was.
+    match status {
+        500 => {
             tracing::error!(error = %err, detail = ?err, ?class, request_id, "request failed inside the gateway")
         }
-        // A rejected or refused request's error text can quote the request —
-        // its body, or the model it named — which is the caller's and never
-        // the log's. What the verifier found is logged where it was found.
-        (..=499, _) | (_, ServiceError::UpstreamVerification(_)) => {
-            tracing::debug!(?class, status, request_id, "request rejected")
+        s if s >= 500 && !matches!(err, ServiceError::UpstreamVerification(_)) => {
+            tracing::warn!(?class, status, request_id, "request failed")
         }
-        _ => tracing::warn!(error = %err, ?class, status, request_id, "request failed"),
+        _ => tracing::debug!(?class, status, request_id, "request rejected"),
     }
     ClientError {
         status,

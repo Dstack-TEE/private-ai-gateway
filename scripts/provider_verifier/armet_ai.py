@@ -354,11 +354,13 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             dcap_result = await verify_quote(quote_bytes)
     except Exception as exc:  # noqa: BLE001
-        reject(f"armet-ai quote verification failed: {exc}", failure="quote_invalid", evidence=evidence)
+        # Collateral retrieval and verification raise alike, so the cause is
+        # not known here.
+        reject(f"armet-ai quote verification failed: {exc}", evidence=evidence)
         return
     tcb_status = dcap_result.get("status")
     if not tcb_status:
-        reject("dcap-qvl returned no TCB status", failure="policy_rejected", evidence=evidence)
+        reject("dcap-qvl returned no TCB status", failure="evidence_invalid", evidence=evidence)
         return
     if str(tcb_status).lower() in REJECTED_TCB_STATUSES:
         reject(f"armet-ai platform TCB status is {tcb_status}", failure="policy_rejected", evidence=evidence)
@@ -402,7 +404,8 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     try:
         gpu_result = await asyncio.to_thread(check_gpu_attestation, gpu_text)
     except Exception as exc:  # noqa: BLE001
-        reject(f"armet-ai GPU attestation failed: {exc}", failure="quote_invalid", evidence=evidence)
+        # The NRAS call and the verification raise alike.
+        reject(f"armet-ai GPU attestation failed: {exc}", evidence=evidence)
         return
     if gpu_result.valid is not True:
         reason = "; ".join(str(error) for error in gpu_result.errors) or "unknown failure"
