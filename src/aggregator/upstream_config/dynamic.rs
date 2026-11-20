@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::ConfiguredUpstreams;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::{
     PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError, UpstreamRequest,
     UpstreamResponse, UpstreamStreamResponse,
@@ -184,7 +184,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }
@@ -227,7 +227,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }

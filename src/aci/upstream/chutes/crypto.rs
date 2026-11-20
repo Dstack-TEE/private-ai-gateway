@@ -57,7 +57,7 @@ pub(super) fn build_chutes_e2ee_request(
     )?;
     let mut payload = payload;
     let Some(obj) = payload.as_object_mut() else {
-        return Err(UpstreamError::Routing(
+        return Err(UpstreamError::InvalidRequest(
             "request body must be a JSON object".to_string(),
         ));
     };

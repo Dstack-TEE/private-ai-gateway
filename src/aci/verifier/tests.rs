@@ -10,7 +10,9 @@ use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, SourceProvenance, TlsSpki,
     WorkloadKeyset,
@@ -475,7 +477,7 @@ async fn routing_verifier_keeps_policy_isolated_for_shared_origins() {
         .await;
     assert_eq!(wrong_origin.result, VerificationResult::Failed);
     assert!(wrong_origin
-        .reason
+        .diagnostic
         .as_deref()
         .is_some_and(|reason| reason.contains("expected \"https://shared.example\"")));
 }
@@ -586,7 +588,7 @@ esac"#
         event.result,
         VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     assert_eq!(event.provider_type.as_deref(), Some("armet-ai"));
 }
@@ -619,7 +621,7 @@ async fn armet_ai_exposes_its_verifier_cache() {
         event.result,
         VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     let cached = verifier
         .cached(&request)
@@ -659,11 +661,11 @@ async fn armet_ai_rejects_a_bridge_claiming_router_scope() {
     assert_eq!(event.result, VerificationResult::Failed);
     assert!(
         event
-            .reason
+            .diagnostic
             .as_deref()
             .is_some_and(|r| r.contains("per-model")),
         "{:?}",
-        event.reason
+        event.diagnostic
     );
 }
 
@@ -691,9 +693,49 @@ async fn provider_external_verifier_rejects_verified_without_binding() {
 
     assert_eq!(event.result, VerificationResult::Failed);
     assert!(event
-        .reason
+        .diagnostic
         .unwrap()
         .contains("without an enforceable channel binding"));
+}
+
+/// What a provider verifier says went wrong reaches the event as a cause from
+/// the closed set, and its own words only as the diagnostic. A verifier that
+/// could not run at all judged nothing.
+#[tokio::test]
+async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_apart() {
+    let request = || UpstreamVerificationRequest {
+        upstream_name: "provider-upstream".to_string(),
+        url_origin: Some("https://provider.example".to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    };
+    let run = |script: &str| {
+        ExternalProviderVerifier::with_command(
+            "tinfoil",
+            AttestationScope::PerRouter,
+            vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            5,
+        )
+        .unwrap()
+    };
+
+    let judged = run(
+        r#"cat >/dev/null; printf '%s' '{"result":"failed","failure":"policy_rejected","reason":"TCB status is OutOfDate"}'"#,
+    )
+    .verify(request())
+    .await;
+    assert_eq!(judged.failure, VerificationFailure::PolicyRejected);
+    assert_eq!(
+        judged.diagnostic.as_deref(),
+        Some("TCB status is OutOfDate")
+    );
+
+    let crashed = run("cat >/dev/null; echo boom >&2; exit 3")
+        .verify(request())
+        .await;
+    assert_eq!(crashed.result, VerificationResult::Failed);
+    assert_eq!(crashed.failure, VerificationFailure::EvidenceUnavailable);
 }
 
 #[tokio::test]
@@ -885,17 +927,17 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     // Router declaring the wrong (model) scope → rejected.
     let mismatch = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("model")).await;
     assert_eq!(mismatch.result, VerificationResult::Failed);
-    assert!(mismatch.reason.unwrap().contains("per-router"));
+    assert!(mismatch.diagnostic.unwrap().contains("per-router"));
 
     // Router declaring no scope at all → rejected (it must declare).
     let missing = verify_with_scope("near-ai", AttestationScope::PerRouter, None).await;
     assert_eq!(missing.result, VerificationResult::Failed);
-    assert!(missing.reason.unwrap().contains("did not declare"));
+    assert!(missing.diagnostic.unwrap().contains("did not declare"));
 
     // Any verifier returning a garbage token → rejected.
     let unknown = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("galaxy")).await;
     assert_eq!(unknown.result, VerificationResult::Failed);
-    assert!(unknown.reason.unwrap().contains("unrecognized"));
+    assert!(unknown.diagnostic.unwrap().contains("unrecognized"));
 
     // Per-instance provider declaring its matching scope → accepted.
     let instance =
@@ -907,7 +949,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     let instance_mismatch =
         verify_with_scope("chutes", AttestationScope::PerInstance, Some("router")).await;
     assert_eq!(instance_mismatch.result, VerificationResult::Failed);
-    assert!(instance_mismatch.reason.unwrap().contains("per-instance"));
+    assert!(instance_mismatch
+        .diagnostic
+        .unwrap()
+        .contains("per-instance"));
 
     // Per-model provider that omits the scope → accepted (Phala-direct / Chutes
     // don't declare one).

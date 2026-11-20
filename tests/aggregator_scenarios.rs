@@ -213,7 +213,7 @@ impl UpstreamVerifier for ScriptedVerifier {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
             verifier_id: "mock-verifier/v1".to_string(),
-            reason: self.reason.clone(),
+            diagnostic: self.reason.clone(),
             evidence: self.evidence.clone(),
             ..event_from_request(&request, self.result)
         }
@@ -651,10 +651,10 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 
@@ -665,10 +665,10 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], true);
-    assert!(uv["reason"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        uv["reason"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert_eq!(
         event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(&response.body)
@@ -690,7 +690,7 @@ async fn optional_verification_is_best_effort_and_receipt_records_failed_not_req
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], false);
-    assert_eq!(uv["reason"], "cached evidence stale");
+    assert_eq!(uv["reason"], "the upstream's attestation was not verified");
 }
 
 #[tokio::test]
@@ -880,10 +880,10 @@ async fn aci_verified_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 }
@@ -902,5 +902,5 @@ async fn unconstrained_request_is_best_effort_and_receipt_records_failed_not_req
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], false);
-    assert_eq!(uv["reason"], "cached evidence stale");
+    assert_eq!(uv["reason"], "the upstream's attestation was not verified");
 }

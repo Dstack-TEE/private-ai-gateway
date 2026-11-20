@@ -179,7 +179,8 @@ async fn public_verification_rejects_a_keyset_expiring_before_the_response() {
     fixture.control.release.add_permits(1);
     let result = pending.await.unwrap();
     assert_eq!(result.result, VerificationResult::Failed);
-    assert!(result.reason.unwrap().contains("expired"));
+    assert_eq!(result.failure, VerificationFailure::KeysetExpired);
+    assert!(result.diagnostic.unwrap().contains("expired"));
     assert!(fixture.verifier.cached(&fixture.request).is_none());
 }
 
@@ -205,4 +206,46 @@ async fn absolute_keyset_expiry_invalidates_an_unexpired_monotonic_cache() {
     assert!(Instant::now() < deadline);
     assert!(verifier.cached(&request).is_none());
     assert!(verifier.cache_remaining(&request).is_none());
+}
+
+/// A report that cannot be read is malformed evidence; only a comparison that
+/// disagrees is a binding mismatch. The receipt signs whichever it was.
+#[test]
+fn a_binding_failure_is_classified_by_what_actually_failed() {
+    use crate::aci::verifier::aci_service::AciServiceVerificationError;
+    use crate::aci::verifier::quote::QuoteStepError;
+    use aci_verify::report::AciReportValidationError;
+    use VerificationFailure as F;
+    for (err, failure) in [
+        (
+            AciReportValidationError::InvalidReportDataHex("zz".into()),
+            F::EvidenceInvalid,
+        ),
+        (
+            AciReportValidationError::InvalidKeyset("eof".into()),
+            F::EvidenceInvalid,
+        ),
+        (
+            AciReportValidationError::ReportDataMismatch {
+                computed: "aa".into(),
+                reported: "bb".into(),
+            },
+            F::BindingMismatch,
+        ),
+        (AciReportValidationError::KeysetExpired, F::KeysetExpired),
+    ] {
+        assert_eq!(
+            AciServiceVerificationError::AciBinding(err).failure(),
+            failure
+        );
+    }
+    assert_eq!(
+        AciServiceVerificationError::from(QuoteStepError::UnparsableQuote("short".into()))
+            .failure(),
+        F::EvidenceInvalid
+    );
+    assert_eq!(
+        AciServiceVerificationError::QuoteVerification("bad signature".into()).failure(),
+        F::QuoteInvalid
+    );
 }

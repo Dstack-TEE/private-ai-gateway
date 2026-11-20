@@ -57,8 +57,10 @@ use std::time::{Duration, Instant};
 fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> Option<u16> {
     match err {
         UpstreamError::Timeout(_) => Some(504),
-        UpstreamError::InvalidRequest(reason) => {
-            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, reason = %reason, "candidate skipped before sending: the route cannot carry this request");
+        // The reason is written for the caller and can quote the request, so
+        // it is served, not logged.
+        UpstreamError::InvalidRequest(_) => {
+            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, "candidate skipped before sending: the route cannot carry this request");
             None
         }
         // A withheld non-2xx is forwarded as a response before it gets here;
@@ -171,6 +173,16 @@ enum RetainedResponse {
 }
 
 impl RetainedResponse {
+    /// Drop the answer's `Retry-After`. It counted from when the answer
+    /// arrived; once the gateway has waited on it, relaying it would make the
+    /// caller wait a second time.
+    fn forget_retry_after(&mut self) {
+        match self {
+            Self::Streaming { error, .. } => error.upstream_headers.remove("retry-after"),
+            Self::Buffered { inputs, .. } => inputs.response.headers.remove("retry-after"),
+        };
+    }
+
     /// Where this candidate's own entry sits in `failed_attempts`. Removing it
     /// on commit keeps the committed attempt last: attempts are reported by
     /// position, and a request's user-facing status is read as the one at the
@@ -945,6 +957,9 @@ impl AciService {
                 && capacity_retry_eligible(capacity_retry_done, forward_started)
             {
                 capacity_retry_done = true;
+                if let Some(retained) = retained.as_mut() {
+                    retained.forget_retry_after();
+                }
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
                 // Nothing is being waited on during the pause; a request abandoned
                 // here must not be pinned on whichever candidate happened to
@@ -1144,7 +1159,34 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use super::{is_retryable_provider_status, retry_after};
+    use super::{is_retryable_provider_status, retry_after, RetainedResponse};
+
+    /// The gateway waits on a rejection's `Retry-After` before its second
+    /// pass. If that pass gets no answer, the first one is what the caller
+    /// receives — without a delay the gateway has already served.
+    #[test]
+    fn a_retained_answer_loses_the_retry_after_the_gateway_waited_on() {
+        let mut retained = RetainedResponse::Streaming {
+            error: crate::aggregator::service::StreamingUpstreamError {
+                upstream_status: 429,
+                upstream_headers: HashMap::from([
+                    ("retry-after".to_string(), "8".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                ]),
+                upstream_body: Vec::new(),
+            },
+            route_id: "route".to_string(),
+            attempt_slot: 0,
+        };
+        retained.forget_retry_after();
+        let RetainedResponse::Streaming { error, .. } = retained else {
+            unreachable!()
+        };
+        assert_eq!(
+            error.upstream_headers,
+            HashMap::from([("content-type".to_string(), "application/json".to_string())])
+        );
+    }
 
     #[test]
     fn retry_after_reads_delay_seconds_capped_at_the_budget() {

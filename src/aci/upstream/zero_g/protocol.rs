@@ -67,12 +67,12 @@ pub(crate) fn seal_chat_request(
 ) -> Result<(Value, ResponseOpener), UpstreamError> {
     if request.contains_key(E2EE) {
         return Err(UpstreamError::InvalidRequest(
-            "request field \"_e2ee\" is reserved by the 0G E2EE transport".to_string(),
+            "request field \"_e2ee\" is reserved".to_string(),
         ));
     }
     if !request.contains_key("messages") {
         return Err(UpstreamError::InvalidRequest(
-            "0G E2EE chat requests must carry messages".to_string(),
+            "request must carry messages".to_string(),
         ));
     }
     // As 0G's client does: a stream must request usage, and setting it before

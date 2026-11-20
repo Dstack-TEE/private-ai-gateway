@@ -203,9 +203,9 @@ pub(super) fn rewrite_request_model(
     upstream_model_id: &str,
 ) -> Result<Vec<u8>, UpstreamError> {
     let mut parsed: Value = serde_json::from_slice(body)
-        .map_err(|e| UpstreamError::Routing(format!("invalid JSON request body: {e}")))?;
+        .map_err(|e| UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}")))?;
     let Some(obj) = parsed.as_object_mut() else {
-        return Err(UpstreamError::Routing(
+        return Err(UpstreamError::InvalidRequest(
             "request body must be a JSON object".to_string(),
         ));
     };
@@ -214,7 +214,7 @@ pub(super) fn rewrite_request_model(
             *model = Value::String(upstream_model_id.to_string());
         }
         _ => {
-            return Err(UpstreamError::Routing(
+            return Err(UpstreamError::InvalidRequest(
                 "request body must contain a string model field".to_string(),
             ));
         }

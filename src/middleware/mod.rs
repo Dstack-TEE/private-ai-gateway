@@ -68,14 +68,20 @@ pub(crate) fn validate_buffered(
     Ok(Some(body))
 }
 
-/// Stamp the native SDK header from the same gateway identity used for billing.
+/// Stamp the gateway's request id under the header the surface's SDK reads.
+/// It is the id the gateway logs and bills under, so a caller can quote it
+/// when a request needs tracing.
 pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {
-    if path == crate::aggregator::service::SYSTEMONE_PATH {
-        if let Ok(value) = HeaderValue::from_str(request_id) {
-            response
-                .headers_mut()
-                .insert("x-typesafe-request-id", value);
+    let name = if path == crate::aggregator::service::SYSTEMONE_PATH {
+        "x-typesafe-request-id"
+    } else {
+        match errors::surface_for_path(path) {
+            Surface::Anthropic => "request-id",
+            Surface::Openai => "x-request-id",
         }
+    };
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        response.headers_mut().insert(name, value);
     }
 }
 

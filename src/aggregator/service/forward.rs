@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult, VerificationRound,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -91,10 +91,12 @@ pub(super) struct SessionGroup {
 fn canonical_bindings(bindings: &[ChannelBinding]) -> Result<Vec<ChannelBinding>, ServiceError> {
     let mut canonical = BTreeMap::new();
     for binding in bindings {
-        let value =
-            serde_json::to_value(binding).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
-        let bytes =
-            digest::jcs_bytes(&value).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
+        // Fixed text, as for the fingerprint below: a binding's members come
+        // from a verifier.
+        let canonicalization_failed =
+            || ServiceError::SessionStore("channel binding canonicalization failed".to_string());
+        let value = serde_json::to_value(binding).map_err(|_| canonicalization_failed())?;
+        let bytes = digest::jcs_bytes(&value).map_err(|_| canonicalization_failed())?;
         canonical.insert(bytes, binding.clone());
     }
     Ok(canonical.into_values().collect())
@@ -123,9 +125,7 @@ impl AdmittedUpstream {
             self.requires_instance = false;
             self.event.channel_bindings.clear();
             self.event.result = VerificationResult::Failed;
-            self.event.reason = Some(
-                "upstream withheld an unverified response without a serving instance".to_string(),
-            );
+            self.event.failure = VerificationFailure::UnattributedResponse;
         }
         self
     }
@@ -718,7 +718,7 @@ impl AciService {
             verifier_id: "none".to_string(),
             result: VerificationResult::Failed,
             required: verification_required,
-            reason: Some("no upstream verifier configured".to_string()),
+            failure: VerificationFailure::NoVerifier,
             ..Default::default()
         });
         self.metrics.record_upstream_verification(&event);
@@ -731,12 +731,11 @@ impl AciService {
                 ));
             }
             if event.result != VerificationResult::Verified {
-                let reason = event
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "upstream verification failed".to_string());
+                // The verifier's own account stays here; the refusal and its
+                // receipt carry the cause from the closed set.
+                tracing::warn!(upstream = %event.upstream_name, model = %event.model_id, verifier = %event.verifier_id, failure = %event.failure, diagnostic = event.diagnostic.as_deref().unwrap_or_default(), "required upstream verification failed");
                 return Err(ServiceError::UpstreamVerification(
-                    UpstreamVerificationError::VerifierFailed(reason),
+                    UpstreamVerificationError::VerifierFailed(event.failure),
                 ));
             }
             // §1.2: verification must obtain an *enforceable* channel binding.
@@ -745,7 +744,7 @@ impl AciService {
             if event.channel_bindings.is_empty() {
                 return Err(ServiceError::UpstreamVerification(
                     UpstreamVerificationError::VerifierFailed(
-                        "no enforceable channel binding".to_string(),
+                        VerificationFailure::NoChannelBinding,
                     ),
                 ));
             }
@@ -1103,7 +1102,13 @@ impl AciService {
         };
         let fingerprint = material
             .fingerprint()
-            .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
+            // Fixed text: the error names the offending member, and the
+            // material carries provider-supplied claim names.
+            .map_err(|_| {
+                ServiceError::SessionStore(
+                    "channel fingerprint canonicalization failed".to_string(),
+                )
+            })?;
 
         let mut expires_at = now
             .checked_add(self.config.attested_session_ttl_seconds)
@@ -1190,10 +1195,12 @@ impl AciService {
             Some(session_id) => builder.add_upstream_verified_with_session(event, &session_id),
             None => builder.add_upstream_verified_failed(
                 &event.model_id,
-                event
-                    .reason
-                    .as_deref()
-                    .unwrap_or("no enforceable verified binding"),
+                // A verified result with no session pinned nothing (§1.2).
+                match event.result {
+                    VerificationResult::Verified => VerificationFailure::NoChannelBinding,
+                    VerificationResult::Failed => event.failure,
+                }
+                .as_str(),
                 event.required,
                 Some(&event.upstream_name),
             ),

@@ -69,7 +69,12 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     raw_origin = request.get("url_origin")
     if not raw_origin:
-        failed(provider, "PhalaDirect upstream is missing url_origin", verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect upstream is missing url_origin",
+            failure="verifier_misconfigured",
+            verifier_id=verifier_id,
+        )
         return
     url_origin = raw_origin.rstrip("/")
     bearer = (options.get("phala_direct_bearer_token") or "").strip()
@@ -83,21 +88,33 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     params = {"signing_algo": "ecdsa", "nonce": nonce, "version": "2"}
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
-    def _fetch_report() -> dict[str, Any]:
+    def _fetch_report() -> requests.Response:
         response = requests.get(
             attestation_url, params=params, headers=headers, timeout=timeout
         )
         response.raise_for_status()
-        return response.json()
+        return response
 
     try:
         # requests is blocking; run it off the event loop (as with the dstack call,
         # and consistent with the rest of the bridge's HTTP).
-        report = await asyncio.to_thread(_fetch_report)
+        response = await asyncio.to_thread(_fetch_report)
     except Exception as exc:  # noqa: BLE001
         failed(
             provider,
             f"failed to fetch PhalaDirect attestation report: {exc}",
+            failure="evidence_unavailable",
+            verifier_id=verifier_id,
+        )
+        return
+    # A report that arrived but is not JSON was fetched: it did not verify.
+    try:
+        report = response.json()
+    except ValueError as exc:
+        failed(
+            provider,
+            f"PhalaDirect attestation report is not JSON: {exc}",
+            failure="evidence_invalid",
             verifier_id=verifier_id,
         )
         return
@@ -119,32 +136,63 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     nvidia_payload = attestation.get("nvidia_payload")
 
     if not intel_quote:
-        failed(provider, "PhalaDirect report missing intel_quote", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report missing intel_quote",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
     if not signing_address:
-        failed(provider, "PhalaDirect report missing signing_address", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report missing signing_address",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
     if not tls_cert_fingerprint:
         failed(
             provider,
             "PhalaDirect report did not include tls_cert_fingerprint; the proxy "
             "must serve attestation version 2 (custom-domain TLS SPKI binding)",
+            failure="evidence_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
         return
     if report_nonce is not None and str(report_nonce).lower() != nonce.lower():
-        failed(provider, "PhalaDirect report nonce did not match request nonce", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report nonce did not match request nonce",
+            failure="binding_mismatch",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     # Reject a TD running in debug/untrusted mode: its CPU state and private
     # memory are accessible to the host, so the TEE guarantee does not hold.
     try:
         if tdx_debug_enabled(bytes.fromhex(intel_quote)):
-            failed(provider, "PhalaDirect TDX quote is in debug mode (TD_ATTRIBUTES TUD set)", evidence=evidence, verifier_id=verifier_id)
+            failed(
+                provider,
+                "PhalaDirect TDX quote is in debug mode (TD_ATTRIBUTES TUD set)",
+                failure="policy_rejected",
+                evidence=evidence,
+                verifier_id=verifier_id,
+            )
             return
     except ValueError as exc:
-        failed(provider, f"PhalaDirect intel_quote is not valid TDX quote bytes: {exc}", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            f"PhalaDirect intel_quote is not valid TDX quote bytes: {exc}",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     if isinstance(vm_config, (dict, list)):
@@ -163,6 +211,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             f"dstack quote verification failed: {dstack_result.get('reason', 'unknown')}",
+            failure="quote_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -171,7 +220,13 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     # 2. Compose hash: SHA256(app_compose) == the RTMR3-measured compose hash.
     compose_ok, compose_reason = _phala_direct_compose_hash_ok(info, dstack_result)
     if not compose_ok:
-        failed(provider, compose_reason, evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            compose_reason,
+            failure="provenance_not_accepted",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
@@ -182,6 +237,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             "could not obtain report_data from PhalaDirect quote; cannot verify nonce/address/TLS binding",
+            failure="evidence_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -196,6 +252,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             f"PhalaDirect report_data binding failed: {binding.get('error') or 'mismatch'}",
+            failure="binding_mismatch",
             evidence=evidence,
             verifier_id=verifier_id,
         )

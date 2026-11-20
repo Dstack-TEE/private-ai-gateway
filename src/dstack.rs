@@ -290,11 +290,11 @@ impl DstackAciProvider {
             .map_err(|e| KeyError::Quote(format!("invalid dstack quote hex: {e}")))?;
         let returned_report_data = decode_hex_field("dstack report_data", &response.report_data)?;
         if returned_report_data != report_data {
-            return Err(KeyError::Quote(format!(
-                "dstack quote report_data mismatch: expected {}, got {}",
-                hex::encode(report_data),
-                hex::encode(returned_report_data)
-            )));
+            // The values stay out: on the legacy report path the expected one
+            // is the caller's nonce, and this text is logged.
+            return Err(KeyError::Quote(
+                "dstack quote report_data mismatch".to_string(),
+            ));
         }
         let info = self
             .client

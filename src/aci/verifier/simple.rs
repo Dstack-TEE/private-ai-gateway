@@ -31,7 +31,7 @@ impl StaticUpstreamVerifier {
         })
     }
 
-    /// Convenience: build a `failed` event tagged with a fixed reason.
+    /// Convenience: build a `failed` event with a fixed diagnostic.
     pub fn failed(verifier_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
             upstream_name: String::new(),
@@ -39,7 +39,7 @@ impl StaticUpstreamVerifier {
             verifier_id: verifier_id.into(),
             result: VerificationResult::Failed,
             required: true,
-            reason: Some(reason.into()),
+            diagnostic: Some(reason.into()),
             ..Default::default()
         })
     }

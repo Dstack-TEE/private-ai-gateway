@@ -446,7 +446,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
         event.result,
         private_ai_gateway::aci::receipt::VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     assert_eq!(event.verifier_id, "aci-service/v2");
     assert!(event.evidence.is_some());

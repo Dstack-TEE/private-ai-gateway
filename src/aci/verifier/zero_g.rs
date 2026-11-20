@@ -21,7 +21,9 @@ use tokio::time::Instant;
 use super::quote::{parse_quote_evidence, verify_quote_to_root};
 use super::{current_unix_secs, CachedProviderEvent};
 use crate::aci::digest;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::upstream::{
     broker_api, readiness_client, UpstreamError, VerifiedProvider, TRUST_MODE_HEADER,
     ZERO_G_E2EE_ALGORITHM, ZERO_G_PROVIDER,
@@ -131,7 +133,8 @@ impl ZeroGProviderVerifier {
         let candidates = match self.preview(&request.model_id).await {
             Ok(candidates) => candidates,
             Err(reason) => {
-                event.reason = Some(reason);
+                event.failure = VerificationFailure::EvidenceUnavailable;
+                event.diagnostic = Some(reason);
                 return event;
             }
         };
@@ -165,7 +168,7 @@ impl ZeroGProviderVerifier {
             }
         }
         if instances.is_empty() {
-            event.reason = Some(format!(
+            event.diagnostic = Some(format!(
                 "no 0G private-tier candidate passed verification ({})",
                 rejected.join("; ")
             ));

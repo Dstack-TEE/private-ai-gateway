@@ -14,15 +14,12 @@ use serde_json::Value;
 use crate::aci::upstream::{read_buffered_upstream_response, UpstreamError};
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
-    ReceiptOwner, ServiceError, StreamingForwardResult, UpstreamVerificationError,
+    ReceiptOwner, ServiceError, StreamingForwardResult,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
 use crate::endpoint::Endpoint;
 
-use super::error_responses::{
-    e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
-    internal_error_response, refusal_error_body,
-};
+use super::error_responses::{insert_str_header, internal_error_response};
 use crate::middleware::errors::{self, normalize_upstream_error, surface_for_path};
 
 pub(super) struct BackendForwardInput {
@@ -128,13 +125,15 @@ async fn forward_to_backend_inner(
                 // error vocabulary; `normalize_upstream_error` scrubs it and subsumes
                 // the image-URL remap this arm used to do on its own. The service
                 // applies the same normalization to a buffered error.
-                normalize_upstream_error(
+                let mut response = normalize_upstream_error(
                     surface_for_path(input.endpoint_path),
                     forward.upstream_status,
                     &forward.upstream_body,
                     &input.received_body,
                     None,
-                )
+                );
+                errors::relay_retry_after(&mut response, &forward.upstream_headers);
+                response
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
             Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -143,33 +142,14 @@ async fn forward_to_backend_inner(
                 user_model,
                 &input.received_body,
                 requester,
+                &request_id,
                 err,
             ),
-            Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
-            Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
-                routing_error_response(message)
-            }
-            Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
-                invalid_request_response(message)
-            }
-            Err(ServiceError::Upstream(UpstreamError::ResponseTooLarge)) => {
-                let surface = surface_for_path(input.endpoint_path);
-                errors::error_response(
-                    surface,
-                    502,
-                    errors::error_type(surface, 502),
-                    errors::upstream_message(502),
-                    Some(&request_id),
-                )
-            }
-            Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
-                gateway_timeout_response(
-                    surface_for_path(input.endpoint_path),
-                    Some(&request_id),
-                    message,
-                )
-            }
-            Err(other) => internal_error_response(other),
+            Err(err) => errors::service_error_response(
+                surface_for_path(input.endpoint_path),
+                &err,
+                Some(&request_id),
+            ),
         };
     }
 
@@ -214,7 +194,9 @@ async fn forward_to_backend_inner(
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            (status, resp_headers, forward.upstream_body).into_response()
+            let mut response = (status, resp_headers, forward.upstream_body).into_response();
+            errors::relay_retry_after(&mut response, &forward.upstream_headers);
+            response
         }
         // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
         Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -223,86 +205,55 @@ async fn forward_to_backend_inner(
             user_model,
             &input.received_body,
             requester,
+            &request_id,
             err,
         ),
-        Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
-        Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
-            routing_error_response(message)
-        }
-        Err(ServiceError::Upstream(UpstreamError::InvalidRequest(message))) => {
-            invalid_request_response(message)
-        }
-        Err(ServiceError::Upstream(UpstreamError::ResponseTooLarge)) => {
-            let surface = surface_for_path(input.endpoint_path);
-            errors::error_response(
-                surface,
-                502,
-                errors::error_type(surface, 502),
-                errors::upstream_message(502),
-                Some(&request_id),
-            )
-        }
-        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
+        Err(err) => errors::service_error_response(
             surface_for_path(input.endpoint_path),
+            &err,
             Some(&request_id),
-            message,
         ),
-        Err(other) => internal_error_response(other),
     }
 }
 
 /// A fail-closed refusal (§7.5): the error body is finalized into a refusal
 /// receipt and served with `X-Receipt-Id`, so the client can fetch the signed
-/// record. §5.3's pinned-session miss is a distinct §10 status: verification
-/// did not fail, the pinned ids just are not the current ones.
+/// record.
 fn refusal_response(
     service: &AciService,
     endpoint_path: &'static str,
     user_model: Option<String>,
     received_body: &[u8],
     requester: Option<ReceiptOwner>,
+    request_id: &str,
     err: ServiceError,
 ) -> Response {
-    let ServiceError::UpstreamVerification(uv) = err else {
-        return internal_error_response(err);
-    };
-    let (status, error_type) = match uv {
-        UpstreamVerificationError::NoEligibleAttestedSession(_) => {
-            (StatusCode::PRECONDITION_FAILED, "session_not_accepted")
-        }
-        _ => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "upstream_verification_failed",
-        ),
-    };
-    let reason = uv.to_string();
-    let body = refusal_error_body(error_type, reason.clone());
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    let surface = surface_for_path(endpoint_path);
+    let error = errors::client_error(surface, &err, Some(request_id));
+    let body = error.body(surface, Some(request_id));
     match service.issue_upstream_refusal_receipt(
         endpoint_path,
         user_model,
         received_body,
-        &reason,
+        &error.message,
         &body,
         requester,
     ) {
         Ok(receipt) => {
-            insert_str_header(&mut headers, "x-receipt-id", &receipt.receipt_id);
+            let mut response = errors::parts_response(error.status, body);
+            let headers = response.headers_mut();
+            insert_str_header(headers, "x-receipt-id", &receipt.receipt_id);
             insert_str_header(
-                &mut headers,
+                headers,
                 "x-aci-keyset-digest",
                 &receipt.workload_keyset_digest,
             );
+            response
         }
         // The receipt is part of the refusal contract (§5.2, §7.5): a refusal
         // this workload cannot commit to is a server error, not a bare 503.
-        Err(err) => return internal_error_response(err),
+        Err(err) => errors::service_error_response(surface, &err, Some(request_id)),
     }
-    (status, headers, body).into_response()
 }
 
 pub(super) fn strip_empty_tool_calls(mut payload: Value) -> (Value, bool) {
@@ -512,17 +463,6 @@ pub(super) fn upstream_direct_response(
     (status, headers, upstream.body).into_response()
 }
 
-pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
-    tracing::warn!(error = %err, "upstream proxy request failed");
-    error_response(StatusCode::BAD_GATEWAY, "upstream_error", err.to_string())
-}
-
-fn invalid_request_response(message: String) -> Response {
-    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
-}
-
-pub(super) fn routing_error_response(message: String) -> Response {
-    // §10: malformed/unroutable requests use the OpenAI-inherited types; the
-    // middleware path serves the same miss as a 404 `not_found_error`.
-    error_response(StatusCode::NOT_FOUND, "not_found_error", message)
+pub(super) fn upstream_proxy_error_response(err: UpstreamError) -> Response {
+    internal_error_response(ServiceError::Upstream(err))
 }

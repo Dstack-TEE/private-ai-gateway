@@ -1181,9 +1181,12 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
 
 fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
     assert!(!headers.contains_key("x-typesafe-request-id"));
-    for (name, _) in LEAKY_UPSTREAM_HEADERS {
+    for (name, value) in LEAKY_UPSTREAM_HEADERS {
+        // `x-request-id` is also the gateway's own header for its own id; the
+        // upstream's value must never be what it carries.
+        let relayed = headers.get(*name).and_then(|v| v.to_str().ok());
         assert!(
-            headers.get(*name).is_none(),
+            relayed.is_none() || (*name == "x-request-id" && relayed != Some(*value)),
             "{name} reached the client; response headers must be an allowlist"
         );
     }
@@ -2863,12 +2866,17 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
     // pass and this stays a test about attribution. 429 would take the delayed
     // capacity-retry path, which the capacity_retry_* suite covers on its own.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"error":"unavailable"}"#.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
     let mut input = chat_input();
     input.stream = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, _) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503, "the upstream status must reach the client");
+    assert_no_upstream_headers(&headers);
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
     assert_eq!(

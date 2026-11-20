@@ -601,6 +601,34 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
         .contains("https://img.example/x.jpg"));
 }
 
+/// Every answer, an error included, names the gateway's own request id in the
+/// header the surface's SDK reads, so a caller can quote it.
+#[tokio::test]
+async fn responses_carry_the_gateway_request_id_per_surface() {
+    let h = make_harness();
+    for (path, header) in [
+        ("/v1/chat/completions", "x-request-id"),
+        ("/v1/messages", "request-id"),
+    ] {
+        let resp = build_router(h.service.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"verified-only","max_tokens":1,"messages":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let id = resp.headers()[header].to_str().unwrap();
+        assert!(id.starts_with("req_"), "{path}: {id}");
+    }
+}
+
 async fn post_chat(h: &TestHarness, body: &str) -> (StatusCode, bool, serde_json::Value) {
     let resp = build_router(h.service.clone())
         .oneshot(
@@ -648,7 +676,7 @@ async fn chat_request_the_route_cannot_carry_is_a_400() {
 async fn chat_withheld_upstream_status_is_normalized() {
     let h = make_harness();
     for stream in [false, true] {
-        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 500), (429, 429)] {
+        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 502), (429, 429)] {
             let body =
                 format!(r#"{{"model":"withheld-{upstream}","messages":[],"stream":{stream}}}"#);
             let (status, _, json) = post_chat(&h, &body).await;

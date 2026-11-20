@@ -34,8 +34,8 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
-    unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, unknown_downstream_host_response, unsupported_e2ee_response,
+    upstream_config_error_response,
 };
 use super::rejected_body::discard_before_reply;
 use super::util::{
@@ -357,11 +357,6 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
-        Err(ServiceError::InvalidNonce(e)) => error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            e.to_string(),
-        ),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -1268,7 +1263,6 @@ pub(super) async fn receipt_by_chat_id(
             "receipt": receipt.document_json().unwrap_or(serde_json::Value::Null),
         }))
         .into_response(),
-        Err(ServiceError::Key(KeyError::UnsupportedAlgo(_))) => invalid_signing_algo_response(),
         Err(other) => internal_error_response(other),
     }
 }

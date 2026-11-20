@@ -30,7 +30,7 @@ use private_ai_gateway::aci::e2ee::{
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
     receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult, VerificationRound,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -315,7 +315,25 @@ impl UpstreamVerifier for AlwaysFailed {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
-            reason: Some("quote verification failed".to_string()),
+            diagnostic: Some("quote verification failed".to_string()),
+            ..event_from_request(&request, VerificationResult::Failed)
+        }
+    }
+}
+
+/// A verifier that could not fetch the evidence and says so in its own words.
+struct EvidenceFetchFailed;
+
+const FETCH_DIAGNOSTIC: &str = "failed to fetch attestation report: \
+    HTTPSConnectionPool(host='surface-upstream.example', port=443): Read timed out.";
+
+#[async_trait]
+impl UpstreamVerifier for EvidenceFetchFailed {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            failure: VerificationFailure::EvidenceUnavailable,
+            diagnostic: Some(FETCH_DIAGNOSTIC.to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
         }
     }
@@ -1287,6 +1305,40 @@ async fn empty_tool_calls_are_stripped_and_visible_as_differing_hashes() {
 // Fail-closed refusal (§7.5)
 // ---------------------------------------------------------------------------
 
+/// A refusal and its signed receipt name the cause from the closed set. The
+/// verifier's own account, which quotes what failed, reaches neither.
+#[tokio::test]
+async fn refusal_names_the_cause_and_never_the_verifiers_own_words() {
+    let h = harness_with(
+        RecordingUpstream::default(),
+        Arc::new(EvidenceFetchFailed),
+        false,
+    );
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            CONSTRAINED_REQUEST,
+            &[("authorization", "Bearer requester-a")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+    let reason = "upstream verification failed: the upstream's attestation evidence could not \
+                  be obtained";
+    assert_eq!(json_body(&resp)["error"]["message"], reason);
+    assert_eq!(json_body(&resp)["error"]["code"], "evidence_unavailable");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "upstream.verified")["reason"],
+        reason
+    );
+    assert!(!payload.to_string().contains("surface-upstream.example"));
+}
+
 #[tokio::test]
 async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let h = harness_with(RecordingUpstream::default(), Arc::new(AlwaysFailed), false);
@@ -1319,10 +1371,10 @@ async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let verified = payload_event(&payload, "upstream.verified");
     assert_eq!(verified["result"], "failed");
     assert_eq!(verified["required"], true);
-    assert!(verified["reason"]
-        .as_str()
-        .unwrap()
-        .contains("quote verification failed"));
+    assert_eq!(
+        verified["reason"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(verified.get("session_id").is_none());
     assert!(payload["event_log"]
         .as_array()
@@ -3793,7 +3845,7 @@ async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
     clock.set(105);
     let mut failed = a.clone();
     failed.result = VerificationResult::Failed;
-    failed.reason = Some("fixture verification failure".to_string());
+    failed.diagnostic = Some("fixture verification failure".to_string());
     *verifier.0.lock().unwrap() = failed;
     assert!(listed_sessions(&h, "").await.is_empty());
     assert_ne!(pin_session(&h, &original).await.status, StatusCode::OK);

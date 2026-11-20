@@ -275,6 +275,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Chutes bearer_token is required to fetch per-instance E2EE attestation evidence",
+            failure="verifier_misconfigured",
             evidence=evidence,
         )
         return
@@ -387,6 +388,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Chutes did not return any E2EE public keys for this chute",
+            failure="evidence_invalid",
             evidence=raw_http_bundle_evidence(
                 raw_items,
                 source_url=f"{api_base}/e2e/instances/{chute_id}",
@@ -423,6 +425,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             provider,
             "Chutes verification did not produce any verified E2EE key binding"
             + (f": {'; '.join(errors)}" if errors else ""),
+            failure="no_channel_binding",
             evidence=raw_http_bundle_evidence(
                 raw_items,
                 source_url=attestation_url,

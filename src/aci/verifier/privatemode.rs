@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tokio::time::Instant;
 
 use super::CachedProviderEvent;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::{readiness_client, PrivatemodeProxyDeployment, UpstreamError};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -72,7 +72,8 @@ impl PrivatemodeProviderVerifier {
         let manifest = match observed {
             Ok(manifest) => manifest,
             Err(reason) => {
-                event.reason = Some(reason);
+                event.failure = VerificationFailure::EvidenceUnavailable;
+                event.diagnostic = Some(reason);
                 return event;
             }
         };

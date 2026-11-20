@@ -1123,7 +1123,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         assert_eq!(upstream_verified["required"], false);
         assert_eq!(
             upstream_verified["reason"],
-            "no enforceable verified binding"
+            "no enforceable channel binding"
         );
         assert!(upstream_verified.get("session_id").is_none());
 
@@ -1428,7 +1428,7 @@ async fn privatemode_observes_legacy_and_rotating_secret_ids_without_claiming_bi
             event.result,
             VerificationResult::Verified,
             "{:?}",
-            event.reason
+            event.diagnostic
         );
         let evidence = event.evidence.unwrap();
         let claims = event.provider_claims.unwrap();
@@ -1493,7 +1493,7 @@ async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_writt
             event.result,
             VerificationResult::Verified,
             "{:?}",
-            event.reason
+            event.diagnostic
         );
         event.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].clone()
     };
@@ -1832,7 +1832,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     assert_eq!(upstream_verified["required"], false);
     assert_eq!(
         upstream_verified["reason"],
-        "no enforceable verified binding"
+        "no enforceable channel binding"
     );
     assert!(upstream_verified.get("session_id").is_none());
 }
@@ -1939,13 +1939,13 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
     let app = build_router(service);
 
     let (status, _, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     let error: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("TLS channel binding requires an https upstream"));
+    assert_eq!(error["error"]["type"], "upstream_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The upstream provider returned an error"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
 }
 
@@ -2684,12 +2684,12 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
     let app = build_router(service);
 
     let (status, _, body) = call(app, "POST", "/v1/chat/completions", PROVIDER_CHAT_REQUEST).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     let error: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("matching the verified binding"));
+    assert_eq!(error["error"]["type"], "upstream_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The upstream's verified channel binding could not be enforced"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
 }
