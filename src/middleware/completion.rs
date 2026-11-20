@@ -971,7 +971,7 @@ async fn run_inner(
         // see the full chain, then a summary row placed after them carrying
         // the class of the aggregate failure.
         Ok(MiddlewareForwardResult::AllFailed(forward)) => {
-            let status = forward_error_status(&forward.error);
+            let status = errors::client_error_status(&forward.error);
             meter.failed_attempts(&forward.failed_attempts, stream);
             if status >= 500 {
                 meter.gateway_failure_at(
@@ -994,7 +994,7 @@ async fn run_inner(
         // rejection). Client-attributable errors (E2EE/4xx) are not recorded.
         // The E2EE context is still available to encrypt the body.
         Err(err) => {
-            let status = forward_error_status(&err);
+            let status = errors::client_error_status(&err);
             if status >= 500 {
                 meter.gateway_failure(
                     status,
@@ -1111,7 +1111,7 @@ impl Meter {
                 status
             }
             Ok(MiddlewareForwardResult::AllFailed(forward)) => {
-                let status = forward_error_status(&forward.error);
+                let status = errors::client_error_status(&forward.error);
                 meter.failed_attempts(&forward.failed_attempts, is_streaming);
                 if status >= 500 {
                     meter.gateway_failure_at(
@@ -1128,7 +1128,7 @@ impl Meter {
                 status
             }
             Err(err) => {
-                let status = forward_error_status(&err);
+                let status = errors::client_error_status(&err);
                 if status >= 500 {
                     meter.gateway_failure(
                         status,
@@ -1720,58 +1720,6 @@ fn forward_error_source(err: &ServiceError) -> ErrorSource {
     }
 }
 
-// Client-facing status for a forward/finalize `ServiceError`.
-fn forward_error_status(err: &ServiceError) -> u16 {
-    match err {
-        ServiceError::AdmissionInvariant(_) => 500,
-        ServiceError::EarlyResponseKeysetExpired => 503,
-        ServiceError::E2ee(_) => 400,
-        // §5.3: nothing failed verification — none of the pinned sessions is
-        // current, so the client re-fetches the list and re-pins.
-        ServiceError::UpstreamVerification(
-            UpstreamVerificationError::NoEligibleAttestedSession(_),
-        ) => 412,
-        ServiceError::UpstreamVerification(_) => 503,
-        ServiceError::Upstream(UpstreamError::Routing(_)) => 404,
-        ServiceError::Upstream(UpstreamError::InvalidRequest(_)) => 400,
-        // The gateway's own connect/read deadline expired: the upstream was
-        // reachable but never answered in time.
-        ServiceError::Upstream(UpstreamError::Timeout(_)) => 504,
-        // The caller's own input: a malformed nonce, or a Host the gateway
-        // has no TLS domain for. Nothing upstream was involved.
-        ServiceError::InvalidNonce(_)
-        | ServiceError::DownstreamTlsDomainMissing
-        | ServiceError::DownstreamTlsDomainUnknown(_) => 400,
-        // A withheld non-2xx is forwarded as a response before it gets here;
-        // one that did not maps as that upstream status does.
-        ServiceError::Upstream(UpstreamError::Upstream { status })
-            if !(200..300).contains(status) =>
-        {
-            errors::map_upstream_status(*status)
-        }
-        // A withheld 2xx (no verifiable body) is no answer; the rest are
-        // transport and gateway faults.
-        ServiceError::Upstream(
-            UpstreamError::Upstream { .. }
-            | UpstreamError::Transport(_)
-            | UpstreamError::SseLineOverflow
-            | UpstreamError::SseTruncated
-            | UpstreamError::EnvelopeTruncated
-            | UpstreamError::ResponseTooLarge
-            | UpstreamError::ChannelBindingMismatch(_),
-        )
-        | ServiceError::TestKeysInProduction
-        | ServiceError::InvalidSourceProvenance
-        | ServiceError::InvalidAttestedSessionTtl
-        | ServiceError::Keyset(_)
-        | ServiceError::Key(_)
-        | ServiceError::Receipt(_)
-        | ServiceError::SessionStore(_)
-        | ServiceError::Metrics(_)
-        | ServiceError::NoReceiptKey => 502,
-    }
-}
-
 // Map a forward/finalize `ServiceError` to a client-facing generated response.
 // E2EE clients still get an encrypted error body, except for `E2ee` errors
 // themselves (the E2EE setup failed, so the response cannot be encrypted).
@@ -1782,55 +1730,36 @@ fn service_error_response(
 ) -> Response {
     let surface = outcome.surface;
     let request_id = outcome.request_id;
-    let status = forward_error_status(&err);
     let e2ee = match &err {
         ServiceError::E2ee(_) => None,
         _ => e2ee,
     };
-    // §7.5: a fail-closed refusal names its §10 type and is receipt-committed,
-    // exactly like the direct path (`http/app/backend.rs::refusal_response`).
-    if let ServiceError::UpstreamVerification(uv) = &err {
-        let error_type = match uv {
-            UpstreamVerificationError::NoEligibleAttestedSession(_) => "session_not_accepted",
-            _ => "upstream_verification_failed",
-        };
-        let reason = uv.to_string();
-        let body = errors::envelope_bytes(surface, error_type, &reason, Some(request_id));
-        return match outcome.service.issue_upstream_refusal_receipt(
-            outcome.endpoint_path,
-            (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
-            outcome.received_body,
-            &reason,
-            &body,
-            outcome.requester.clone(),
-        ) {
-            Ok(receipt) => {
-                let headers = vec![
-                    ("x-receipt-id", receipt.receipt_id.clone()),
-                    ("x-aci-keyset-digest", receipt.workload_keyset_digest),
-                ];
-                finalize_generated(status, body, &headers, e2ee, outcome)
-            }
-            // The receipt is part of the refusal contract (§5.2); a refusal
-            // that cannot be committed is a server error, not a bare 503.
-            Err(receipt_err) => {
-                let body = errors::envelope_bytes(
-                    surface,
-                    errors::error_type(surface, 500),
-                    &format!("refusal receipt could not be issued: {receipt_err}"),
-                    Some(request_id),
-                );
-                finalize_generated(500, body, &[], e2ee, outcome)
-            }
-        };
+    let error = errors::client_error(surface, &err, Some(request_id));
+    let body = errors::envelope_bytes(surface, error.error_type, &error.message, Some(request_id));
+    // §7.5: a fail-closed refusal is receipt-committed, exactly like the
+    // direct path (`http/app/backend.rs::refusal_response`).
+    if !matches!(err, ServiceError::UpstreamVerification(_)) {
+        return finalize_generated(error.status, body, &[], e2ee, outcome);
     }
-    let body = errors::envelope_bytes(
-        surface,
-        errors::error_type(surface, status),
-        &err.to_string(),
-        Some(request_id),
-    );
-    finalize_generated(status, body, &[], e2ee, outcome)
+    match outcome.service.issue_upstream_refusal_receipt(
+        outcome.endpoint_path,
+        (!outcome.model.is_empty()).then(|| outcome.model.to_string()),
+        outcome.received_body,
+        &error.message,
+        &body,
+        outcome.requester.clone(),
+    ) {
+        Ok(receipt) => {
+            let headers = vec![
+                ("x-receipt-id", receipt.receipt_id.clone()),
+                ("x-aci-keyset-digest", receipt.workload_keyset_digest),
+            ];
+            finalize_generated(error.status, body, &headers, e2ee, outcome)
+        }
+        // The receipt is part of the refusal contract (§5.2); a refusal that
+        // cannot be committed is a server error, not a bare 503.
+        Err(receipt_err) => service_error_response(outcome, receipt_err, e2ee),
+    }
 }
 
 // Finalize a buffered answer, including a sanitized malformed-success error.

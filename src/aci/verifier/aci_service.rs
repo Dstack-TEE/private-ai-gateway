@@ -124,8 +124,8 @@ impl AciServiceVerifierPolicy {
 pub(super) enum AciServiceVerificationError {
     #[error("upstream attestation request failed: {0}")]
     Transport(String),
-    #[error("upstream attestation returned HTTP {status}: {body}")]
-    HttpStatus { status: u16, body: String },
+    #[error("upstream attestation returned HTTP {status}")]
+    HttpStatus { status: u16 },
     #[error("invalid upstream attestation JSON: {0}")]
     InvalidJson(String),
     #[error("ACI report binding failed: {0}")]
@@ -449,17 +449,14 @@ impl AciServiceUpstreamVerifier {
             .get(&url)
             .send()
             .await
-            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.without_url().to_string()))?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
-            .map_err(|e| AciServiceVerificationError::Transport(e.to_string()))?;
+            .map_err(|e| AciServiceVerificationError::Transport(e.without_url().to_string()))?;
         if !(200..300).contains(&status) {
-            return Err(AciServiceVerificationError::HttpStatus {
-                status,
-                body: String::from_utf8_lossy(&body).to_string(),
-            });
+            return Err(AciServiceVerificationError::HttpStatus { status });
         }
 
         let report: AttestationReport = serde_json::from_slice(&body)

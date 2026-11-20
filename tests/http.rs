@@ -648,7 +648,7 @@ async fn chat_request_the_route_cannot_carry_is_a_400() {
 async fn chat_withheld_upstream_status_is_normalized() {
     let h = make_harness();
     for stream in [false, true] {
-        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 500), (429, 429)] {
+        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 502), (429, 429)] {
             let body =
                 format!(r#"{{"model":"withheld-{upstream}","messages":[],"stream":{stream}}}"#);
             let (status, _, json) = post_chat(&h, &body).await;

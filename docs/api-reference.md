@@ -604,8 +604,20 @@ to these statuses.
 
 The following errors use the OpenAI envelope on every path, including
 `/v1/messages`: E2EE header and decryption errors, `X-Upstream-Verification`,
-invalid JSON, invalid `provider.aci_*` fields, and errors the gateway generates
-in direct mode other than the `504` for an upstream timeout.
+invalid JSON, and invalid `provider.aci_*` fields.
+
+A request that fails after it was accepted is answered the same way in both
+modes. The message is fixed wording for the condition; the cause is written to
+the gateway log with the request id and is not returned.
+
+| Condition | Response |
+| --- | --- |
+| Upstream verification refused the request | `503 upstream_verification_failed` or `412 session_not_accepted`, with `X-Receipt-Id`. A verifier reason that names a host or exceeds 300 characters is replaced with `details withheld`. |
+| No route serves the model | `404 not_found_error`. |
+| The route cannot carry the request | `400 invalid_request_error`. |
+| The upstream did not answer in time | `504 timeout_error`. |
+| The upstream could not be reached, broke off, or failed its channel binding | `502`. |
+| The gateway itself failed | `500 internal_error` (`api_error` on `/v1/messages`). |
 
 The gateway passes actionable upstream client errors through in its own
 envelope, maps upstream authentication failures to gateway errors, and maps a

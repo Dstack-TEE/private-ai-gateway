@@ -357,11 +357,6 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
-        Err(ServiceError::InvalidNonce(e)) => error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            e.to_string(),
-        ),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),

@@ -24,6 +24,8 @@ pub use crate::sse_protocol::{
 };
 
 use super::types::ErrorClass;
+use crate::aci::upstream::UpstreamError;
+use crate::aggregator::service::{E2eeError, ServiceError, UpstreamVerificationError};
 use crate::error_payload::envelope;
 
 /// Flatten an upstream status to the client-facing status. The mapping is uniform
@@ -48,6 +50,169 @@ pub fn map_upstream_status(status: u16) -> u16 {
 /// (always re-wrapped in our envelope, never the raw upstream response).
 pub fn is_actionable_client_error(status: u16) -> bool {
     (400..500).contains(&status) && !matches!(status, 401..=403 | 429)
+}
+
+/// What a client is told about a [`ServiceError`]: the one place a service
+/// failure becomes a status, an `error.type` and a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientError {
+    pub status: u16,
+    pub error_type: &'static str,
+    pub message: String,
+}
+
+/// The message a gateway fault carries. The cause is logged, never served.
+const INTERNAL_ERROR_MESSAGE: &str = "The gateway encountered an internal error";
+
+/// The message for an upstream whose verified channel binding did not hold.
+const CHANNEL_BINDING_MESSAGE: &str =
+    "The upstream's verified channel binding could not be enforced";
+
+/// The status, the `error.type` when it is not the status's default, and the
+/// message when the error has one written for the caller.
+///
+/// A message is served only where the gateway wrote it about the caller's own
+/// request: a refusal (§10), an E2EE or nonce fault, a request it could not
+/// route or shape. Everything else — transport text, upstream statuses, the
+/// gateway's own faults — gets fixed per-status wording, because its `Display`
+/// names hosts, keys and internals that belong in the log.
+fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
+    match err {
+        // §10. A pinned-session miss is not a verification failure: the
+        // client re-lists the sessions and re-pins.
+        ServiceError::UpstreamVerification(verification) => (
+            match verification {
+                UpstreamVerificationError::NoEligibleAttestedSession(_) => 412,
+                _ => 503,
+            },
+            Some(match verification {
+                UpstreamVerificationError::NoEligibleAttestedSession(_) => "session_not_accepted",
+                _ => "upstream_verification_failed",
+            }),
+            Some(verification.to_string()),
+        ),
+        // The response could not be encrypted: the gateway's fault, and the
+        // error itself goes out in cleartext.
+        ServiceError::E2ee(E2eeError::EncryptionFailed) => (500, None, None),
+        ServiceError::E2ee(e2ee) => (400, Some(e2ee_error_type(e2ee)), Some(e2ee.to_string())),
+        ServiceError::EarlyResponseKeysetExpired => (503, None, Some(err.to_string())),
+        // The caller's own input: a malformed nonce, or a Host the gateway
+        // has no TLS domain for.
+        ServiceError::InvalidNonce(_)
+        | ServiceError::DownstreamTlsDomainMissing
+        | ServiceError::DownstreamTlsDomainUnknown(_) => (400, None, Some(err.to_string())),
+        ServiceError::Upstream(UpstreamError::Routing(message)) => {
+            (404, None, scrub_identifying_markers(message))
+        }
+        ServiceError::Upstream(UpstreamError::InvalidRequest(message)) => {
+            (400, None, scrub_identifying_markers(message))
+        }
+        // The gateway's own connect/read deadline expired: the upstream was
+        // reachable but never answered in time.
+        ServiceError::Upstream(UpstreamError::Timeout(_)) => (504, None, None),
+        // A withheld non-2xx is forwarded as a response before it gets here;
+        // one that did not maps as that upstream status does.
+        ServiceError::Upstream(UpstreamError::Upstream { status })
+            if !(200..300).contains(status) =>
+        {
+            (
+                map_upstream_status(*status),
+                None,
+                Some(upstream_message(*status).to_string()),
+            )
+        }
+        // A withheld 2xx (no verifiable body) is no answer, and the rest never
+        // got one.
+        ServiceError::Upstream(
+            UpstreamError::Upstream { .. }
+            | UpstreamError::Transport(_)
+            | UpstreamError::SseLineOverflow
+            | UpstreamError::SseTruncated
+            | UpstreamError::EnvelopeTruncated
+            | UpstreamError::ResponseTooLarge,
+        ) => (502, None, None),
+        // Fail-closed before or during the send; which binding and why is the
+        // log's to say.
+        ServiceError::Upstream(UpstreamError::ChannelBindingMismatch(_)) => {
+            (502, None, Some(CHANNEL_BINDING_MESSAGE.to_string()))
+        }
+        ServiceError::TestKeysInProduction
+        | ServiceError::InvalidSourceProvenance
+        | ServiceError::InvalidAttestedSessionTtl
+        | ServiceError::AdmissionInvariant(_)
+        | ServiceError::Keyset(_)
+        | ServiceError::Key(_)
+        | ServiceError::Receipt(_)
+        | ServiceError::SessionStore(_)
+        | ServiceError::Metrics(_)
+        | ServiceError::NoReceiptKey => (500, None, None),
+    }
+}
+
+/// The E2EE v2 §9 type for a request the service could not accept.
+fn e2ee_error_type(err: &E2eeError) -> &'static str {
+    match err {
+        E2eeError::HeaderMissing => "e2ee_header_missing",
+        E2eeError::InvalidSigningAlgo => "e2ee_invalid_signing_algo",
+        E2eeError::InvalidVersion => "e2ee_invalid_version",
+        E2eeError::InvalidPublicKey => "e2ee_invalid_public_key",
+        E2eeError::ModelKeyMismatch => "e2ee_model_key_mismatch",
+        E2eeError::InvalidNonce => "e2ee_invalid_nonce",
+        E2eeError::ReplayDetected => "e2ee_replay_detected",
+        E2eeError::InvalidTimestamp => "e2ee_invalid_timestamp",
+        E2eeError::InvalidPayloadModel => "e2ee_invalid_payload_model",
+        E2eeError::DecryptionFailed => "e2ee_decryption_failed",
+        E2eeError::EncryptionFailed => "internal_error",
+    }
+}
+
+/// The status a [`ServiceError`] is served and recorded with.
+pub fn client_error_status(err: &ServiceError) -> u16 {
+    classify(err).0
+}
+
+/// Turn a [`ServiceError`] into what the client is told, and log the error
+/// itself — the only place its full text goes.
+pub fn client_error(surface: Surface, err: &ServiceError, request_id: Option<&str>) -> ClientError {
+    let (status, refusal_type, message) = classify(err);
+    let class = ErrorClass::from(err);
+    let request_id = request_id.unwrap_or_default();
+    match status {
+        500 => {
+            tracing::error!(error = %err, detail = ?err, ?class, request_id, "request failed inside the gateway")
+        }
+        s if s >= 500 => tracing::warn!(error = %err, ?class, status, request_id, "request failed"),
+        _ => tracing::debug!(error = %err, ?class, status, request_id, "request rejected"),
+    }
+    ClientError {
+        status,
+        error_type: refusal_type.unwrap_or(match (status, surface) {
+            // A gateway fault is not the upstream's: 5xx otherwise reads as
+            // `upstream_error` on this surface.
+            (500, Surface::Openai) => "internal_error",
+            _ => error_type(surface, status),
+        }),
+        message: message.unwrap_or_else(|| match status {
+            500 => INTERNAL_ERROR_MESSAGE.to_string(),
+            _ => upstream_message(status).to_string(),
+        }),
+    }
+}
+
+/// The response for a [`ServiceError`], in `surface`'s envelope.
+pub fn service_error_response(
+    surface: Surface,
+    err: &ServiceError,
+    request_id: Option<&str>,
+) -> Response {
+    let error = client_error(surface, err, request_id);
+    error_response(
+        surface,
+        error.status,
+        error.error_type,
+        &error.message,
+        request_id,
+    )
 }
 
 /// Serialize the surface error envelope to bytes (for the E2EE generated path).
@@ -810,6 +975,133 @@ mod scrub_tests {
 #[cfg(test)]
 mod tests {
     use super::is_upstream_capacity_signal;
+
+    #[test]
+    fn a_service_error_is_served_by_class_never_by_its_own_text() {
+        use super::{client_error, Surface};
+        use crate::aci::upstream::UpstreamError;
+        use crate::aggregator::service::{E2eeError, ServiceError, UpstreamVerificationError};
+
+        let secret = "https://node-7.provider.example.com/v1?key=sk-live";
+        let cases: Vec<(ServiceError, u16, &str, &str, &str)> = vec![
+            // Gateway faults: one status in every mode, the cause withheld.
+            (
+                ServiceError::Keyset(secret.into()),
+                500,
+                "internal_error",
+                "api_error",
+                "The gateway encountered an internal error",
+            ),
+            (
+                ServiceError::SessionStore(secret.into()),
+                500,
+                "internal_error",
+                "api_error",
+                "The gateway encountered an internal error",
+            ),
+            (
+                E2eeError::EncryptionFailed.into(),
+                500,
+                "internal_error",
+                "api_error",
+                "The gateway encountered an internal error",
+            ),
+            // Transport text carries the upstream's URL.
+            (
+                UpstreamError::Transport(format!("error sending request for url ({secret})"))
+                    .into(),
+                502,
+                "upstream_error",
+                "api_error",
+                "The upstream provider returned an error",
+            ),
+            (
+                UpstreamError::ChannelBindingMismatch(secret.into()).into(),
+                502,
+                "upstream_error",
+                "api_error",
+                "The upstream's verified channel binding could not be enforced",
+            ),
+            (
+                UpstreamError::Timeout(secret.into()).into(),
+                504,
+                "timeout_error",
+                "timeout_error",
+                "The upstream provider timed out",
+            ),
+            (
+                UpstreamError::Upstream { status: 401 }.into(),
+                502,
+                "upstream_error",
+                "api_error",
+                "The upstream provider is currently unavailable",
+            ),
+            // A withheld 2xx is no answer.
+            (
+                UpstreamError::Upstream { status: 204 }.into(),
+                502,
+                "upstream_error",
+                "api_error",
+                "The upstream provider returned an error",
+            ),
+            // Written by the gateway about the caller's request: served.
+            (
+                UpstreamError::Routing("no upstream route for model \"m\"".into()).into(),
+                404,
+                "not_found_error",
+                "not_found_error",
+                "no upstream route for model \"m\"",
+            ),
+            // ...unless it names a host after all.
+            (
+                UpstreamError::Routing(format!("unknown target {secret}")).into(),
+                404,
+                "not_found_error",
+                "not_found_error",
+                "The requested model or resource was not found",
+            ),
+            (
+                UpstreamError::InvalidRequest("invalid media metadata".into()).into(),
+                400,
+                "invalid_request_error",
+                "invalid_request_error",
+                "invalid media metadata",
+            ),
+            (
+                E2eeError::ReplayDetected.into(),
+                400,
+                "e2ee_replay_detected",
+                "e2ee_replay_detected",
+                "E2EE replay detected",
+            ),
+            (
+                UpstreamVerificationError::VerifierFailed("quote expired".into()).into(),
+                503,
+                "upstream_verification_failed",
+                "upstream_verification_failed",
+                "upstream verifier reported failed: quote expired",
+            ),
+            (
+                UpstreamVerificationError::NoEligibleAttestedSession("m".into()).into(),
+                412,
+                "session_not_accepted",
+                "session_not_accepted",
+                "none of the requested attested sessions is available for model m; \
+                  pinned sessions may have been superseded by \
+                 re-verification, so re-list /v1/aci/sessions and retry",
+            ),
+        ];
+        for (err, status, openai_type, anthropic_type, message) in cases {
+            let openai = client_error(Surface::Openai, &err, None);
+            assert_eq!(openai.status, status, "{err:?}");
+            assert_eq!(openai.error_type, openai_type, "{err:?}");
+            assert_eq!(openai.message, message, "{err:?}");
+            let anthropic = client_error(Surface::Anthropic, &err, None);
+            assert_eq!(anthropic.status, status, "{err:?}");
+            assert_eq!(anthropic.error_type, anthropic_type, "{err:?}");
+            assert_eq!(anthropic.message, message, "{err:?}");
+        }
+    }
 
     #[test]
     fn top_level_message_bodies_still_yield_a_client_message() {

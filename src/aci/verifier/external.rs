@@ -409,11 +409,17 @@ impl ExternalProviderVerifier {
         })?
         .map_err(|e| format!("provider verifier process failed: {e}"))?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            // stderr is a traceback: it goes to the log, not into a reason
+            // that receipts and clients carry.
+            tracing::warn!(
+                provider = %self.provider,
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                "provider verifier exited unsuccessfully"
+            );
             return Err(format!(
-                "provider verifier exited with status {}: {}",
-                output.status,
-                stderr.trim()
+                "provider verifier exited with status {}",
+                output.status
             ));
         }
         Ok(output.stdout)
