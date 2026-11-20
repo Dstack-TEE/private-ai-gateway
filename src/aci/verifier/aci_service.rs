@@ -178,6 +178,37 @@ pub(super) enum AciServiceVerificationError {
     DownstreamTlsBindingNotInKeyset,
 }
 
+impl AciServiceVerificationError {
+    /// The cause a receipt records for this error.
+    fn failure(&self) -> VerificationFailure {
+        use VerificationFailure as F;
+        match self {
+            Self::Transport(_) | Self::HttpStatus { .. } | Self::Collateral(_) | Self::Timeout => {
+                F::EvidenceUnavailable
+            }
+            Self::InvalidJson(_)
+            | Self::MissingQuote
+            | Self::InvalidQuoteHex(_)
+            | Self::InvalidQuoteReportDataHex(_)
+            | Self::InvalidEventLog(_) => F::EvidenceInvalid,
+            Self::QuoteVerification(_) | Self::TeeTypeMismatch { .. } => F::QuoteInvalid,
+            Self::AciBinding(_)
+            | Self::QuoteReportDataEvidenceMismatch
+            | Self::QuoteReportDataMismatch => F::BindingMismatch,
+            Self::MissingProvenance => F::ProvenanceNotAccepted,
+            Self::KeyCustody(_) | Self::InvalidKeyCustody(_) | Self::KmsRootRejected => {
+                F::CustodyNotVerified
+            }
+            Self::PolicyRejected => F::PolicyRejected,
+            Self::MissingTlsSpkiBinding
+            | Self::MissingDownstreamTlsBinding
+            | Self::InvalidDownstreamTlsBinding(_)
+            | Self::DownstreamTlsBindingHostMismatch { .. }
+            | Self::DownstreamTlsBindingNotInKeyset => F::NoChannelBinding,
+        }
+    }
+}
+
 /// Fold a §9.1 check result onto this deployment's error surface, so the
 /// messages and metrics that read these variants keep working.
 impl From<&CheckResult> for AciServiceVerificationError {
@@ -562,14 +593,7 @@ impl AciServiceUpstreamVerifier {
                 verifier_id: self.verifier_id.clone(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                failure: match err {
-                    AciServiceVerificationError::Transport(_)
-                    | AciServiceVerificationError::HttpStatus { .. }
-                    | AciServiceVerificationError::Collateral(_) => {
-                        VerificationFailure::EvidenceUnavailable
-                    }
-                    _ => VerificationFailure::NotVerified,
-                },
+                failure: err.failure(),
                 diagnostic: Some(err.to_string()),
                 ..Default::default()
             },

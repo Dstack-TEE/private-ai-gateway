@@ -86,11 +86,11 @@ const CHANNEL_BINDING_MESSAGE: &str =
 /// message when the error has one written for the caller.
 ///
 /// A message is served only where the gateway wrote it for the caller: a
-/// refusal (§10), an E2EE or nonce fault, a request a route cannot carry.
-/// Everything else — routing and transport text, upstream statuses, the
-/// gateway's own faults — gets fixed per-status wording, because its `Display`
-/// names hosts, routes and internals that belong in the log. No message is
-/// inspected or filtered here: what may be served is decided by the type.
+/// refusal (§10), an E2EE or nonce fault, a model with no route, a request a
+/// route cannot carry. Everything else — transport text, upstream statuses,
+/// the gateway's own faults — gets fixed per-status wording: its `Display` is
+/// built from whatever failed underneath, which is the log's to keep. No
+/// message is inspected or filtered here; what is served is decided by type.
 fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
     match err {
         // §10. A pinned-session miss is not a verification failure: the
@@ -116,10 +116,11 @@ fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
         ServiceError::InvalidNonce(_)
         | ServiceError::DownstreamTlsDomainMissing
         | ServiceError::DownstreamTlsDomainUnknown(_) => (400, None, Some(err.to_string())),
-        // Routing text names routes and backends; the miss itself is all the
-        // caller needs.
-        ServiceError::Upstream(UpstreamError::Routing(_)) => (404, None, None),
-        // Written about the caller's own request, by that variant's contract.
+        // Both are written by the gateway for the caller, by those variants'
+        // contracts: which model has no route, what is wrong with the request.
+        ServiceError::Upstream(UpstreamError::Routing(message)) => {
+            (404, None, Some(message.clone()))
+        }
         ServiceError::Upstream(UpstreamError::InvalidRequest(message)) => {
             (400, None, Some(message.clone()))
         }
@@ -234,6 +235,25 @@ pub fn service_error_response(
 ) -> Response {
     let error = client_error(surface, err, request_id);
     parts_response(error.status, error.body(surface, request_id))
+}
+
+/// Pass on how long the upstream asked the caller to wait, when the response
+/// is one a caller retries. Only the delay-seconds form is relayed.
+pub fn relay_retry_after(
+    response: &mut Response,
+    upstream_headers: &std::collections::HashMap<String, String>,
+) {
+    if !matches!(response.status().as_u16(), 429 | 503) {
+        return;
+    }
+    let seconds = upstream_headers
+        .get("retry-after")
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if let Some(seconds) = seconds {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
 }
 
 /// Serialize the surface error envelope to bytes (for the E2EE generated path).
@@ -998,6 +1018,29 @@ mod tests {
     use super::is_upstream_capacity_signal;
 
     #[test]
+    fn retry_after_is_relayed_only_as_seconds_and_only_on_a_retryable_answer() {
+        use super::{parts_response, relay_retry_after};
+        use std::collections::HashMap;
+
+        let relayed = |status: u16, value: &str| {
+            let mut response = parts_response(status, Vec::new());
+            let upstream = HashMap::from([("retry-after".to_string(), value.to_string())]);
+            relay_retry_after(&mut response, &upstream);
+            response
+                .headers()
+                .get("retry-after")
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+        assert_eq!(relayed(429, "30").as_deref(), Some("30"));
+        assert_eq!(relayed(503, " 5 ").as_deref(), Some("5"));
+        // A date, or anything else an upstream writes there, is not passed on.
+        assert_eq!(relayed(429, "Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        // Not an answer a caller retries on a timer.
+        assert_eq!(relayed(502, "30"), None);
+        assert_eq!(relayed(200, "30"), None);
+    }
+
+    #[test]
     fn a_service_error_is_served_by_class_never_by_its_own_text() {
         use super::{client_error, Surface};
         use crate::aci::receipt::VerificationFailure;
@@ -1067,11 +1110,11 @@ mod tests {
                 "The upstream provider returned an error",
             ),
             (
-                UpstreamError::Routing(format!("unknown target route {secret}")).into(),
+                UpstreamError::Routing("no upstream route for model \"m\"".into()).into(),
                 404,
                 "not_found_error",
                 "not_found_error",
-                "The requested model or resource was not found",
+                "no upstream route for model \"m\"",
             ),
             // Written by the gateway about the caller's request: served.
             (

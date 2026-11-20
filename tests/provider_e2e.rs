@@ -2118,10 +2118,10 @@ async fn chutes_provider_requires_exact_catalog_match() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["error"]["type"], "not_found_error");
-    assert_eq!(
-        error["error"]["message"],
-        "The requested model or resource was not found"
-    );
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("exact chute_id match"));
     assert!(provider_calls.lock().unwrap().is_empty());
     assert!(instance_requests.lock().unwrap().is_empty());
 }

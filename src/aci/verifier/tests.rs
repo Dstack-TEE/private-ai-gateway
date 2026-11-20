@@ -10,7 +10,9 @@ use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, SourceProvenance, TlsSpki,
     WorkloadKeyset,
@@ -694,6 +696,46 @@ async fn provider_external_verifier_rejects_verified_without_binding() {
         .diagnostic
         .unwrap()
         .contains("without an enforceable channel binding"));
+}
+
+/// What a provider verifier says went wrong reaches the event as a cause from
+/// the closed set, and its own words only as the diagnostic. A verifier that
+/// could not run at all judged nothing.
+#[tokio::test]
+async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_apart() {
+    let request = || UpstreamVerificationRequest {
+        upstream_name: "provider-upstream".to_string(),
+        url_origin: Some("https://provider.example".to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    };
+    let run = |script: &str| {
+        ExternalProviderVerifier::with_command(
+            "tinfoil",
+            AttestationScope::PerRouter,
+            vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            5,
+        )
+        .unwrap()
+    };
+
+    let judged = run(
+        r#"cat >/dev/null; printf '%s' '{"result":"failed","failure":"policy_rejected","reason":"TCB status is OutOfDate"}'"#,
+    )
+    .verify(request())
+    .await;
+    assert_eq!(judged.failure, VerificationFailure::PolicyRejected);
+    assert_eq!(
+        judged.diagnostic.as_deref(),
+        Some("TCB status is OutOfDate")
+    );
+
+    let crashed = run("cat >/dev/null; echo boom >&2; exit 3")
+        .verify(request())
+        .await;
+    assert_eq!(crashed.result, VerificationResult::Failed);
+    assert_eq!(crashed.failure, VerificationFailure::EvidenceUnavailable);
 }
 
 #[tokio::test]

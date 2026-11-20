@@ -1174,10 +1174,6 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
     ("server", "acme-edge/1.0"),
     ("inference-id", "29abc41a-c5c0-56d7-818a-c56c8c0fb272"),
     ("x-request-id", "fa57b5a8-4967-4e5c-9ab8-103a9feeeb14"),
-    // How long an upstream asks callers to wait, and whether it says so at
-    // all, differs by provider.
-    ("retry-after", "7"),
-    ("retry-after-ms", "7000"),
     ("alt-svc", r#"h3=":8443"; ma=86400"#),
     ("x-vendor-call-gateway", "true"),
     ("set-cookie", "edge_sess=0893731c1786104409;path=/"),

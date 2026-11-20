@@ -32,6 +32,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             "verifier contract drift: NearAICloudVerifier is missing "
             "verify_gateway_component; the confidential_verifier package is out of sync "
             "with this bridge (see scripts/confidential_verifier/VENDOR.md)",
+            failure="verifier_misconfigured",
             verifier_id=verifier_id,
         )
         return
@@ -55,6 +56,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI report did not include gateway_attestation",
+            failure="evidence_invalid",
             evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
@@ -64,6 +66,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI report did not include TLS SPKI binding",
+            failure="evidence_invalid",
             evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )

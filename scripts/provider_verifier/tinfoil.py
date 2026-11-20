@@ -98,6 +98,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Tinfoil verification returned no TLS public key fingerprint",
+            failure="evidence_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -118,6 +119,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
             provider,
             "Tinfoil verification was not router-scoped; expected the "
             f"confidential-model-router enclave (repo={repo!r})",
+            failure="provenance_not_accepted",
             evidence=evidence,
             verifier_id=verifier_id,
         )
