@@ -623,8 +623,12 @@ fn resolve_effective_reasoning(
     }
 }
 
-/// Read a switched-off `chat_template_kwargs` thinking flag as a request to
-/// disable reasoning.
+/// Read a switched-off `chat_template_kwargs` thinking flag, or a top-level
+/// `thinking: {"type": "disabled"}`, as a request to disable reasoning.
+///
+/// The top-level switch is never forwarded as the caller wrote it (on the
+/// OpenAI wire the gateway owns that key), so unread it would be dropped and
+/// the model would keep thinking. It follows the same rules as the flag.
 ///
 /// The flag is the vLLM chat-template idiom, and for some callers it is the
 /// only way to say "no thinking" at all: a client whose model catalog exposes
@@ -663,23 +667,38 @@ fn chat_template_reasoning_intent(
     {
         return None;
     }
-    let kwargs = params.get("chat_template_kwargs")?.as_object()?;
-    let mut disabled = false;
-    for key in ["thinking", "enable_thinking"] {
-        match kwargs.get(key).and_then(Value::as_bool) {
-            // Any switch left on ends the derivation, which covers both rules
-            // above at once: a plain "on" is never translated, and a caller who
-            // sets the two aliases against each other has stated no intent to
-            // read, so the body is left alone rather than a side picked.
-            Some(true) => return None,
-            Some(false) => disabled = true,
-            None => {}
+    let mut disabled = chat_thinking_disabled(params);
+    if let Some(kwargs) = params
+        .get("chat_template_kwargs")
+        .and_then(Value::as_object)
+    {
+        for key in ["thinking", "enable_thinking"] {
+            match kwargs.get(key).and_then(Value::as_bool) {
+                // Any switch left on ends the derivation, which covers both
+                // rules above at once: a plain "on" is never translated, and a
+                // caller who sets the switches against each other has stated
+                // no intent to read, so the body is left alone rather than a
+                // side picked.
+                Some(true) => return None,
+                Some(false) => disabled = true,
+                None => {}
+            }
         }
     }
     disabled.then(|| ReasoningConfig {
         enabled: Some(false),
         ..Default::default()
     })
+}
+
+/// Whether a Chat body carries a top-level `thinking: {"type": "disabled"}`,
+/// the off switch some OpenAI-compatible APIs and SDKs use.
+pub(crate) fn chat_thinking_disabled(params: &Value) -> bool {
+    params
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled")
 }
 
 fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
@@ -4370,10 +4389,26 @@ mod tests {
             assert!(body.get("reasoning").is_none(), "{request}");
         }
 
-        // With nothing to say the switch stays absent, and a caller-supplied
-        // `thinking` does not stand in for it: on the OpenAI wire the gateway
-        // owns that key. On the Anthropic wire it is the caller's own control
-        // and still passes through.
+        // A caller's own switched-off `thinking` is read as intent the same
+        // way. Set against a chat-template switch left on, it states nothing.
+        let off = with("thinking", json!({ "type": "disabled" }));
+        let body = shape(off.clone()).unwrap();
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+        let mut conflicting = off;
+        conflicting["chat_template_kwargs"] = json!({ "thinking": true });
+        assert!(shape(conflicting).unwrap().get("thinking").is_none());
+        // An explicit `reasoning` wins over it.
+        let mut explicit = with("thinking", json!({ "type": "disabled" }));
+        explicit["reasoning"] = json!({ "effort": "high" });
+        assert_eq!(
+            shape(explicit).unwrap()["thinking"],
+            json!({ "type": "enabled" })
+        );
+
+        // A switched-on caller `thinking` is not translated and does not stand
+        // in for ours: on the OpenAI wire the gateway owns that key. On the
+        // Anthropic wire it is the caller's own control and still passes
+        // through.
         let callers = with(
             "thinking",
             json!({ "type": "enabled", "budget_tokens": 1024 }),
