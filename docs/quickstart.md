@@ -1,4 +1,4 @@
-# ACI Quickstart
+# ACI quickstart
 
 Verify a live ACI deployment yourself. The commands below run against
 `https://tee.redpill.ai`, a live deployment of the reference implementation

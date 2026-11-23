@@ -1,4 +1,4 @@
-# 0G Private Computer Review
+# 0G Private Computer review
 
 Date: 2026-10-20 UTC. Supersedes the 2026-10-14 and 2026-10-16 drafts.
 

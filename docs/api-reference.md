@@ -53,7 +53,7 @@ authenticated user's cache partition; caller fields are removed before
 forwarding. Supported providers receive a derived per-user, provider-specific
 field on text-generation routes. Anonymous requests receive no generated
 salt. Direct mode retains existing caller-field behavior. See
-[Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation).
+[Prefix-cache isolation](prefix-cache-isolation.md).
 
 System One requests and responses are buffered JSON. Middleware preserves in-band
 `error` using the shared public error sanitizer, removing upstream metadata.
@@ -183,6 +183,9 @@ the [shared upload budget and deadline](configuration-reference.md#transcription
 and share inference admission with generations.
 
 ### Audio transcription
+
+The [audio transcription example](../examples/audio/README.md) configures an
+upstream and sends a request.
 
 Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
 `model` and exactly one nonempty `file` (up to 25 MiB), with filename extension

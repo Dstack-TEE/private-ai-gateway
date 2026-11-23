@@ -1,4 +1,4 @@
-# Confidential AI Review
+# Confidential AI review
 
 Date: 2026-10-27 PDT (round 3).
 

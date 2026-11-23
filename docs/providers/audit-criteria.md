@@ -1,4 +1,4 @@
-# Provider Audit Criteria
+# Provider audit criteria
 
 This document defines the admission bar for adding a verified upstream provider
 to Private AI Gateway. It is a normative review rubric, not a record of

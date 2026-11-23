@@ -1,4 +1,4 @@
-# ArmetAI Verification
+# ArmetAI verification
 
 The `armet-ai` adapter verifies one per-model Intel TDX endpoint that does
 **not** run on dstack. There is no event log to replay and no dstack verifier:
@@ -185,7 +185,7 @@ The Rust scope seam refuses a bridge result that declares `router` scope for
 this provider, so one model's verification cannot be reused for another model
 behind the same origin.
 
-Middleware injects a per-user `cache_salt`, enforced by vLLM in the measured TD. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+Middleware injects a per-user `cache_salt`, enforced by vLLM in the measured TD. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
 ## Evidence
 

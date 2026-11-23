@@ -1,4 +1,4 @@
-# 0G Private Computer Verification
+# 0G Private Computer verification
 
 The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 0G router. It implements 0G's E2EE protocol natively, verifies every candidate provider before sealing anything to it, and releases a response only after the provider's signature recovers to the verified on-chain signer.
 
@@ -72,7 +72,7 @@ The backend uses the first provider, in preview order, whose recorded key hashes
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response keeps its status and loses its body: failover, the capacity retry, the recorded attempt and the client's status treat it like that status from any upstream, and its body is not returned.
 
-Middleware injects a per-user `cache_salt`, sealed by the adapter and merged into the served request by the broker; see [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation) for observed enforcement and limitations.
+Middleware injects a per-user `cache_salt`, sealed by the adapter and merged into the served request by the broker; see [Prefix-cache isolation](../../prefix-cache-isolation.md) for observed enforcement and limitations.
 
 ## Responses
 
@@ -126,7 +126,7 @@ These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this
 ## Tests
 
 - `src/aci/upstream/zero_g/tests.rs`:
-  - interop with `tests/fixtures/0g-private-computer/interop.json`, produced by 0G's Go protocol library at the pinned release (provenance in that directory's README), plus the broker signature KAT;
+  - interop with `tests/fixtures/0g-private-computer/interop.json`, produced by 0G's Go protocol library at the pinned release ([provenance](../../../tests/fixtures/0g-private-computer/README.md)), plus the broker signature KAT;
   - tampered, reordered, truncated and unsealed frames;
   - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and binding mismatch.
 - `src/aci/verifier/tests/zero_g.rs`: the real compute-network-19 quote with patched report_data. It covers TargetSeparated, unacknowledged signer, model mismatch, signer mismatch, boot chain, quote redirect, and root-check rejections, and failing closed when no candidate passes.

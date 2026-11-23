@@ -1,4 +1,4 @@
-# Configuration Reference
+# Configuration reference
 
 Private AI Gateway reads one static JSON file at startup and owns one writable
 state directory. Upstream routes have a separate JSON schema because operators
@@ -294,7 +294,7 @@ request time.
 ### Cache partition derivation and rotation
 
 Middleware cache partitioning is automatic, with no new configuration option.
-See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)
+See [Prefix-cache isolation](prefix-cache-isolation.md)
 for provider mapping and supported request paths.
 
 Let `lp(x) = u32_be(byte_length(x)) || x`, and let `HMAC` mean HMAC-SHA256.
@@ -323,7 +323,7 @@ Rotation invalidates every old partition and causes a global cache cold start;
 there is no dual-read of old caches. Changing the KMS application/key has the
 same cache-lifecycle effect.
 
-See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)
+See [Prefix-cache isolation](prefix-cache-isolation.md)
 for privacy, provider limitations, and anonymous/direct-mode behavior.
 
 ### Upstream fields
@@ -471,7 +471,7 @@ The gateway process and provider-verifier children use:
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime admin token overriding static `admin_token`. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE` | Optional path to a file holding the admin token, such as a Compose secret, read when `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is unset. Surrounding whitespace is trimmed; an empty or unreadable file fails startup. |
 | `RUST_LOG` | `tracing_subscriber` filter. Defaults to `info`. |
-| `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](getting-started.md#install-dependencies). |
+| `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](local-development.md#install-dependencies). |
 | `DSTACK_VERIFIER_URL` | External verifier URL consumed by NEAR AI and PhalaDirect bridge code. Those adapters default to `http://localhost:8080` when unset. |
 
 The repository entrypoint and deployment manifest also use:

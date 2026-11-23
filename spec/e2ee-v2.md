@@ -1,4 +1,4 @@
-# E2EE v2 Compatibility Protocol
+# E2EE v2 compatibility protocol
 
 > **Version:** `2`
 > **Status:** supported, frozen compatibility protocol

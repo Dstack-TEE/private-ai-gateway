@@ -1,4 +1,4 @@
-# NEAR AI Gateway Review
+# NEAR AI gateway review
 
 Date: 2026-05-18 UTC. Verdict and lease contract updated 2026-06-15 for
 router-scoped sessions.

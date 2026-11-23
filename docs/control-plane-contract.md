@@ -359,7 +359,7 @@ the trusted identity source: returning the same ID for different people makes
 them share a partition. Anonymous consults have no generated cache salt.
 Non-empty caller `cache_salt` strings subdivide one user's partition; neither
 caller cache field reaches the provider unchanged. Salts are absent from
-consult requests and post reports. See [provider mapping and limitations](providers/README.md#prefix-cache-isolation-observation)
+consult requests and post reports. See [provider mapping and limitations](prefix-cache-isolation.md)
 and [derivation/rotation](configuration-reference.md#cache-partition-derivation-and-rotation).
 
 ### Denials

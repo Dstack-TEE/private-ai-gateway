@@ -1,4 +1,4 @@
-# Chutes E2EE Review
+# Chutes E2EE review
 
 Date: 2026-05-18 UTC.
 

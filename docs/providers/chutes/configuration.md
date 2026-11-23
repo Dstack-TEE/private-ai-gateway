@@ -1,4 +1,4 @@
-# Configure a Private Chutes Route
+# Configure a private Chutes route
 
 Private Chutes routes use the standard `chutes` adapter, a dedicated chute origin, pinned chute identifiers, and encrypted `/e2e/invoke` transport.
 
