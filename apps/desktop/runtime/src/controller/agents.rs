@@ -110,9 +110,6 @@ impl DesktopRuntime {
                 None => Ok(Vec::new()),
             };
         }
-        if let Err(error) = self.reconcile_agents() {
-            self.report_once(error);
-        }
         // Publish the scan under the same lock as connect/disconnect and key
         // rotation, so an older scan cannot restore revoked credentials.
         let _guard = self.lock_agents()?;
@@ -303,6 +300,9 @@ impl DesktopRuntime {
                 .map_or(true, |failures| !failures.is_empty()),
         );
         let failures = outcome?;
+        for (agent, reason) in &failures {
+            tracing::warn!(agent = %agent, reason = %reason, "agent reconciliation failed");
+        }
         self.publish_agent_tokens(projector.scan(catalog.as_ref())?.1)?;
         Ok(all_applied(failures)?)
     }

@@ -131,23 +131,24 @@ impl Projector {
                 let result = if record.cleanup_pending {
                     self.cleanup(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
-                } else if catalog.is_none()
-                    || !status.installed
-                    || status.error.is_some()
-                    || (!record.suspended && !status.authorized)
-                {
-                    if catalog.is_some()
-                        && status.installed
-                        && status.error.is_none()
-                        && !record.suspended
-                        && !status.authorized
-                    {
-                        if let Some(record) = store.get_mut(agent.id()) {
-                            record.attention = status.attention.clone().or_else(|| Some("Configuration changed outside the app; reconnect to apply it again".to_string()));
-                        }
-                    }
+                } else if catalog.is_none() {
                     self.suspend(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
+                } else if !record.suspended
+                    && !status.authorized
+                    && status.attention.as_deref().is_some_and(|attention| {
+                        attention.contains("outdated credential helper")
+                            || attention.contains("OpenClaw helper changed")
+                    })
+                {
+                    self.reproject(agent, &mut store, catalog)
+                } else if !record.suspended && (!status.installed || !status.authorized) {
+                    if let Some(record) = store.get_mut(agent.id()) {
+                        record.attention = status.attention.clone().or_else(|| Some("Configuration changed outside the app; reconnect to apply it again".to_string()));
+                    }
+                    self.save_store(&store)
+                        .map_err(|_| ConnectFailure::Unavailable(AgentError::RecordUnavailable))
+                        .map(|_| ())
                 } else if record.suspended && record.attention.is_none() {
                     self.suspend(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
@@ -276,14 +277,13 @@ impl Projector {
             }
         }
         let text = self.read_config_at(path)?;
-        let mut doc = ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default())
-            .map_err(|reason| {
-                AgentError::InvalidConfiguration(format!(
-                    "Cannot restore {} at {}: {reason}",
-                    agent.name(),
-                    path.display()
-                ))
-            })?;
+        let mut doc = self.parse_config(agent, text.as_deref()).map_err(|error| {
+            AgentError::InvalidConfiguration(format!(
+                "Cannot restore {} at {}: {error}",
+                agent.name(),
+                path.display()
+            ))
+        })?;
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {

@@ -145,9 +145,27 @@ pub(super) fn is_model_selection_field(agent: Agent, field: &OwnedField) -> bool
     })
 }
 
+pub(super) fn is_any_model_selection_field(field: &OwnedField) -> bool {
+    Agent::ALL
+        .iter()
+        .copied()
+        .any(|agent| is_model_selection_field(agent, field))
+}
+
 pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedField) -> bool {
     if is_model_selection_field(agent, field) {
         return true;
+    }
+    if is_regenerable_field(agent, field) {
+        let Some(mut expected) = field.value.clone() else {
+            return field.holds(owned_value(doc, field).as_ref());
+        };
+        let Some(mut current) = owned_value(doc, field) else {
+            return false;
+        };
+        normalize_regenerable_value(agent, &mut expected);
+        normalize_regenerable_value(agent, &mut current);
+        return expected == current;
     }
     if agent == Agent::Dsh
         && field.path == owned(&["config"])
@@ -170,6 +188,40 @@ pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedFi
         return expected == current;
     }
     field.holds(owned_value(doc, field).as_ref())
+}
+
+fn is_regenerable_field(agent: Agent, field: &OwnedField) -> bool {
+    match agent {
+        Agent::Codex => field.path == owned(&["model_catalog_json"]),
+        Agent::ClaudeCode => field.path == owned(&["modelPicker"]),
+        Agent::OpenCode => field.path == owned(&["provider", "private-ai-proxy"]),
+        Agent::Pi | Agent::OhMyPi => field.path == owned(&["providers", "private-ai-proxy"]),
+        Agent::OpenClaw => field.path == owned(&["models", "providers", "private-ai-proxy"]),
+        Agent::Dsh => {
+            field.path == owned(&["config"])
+                && field
+                    .entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.key.id == "llm-pi-ai")
+        }
+        Agent::Hermes => false,
+    }
+}
+
+fn normalize_regenerable_value(agent: Agent, value: &mut ConfigValue) {
+    let ConfigValue::Json(value) = value else {
+        return;
+    };
+    match agent {
+        Agent::Codex | Agent::ClaudeCode => {}
+        Agent::OpenCode | Agent::Pi | Agent::OhMyPi | Agent::OpenClaw => {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("models");
+            }
+        }
+        Agent::Dsh => remove_json_path(value, &["providers", "private-ai-proxy", "models"]),
+        Agent::Hermes => {}
+    }
 }
 
 fn remove_json_path(value: &mut serde_json::Value, path: &[&str]) {
@@ -454,6 +506,14 @@ pub(super) fn project(
         if matches!(field.value, Some(ConfigValue::Json(_)))
             && doc.contains(&path)
             && still_ours.is_none()
+            && !prior.iter().any(|recorded| {
+                recorded.path == field.path
+                    || (agent == Agent::OpenCode
+                        && ((recorded.path == owned(&["provider", "private-ai-proxy"])
+                            && field.path == owned(&["providers", "private-ai-proxy"]))
+                            || (recorded.path == owned(&["providers", "private-ai-proxy"])
+                                && field.path == owned(&["provider", "private-ai-proxy"]))))
+            })
         {
             return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));
         }
@@ -925,7 +985,9 @@ pub(super) fn restore(
         if let Some(Previous::Secret { secret_ref }) = &field.previous {
             consumed_secrets.push(secret_ref.clone());
         }
-        if !field.holds(current.as_ref()) {
+        if !field.holds(current.as_ref())
+            && !(is_any_model_selection_field(field) && private_model_selection(current.as_ref()))
+        {
             continue;
         }
         let sensitive = is_sensitive(&field.path);
@@ -986,6 +1048,16 @@ pub(super) fn restore(
         consumed_secrets,
         ..Edit::default()
     })
+}
+
+fn private_model_selection(value: Option<&ConfigValue>) -> bool {
+    match value {
+        Some(ConfigValue::Str(value)) => value.starts_with("private-ai-proxy/"),
+        Some(ConfigValue::Json(value)) => {
+            value.get("providerID").and_then(serde_json::Value::as_str) == Some("private-ai-proxy")
+        }
+        _ => false,
+    }
 }
 
 /// Put an exact field back: remove the key it added, or the scalar source it

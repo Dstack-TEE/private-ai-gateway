@@ -209,6 +209,32 @@ pub(super) fn opencode_provider(
     }))
 }
 
+pub(super) fn opencode_provider_v2(provider: &serde_json::Value) -> serde_json::Value {
+    let mut native = serde_json::Map::new();
+    if let Some(package) = provider.get("npm") {
+        native.insert("package".into(), package.clone());
+    }
+    if let Some(name) = provider.get("name") {
+        native.insert("name".into(), name.clone());
+    }
+    if let Some(options) = provider
+        .get("options")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut settings = serde_json::Map::new();
+        for key in ["baseURL", "apiKey"] {
+            if let Some(value) = options.get(key) {
+                settings.insert(key.into(), value.clone());
+            }
+        }
+        native.insert("settings".into(), serde_json::Value::Object(settings));
+    }
+    if let Some(models) = provider.get("models") {
+        native.insert("models".into(), models.clone());
+    }
+    serde_json::Value::Object(native)
+}
+
 /// OpenCode's `{file:<path>}` substitution, which no library writes. It ends
 /// at the first `}`, so a path with a brace cannot be written safely.
 fn opencode_file_reference(token_path: &Path) -> Result<String, String> {

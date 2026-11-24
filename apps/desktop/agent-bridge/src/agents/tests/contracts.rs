@@ -366,6 +366,36 @@ fn opencode_policies_use_the_last_matching_provider_rule() {
 }
 
 #[test]
+fn audit_opencode_v2_projection_uses_native_provider_keys() {
+    let sandbox = sandbox("audit-opencode-v2-projection");
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"providers":{"other":{"name":"User provider"}},"model":{"providerID":"other","model":"native"}}"#,
+    );
+    let catalog = catalog();
+    let preview =
+        sandbox
+            .projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &claude_options());
+    assert!(preview.is_ok(), "{preview:?}");
+    let preview = preview.unwrap();
+    let result = sandbox.projector.apply(
+        Agent::OpenCode,
+        true,
+        &preview.revision,
+        Some(&catalog),
+        &claude_options(),
+    );
+    assert!(result.is_ok(), "{result:?}");
+    let status = result.unwrap();
+    assert!(status.authorized, "{status:?}");
+    let config = doc(&sandbox, Agent::OpenCode);
+    assert!(config.contains(&["providers", "private-ai-proxy"]));
+    assert!(!config.contains(&["provider", "private-ai-proxy"]));
+}
+
+#[test]
 fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
     let catalog = Catalog::from_remote(
         &json!({"data":[

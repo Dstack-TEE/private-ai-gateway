@@ -880,6 +880,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
             catalog: Some(catalog.clone()),
             ..Default::default()
         });
+        runtime.reconcile_agents().unwrap();
         assert!(runtime
             .list_agents()
             .unwrap()

@@ -88,7 +88,7 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
     if doc.contains(PROVIDER_PATH)
         && !prior.is_some_and(|record| {
             record.fields.iter().any(|field| {
-                field.path == owned(PROVIDER_PATH) && field.value == doc.get_value(PROVIDER_PATH)
+                field.path == owned(PROVIDER_PATH) && holds_managed_field(Agent::OhMyPi, doc, field)
             })
         })
     {

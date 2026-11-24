@@ -155,6 +155,88 @@ fn changing_a_connected_agents_model_keeps_access() {
 }
 
 #[test]
+fn audit_generated_catalog_edits_do_not_deauthorize() {
+    let sandbox = sandbox("audit-generated-catalog");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_value(
+            &["provider", "private-ai-proxy", "models"],
+            &ConfigValue::Json(serde_json::json!({})),
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(status.connected, "{status:?}");
+    assert!(status.authorized, "{status:?}");
+}
+
+#[test]
+fn audit_drift_does_not_restore_or_revoke_until_disconnect() {
+    let sandbox = sandbox("audit-drift-no-suspend");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::ClaudeCode);
+    config
+        .set_str(&["env", "ANTHROPIC_BASE_URL"], "http://127.0.0.1:9999")
+        .unwrap();
+    let edited = config.render().unwrap();
+    write(&path, &edited);
+    let token_path = sandbox.projector.tokens.path(Agent::ClaudeCode.id());
+    let token = fs::read(&token_path).unwrap();
+    sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(fs::read(&token_path).unwrap(), token);
+    assert!(!sandbox.projector.load_store().unwrap()[Agent::ClaudeCode.id()].suspended);
+}
+
+#[test]
+fn audit_agent_helpers_use_the_staged_helper_location() {
+    let sandbox = sandbox("audit-staged-helper");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let config = doc(&sandbox, Agent::ClaudeCode);
+    let helper = config.get_str(&["apiKeyHelper"]).unwrap();
+    assert!(helper.contains(
+        &sandbox
+            .projector
+            .data_dir
+            .join("helpers")
+            .display()
+            .to_string()
+    ));
+}
+
+#[test]
+fn audit_record_attention_is_visible_while_connected() {
+    let sandbox = sandbox("audit-record-attention");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let mut store = sandbox.projector.load_store().unwrap();
+    store.get_mut(Agent::ClaudeCode.id()).unwrap().attention = Some("audit attention".into());
+    sandbox.projector.save_store(&store).unwrap();
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::ClaudeCode.id())
+        .unwrap();
+    assert_eq!(status.attention.as_deref(), Some("audit attention"));
+}
+
+#[test]
 fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
     const CASE_ENV: &str = "PAP_TEST_HERMES_PATH_CASE";
     const ROOT_ENV: &str = "PAP_TEST_HERMES_PATH_ROOT";

@@ -121,7 +121,8 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
             if index + 1 == path.len() {
                 let ours = prior.is_some_and(|record| {
                     record.fields.iter().any(|field| {
-                        field.path == owned(path) && field.value == doc.get_value(path)
+                        field.path == owned(path)
+                            && holds_managed_field(Agent::OpenClaw, doc, field)
                     })
                 });
                 if !ours {

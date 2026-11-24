@@ -147,11 +147,10 @@ impl Connection {
         if let Some(selection) = &self.selection {
             selection.validate()?;
         }
-        if self
-            .fields
-            .iter()
-            .any(|field| matches!(field.previous, Some(Previous::Plain(ConfigValue::Json(_)))))
-        {
+        if self.fields.iter().any(|field| {
+            matches!(field.previous, Some(Previous::Plain(ConfigValue::Json(_))))
+                && !is_any_model_selection_field(field)
+        }) {
             return Err("The connection record contains an unsafe structured plaintext backup. Access is disabled; secure manual recovery is required and the existing record is retained".to_string());
         }
         Ok(())
@@ -315,6 +314,12 @@ impl Projector {
         tool_env: bool,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
+        let staged_helper = data_dir.join("helpers").join(helper_binary_name());
+        let helper_exe = if staged_helper.is_file() {
+            staged_helper
+        } else {
+            helper_exe
+        };
         Self {
             home,
             tokens: TokenFiles::new(&data_dir),

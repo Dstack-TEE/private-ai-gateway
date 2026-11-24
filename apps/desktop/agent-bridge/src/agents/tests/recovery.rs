@@ -93,6 +93,29 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
 }
 
 #[test]
+fn disconnect_restores_original_opencode_model_after_private_model_edit() {
+    let sandbox = sandbox("restore-private-opencode-model");
+    let agent = Agent::OpenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"model":"other/original","provider":{"other":{"name":"User provider"}}}"#,
+    );
+    let catalog = catalog();
+    apply_connect(&sandbox, agent, &catalog, &claude_options());
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["model"], "private-ai-proxy/phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+        Some("other/original")
+    );
+}
+
+#[test]
 fn recorded_paths_restore_original_files_after_location_changes() {
     for agent in [Agent::ClaudeCode, Agent::OpenCode] {
         let mut sandbox = sandbox(&format!("recorded-path-{}", agent.id()));
