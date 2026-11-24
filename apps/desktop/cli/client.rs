@@ -69,7 +69,7 @@ pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 /// Generous bounds for attestation and session artifacts. These are large
 /// enough for quote collateral and evidence in normal deployments while
 /// preventing an untrusted service from making the CLI buffer indefinitely.
-/// Observed live: Chutes evidence reaches roughly 4.2 MB per session, with larger fleet bundles.
+/// Observed live: Chutes evidence reaches roughly 1.7–4.2 MB per session, with larger fleet bundles.
 /// Keep each JSON evidence bound at the gateway's 64 MiB default operator limit.
 pub const MAX_ATTESTATION_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_SESSION_LIST_BYTES: usize = 64 * 1024 * 1024;
