@@ -92,30 +92,23 @@ fn configured_backend_protocol_comes_from_provider_and_wire_operation() {
 }
 
 #[test]
-fn router_provider_verifies_once_per_channel() {
-    // A router (NEAR AI) with several models yields ONE verification target — the
-    // shared gateway channel — so it seals one session per channel, not one per
-    // model. A per-model provider keeps one target per model.
-    let mut router = test_upstream_config("near-router", UpstreamProvider::NearAi, "pub-a", "up-a");
-    router
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&router)).len(),
-        1,
-        "router collapses its models to one channel target"
-    );
-
-    let mut per_model =
-        test_upstream_config("phala", UpstreamProvider::PhalaDirect, "pub-a", "up-a");
-    per_model
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&per_model)).len(),
-        2,
-        "per-model provider verifies every model"
-    );
+fn verification_targets_follow_provider_model_checks() {
+    for (provider, expected_models) in [
+        (UpstreamProvider::Tinfoil, vec!["up-a"]),
+        (UpstreamProvider::NearAi, vec!["up-a", "up-b"]),
+        (UpstreamProvider::PhalaDirect, vec!["up-a", "up-b"]),
+    ] {
+        let mut config = test_upstream_config("upstream", provider, "pub-a", "up-a");
+        config
+            .models
+            .insert("pub-b".to_string(), "up-b".to_string());
+        let targets = verification_targets(std::slice::from_ref(&config));
+        let models: Vec<_> = targets
+            .iter()
+            .map(|target| target.model_id.as_str())
+            .collect();
+        assert_eq!(models, expected_models, "{provider:?}");
+    }
 }
 
 #[test]

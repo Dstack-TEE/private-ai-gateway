@@ -798,13 +798,12 @@ async fn external_provider_verifier_caches_verified_bindings() {
 }
 
 #[tokio::test]
-async fn router_shares_one_channel_verification_across_models() {
-    // Security-critical: a router keys its verifier cache on the channel, not the
-    // model, so verifying a second model reuses the first model's verification
-    // (one external run) and event_for re-tags it with the requesting model. A
-    // per-model provider must NOT share — each model is its own channel.
+async fn provider_verifier_cache_respects_model_checks() {
+    // NEAR AI must run its model selection check even with a cached router
+    // channel verification for a different model.
     for (provider, scope, expected_runs) in [
-        ("near-ai", AttestationScope::PerRouter, "1"),
+        ("tinfoil", AttestationScope::PerRouter, "1"),
+        ("near-ai", AttestationScope::PerRouter, "2"),
         ("phala-direct", AttestationScope::PerModel, "2"),
     ] {
         // The stub declares the provider's scope (routers) or omits it (per-model)
@@ -872,8 +871,7 @@ printf '%s' '{output}'"#
         assert_eq!(
             std::fs::read_to_string(&counter_path).unwrap(),
             expected_runs,
-            "{provider}: external verifier runs (a router reuses one channel \
-             verification across models; a per-model provider verifies each)"
+            "{provider}: external verifier runs"
         );
     }
 }
@@ -961,12 +959,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
 }
 
 #[tokio::test]
-async fn external_provider_refresh_keeps_existing_cache_on_failure() {
-    let directory = tempfile::tempdir().unwrap();
-    let counter_path = directory.path().join("counter");
+async fn external_provider_refresh_distinguishes_near_ai_model_rejection() {
     let output = json!({
         "result": "verified",
-        "verifier_id": "tinfoil/external-test/v1",
+        "verifier_id": "router/external-test/v1",
         "attested_scope": "router",
         "evidence": {
             "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
@@ -987,24 +983,9 @@ printf '%s' "$count" > "$1"
 if [ "$count" -eq 1 ]; then
   printf '%s' '{output}'
 else
-  printf '%s\n' 'refresh failed' >&2
-  exit 42
+  printf '%s' "$2"
 fi"#
     );
-    let verifier = ExternalProviderVerifier::with_command_and_cache(
-        "tinfoil",
-        AttestationScope::PerRouter,
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            script,
-            "provider-refresh-cache-test".to_string(),
-            counter_path.display().to_string(),
-        ],
-        5,
-        300,
-    )
-    .unwrap();
     let request = UpstreamVerificationRequest {
         upstream_name: "provider-upstream".to_string(),
         url_origin: Some("https://provider.example".to_string()),
@@ -1013,18 +994,37 @@ fi"#
         required: true,
     };
 
-    let first = verifier.verify(request.clone()).await;
-    let refresh = verifier.refresh(request.clone()).await;
-    let after_failed_refresh = verifier.verify(request).await;
-
-    assert_eq!(first.result, VerificationResult::Verified);
-    assert_eq!(refresh.result, VerificationResult::Failed);
-    assert_eq!(after_failed_refresh.result, VerificationResult::Verified);
-    assert_eq!(
-        std::fs::read_to_string(&counter_path).unwrap(),
-        "2",
-        "failed refresh must not remove the previous verified cache entry"
-    );
+    for (provider, failure, keep_cache) in [
+        ("tinfoil", VerificationFailure::EvidenceUnavailable, true),
+        ("near-ai", VerificationFailure::EvidenceUnavailable, true),
+        ("near-ai", VerificationFailure::BindingMismatch, false),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let counter_path = directory.path().join("counter");
+        let verifier = ExternalProviderVerifier::with_command_and_cache(
+            provider,
+            AttestationScope::PerRouter,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script.clone(),
+                "provider-refresh-cache-test".to_string(),
+                counter_path.display().to_string(),
+                json!({"result": "failed", "failure": failure.code()}).to_string(),
+            ],
+            5,
+            300,
+        )
+        .unwrap();
+        assert_eq!(
+            verifier.verify(request.clone()).await.result,
+            VerificationResult::Verified,
+        );
+        let refresh = verifier.refresh(request.clone()).await;
+        assert_eq!(refresh.result, VerificationResult::Failed);
+        assert_eq!(refresh.failure, failure);
+        assert_eq!(verifier.cached(&request).is_some(), keep_cache);
+    }
 }
 
 #[test]

@@ -27,7 +27,8 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
   Upstream read `report_data` from the dstack verifier result, which never contains it, so the
   binding check never ran.
 - `providers/nearai.py`: `NearaiProvider` takes an optional `api_key` and sends it as a bearer token
-  when fetching the attestation report.
+  when fetching the attestation report. It raises an explicit error when the
+  first model attestation lacks a non-empty `intel_quote` string.
 - `RedpillProvider` is renamed `RedPillProvider`.
 - `verifiers/dstack.py`: `DstackVerifier.verify` sends `"attestation": None` in the `/verify` body.
   dstack-verifier >= 0.5.6 serializes the request with `serde_human_bytes` and no field default, so the

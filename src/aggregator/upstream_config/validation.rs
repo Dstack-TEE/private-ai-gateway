@@ -37,13 +37,9 @@ pub(super) fn verification_targets(config: &[UpstreamConfig]) -> Vec<UpstreamVer
     let mut targets = Vec::new();
     for cfg in config {
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
-        // A router's attestation is of the gateway/enclave channel itself, which
-        // is identical for every model it fronts — every model resolves to the
-        // same channel-keyed verification. So probing a second model would only
-        // re-verify the same channel (a cache hit); we probe once with one
-        // representative model (`models` is a BTreeMap, so `.take(1)` is
-        // deterministic). Per-model / per-instance providers verify every model.
-        let model_ids: Vec<&String> = if cfg.provider.attestation_scope().is_per_router() {
+        // NEAR AI validates the selected model even though its evidence is
+        // router-scoped. Routers with shared verification use one model.
+        let model_ids: Vec<&String> = if cfg.provider.shares_verification_across_models() {
             cfg.models.values().take(1).collect()
         } else {
             cfg.models.values().collect()

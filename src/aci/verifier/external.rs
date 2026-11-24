@@ -198,12 +198,11 @@ impl ExternalProviderVerifier {
         self
     }
 
-    /// Cache / channel-identity key. A per-router provider shares one verified
-    /// channel across all its models, so the model is dropped from the key.
+    /// NEAR AI checks model selection before accepting its router evidence.
     fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
         let mut key = ExternalProviderVerifierCacheKey::from_request(request);
-        if self.scope.is_per_router() {
-            key.model_id = String::new();
+        if self.scope.is_per_router() && self.provider != "near-ai" {
+            key.model_id.clear();
         }
         key
     }
@@ -313,6 +312,11 @@ impl ExternalProviderVerifier {
                     if let Err(err) = self.record_provider_session(&output) {
                         return self.failed_event(request, err);
                     }
+                } else if self.provider == "near-ai"
+                    && event.failure == VerificationFailure::BindingMismatch
+                {
+                    // An explicit model mismatch supersedes the cached result.
+                    self.invalidate(&request);
                 }
                 self.maybe_cache_event(cache_key, &event, started);
                 event
@@ -341,9 +345,6 @@ impl ExternalProviderVerifier {
     }
 
     pub(super) fn invalidate(&self, request: &UpstreamVerificationRequest) {
-        // Must use the same key as `verify`/`refresh` (channel-keyed for routers),
-        // otherwise invalidation would target a different entry than the one
-        // cached and a router's verification could never be flushed.
         self.cache
             .write()
             .expect("external provider verifier cache poisoned")

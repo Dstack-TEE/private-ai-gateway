@@ -42,14 +42,28 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         api_key=provider_options.get("near_ai_api_key"),
     )
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
+    model_id = request["model_id"]
     with contextlib.redirect_stdout(sys.stderr):
-        report = await asyncio.to_thread(near_provider.fetch_report, request["model_id"])
-        verifier = NearAICloudVerifier(dstack_verifier_url)
-        gateway = (report.raw or {}).get("gateway_attestation") or {}
-        gateway_result = await verifier.verify_gateway_component(
-            report.raw or {},
-            report.request_nonce,
+        report = await asyncio.to_thread(near_provider.fetch_report, model_id)
+    raw = report.raw or {}
+    attestations = raw.get("model_attestations")
+    if not isinstance(attestations, list) or not attestations:
+        failed(provider, "NEAR AI report missing model_attestations", failure="evidence_invalid")
+        return
+    if any(
+        not isinstance(entry, dict) or entry.get("model_name") != model_id
+        for entry in attestations
+    ):
+        failed(
+            provider,
+            "NEAR AI model attestation model_name does not match the requested model ID",
+            failure="binding_mismatch",
         )
+        return
+    with contextlib.redirect_stdout(sys.stderr):
+        verifier = NearAICloudVerifier(dstack_verifier_url)
+        gateway = raw.get("gateway_attestation") or {}
+        gateway_result = await verifier.verify_gateway_component(raw, report.request_nonce)
     report_obj = model_dump(report)
     attestation_url = "https://cloud-api.near.ai/v1/attestation/report"
     if not gateway:
@@ -81,11 +95,8 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         )
         return
 
-    # NEAR AI is a router: this verifier attests the gateway TEE channel
-    # (attested_scope = "router"), shared by every model. Per-model TEE coverage
-    # is delegated to the verified gateway, which attests its own backends; the
-    # model is only a fetch parameter and is recorded on the receipt as an
-    # identifier.
+    # The model_name check guards model selection. The resulting evidence and
+    # binding cover the shared gateway TEE channel.
     #
     # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
     # so the session layer can populate a tri-state `tcb_up_to_date` claim. The
