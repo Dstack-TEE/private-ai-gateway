@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+* Keep Oh My Pi authorized when its settings allow a Private AI Proxy model and honor provider filters in `config.yaml`.
+* Restore the generated Claude Code model picker and dsh default-model entry when stopping protection so both can reconnect.
+* Report OpenCode model selections on Windows without `ProgramData` and detect OpenClaw entries that override only fallback models.
+
 ## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
 
 Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, network changes and routine commands that used to interrupt it, and adds `pap update` and `pap service restart`.

@@ -97,38 +97,61 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
     Ok(())
 }
 
-pub(super) fn validate_settings(path: &Path, catalog: Option<&Catalog>) -> Result<(), String> {
-    let Some(text) = fs::read_to_string(path).ok() else {
+pub(super) fn validate_settings(
+    path: &Path,
+    projection: &ConfigDoc,
+    catalog: Option<&Catalog>,
+) -> Result<(), String> {
+    let Some(settings) = selection::omp_settings(path)? else {
         return Ok(());
     };
-    let doc = ConfigDoc::parse(Format::Yaml, &text)?;
-    if doc
-        .get_value(&["disabledProviders"])
-        .is_some_and(|value| config_filter_matches(&value, PROVIDER))
-    {
+    if matches!(
+        settings.get_value(&["disabledProviders"]),
+        Some(ConfigValue::List(ids)) if ids.iter().any(|id| id == PROVIDER)
+    ) {
         return Err("Oh My Pi disabledProviders excludes private-ai-proxy; resolve that filter before connecting".into());
     }
-    if doc.get_value(&["enabledModels"]).is_some_and(|value| {
-        catalog.is_none_or(|catalog| {
-            catalog.models.iter().all(|model| {
-                !config_filter_matches(&value, &format!("private-ai-proxy/{}", model.id()))
-            })
-        })
-    }) {
-        return Err("Oh My Pi enabledModels excludes private-ai-proxy models; resolve that filter before connecting".into());
+    if let Some(ConfigValue::List(patterns)) = settings.get_value(&["enabledModels"]) {
+        if !patterns.is_empty() && !enabled_models_match(&patterns, projection, catalog) {
+            return Err("Oh My Pi enabledModels excludes private-ai-proxy models; resolve that filter before connecting".into());
+        }
     }
     Ok(())
 }
 
-fn config_filter_matches(value: &ConfigValue, target: &str) -> bool {
-    let ConfigValue::List(values) = value else {
+fn enabled_models_match(
+    patterns: &[String],
+    projection: &ConfigDoc,
+    catalog: Option<&Catalog>,
+) -> bool {
+    // model-resolver.ts@v19.1.1 matches globs against lowercase full and bare IDs.
+    let patterns: Vec<_> = patterns
+        .iter()
+        .filter_map(|pattern| glob::Pattern::new(&pattern.to_lowercase()).ok())
+        .collect();
+    let matches = |id: &str| {
+        let id = id.to_lowercase();
+        let full_id = format!("{PROVIDER}/{id}");
+        let options = glob::MatchOptions {
+            require_literal_separator: true,
+            ..glob::MatchOptions::new()
+        };
+        patterns.iter().any(|pattern| {
+            pattern.matches_with(&full_id, options) || pattern.matches_with(&id, options)
+        })
+    };
+    if let Some(catalog) = catalog {
+        return catalog.models.iter().any(|model| matches(model.id()));
+    }
+    // Token-only scans have no remote catalog. Use the currently projected rows.
+    let Some(ConfigValue::Json(rows)) = projection.get_value(&["providers", PROVIDER, "models"])
+    else {
         return false;
     };
-    values.iter().any(|value| {
-        let mut parts = value.split('*');
-        let prefix = parts.next().unwrap_or_default();
-        let suffix = parts.next().unwrap_or_default();
-        parts.next().is_none() && target.starts_with(prefix) && target.ends_with(suffix)
+    rows.as_array().into_iter().flatten().any(|row| {
+        row.get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(matches)
     })
 }
 

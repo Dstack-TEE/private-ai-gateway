@@ -258,13 +258,15 @@ unlocked OS keychain for a process running as you.
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
 - **Agent model choices stay user-owned.** Changing an agent's model keeps its
-  connection authorized when the model is in the verified catalog. A changed
-  routing or credential setting pauses that agent without restoring its file
+  connection authorized. An unavailable model or one from another provider
+  can show a notice. Changing routing or credential settings inside the
+  Private AI Proxy provider pauses that agent without restoring its file
   while protection is running. Reconnect projects the recorded settings again,
   and Disconnect or stopping protection restores the saved configuration.
   OpenCode 2 configurations use the native `providers` provider shape when
   their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
-  shape.
+  shape. Oh My Pi honors the model and provider filters in its companion
+  `config.yml` or `config.yaml`.
 - **Agent integration limits.** Claude Code project `.claude/settings.json` and
   `.claude/settings.local.json` can override `ANTHROPIC_BASE_URL`. Codex's
   `managed_config.toml` is outside this integration. Oh My Pi project config

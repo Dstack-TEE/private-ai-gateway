@@ -173,6 +173,15 @@ fn read(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+pub(super) fn omp_settings(config: &Path) -> Result<Option<ConfigDoc>, String> {
+    let Some((file, path)) = location(Agent::OhMyPi, config, None)? else {
+        return Err("Missing Oh My Pi settings path".into());
+    };
+    read(&path)?
+        .map(|text| ConfigDoc::parse(file.format(), &text))
+        .transpose()
+}
+
 pub(super) fn fingerprint(
     agent: Agent,
     config: &Path,

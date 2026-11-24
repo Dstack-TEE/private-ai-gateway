@@ -24,6 +24,7 @@ axum = "0.8"
 async-stream = "0.3"
 bytes = "1"
 futures-util = "0.3"
+glob = "0.3"
 hex = "0.4"
 jsonc-parser = { version = "0.34.0", features = ["serde", "cst"] }
 multer = { version = "3", default-features = false }

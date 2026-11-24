@@ -231,11 +231,7 @@ impl Projector {
                 oh_my_pi::validate_config(doc, prior)
                     .and_then(|()| {
                         let path = Agent::OhMyPi.config_path(&self.home, self.tool_env);
-                        let settings = path.with_file_name("config.yml");
-                        oh_my_pi::validate_settings(
-                            &settings,
-                            catalog,
-                        )
+                        oh_my_pi::validate_settings(&path, doc, catalog)
                     })
                     .map_err(AgentError::ConfigurationConflict)
             }
@@ -398,15 +394,7 @@ impl Projector {
                 merge_opencode_config(&mut merged, layer);
             }
         }
-        let system_dir = if cfg!(target_os = "macos") {
-            Some(PathBuf::from("/Library/Application Support/opencode"))
-        } else if cfg!(windows) {
-            env::var_os("ProgramData")
-                .map(PathBuf::from)
-                .map(|path| path.join("opencode"))
-        } else {
-            Some(PathBuf::from("/etc/opencode"))
-        };
+        let system_dir = opencode_system_config_dir(env::consts::OS);
         if let Some(system_dir) = system_dir {
             for path in [
                 system_dir.join("opencode.json"),
@@ -527,7 +515,11 @@ impl Projector {
                 .is_some_and(|schema| schema.contains("/v2/"))
     }
 
-    fn merged_opencode_selector(&self, doc: &ConfigDoc) -> Option<serde_json::Value> {
+    pub(super) fn merged_opencode_selector(
+        &self,
+        doc: &ConfigDoc,
+        system_dir: Option<PathBuf>,
+    ) -> Option<serde_json::Value> {
         let projected = doc.as_json()?;
         let global = self
             .tool_env
@@ -566,25 +558,14 @@ impl Projector {
                 merge_opencode_config(&mut merged, parse_jsonc(&content.into_string().ok()?).ok()?);
             }
         }
-        let system_dir = if cfg!(target_os = "macos") {
-            Some(PathBuf::from("/Library/Application Support/opencode"))
-        } else if cfg!(windows) {
-            env::var_os("ProgramData")
-                .map(PathBuf::from)
-                .map(|path| path.join("opencode"))
-        } else {
-            Some(PathBuf::from("/etc/opencode"))
-        }?;
-        for path in [
-            system_dir.join("opencode.json"),
-            system_dir.join("opencode.jsonc"),
-        ] {
-            if let Ok(text) = fs::read_to_string(path) {
-                merge_opencode_config(&mut merged, parse_jsonc(&text).ok()?);
+        if let Some(system_dir) = system_dir {
+            for name in ["opencode.json", "opencode.jsonc"] {
+                if let Ok(text) = fs::read_to_string(system_dir.join(name)) {
+                    merge_opencode_config(&mut merged, parse_jsonc(&text).ok()?);
+                }
             }
         }
-        let model = merged.get("model").cloned();
-        model
+        merged.get("model").cloned()
     }
 
     pub(super) fn status(
@@ -749,7 +730,10 @@ impl Projector {
         } else if status.connected {
             if agent == Agent::OpenCode
                 && self
-                    .merged_opencode_selector(doc.as_ref().unwrap())
+                    .merged_opencode_selector(
+                        doc.as_ref().unwrap(),
+                        opencode_system_config_dir(env::consts::OS),
+                    )
                     .as_ref()
                     .and_then(ConfigValue::from_json)
                     .and_then(|value| match value {
@@ -770,7 +754,7 @@ impl Projector {
             } else if agent == Agent::OpenClaw
                 && openclaw::entry_models(doc.as_ref().unwrap())
                     .iter()
-                    .any(|(_, model)| !model.starts_with("private-ai-proxy/"))
+                    .any(|model| !model.starts_with("private-ai-proxy/"))
             {
                 status.connected = false;
                 status.attention = Some(
@@ -798,7 +782,13 @@ impl Projector {
             }
             if refusal.is_none() {
                 refusal = self
-                    .validate_native_config(agent, doc, Some(record), &record.options, None)
+                    .validate_native_config(
+                        agent,
+                        doc,
+                        Some(record),
+                        &record.options,
+                        catalog.filter(|_| agent == Agent::OhMyPi),
+                    )
                     .err()
                     .map(|error| error.to_string());
             }
@@ -909,6 +899,14 @@ fn helper_fields_hold(agent: Agent, record: &Connection, doc: Option<&ConfigDoc>
         .iter()
         .filter(|field| is_helper_field(agent, field))
         .all(|field| field.holds(owned_value(doc, field).as_ref()))
+}
+
+pub(super) fn opencode_system_config_dir(os: &str) -> Option<PathBuf> {
+    match os {
+        "macos" => Some(PathBuf::from("/Library/Application Support/opencode")),
+        "windows" => env::var_os("ProgramData").map(|path| PathBuf::from(path).join("opencode")),
+        _ => Some(PathBuf::from("/etc/opencode")),
+    }
 }
 
 fn legacy_claude_journal(record: &Connection, doc: Option<&ConfigDoc>) -> bool {

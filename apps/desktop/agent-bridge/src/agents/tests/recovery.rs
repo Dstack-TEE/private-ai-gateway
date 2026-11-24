@@ -634,3 +634,103 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
     disconnect(&sandbox, Agent::ClaudeCode);
     assert!(sandbox.projector.load_store().unwrap().is_empty());
 }
+
+#[test]
+fn claude_stop_restores_an_edited_owned_model_picker_and_start_regenerates_it() {
+    let sandbox = sandbox("claude-stop-edited-picker");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    let original_picker = config.get_value(&["modelPicker"]).unwrap();
+    config
+        .set_value(&["modelPicker"], &ConfigValue::Json(json!({"options": []})))
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    let stopped = doc(&sandbox, agent);
+    let failures = sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(stopped.get_value(&["modelPicker"]), None);
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&["modelPicker"]),
+        Some(original_picker)
+    );
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+}
+
+#[test]
+fn dsh_disconnect_removes_an_appended_entry_with_only_its_model_edited() {
+    let sandbox = sandbox("dsh-disconnect-edited-model");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    config
+        .entry(&entry)
+        .unwrap()
+        .unwrap()
+        .set_str(&["config", "model"], "phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, agent);
+    assert!(doc(&sandbox, agent).entry(&entry).unwrap().is_none());
+}
+
+#[test]
+fn dsh_stop_removes_an_appended_entry_with_only_its_model_edited_and_start_reprojects() {
+    let sandbox = sandbox("dsh-stop-edited-model");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    config
+        .entry(&entry)
+        .unwrap()
+        .unwrap()
+        .set_str(&["config", "model"], "phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    let stopped = doc(&sandbox, agent);
+    let failures = sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(stopped.entry(&entry).unwrap().is_none());
+    assert_eq!(
+        dsh::selected_model(&doc(&sandbox, agent)).as_deref(),
+        Some("phala/qwen")
+    );
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+}
+
+#[test]
+fn dsh_disconnect_keeps_an_appended_entry_with_unrelated_user_edits() {
+    let sandbox = sandbox("dsh-keep-edited-entry");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    let mut item = config.entry(&entry).unwrap().unwrap();
+    item.set_str(&["config", "model"], "phala/qwen").unwrap();
+    item.set_str(&["config", "reasoningEffort"], "max").unwrap();
+    write(&path, &config.render().unwrap());
+    let expected = item.get_value(&[]);
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent)
+            .entry(&entry)
+            .unwrap()
+            .unwrap()
+            .get_value(&[]),
+        expected
+    );
+}

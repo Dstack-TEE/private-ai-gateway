@@ -46,17 +46,18 @@ pub(super) fn hermes_profile_valid(home: &Path, tool_env: bool) -> bool {
     profile.is_empty() || profile == "default" || hermes_profile_id_valid(&profile)
 }
 
-// Mirrors hermes_cli/profiles.py profile-name validation: normalize once,
-// reserve the default alias, and require a bounded identifier.
+// hermes_cli/profiles.py@v0.23.4 imports PROFILE_ID_RE from hermes_constants.py:
+// ^[a-z0-9][a-z0-9_-]{0,63}$
 fn hermes_profile_id_valid(profile: &str) -> bool {
-    profile.len() <= 64
-        && profile
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphanumeric())
-        && profile
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    let is_id_char = |ch: u8| ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    let Some((&first, rest)) = profile.as_bytes().split_first() else {
+        return false;
+    };
+    rest.len() <= 63
+        && is_id_char(first)
+        && rest
+            .iter()
+            .all(|&ch| is_id_char(ch) || matches!(ch, b'_' | b'-'))
 }
 
 /// A path override that is not blank, trimmed as Hermes reads it.
@@ -155,5 +156,31 @@ impl Projector {
             return Ok(());
         }
         write_atomic(&path, &text, None).map_err(|_| AgentError::ConfigurationWrite)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hermes_profile_ids_follow_the_native_grammar() {
+        let longest = "a".repeat(64);
+        let too_long = "a".repeat(65);
+        for (id, valid) in [
+            ("default", true),
+            ("Default", false),
+            ("Work", false),
+            ("a-0_b", true),
+            ("9", true),
+            ("_work", false),
+            (longest.as_str(), true),
+            (too_long.as_str(), false),
+            ("a/b", false),
+            ("../x", false),
+            ("", false),
+        ] {
+            assert_eq!(hermes_profile_id_valid(id), valid, "{id:?}");
+        }
     }
 }

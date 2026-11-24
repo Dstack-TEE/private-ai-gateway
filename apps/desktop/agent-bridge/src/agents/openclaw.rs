@@ -198,35 +198,30 @@ pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<(String, String)> {
+// types.agents-shared.ts@78d8fcf defines a string or an object with optional
+// primary and fallbacks. An entry can override only the fallbacks.
+pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<String> {
     let Some(ConfigValue::Json(root)) = doc.get_value(&[]) else {
         return Vec::new();
     };
     root.pointer("/agents/entries")
         .and_then(Value::as_object)
         .into_iter()
-        .flat_map(|entries| entries.iter())
-        .filter_map(|(id, entry)| {
-            let model = entry.get("model")?;
-            let primary = model.as_str().map(str::to_string).or_else(|| {
-                model
-                    .get("primary")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })?;
+        .flat_map(|entries| entries.values())
+        .filter_map(|entry| entry.get("model"))
+        .flat_map(|model| {
+            let primary = model
+                .as_str()
+                .or_else(|| model.get("primary").and_then(Value::as_str));
             let fallbacks = model
                 .get("fallbacks")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_string);
-            Some(
-                std::iter::once((id.clone(), primary))
-                    .chain(fallbacks.map(|fallback| (id.clone(), fallback))),
-            )
+                .filter_map(Value::as_str);
+            primary.into_iter().chain(fallbacks)
         })
-        .flatten()
+        .map(str::to_owned)
         .collect()
 }
 

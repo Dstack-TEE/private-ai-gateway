@@ -179,27 +179,30 @@ pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedFi
         normalize_regenerable_values(agent, &mut expected, &mut current);
         return expected == current;
     }
-    if agent == Agent::Dsh
-        && field.path == owned(&["config"])
-        && field.entry.as_ref().is_some_and(|entry| entry.created)
-    {
-        let Some(selection) = model_selection_paths(agent).iter().find(|selection| {
-            field.entry.as_ref().map(|entry| entry.key.id.as_str()) == selection.entry
-        }) else {
-            return field.holds(owned_value(doc, field).as_ref());
-        };
+    if let Some(path) = dsh_appended_model_path(field) {
         let Some(ConfigValue::Json(mut expected)) = field.value.clone() else {
             return field.holds(owned_value(doc, field).as_ref());
         };
         let Some(ConfigValue::Json(mut current)) = owned_value(doc, field) else {
             return false;
         };
-        let path = &selection.path[1..];
         remove_json_path(&mut expected, path);
         remove_json_path(&mut current, path);
         return expected == current;
     }
     field.holds(owned_value(doc, field).as_ref())
+}
+
+// Appended dsh items journal the whole config instead of each leaf.
+fn dsh_appended_model_path(field: &OwnedField) -> Option<&'static [&'static str]> {
+    let entry = field.entry.as_ref()?;
+    if !entry.created || field.path != ["config"] {
+        return None;
+    }
+    model_selection_paths(Agent::Dsh)
+        .iter()
+        .find(|selection| selection.entry == Some(entry.key.id.as_str()))
+        .map(|selection| &selection.path[1..])
 }
 
 fn is_regenerable_field(agent: Agent, field: &OwnedField) -> bool {
@@ -841,36 +844,28 @@ fn project_entry(
     Ok(())
 }
 
-/// Whether an item the connection appended still holds exactly what it wrote,
-/// with nothing the user added.
+/// Whether an appended item still matches the journal, ignoring its model
+/// selection while preserving any other user edits.
 fn appended_intact(item: &ConfigDoc, key: &EntryKey, fields: &[&OwnedField]) -> bool {
-    let mut expected = serde_json::Map::new();
-    expected.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
-    for field in fields {
-        match (&field.entry, &field.value) {
-            (Some(entry), Some(value))
-                if entry.created
-                    && field.path.len() == 1
-                    && !is_any_model_selection_field(field) =>
-            {
-                expected.insert(field.path[0].clone(), value.to_json());
-            }
-            (Some(entry), Some(value)) if entry.created && is_any_model_selection_field(field) => {
-                let _ = (entry, value);
-            }
-            _ => return false,
-        }
-    }
     let Some(ConfigValue::Json(mut actual)) = item.get_value(&[]) else {
         return false;
     };
+    let mut expected = serde_json::Map::new();
+    expected.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
     for field in fields {
-        if is_any_model_selection_field(field) {
-            remove_json_path(
-                &mut actual,
-                &field.path.iter().map(String::as_str).collect::<Vec<_>>(),
-            );
+        let (Some(OwnedEntry { created: true, .. }), Some(value), [name]) =
+            (&field.entry, &field.value, field.path.as_slice())
+        else {
+            return false;
+        };
+        let mut value = value.to_json();
+        if let Some(path) = dsh_appended_model_path(field) {
+            remove_json_path(&mut value, path);
+            if let Some(current) = actual.get_mut(name) {
+                remove_json_path(current, path);
+            }
         }
+        expected.insert(name.clone(), value);
     }
     actual == serde_json::Value::Object(expected)
 }
@@ -1203,7 +1198,10 @@ pub(super) fn restore(
         if let Some(Previous::Secret { secret_ref }) = &field.previous {
             consumed_secrets.push(secret_ref.clone());
         }
+        // The owned Claude model picker is regenerated on start. Restore it
+        // even after edits so the next projection can take ownership again.
         if !field.holds(current.as_ref())
+            && !is_regenerable_field(Agent::ClaudeCode, field)
             && !(is_any_model_selection_field(field)
                 && (routing_unchanged || private_model_selection(current.as_ref())))
             && !hermes_model_override(field, current.as_ref(), record)
