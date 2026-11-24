@@ -45,13 +45,14 @@ and channel binding could not be confirmed for the SGLang deployment.
 | GPU topology | 8 × GH100 verified | 8 × H200 SXM and 4 × NVSwitch in one NVIDIA Protected PCIe group, per provider |
 | Weights | Provenance unknown | Initdata pins a SHA-384 digest and the provider publishes a per-file manifest |
 
-The **predicted subject** is
+The **predicted subject** calculated from the published registers is
 `tdx-measurement:sha256:1e2dcdb9709a6a399233e4bb78dd3cea9de4dfde74d9a5e5439881d33977b9ba`.
-This calculation uses the published registers, TD_ATTRIBUTES
+No fresh quote was available for this calculation. It assumes TD_ATTRIBUTES
 `0000001000000000`, XFAM `e702060000000000` and zero MROWNER and
-MROWNERCONFIG as in the October record. The same calculation reproduces the
-October quote-verified subject from the October reference at `a0599a97`.
-Treat the November result as a candidate for the authenticated probe.
+MROWNERCONFIG are unchanged from the October quote. The same calculation
+reproduces the October quote-verified subject from the October reference
+at `a0599a97`. Fortanix describes RTMR0 as per-node, so confirm the subject
+with a fresh quote from the live node.
 
 ### Live and public checks (2026-11-23 20:07–20:09 PST)
 
@@ -150,7 +151,7 @@ Date: 2026-09-29 UTC. Updated: 2026-10-15 UTC.
 Source repos reviewed: **TODO** (guest image build, attestation service, and
 in-TD TLS proxy repositories with commits, to be listed before review).
 
-## Verdict
+### Verdict
 
 **Decision pending.** The adapter verifies the current live endpoint
 `ctf.armet.ai` (see [New endpoint](#new-endpoint-ctfarmetai-2026-10-14) and
@@ -179,9 +180,9 @@ The expected decision, once the provider evidence below is supplied, is
 **acceptable with conditions**. The conditions would be the required
 measurement pins and the TODOs under criteria 7 and 13.
 
-## Criteria
+### Criteria
 
-### 1. Workload identity
+#### 1. Workload identity
 
 - **Met by the adapter:** DCAP-verified TDX quote, a fresh 32-byte nonce per
   verification, and debug TDs rejected. The identity is the pinned measurement
@@ -215,7 +216,7 @@ measurement pins and the TODOs under criteria 7 and 13.
   TD-attested SPKI, so such a certificate fails the pin. Certificate
   Transparency monitoring for the domain is a useful extra signal.
 
-### 2. Channel binding
+#### 2. Channel binding
 
 - **Met by the adapter:** `tls_spki_sha256`, committed in `report_data`, is
   enforced on every forwarded request by the SPKI-pinned client. A certificate
@@ -230,13 +231,13 @@ measurement pins and the TODOs under criteria 7 and 13.
   delay it. It sees connection metadata (client addresses, timing, sizes) but
   no content, and ArmetAI states it does not log that metadata.
 
-### 3. Gateway soundness
+#### 3. Gateway soundness
 
 Not applicable. The trust boundary is a direct model instance, not a router.
 The adapter declares `model` scope and the gateway refuses a `router` scope
 claim.
 
-### 4. Model selection
+#### 4. Model selection
 
 - **Met by the adapter:** the gateway sends the canonical provider model ID.
   The report must echo it and `report_data` must commit to it, so an alias
@@ -244,7 +245,7 @@ claim.
 - **Limitation:** the weights actually loaded are a property of the measured
   software; `model_weights_provenance` is Unknown.
 
-### 5. Privacy boundary
+#### 5. Privacy boundary
 
 **Provider evidence through live review session.** We plan to show the following, with source:
 
@@ -253,7 +254,7 @@ claim.
 - Billing events carry only token counts.
 - No debug endpoints exist in production images.
 
-### 6. Runtime policy
+#### 6. Runtime policy
 
 - **Met by the adapter:** debug TDs are rejected, and TD attributes and XFAM
   are pinned.
@@ -281,7 +282,7 @@ claim.
   - credentials loaded only inside the TD;
   - no off-TEE TLS termination.
 
-### 7. Release and measurement updates
+#### 7. Release and measurement updates
 
 **TODO. This blocks strict inclusion.** ArmetAI must publish, before each
 production rollout:
@@ -296,12 +297,12 @@ It must also publish an emergency-rollout policy. The adapter fails closed on
 any unpublished measurement. The 2026-10-07 `initdata.toml` change shows this
 live: the previous pin was rejected until the new subject was pinned.
 
-### 8. Lease lifecycle
+#### 8. Lease lifecycle
 
 Met by the gateway's standard per-model lease and non-destructive refresh. No
 provider-specific session material is used.
 
-### 9. Request fidelity
+#### 9. Request fidelity
 
 Chat and streaming pass end to end through the gateway (see
 [Live probe](#live-probe-2026-10-02)). Tool calling passes with
@@ -310,17 +311,17 @@ with the tool result (see [Tool calling](#tool-calling-2026-10-09)).
 **Provider evidence through live review session:** structured outputs, error
 paths, and other `tool_choice` modes, as advertised.
 
-### 10. Load balancing and cache
+#### 10. Load balancing and cache
 
 Per-instance endpoints: one TD per origin. There is no provider-side router in
 the trust path. Cache affinity is not claimed.
 
-### 11. Receipts
+#### 11. Receipts
 
 Met by the adapter. Evidence is the exact report bytes, with a `sha256:`
 digest, recorded in the attested session.
 
-### 12. Negative checks
+#### 12. Negative checks
 
 Covered hermetically by `tests/provider_verifier/armet_ai_soundness.py`. It
 checks replayed nonces, a swapped TLS key, another model, swapped GPU evidence,
@@ -336,7 +337,7 @@ Live:
 
 The certificate-rotation and VM-shape checks are **TODO**.
 
-### 13. Source and platform provenance
+#### 13. Source and platform provenance
 
 **TODO. This blocks strict inclusion.**
 
@@ -347,7 +348,7 @@ The certificate-rotation and VM-shape checks are **TODO**.
   recorded in provider claims but not pinned. Firmware (TDVF) provenance must
   be documented.
 
-### 14. Platform TCB freshness
+#### 14. Platform TCB freshness
 
 - **Met by the adapter:** `Revoked` is rejected. Other statuses are recorded,
   with advisory IDs, and surface as the hardware-proven `tcb_up_to_date`
@@ -356,7 +357,7 @@ The certificate-rotation and VM-shape checks are **TODO**.
   keeping the TCB `UpToDate`, so relying parties can require it through claims
   policy.
 
-## Live probe (2026-10-02)
+### Live probe (2026-10-02)
 
 The bridge verifier (`scripts/private_ai_provider_verifier.py`) was run
 directly against `https://poc1.armet.ai` for provider model `GLM-5.3-Flash`,
@@ -404,7 +405,7 @@ covered.
 The subject was pinned for this test only. It becomes an acceptance decision
 once the release behind it is published and reviewed (criteria 7 and 13).
 
-## Re-probe after redeploy (2026-10-07)
+### Re-probe after redeploy (2026-10-07)
 
 ArmetAI relaunched the TD with an `initdata.toml` that disallows exec. The
 verifier checks and the gateway end-to-end tests were rerun against
@@ -442,7 +443,7 @@ any verified provider.
 
 The new subject was pinned for this test only, as above.
 
-## Re-probe after redeploy (2026-10-09)
+### Re-probe after redeploy (2026-10-09)
 
 ArmetAI relaunched the TD with a changed `initdata.toml`: the vLLM start
 parameters now add `--enable-auto-tool-choice`, `--tool-call-parser glm47` and
@@ -478,7 +479,7 @@ the session claims are unchanged.
 
 The new subject was pinned for this test only, as above.
 
-## Tool calling (2026-10-09)
+### Tool calling (2026-10-09)
 
 Tested through a locally run gateway against the 2026-10-09 deployment (same
 pinned subject), with `provider.aci_verified: true`, a single `get_weather`
@@ -494,7 +495,7 @@ signed receipt citing the verified ArmetAI session.
 `tool_choice: required`, a named function, parallel tool calls and structured
 outputs were not tested.
 
-## New endpoint `ctf.armet.ai` (2026-10-14)
+### New endpoint `ctf.armet.ai` (2026-10-14)
 
 ArmetAI redeployed the model to a new origin, `https://ctf.armet.ai`, with a
 new TLS implementation: the key is generated inside the TD and the certificate
@@ -535,7 +536,7 @@ End to end through a locally run gateway, pinned to the new subject:
 The live E2E suite ran with the session-label fix merged upstream in #400.
 The new subject was pinned for this test only.
 
-## Re-probe after redeploy (2026-10-15)
+### Re-probe after redeploy (2026-10-15)
 
 ArmetAI relaunched the TD on `ctf.armet.ai` with an `initdata.toml` updated to
 harden the runtime policy. The tests were rerun for `GLM-5.3-Flash` on the
@@ -575,7 +576,7 @@ End to end through a locally run gateway, pinned to the new subject:
 
 The new subject was pinned for this test only.
 
-## Hard reject conditions
+### Hard reject conditions
 
 | Condition | Status |
 | --- | --- |
@@ -590,7 +591,7 @@ The new subject was pinned for this test only.
 | No model-scoped evidence | Clear. |
 | Semantic post-processing | Chat, streaming and tool calling pass unmodified; structured outputs pending (criterion 9). |
 
-## Open questions for maintainers
+### Open questions for maintainers
 
 1. Should the pin also cover `MR_SEAM`, or is TCB status sufficient for TDX
    module updates?
