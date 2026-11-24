@@ -207,10 +207,42 @@ pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<(String, String)> {
         .into_iter()
         .flat_map(|entries| entries.iter())
         .filter_map(|(id, entry)| {
+            let model = entry.get("model")?;
+            let primary = model.as_str().map(str::to_string).or_else(|| {
+                model
+                    .get("primary")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })?;
+            let fallbacks = model
+                .get("fallbacks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string);
+            Some(
+                std::iter::once((id.clone(), primary))
+                    .chain(fallbacks.map(|fallback| (id.clone(), fallback))),
+            )
+        })
+        .flatten()
+        .collect()
+}
+
+pub(super) fn entry_model_values(doc: &ConfigDoc) -> Vec<(String, ConfigValue)> {
+    let Some(ConfigValue::Json(root)) = doc.get_value(&[]) else {
+        return Vec::new();
+    };
+    root.pointer("/agents/entries")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
+        .filter_map(|(id, entry)| {
             entry
                 .get("model")
-                .and_then(Value::as_str)
-                .map(|model| (id.clone(), model.to_string()))
+                .and_then(ConfigValue::from_json)
+                .map(|model| (id.clone(), model))
         })
         .collect()
 }

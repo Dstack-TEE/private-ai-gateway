@@ -125,9 +125,9 @@ write .config/opencode/opencode.jsonc sha256:d218b45512c8
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: changes sha256:1621f223c7fd [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json sha256:9b155671eed0; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c0d52f24e8cf; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: changes sha256:4f53cda18c2b [], note sha256:226ab026c4b9
 write .config/opencode/opencode.jsonc sha256:65bc5913785d
-scan no-catalog: installed, recorded, connected, authorized | proxy accepts ["opencode"]
+scan no-catalog: installed, recorded, authorized, attention: OpenCode's selected model uses another provider, so this agent is not routed through Private AI Proxy. Choose a private-ai-proxy model to use the connection. | proxy accepts ["opencode"]
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: changes sha256:4f53cda18c2b [], note sha256:226ab026c4b9
-; applied: installed, recorded, connected, authorized
+; applied: installed, recorded, authorized, attention: OpenCode's selected model uses another provider, so this agent is not routed through Private AI Proxy. Choose a private-ai-proxy model to use the connection.
 write .config/opencode/opencode.jsonc sha256:2e9bad09b621
 scan no-catalog: installed, recorded, attention: OpenCode's merged config changes the gateway-owned field /provider/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json, $HOME/.config/opencode/opencode.jsonc without changing unrelated providers, or Disconnect to restore the original config. | proxy accepts []
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's merged config changes the gateway-owned field /provider/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json, $HOME/.config/opencode/opencode.jsonc without changing unrelated providers, or Disconnect to restore the original config.

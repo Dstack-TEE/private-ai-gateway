@@ -146,6 +146,7 @@ impl Projector {
                     && status.attention.as_deref().is_some_and(|attention| {
                         attention.contains("outdated credential helper")
                             || attention.contains("OpenClaw helper changed")
+                            || attention.contains("Legacy Claude Code provider-switch")
                     })
                 {
                     self.reproject(agent, &mut store, catalog)
@@ -308,21 +309,7 @@ impl Projector {
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
-            let mut suspend_record = record.clone();
-            suspend_record.fields.retain(|field| {
-                if !is_any_model_selection_field(field) {
-                    return true;
-                }
-                let current = owned_value(&doc, field);
-                field.holds(current.as_ref())
-                    || private_model_selection(current.as_ref())
-                    || record
-                        .options
-                        .default_model
-                        .as_ref()
-                        .is_some_and(|model| current == Some(ConfigValue::Str(model.clone())))
-            });
-            restore(&mut doc, &suspend_record, self.secrets.as_ref())?
+            restore(&mut doc, &record, self.secrets.as_ref())?
         } else {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.

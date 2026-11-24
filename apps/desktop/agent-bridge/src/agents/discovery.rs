@@ -24,10 +24,32 @@ pub(super) fn hermes_config_path(home: &Path, tool_env: bool) -> PathBuf {
         .ok()
         .map(|profile| profile.trim().to_string())
         .filter(|profile| !profile.is_empty());
-    profile.map_or_else(
-        || root.join("config.yaml"),
-        |profile| root.join("profiles").join(profile).join("config.yaml"),
-    )
+    let Some(profile) = profile else {
+        return root.join("config.yaml");
+    };
+    if profile == "default" {
+        return root.join("config.yaml");
+    }
+    if !profile
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+    {
+        return root.join("config.yaml");
+    }
+    root.join("profiles").join(profile).join("config.yaml")
+}
+
+pub(super) fn hermes_profile_valid(home: &Path, tool_env: bool) -> bool {
+    let root = hermes_native_dir(home, tool_env);
+    let Ok(profile) = fs::read_to_string(root.join("active_profile")) else {
+        return true;
+    };
+    let profile = profile.trim();
+    profile.is_empty()
+        || profile == "default"
+        || (profile
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
 }
 
 /// A path override that is not blank, trimmed as Hermes reads it.

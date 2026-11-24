@@ -229,6 +229,116 @@ fn opencode_external_model_is_reported_as_unrouted() {
 }
 
 #[test]
+fn openclaw_external_entry_object_is_attention_only() {
+    let sandbox = sandbox("openclaw-external-entry-object");
+    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    write(&path, "{}");
+    apply_connect(&sandbox, Agent::OpenClaw, &catalog(), &claude_options());
+    let mut config = doc(&sandbox, Agent::OpenClaw);
+    config
+        .set_value(
+            &["agents", "entries", "main", "model"],
+            &ConfigValue::Json(serde_json::json!({
+                "primary": "other/model",
+                "fallbacks": ["private-ai-proxy/phala/qwen"]
+            })),
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog()))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenClaw.id())
+        .unwrap();
+    assert!(status.authorized);
+    assert!(!status.connected);
+    assert!(status.attention.unwrap().contains("not routed"));
+}
+
+#[test]
+fn hermes_rejects_invalid_active_profile_names() {
+    let sandbox = sandbox("hermes-invalid-profile");
+    let root = sandbox.home.join(".hermes");
+    write(&root.join("active_profile"), "../escape\n");
+    let error = sandbox
+        .projector
+        .preview(Agent::Hermes, true, Some(&catalog()), &claude_options())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("active_profile"));
+}
+
+#[test]
+fn omp_filters_are_read_from_companion_config() {
+    let sandbox = sandbox("omp-companion-filters");
+    let models = Agent::OhMyPi.config_path(&sandbox.home, false);
+    write(&models, "providers: {}\n");
+    write(
+        &models.with_file_name("config.yml"),
+        "disabledProviders:\n  - private-ai-proxy\n",
+    );
+    let error = sandbox
+        .projector
+        .preview(Agent::OhMyPi, true, Some(&catalog()), &claude_options())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("disabledProviders"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_projector_connects_with_only_installed_helper() {
+    let sandbox = sandbox("windows-installed-helper");
+    let projector = Projector::new(
+        sandbox.projector.helper_exe.clone(),
+        ENDPOINT,
+        sandbox.secrets.clone(),
+    )
+    .unwrap();
+    write(&Agent::ClaudeCode.config_path(&sandbox.home, false), "{}");
+    assert!(projector
+        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+        .is_ok());
+}
+
+#[test]
+fn legacy_claude_journal_migrates_provider_switch_flags() {
+    let sandbox = sandbox("legacy-claude-journal");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::ClaudeCode);
+    config
+        .set_str(&["env", "CLAUDE_CODE_USE_BEDROCK"], "1")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let mut store = sandbox.projector.load_store().unwrap();
+    store
+        .get_mut(Agent::ClaudeCode.id())
+        .unwrap()
+        .fields
+        .retain(|field| field.path != owned(&["env", "CLAUDE_CODE_USE_BEDROCK"]));
+    sandbox.projector.save_store(&store).unwrap();
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::ClaudeCode.id())
+        .unwrap();
+    assert!(!status.authorized);
+    sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert_eq!(
+        doc(&sandbox, Agent::ClaudeCode).get_str(&["env", "CLAUDE_CODE_USE_BEDROCK"]),
+        None
+    );
+}
+
+#[test]
 fn audit_generated_catalog_edits_do_not_deauthorize() {
     let sandbox = sandbox("audit-generated-catalog");
     let catalog = catalog();

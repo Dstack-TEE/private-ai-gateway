@@ -166,6 +166,9 @@ pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedFi
     if agent == Agent::ClaudeCode && field.path == owned(&["modelPicker"]) {
         return true;
     }
+    if agent == Agent::Codex && field.path == owned(&["model_catalog_json"]) {
+        return true;
+    }
     if is_regenerable_field(agent, field) {
         let Some(mut expected) = field.value.clone() else {
             return field.holds(owned_value(doc, field).as_ref());
@@ -1436,16 +1439,5 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::Pi | Agent::OhMyPi => None,
         Agent::Dsh => dsh::selected_model(doc),
-    }
-}
-
-pub(super) fn opencode_selected_provider(doc: &ConfigDoc) -> Option<String> {
-    match doc.get_value(model_selection_paths(Agent::OpenCode)[0].path)? {
-        ConfigValue::Str(value) => value.split('/').next().map(str::to_string),
-        ConfigValue::Json(value) => value
-            .get("providerID")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
-        _ => None,
     }
 }

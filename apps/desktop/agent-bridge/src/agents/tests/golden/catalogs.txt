@@ -3,12 +3,12 @@ connect codex model="openai/gpt-oss-20b" catalog=0bf0a8e4: changes sha256:71f687
 write .codex/config.toml (600) sha256:738ed6f8d7e0
 reconcile catalog=0bf0a8e4
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["codex"]
-reconcile no-catalog => ~ .codex/config.toml (600) sha256:454d96c2c461; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4f9dd8d9d108
-connect codex catalog=0bf0a8e4: changes sha256:43228f224cc7 [model_provider, model_catalog_json], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: rotated; ~ .codex/config.toml (600) sha256:b6becf6e5d73; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:5c88fca768a2
-reconcile no-catalog => ~ .codex/config.toml (600) sha256:454d96c2c461; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4f9dd8d9d108
-reconcile catalog=0bf0a8e4 => token codex: rotated; ~ .codex/config.toml (600) sha256:b6becf6e5d73; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:5c88fca768a2
-write .codex/config.toml (600) sha256:49a29d7f805e
-reconcile catalog=0bf0a8e4 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:681cb3e546c2
+reconcile no-catalog => ~ .codex/config.toml (600) sha256:b452ed7864ca; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4f9dd8d9d108
+connect codex catalog=0bf0a8e4: changes sha256:5ed748a70bae [model_provider, model_catalog_json, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: rotated; ~ .codex/config.toml (600) sha256:7a872c07aa31; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1d2485846a73
+reconcile no-catalog => ~ .codex/config.toml (600) sha256:b452ed7864ca; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:f91b38e140b5
+reconcile catalog=0bf0a8e4 => token codex: rotated; ~ .codex/config.toml (600) sha256:7a872c07aa31; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1d2485846a73
+write .codex/config.toml (600) sha256:cb5fed1652b1
+reconcile catalog=0bf0a8e4 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:30f23ba3aca2
 # codex takes over provider credentials; opencode connects
 write .codex/config.toml sha256:2f5debfe1e1e
 connect codex model="openai/gpt-oss-20b" catalog=0bf0a8e4: changes sha256:0343b68b6e7b [model_provider, model_providers.private_ai_proxy.env_key, *model_providers.private_ai_proxy.experimental_bearer_token, model_providers.private_ai_proxy.requires_openai_auth, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml sha256:7a872c07aa31; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2f3aab30a093; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; + org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:b09a5094a615; parked secrets: [("restore:codex:f99c582a71096621847d05521b62d116cb292a78c362552c42713403a746c962", "old-synthetic-token")]

@@ -28,8 +28,9 @@ impl DesktopRuntime {
         .with_home_credentials();
         #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         let projector =
-            Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?
-                .require_staged_helper();
+            Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?;
+        #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
+        let projector = projector.require_staged_helper();
         #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         let projector = if let Some(path) = self.staged_helper.clone() {
             projector.with_staged_helper(path)

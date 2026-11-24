@@ -94,16 +94,27 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
     {
         return Err("The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten".into());
     }
+    Ok(())
+}
+
+pub(super) fn validate_settings(path: &Path, catalog: Option<&Catalog>) -> Result<(), String> {
+    let Some(text) = fs::read_to_string(path).ok() else {
+        return Ok(());
+    };
+    let doc = ConfigDoc::parse(Format::Yaml, &text)?;
     if doc
         .get_value(&["disabledProviders"])
         .is_some_and(|value| config_filter_matches(&value, PROVIDER))
     {
         return Err("Oh My Pi disabledProviders excludes private-ai-proxy; resolve that filter before connecting".into());
     }
-    if doc
-        .get_value(&["enabledModels"])
-        .is_some_and(|value| !config_filter_matches(&value, "private-ai-proxy/"))
-    {
+    if doc.get_value(&["enabledModels"]).is_some_and(|value| {
+        catalog.is_none_or(|catalog| {
+            catalog.models.iter().all(|model| {
+                !config_filter_matches(&value, &format!("private-ai-proxy/{}", model.id()))
+            })
+        })
+    }) {
         return Err("Oh My Pi enabledModels excludes private-ai-proxy models; resolve that filter before connecting".into());
     }
     Ok(())

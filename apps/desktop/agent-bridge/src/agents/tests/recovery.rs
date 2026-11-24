@@ -155,7 +155,7 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
-        Some(ConfigValue::Str("user-choice".into()))
+        Some(ConfigValue::Str("original".into()))
     );
 }
 
