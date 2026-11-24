@@ -214,6 +214,38 @@ fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
 }
 
 #[test]
+fn tinfoil_release_pins_are_opt_in_and_must_be_well_formed() {
+    let config_with = |subjects: serde_json::Value| {
+        serde_json::json!([{
+            "name": "tinfoil",
+            "provider": "tinfoil",
+            "base_url": "https://inference.tinfoil.sh",
+            "models": {"public-model": "upstream-model"},
+            "accepted_subjects": subjects,
+        }])
+        .to_string()
+    };
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    for subjects in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(["app-id:0xabc"]),
+        serde_json::json!(["app-id:0xabc", pin]),
+    ] {
+        parse_config_text(&config_with(subjects)).expect("valid Tinfoil configuration");
+    }
+    for bad in [
+        "tinfoil-release:sha256:ab".to_string(),
+        format!("tinfoil-release:sha256:{}", "AB".repeat(32)),
+        format!("tinfoil-release:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(serde_json::json!([pin, bad])))
+            .expect_err("a malformed Tinfoil release pin must be rejected");
+        assert!(err.to_string().contains("tinfoil-release:sha256:"));
+    }
+}
+
+#[test]
 fn parse_secret_ai_allows_an_unpinned_workload() {
     let config = parse_config_text(
         r#"

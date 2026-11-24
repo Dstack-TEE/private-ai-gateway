@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -456,7 +456,12 @@ impl AciService {
                 .lease
                 .as_ref()
                 .map(|lease| lease.session_id().to_string());
-            Self::append_upstream_verified(&mut builder, &selected.event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &selected.event,
+                recorded,
+                &upstream_headers,
+            )?;
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's event.
             builder.set_upstream_verified_model_id(response_model.clone());
@@ -633,7 +638,12 @@ impl AciService {
                 .lease
                 .as_ref()
                 .map(|lease| lease.session_id().to_string());
-            Self::append_upstream_verified(&mut builder, &selected.event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &selected.event,
+                recorded,
+                &upstream_response.headers,
+            )?;
         }
 
         // This is the streaming entry point, so a response with no declared
@@ -1188,11 +1198,26 @@ impl AciService {
         builder: &mut ReceiptBuilder,
         event: &UpstreamVerifiedEvent,
         recorded: Option<String>,
+        upstream_headers: &HashMap<String, String>,
     ) -> Result<(), ReceiptError> {
         // §8.3: the receipt cites the session; the claims live on the session
         // record, so a verified event carries an id and a failed one a reason.
         match recorded {
-            Some(session_id) => builder.add_upstream_verified_with_session(event, &session_id),
+            Some(session_id) => {
+                builder.add_upstream_verified_with_session(event, &session_id)?;
+                if let Some(enclave) = upstream_headers.get("tinfoil-enclave").filter(|value| {
+                    event.provider_type.as_deref() == Some("tinfoil") && !value.is_empty()
+                }) {
+                    builder.add_extension_event(
+                        "upstream.tinfoil_enclave",
+                        serde_json::Map::from_iter([(
+                            "enclave".into(),
+                            Value::from(enclave.as_str()),
+                        )]),
+                    )?;
+                }
+                Ok(())
+            }
             None => builder.add_upstream_verified_failed(
                 &event.model_id,
                 // A verified result with no session pinned nothing (§1.2).
