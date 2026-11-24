@@ -156,6 +156,9 @@ pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedFi
     if is_model_selection_field(agent, field) {
         return true;
     }
+    if agent == Agent::ClaudeCode && field.path == owned(&["modelPicker"]) {
+        return true;
+    }
     if is_regenerable_field(agent, field) {
         let Some(mut expected) = field.value.clone() else {
             return field.holds(owned_value(doc, field).as_ref());
@@ -235,6 +238,16 @@ fn normalize_regenerable_values(
 }
 
 fn normalize_model_map(expected: &mut serde_json::Value, current: &mut serde_json::Value) {
+    if expected
+        .get("models")
+        .is_some_and(serde_json::Value::is_array)
+        || current
+            .get("models")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        normalize_model_rows(expected, current);
+        return;
+    }
     let (Some(expected), Some(current)) = (expected.as_object_mut(), current.as_object_mut())
     else {
         return;
@@ -279,6 +292,43 @@ fn normalize_model_map(expected: &mut serde_json::Value, current: &mut serde_jso
     current.insert("models".into(), serde_json::Value::Object(routing));
 }
 
+fn normalize_model_rows(expected: &mut serde_json::Value, current: &mut serde_json::Value) {
+    let (Some(expected_root), Some(current_root)) =
+        (expected.as_object_mut(), current.as_object_mut())
+    else {
+        return;
+    };
+    let expected_rows = expected_root
+        .remove("models")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let current_rows = current_root
+        .remove("models")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut expected_routing = Vec::new();
+    let mut current_routing = Vec::new();
+    for row in &current_rows {
+        let id = row.get("id");
+        let expected_row = expected_rows
+            .iter()
+            .find(|candidate| id.is_some() && candidate.get("id") == id);
+        let Some(expected_row) = expected_row else {
+            let value = routing_value(row);
+            if !value.as_object().is_some_and(serde_json::Map::is_empty) {
+                current_routing.push(value);
+            }
+            continue;
+        };
+        if row != expected_row {
+            expected_routing.push(routing_value(expected_row));
+            current_routing.push(routing_value(row));
+        }
+    }
+    expected_root.insert("models".into(), serde_json::Value::Array(expected_routing));
+    current_root.insert("models".into(), serde_json::Value::Array(current_routing));
+}
+
 fn routing_value(value: &serde_json::Value) -> serde_json::Value {
     let Some(object) = value.as_object() else {
         return serde_json::Value::Null;
@@ -297,9 +347,22 @@ fn routing_value(value: &serde_json::Value) -> serde_json::Value {
             routing.insert("provider".into(), provider.clone());
         }
     }
+    for key in ["package", "body", "baseUrl", "api"] {
+        if let Some(value) = object.get(key) {
+            routing.insert(key.into(), value.clone());
+        }
+    }
     if let Some(options) = object.get("options").and_then(serde_json::Value::as_object) {
         if let Some(base_url) = options.get("baseURL") {
             routing.insert("options".into(), serde_json::json!({"baseURL": base_url}));
+        }
+    }
+    if let Some(settings) = object
+        .get("settings")
+        .and_then(serde_json::Value::as_object)
+    {
+        if let Some(base_url) = settings.get("baseURL") {
+            routing.insert("settings".into(), serde_json::json!({"baseURL": base_url}));
         }
     }
     if let Some(headers) = object.get("headers") {
@@ -989,20 +1052,26 @@ pub(super) fn restore(
         .fields
         .iter()
         .filter(|field| {
-            matches!(
-                field.path.last().map(String::as_str),
-                Some(
-                    "apiKeyHelper"
-                        | "ANTHROPIC_BASE_URL"
-                        | "base_url"
-                        | "baseURL"
-                        | "command"
-                        | "args"
-                        | "model_provider"
+            !is_any_model_selection_field(field)
+                && matches!(
+                    field.path.last().map(String::as_str),
+                    Some(
+                        "apiKeyHelper"
+                            | "ANTHROPIC_BASE_URL"
+                            | "base_url"
+                            | "baseURL"
+                            | "baseUrl"
+                            | "command"
+                            | "args"
+                            | "model_provider"
+                            | "provider"
+                            | "api"
+                            | "apiKey"
+                            | "key_cmd"
+                    )
                 )
-            )
         })
-        .all(|field| doc.get_value(&refs(&field.path)) == field.value);
+        .all(|field| field.holds(owned_value(doc, field).as_ref()));
     if !routing_unchanged
         && record.fields.iter().any(|field| {
             is_sensitive(&field.path)
@@ -1061,13 +1130,15 @@ pub(super) fn restore(
                     .entry(&entry.key)
                     .map_err(AgentError::ConfigurationConflict)?
                 {
-                    Some(mut item) => restore_exact(&mut item, field)?.map(|mut change| {
-                        change.key = format!("{}.{}", entry.key.id, change.key);
-                        change
-                    }),
+                    Some(mut item) => {
+                        restore_exact(&mut item, field, routing_unchanged)?.map(|mut change| {
+                            change.key = format!("{}.{}", entry.key.id, change.key);
+                            change
+                        })
+                    }
                     None => None,
                 },
-                None => restore_exact(doc, field)?,
+                None => restore_exact(doc, field, routing_unchanged)?,
             };
             changes.extend(change);
             continue;
@@ -1096,7 +1167,8 @@ pub(super) fn restore(
             consumed_secrets.push(secret_ref.clone());
         }
         if !field.holds(current.as_ref())
-            && !(is_any_model_selection_field(field) && private_model_selection(current.as_ref()))
+            && !(is_any_model_selection_field(field)
+                && (routing_unchanged || private_model_selection(current.as_ref())))
         {
             continue;
         }
@@ -1175,11 +1247,13 @@ fn private_model_selection(value: Option<&ConfigValue>) -> bool {
 fn restore_exact(
     target: &mut ConfigDoc,
     field: &OwnedField,
+    routing_unchanged: bool,
 ) -> Result<Option<ConfigChange>, AgentError> {
     let path = refs(&field.path);
     let current = target.get_value(&path);
     if !field.holds(current.as_ref())
-        && !(is_any_model_selection_field(field) && private_model_selection(current.as_ref()))
+        && !(is_any_model_selection_field(field)
+            && (routing_unchanged || private_model_selection(current.as_ref())))
     {
         return Ok(None);
     }

@@ -133,9 +133,10 @@ impl Connection {
     fn restored(&self) -> bool {
         self.suspended
             && self.selection.is_none()
-            && self.fields.iter().all(|field| {
-                retain_provider_field(field, &self.fields) || is_any_model_selection_field(field)
-            })
+            && self
+                .fields
+                .iter()
+                .all(|field| retain_provider_field(field, &self.fields))
     }
 
     fn disconnected(&self) -> bool {
@@ -262,6 +263,7 @@ pub struct Projector {
     helper_exe: PathBuf,
     bundled_helper: PathBuf,
     staged_helper: Option<PathBuf>,
+    staged_helper_required: bool,
     endpoint: String,
     tool_env: bool,
     file_credentials: bool,
@@ -322,6 +324,7 @@ impl Projector {
             bundled_helper: helper_exe.clone(),
             helper_exe,
             staged_helper: None,
+            staged_helper_required: false,
             endpoint: endpoint.to_string(),
             tool_env,
             file_credentials: false,
@@ -331,6 +334,11 @@ impl Projector {
 
     pub fn with_staged_helper(mut self, staged_helper: PathBuf) -> Self {
         self.staged_helper = Some(staged_helper);
+        self
+    }
+
+    pub fn require_staged_helper(mut self) -> Self {
+        self.staged_helper_required = true;
         self
     }
 

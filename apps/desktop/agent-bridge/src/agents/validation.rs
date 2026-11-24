@@ -62,6 +62,11 @@ impl Projector {
     /// Connecting references the bundled helper; an installation without it
     /// cannot issue agent credentials.
     pub(super) fn require_helper(&self) -> Result<(), AgentError> {
+        if self.staged_helper_required && !self.file_credentials && self.staged_helper.is_none() {
+            return Err(AgentError::ConfigurationConflict(
+                "The credential helper could not be staged in the app data directory; agent connections are disabled until staging succeeds".to_string(),
+            ));
+        }
         if self.file_credentials
             || executable_metadata(&self.helper_exe).is_some_and(|metadata| metadata.len() > 0)
         {

@@ -687,7 +687,7 @@ mod tests {
         assert_eq!(
             doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)
                 .as_deref(),
-            Some("external/new")
+            Some("external/original")
         );
         assert_eq!(
             doc.get_value(&["agents", "defaults", "model", "fallbacks"]),

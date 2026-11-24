@@ -116,7 +116,7 @@ fn test_runtime_with(
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
-        staged_helper: None,
+        staged_helper: Some(directory.join("helper")),
         agent_configuration: true,
         agent_access_error: None,
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
