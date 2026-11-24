@@ -8,8 +8,8 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 | Verifier | `src/aci/verifier/zero_g.rs` (native Rust) |
 | Verifier ID | `0g-private-computer/native-e2ee/v1` |
 | Enforced binding | `e2ee_public_key_sha256`, `key_id` = provider address |
-| Transport | 0G E2EE v1 (HPKE base, X25519 / HKDF-SHA256 / ChaCha20-Poly1305) through the router, `src/aci/upstream/zero_g/` |
-| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.11.20.3` (`37d697f2`). The adapter uses the base-mode chat profile. |
+| Transport | 0G E2EE v1 (X25519 / HKDF-SHA256 / ChaCha20-Poly1305) through the router. Requests use HPKE base mode. Responses use PSK mode when the broker advertises support. |
+| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.11.20.3` (`37d697f2`). |
 | Audit | [Acceptable with conditions](review.md#round-2-2026-11-23-pst), 2026-11-23 PST |
 
 ## Configuration
@@ -42,6 +42,7 @@ Per configured model, cached for `verifier_cache_seconds` (verified results only
 4. Verify the TDX quote to Intel's root with `dcap-qvl` (`pccs_url`, default Phala PCCS), which refuses invalid TCB statuses and debug TDs.
 5. Require the quote's boot chain to be one of the route's `accepted_subjects`.
 6. Require `report_data` = `enc_pub(32) ‖ signer(20) ‖ version 1 ‖ zero(8)` and the signer to equal the on-chain `teeSignerAddress`.
+7. Read `e2ee_features` from the broker's direct HTTPS quote reply and enable response binding for that provider when the array contains `"resp-bind"`.
 
 A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed`, no prompt is sent, and the request is refused like any other verification failure (503 `upstream_verification_failed` with a refusal receipt), whether or not the caller required verification.
 
@@ -72,7 +73,7 @@ Adding a model is configuration only: map its public name in the route's `models
 
 The backend uses the first provider, in preview order, whose recorded key hashes to a binding the current event carries.
 
-- Only the fields 0G's router reads stay cleartext, bound in the AAD: `model` (routing and attribution), `stream` (how the router serves the response), `stream_options` (the router forces `include_usage` to bill a stream), and `max_tokens` / `max_completion_tokens` (0G's design lists the output limit as read for routing and billing; the router's source is not public, so they stay readable). The provider is pinned, so the router routes on nothing else. The adapter seals `messages`, `tools` and `tool_choice` by default and uses §5.1 to seal all other fields, including `temperature`, `stop`, `logit_bias`, `response_format`, `reasoning_effort`, `user` and `metadata`. Sealing protects those fields through delivery to the verified broker. The broker's forwarding policy determines which fields reach the engine. As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Nothing is unbound, so a rewritten `model` fails the provider's `Open`. The sealed `model` is the configured on-chain id, which the router forwards unchanged. 0G's client instead seals the `canonical_id` and leaves `model` unbound so the router can rewrite it. A caller-supplied `_e2ee` field is refused. Only `/v1/chat/completions` is served.
+- Only the fields 0G's router reads stay cleartext, bound in the AAD: `model` (routing and attribution), `stream` (how the router serves the response), `stream_options` (the router forces `include_usage` to bill a stream), and `max_tokens` / `max_completion_tokens` (0G's design lists the output limit as read for routing and billing; the router's source is not public, so they stay readable). The provider is pinned, so the router routes on nothing else. The adapter seals `messages`, `tools` and `tool_choice` by default and uses §5.1 to seal all other fields, including `temperature`, `stop`, `logit_bias`, `response_format`, `reasoning_effort`, `user` and `metadata`. Sealing protects those fields through delivery to the verified broker. The broker's forwarding policy determines which fields reach the engine. As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Nothing is unbound, so a rewritten `model` fails the provider's `Open`. The sealed `model` is the configured on-chain id, which the router forwards unchanged. 0G's client instead seals the `canonical_id` and leaves `model` unbound so the router can rewrite it. Caller-supplied `_e2ee` and `_bind` fields are refused. Only `/v1/chat/completions` is served.
 - The adapter does not translate reasoning. As for any route, the middleware writes it in the candidate's `reasoningFormat` ([control-plane contract](../../control-plane-contract.md#reasoning-format)), and a 0G route needs `reasoning_effort`. A managed candidate (no `engine`) does not forward `chat_template_kwargs`, so the `chat_template_*` formats would drop the switch. `thinking_type` writes a `thinking` field, and an unset `reasoningFormat` writes a nested `reasoning` object. The adapter seals both fields. The provider ignored `thinking` in [round 1](#provider-behavior). The nested object remains untested.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A 409 with the broker's `e2ee_key_mismatch` error code triggers the existing channel-binding reverification path. A gateway-managed binding can be refreshed from a new verified quote before resealing the request. Other non-200 responses keep their status. Error bodies are withheld.
@@ -83,12 +84,14 @@ Middleware injects a per-user `cache_salt` and the adapter seals it. Source read
 
 Every frame must be sealed, seal `choices`, not seal `usage` or `model`, not unbind `usage`, and decrypt to exactly its declared fields. Frames open in order under one HPKE context, so reordering, dropping or tampering fails.
 
+For a provider that advertises `resp-bind`, the gateway derives `_bind` from the response ephemeral private key, seals it in the request and requires §7.6 HPKE PSK mode on the response. The first frame must authenticate under that key before any chunk is released. Other providers use HPKE base mode.
+
 Only the decrypted fields and the bound cleartext reach the caller. A field named in a frame's `unbound_fields` is outside the AAD and the §8 binding, so an intermediary can set it undetected (§5.2; §8.2: "a router-injected `x_0g_trace` is unauthenticated by construction"). Every unbound field is therefore dropped when the frame opens, after its AEAD and binding checks, and the §8 signature still covers the frames as received. In round 1, live frames declared `["model", "x_0g_trace"]` unbound. `x_0g_trace` carried the router's billing amounts and provider address. 0G unbinds `model` so the router can restore its alias (§5.2), so the caller gets the `model` this request bound, which is the configured on-chain id. A streamed frame left with no value to deliver is not emitted. In round 1, the last live frame carried only `x_0g_trace` and an empty sealed `choices`.
 
 The §8 signature is fetched from `<record url>/v1/proxy/signature/<ZG-Res-Key>` on the broker, not the router, with three attempts on 404, 5xx and transport errors. Its text must equal the binding computed locally over the sealed request and every frame (`zg-sig-v1/e2ee-ct` or `zg-sig-v1/e2ee-ct-stream`), and it must recover (EIP-191) to the verified signer.
 
 - **Buffered:** returned only after the signature verifies. A fetch failure (`signature_unavailable`) or a bad signature (`signature_invalid`) fails the request; both are logged under target `zero_g`.
-- **Streamed:** frames are delivered as they open, but the provider's `[DONE]` is withheld. The gateway emits `[DONE]` only after the final frame and a verified signature. Truncation, a bad frame or a bad signature ends the stream with an error, so the gateway appends its error tail, never a success terminator. Frames already delivered are provisional until `[DONE]`.
+- **Streamed:** frames are delivered as they open, but the provider's `[DONE]` is withheld. The gateway emits `[DONE]` only after the final frame and a verified signature. Truncation, a bad frame or a bad signature ends the stream with an error, so the gateway appends its error tail, never a success terminator. In base mode, chunks already delivered are provisional until `[DONE]`. With response binding, chunks authenticate on arrival. The final signature still determines whether the stream completed successfully.
 
 The outer SSE envelope uses the shared `sse-stream` decoder with a 4 MiB block
 cap. It accepts LF, CRLF and bare CR framing, compares `[DONE]` exactly, discards
@@ -132,8 +135,8 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 ## Tests
 
 - `src/aci/upstream/zero_g/tests.rs`:
-  - base-mode interop from 0G's Go protocol library at the pinned release, plus the broker signature known-answer test. See [fixture provenance](../../../tests/fixtures/0g-private-computer/README.md).
-  - tampered, reordered, truncated and unsealed frames;
+  - base-mode and response-bound interop from 0G's Go protocol library at the pinned release, plus the broker signature known-answer test. See [fixture provenance](../../../tests/fixtures/0g-private-computer/README.md).
+  - tampered, reordered, truncated and unsealed frames, and base-mode responses refused when binding was requested;
   - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and stale-key conflict classification.
-- `src/aci/verifier/tests/zero_g.rs` uses a dstack 0.6.5 quote fixture. It covers admission failures, Compose claim extraction for both layouts, and omission of the v3 claim when evidence fails to match.
+- `src/aci/verifier/tests/zero_g.rs` uses a dstack 0.6.5 quote fixture. It covers admission failures, Compose claim extraction for both layouts, omission of the v3 claim when evidence fails to match, and recording an advertised response-binding capability.
 - `tests/0g_private_computer_live.rs`: an ignored authenticated live test for the reviewed boot chains, including a sealed JSON-mode request with `reasoning_effort`. See [Live E2E test suite](../../live-e2e-test-suite.md).
