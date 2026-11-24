@@ -25,9 +25,14 @@ both repositories are archived.
 
 ### Verdict
 
-**Acceptable with conditions** for router-scoped gateway attestation. A
-verified NEAR session attests the gateway TLS channel. Backend model workload
-identity remains unverified.
+**Acceptable with conditions** for the gateway channel (router-scoped
+attestation).
+
+**Not acceptable** for model-scoped verified-inference claims: findings 1
+and 2 fall under the [hard reject conditions](../audit-criteria.md#hard-reject-conditions)
+for unverified model paths and alias selection. Admission for verified model
+inference is withheld until backend workload admission and model-identity
+matching are enforced.
 
 - Configure canonical model IDs from `/v1/model/list`. NEAR administrators can
   change which model an alias resolves to.
@@ -79,13 +84,14 @@ identity remains unverified.
    production compose or its allowed environment variables. The source check
    found no separate backend compose or app ID allowlist. For workload
    identity, any genuine non-debug dstack TDX CVM can pass the backend
-   attestation checks with valid report-data binding. This blocks claims
-   that NEAR's backend admission establishes a reviewed model workload.
+   attestation checks with valid report-data binding. This blocks admission
+   for verified model inference under the hard reject condition for
+   unverified model paths.
 2. **Administrators can retarget model aliases.** The attestation report
    requested for `zai-org/GLM-5.1-FP8` named `z-ai/glm-5.3-flash`. The
-   adapter still returned `verified` for the alias. This blocks claims that
-   NEAR vouches for the requested backend model workload under criterion 4 of
-   the [audit criteria](../audit-criteria.md).
+   adapter still returned `verified` for the alias. This blocks admission
+   for verified model inference under the hard reject condition for silent
+   alias selection.
 3. **Third-party routes are outside the reviewed scope.** Chutes and Tinfoil
    models can be marked verifiable in the catalog. Lease establishment failed
    for the probed models.
@@ -448,8 +454,6 @@ Live probes during review:
   bucket id, or cache-hit metadata.
 - `/v1/signature/<bogus-chat-id>` returned a chat-id keyed not-found shape,
   confirming the signature lookup path exists.
-- Existing gateway live artifact:
-  `/tmp/private-ai-gateway-live-e2e/20260518-053819`.
 
 ### Adapter Behavior
 
