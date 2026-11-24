@@ -1,5 +1,5 @@
 //! 0G Private Computer E2EE, chat profile (0g-pc-e2ee `protocol/SPEC.md` at
-//! release-2026.10.19.2): request sealing (§5–§6), response opening (§7) and
+//! release-2026.11.20.3): request sealing (§5–§6), response opening (§7) and
 //! the §8 response signature.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

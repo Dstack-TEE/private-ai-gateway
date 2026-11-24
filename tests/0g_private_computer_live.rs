@@ -17,10 +17,10 @@ use serde_json::Value;
 const ROUTER: &str = "https://router-api-cloud.0g.ai";
 const SERVING_CONTRACT: &str = "0x47340d900bdFec2BD393c626E12ea0656F938d84";
 /// Boot-chain pins for the dstack images 0G publishes for its providers
-/// (`client/evidence/brokerimages.json`): dstack-nvidia-0.5.4.1 and 0.5.9.
+/// (`client/evidence/brokerimages.json`): dstack-0.6.5 and dstack-nvidia-0.5.15.
 const BOOT_CHAINS: [&str; 2] = [
-    "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc",
-    "tdx-boot-chain:sha256:bebbc1f26600aa7e415962d919d1919613d7be1d3ce9f4043c19f6785da11c0e",
+    "tdx-boot-chain:sha256:8c79554388166a9b2484a13ea4ccce08a81854a0993dc27b5c3b6adcfacc9d34",
+    "tdx-boot-chain:sha256:8dbfd8fe8bdef1ed5aca189e78f8e143e7c74d79bcbc04c3a38003f3cd0ef191",
 ];
 
 fn model() -> String {

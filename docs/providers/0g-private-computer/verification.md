@@ -1,6 +1,6 @@
 # 0G Private Computer verification
 
-The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 0G router. It implements 0G's E2EE protocol natively, verifies every candidate provider before sealing anything to it, and releases a response only after the provider's signature recovers to the verified on-chain signer.
+The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 0G router. It implements 0G's E2EE protocol natively, verifies every candidate provider before sealing anything to it, and checks that the response signature recovers to the verified on-chain signer before releasing a buffered response or marking a stream complete.
 
 | Property | Value |
 | --- | --- |
@@ -9,7 +9,7 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 | Verifier ID | `0g-private-computer/native-e2ee/v1` |
 | Enforced binding | `e2ee_public_key_sha256`, `key_id` = provider address |
 | Transport | 0G E2EE v1 (HPKE base, X25519 / HKDF-SHA256 / ChaCha20-Poly1305) through the router, `src/aci/upstream/zero_g/` |
-| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.10.19.2` (`6d823311`). The [reviewed upstream release](review.md#round-2-2026-11-23-pst) is `release-2026.11.20.3`. The adapter's chat profile still uses base mode without `_bind`. |
+| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.11.20.3` (`37d697f2`). The adapter uses the base-mode chat profile. |
 | Audit | [Acceptable with conditions](review.md#round-2-2026-11-23-pst), 2026-11-23 PST |
 
 ## Configuration
@@ -75,7 +75,7 @@ The backend uses the first provider, in preview order, whose recorded key hashes
 - Only the fields 0G's router reads stay cleartext, bound in the AAD: `model` (routing and attribution), `stream` (how the router serves the response), `stream_options` (the router forces `include_usage` to bill a stream), and `max_tokens` / `max_completion_tokens` (0G's design lists the output limit as read for routing and billing; the router's source is not public, so they stay readable). The provider is pinned, so the router routes on nothing else. The adapter seals `messages`, `tools` and `tool_choice` by default and uses §5.1 to seal all other fields, including `temperature`, `stop`, `logit_bias`, `response_format`, `reasoning_effort`, `user` and `metadata`. Sealing protects those fields through delivery to the verified broker. The broker's forwarding policy determines which fields reach the engine. As 0G's client does, a streamed request gets `stream_options.include_usage: true` before sealing, so the router need not rewrite it. Nothing is unbound, so a rewritten `model` fails the provider's `Open`. The sealed `model` is the configured on-chain id, which the router forwards unchanged. 0G's client instead seals the `canonical_id` and leaves `model` unbound so the router can rewrite it. A caller-supplied `_e2ee` field is refused. Only `/v1/chat/completions` is served.
 - The adapter does not translate reasoning. As for any route, the middleware writes it in the candidate's `reasoningFormat` ([control-plane contract](../../control-plane-contract.md#reasoning-format)), and a 0G route needs `reasoning_effort`. A managed candidate (no `engine`) does not forward `chat_template_kwargs`, so the `chat_template_*` formats would drop the switch. `thinking_type` writes a `thinking` field, and an unset `reasoningFormat` writes a nested `reasoning` object. The adapter seals both fields. The provider ignored `thinking` in [round 1](#provider-behavior). The nested object remains untested.
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
-- A non-200 router or broker response keeps its status and loses its body: failover, the capacity retry, the recorded attempt and the client's status treat it like that status from any upstream, and its body is not returned.
+- A 409 with the broker's `e2ee_key_mismatch` error code triggers the existing channel-binding reverification path. A gateway-managed binding can be refreshed from a new verified quote before resealing the request. Other non-200 responses keep their status. Error bodies are withheld.
 
 Middleware injects a per-user `cache_salt` and the adapter seals it. Source reading of broker `v0.6.4` and `v0.6.5` found that the top-level allowlist for self-hosted engines omits `cache_salt`, so the broker may drop it after opening the request. Forwarding and cache isolation remain unverified live for these versions. See the [earlier prefix-cache test](../../prefix-cache-isolation.md#observed-enforcement).
 
@@ -117,7 +117,7 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 | `tcb_up_to_date` | Hardware-proven from the provider's TCB status. |
 | `os_known_good`, `gpu_attested`, `serving_software_known_good`, `model_weights_provenance` | Unknown. |
 
-`claims.extra` records `boot_chain`, `onchain_verifiability` (informational) and `plaintext_destination_verified: false`. The adapter records `compose_hash` only for the v1 `mr_config_id` layout (prefix `0x01`), so the claim is absent for the reviewed `dstack-0.6.5` provider (prefix `0x03`). This layout is independent of the `report_data` version.
+`claims.extra` records `boot_chain`, `onchain_verifiability` (informational) and `plaintext_destination_verified: false`. With `mr_config_id` v1, the adapter reads `compose_hash` directly from the register. With dstack 0.6's v3 layout, it replays the boot event log to the quote's RTMR3 and reconstructs the launch document. The hash is recorded only when the document reproduces the quote's `mr_config_id`. Incomplete or inconsistent evidence leaves the claim absent. The `mr_config_id` layout is independent of the `report_data` version.
 
 ## Limitations
 
@@ -125,15 +125,15 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 - The private tier is enforced by the router. PAG's own gates are the on-chain record and quote checks above, so a provider that misdeclares `TargetSeparated` passes them.
 - There is no quote freshness challenge (0G's quote takes no nonce). GPU evidence (0G's `ZG-Quote-Signature` over NVIDIA evidence) and weights are not checked.
 - A send failure does not fall back to another verified provider.
-- When a broker generates its encryption key at startup, a restart can make a cached key stale. The adapter treats HTTP 409 `e2ee_key_mismatch` as an upstream error, so requests using the stale key can fail until the verification cache refreshes.
+- The stale-key 409 arrives via the router. A misbehaving router can trigger up to two reverifications per request with a gateway-managed binding. The gateway fails closed if reverification fails or the mismatch persists.
 - Receipts carry no per-response signature-status field: the outcome is implied by the receipt existing (buffered) or by the stream ending in `[DONE]` (streamed).
 - Response cleartext floats can cause a frame to fail closed because `serde_json` float parsing is not guaranteed to round correctly. Round-1 responses carried no cleartext floats.
 
 ## Tests
 
 - `src/aci/upstream/zero_g/tests.rs`:
-  - interop with `tests/fixtures/0g-private-computer/interop.json`, produced by 0G's Go protocol library at the pinned release ([provenance](../../../tests/fixtures/0g-private-computer/README.md)), plus the broker signature KAT;
+  - base-mode interop from 0G's Go protocol library at the pinned release, plus the broker signature known-answer test. See [fixture provenance](../../../tests/fixtures/0g-private-computer/README.md).
   - tampered, reordered, truncated and unsealed frames;
-  - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and binding mismatch.
-- `src/aci/verifier/tests/zero_g.rs`: the quote from the round-1 host `compute-network-19` with patched report_data. It covers TargetSeparated, unacknowledged signer, model mismatch, signer mismatch, boot chain, quote redirect, and root-check rejections, and failing closed when no candidate passes.
-- `tests/0g_private_computer_live.rs`: an ignored live glm-5.3 test, including a sealed JSON-mode request with `reasoning_effort`. See [Live E2E test suite](../../live-e2e-test-suite.md).
+  - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and stale-key conflict classification.
+- `src/aci/verifier/tests/zero_g.rs` uses a dstack 0.6.5 quote fixture. It covers admission failures, Compose claim extraction for both layouts, and omission of the v3 claim when evidence fails to match.
+- `tests/0g_private_computer_live.rs`: an ignored authenticated live test for the reviewed boot chains, including a sealed JSON-mode request with `reasoning_effort`. See [Live E2E test suite](../../live-e2e-test-suite.md).

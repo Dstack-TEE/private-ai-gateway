@@ -10,6 +10,15 @@ Date: 2026-11-23 PST (round 2).
 Provider: [0G Private Computer](https://pc.0g.ai/), private tier only.
 Adapter: native `0g-private-computer` provider. See [Verification](verification.md).
 
+## Adapter update (2026-11-23 PST)
+
+A stale encryption-key conflict now triggers the gateway's existing
+reverification path. The adapter records the Compose hash on dstack 0.6 when
+the verified quote's RTMR3 and launch-document commitment agree. The Go
+interop vectors were refreshed. The authenticated live completion remains
+unverified.
+See [Verification](verification.md).
+
 ## Round 2 (2026-11-23 PST)
 
 Reviewed [`0gfoundation/0g-pc-e2ee`][pc-r2] at `release-2026.11.20.3`
@@ -57,12 +66,12 @@ providers.
   because it does not pin the Compose hash.
 - [Response binding][pc-r2-response] lets a client seal `_bind` and require an
   HPKE `mode_psk` response, so it can reject a substituted stream on the first
-  frame. The adapter still uses base mode and releases provisional chunks
+  frame. At the time of this check, the adapter used base mode and released provisional chunks
   before checking the final signature.
 - A controller-less private broker generates its encryption key at startup.
   A stale key can produce HTTP 409 `e2ee_key_mismatch` until the gateway
-  refreshes verification. The adapter records `compose_hash` only for the
-  older `mr_config_id` layout, so the claim is absent for the reviewed
+  refreshes verification. At the time of this check, the adapter recorded
+  `compose_hash` only for the older `mr_config_id` layout, so the claim was absent for the reviewed
   `dstack-0.6.5` provider.
 
 ### Open findings
