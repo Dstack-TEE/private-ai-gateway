@@ -32,8 +32,10 @@ implements the report endpoint above. For every request it must:
 4. Collect NVIDIA GPU evidence for every GPU attached to the TD, using `nonce`
    as the GPU attestation nonce. Serialize it once as the JSON text
    `nvidia_payload`, an object with `arch`, `nonce` and `evidence_list` in the
-   format NVIDIA's attestation SDK produces. The exact UTF-8 bytes matter: the
-   TD commits to their hash and the gateway hashes the string it receives.
+   format NVIDIA's attestation SDK produces. The ArmetAI image reviewed on
+   2026-11-23 PST also emits `switch_arch`, `switch_evidence_list` and
+   `switch_evidence_present`. The TD commits to the hash of the exact UTF-8
+   bytes and the gateway hashes the full string it receives.
 5. Request a TD quote with this 64-byte `report_data`:
 
    ```text
@@ -57,11 +59,12 @@ implements the report endpoint above. For every request it must:
      "nonce": "<nonce, echoed>",
      "tls_spki_sha256": "<64 lowercase hex>",
      "quote": "<hex TDX v4 or v5 quote>",
-     "nvidia_payload": "{\"arch\":\"HOPPER\",\"nonce\":\"<nonce>\",\"evidence_list\":[...]}"
+     "nvidia_payload": "{\"arch\":\"HOPPER\",\"nonce\":\"<nonce>\",\"evidence_list\":[...],\"switch_arch\":\"<switch arch>\",\"switch_evidence_list\":[...],\"switch_evidence_present\":true}"
    }
    ```
 
-   `nvidia_payload` is a JSON **string**, not a nested object.
+   `nvidia_payload` is a JSON **string**. The switch fields are optional in
+   the adapter.
 
 A reference computation of the report data, for the provider's attestation
 service:
@@ -101,13 +104,17 @@ though the digest appears in the quote.
   "accepted_subjects": [
     "tdx-measurement:sha256:<64 lowercase hex>"
   ],
-  "bearer_token": "optional, sent to the report endpoint and on inference"
+  "bearer_token": "<provider API key>"
 }
 ```
 
 The gateway refuses to load an `armet-ai` entry without at least one
 well-formed `accepted_subjects` pin, or with a `base_url` that is not a root
 HTTPS origin without user info, path, query or fragment.
+
+The adapter accepts an optional `bearer_token` and sends it to the report
+endpoint and on inference. The current `ctf.armet.ai` deployment requires
+the provider's API key.
 
 A pin is SHA-256 over these raw fields of the verified TD report, in order:
 
@@ -185,7 +192,9 @@ The Rust scope seam refuses a bridge result that declares `router` scope for
 this provider, so one model's verification cannot be reused for another model
 behind the same origin.
 
-Middleware injects a per-user `cache_salt`, enforced by vLLM in the measured TD. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
+Middleware injects a per-user `cache_salt`. Isolation depends on enforcement by
+the serving engine in the measured TD. The tenant-isolation test used vLLM and
+predates the switch to SGLang `v0.5.23`. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
 ## Evidence
 
@@ -239,11 +248,15 @@ access for collateral and NRAS.
 - **Model binding is a claim of the measured software.** `report_data` commits
   to the model ID the TD says it serves. Whether the weights match that ID is
   only as strong as the measured software's loading logic.
-- **Key custody is not proved by the quote alone.** ArmetAI generates the TLS
-  key inside the TD and obtains its certificate via ACME from inside the TD.
-  Reviewers must confirm that the code doing this is covered by the pin, that
-  the key never leaves the TD, and that nothing outside the TD terminates TLS
-  (see the [review](review.md#1-workload-identity)).
+- **Key custody requires image and deployment review.** The TLS key generation
+  and ACME scripts are readable in the digest-pinned workload image. The image
+  layer containing `haproxy.cfg` is encrypted, with its key released through
+  Fortanix DSM. Confirm that the live quote covers the reviewed image through
+  its initdata, the TLS key stays inside the TD and the public frontend uses
+  TCP passthrough. See the [currency check](review.md#currency-check-2026-11-23-pst).
+- **Switch attestation is outside the GPU verification gate.** The
+  `report_data` commitment covers the PPCIe switch fields when present. The
+  `gpu_attested` claim uses only the signed NRAS GPU result.
 - **GPU-to-TD binding rests on the measured software.** The quote proves the
   pinned TD software presented this GPU evidence for this nonce. That the GPUs
   are the ones attached to the TD, in CC mode, and serving the requests, is a
@@ -291,7 +304,9 @@ validation, per-model scope), `src/aci/verifier/tests.rs` (bridge seam, option
 passing, refusal of a declared `router` scope), and
 `src/aggregator/service/claims.rs` (claim mapping).
 
-For a live endpoint:
+For a live endpoint, set `PROVIDER_API_KEY` in the environment from your
+secret store if required by the provider. For ArmetAI's current deployment,
+use `https://ctf.armet.ai` as the origin and `GLM-5.3-Flash` as the model.
 
 ```sh
 request_hash="sha256:$(printf '0%.0s' {1..64})"
@@ -309,16 +324,23 @@ jq -n \
     forwarded_body_hash: $hash,
     required: true,
     timeout_seconds: 60,
-    provider_options: {("armet_ai_accepted_subject:" + $pin): "true"}
+    provider_options: {
+      ("armet_ai_accepted_subject:" + $pin): "true",
+      armet_ai_bearer_token: (env.PROVIDER_API_KEY // "")
+    }
   }' | uv run python scripts/private_ai_provider_verifier.py
 ```
 
-With the placeholder pin, a correct endpoint fails only at the measurement step
-and prints the subject to review. Replace the placeholder with that subject
-after review, and the same command returns `verified`.
+If verification reaches the placeholder pin, the bridge reports the observed
+subject and fields. For a test run, substitute the reviewed subject and
+require `verified`, which includes the NRAS gate. Compare the returned
+`tls_spki_sha256` binding with the live TLS leaf. Use the
+[dated review](review.md#currency-check-2026-11-23-pst) when deciding whether
+to accept a pin for production.
 
 For the live E2E suite, add a providers-file entry with `"provider":
 "armet-ai"`, `"binding": "tls_spki_sha256"` and the reviewed pin in
 `accepted_subjects` (see [Live E2E test suite](../../live-e2e-test-suite.md)).
 
-See the [dated review](review.md) for the audit-criteria self-assessment.
+See the [dated review](review.md) for the audit findings and historical
+self-assessment.
