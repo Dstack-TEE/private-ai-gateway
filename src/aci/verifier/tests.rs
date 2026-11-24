@@ -735,12 +735,12 @@ async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_a
         .verify(request())
         .await;
     assert_eq!(crashed.result, VerificationResult::Failed);
-    assert_eq!(crashed.failure, VerificationFailure::NotVerified);
+    assert_eq!(crashed.failure, VerificationFailure::EvidenceUnavailable);
 }
 
 #[tokio::test]
 #[cfg(unix)]
-async fn near_ai_retries_after_bridge_spawn_failure() {
+async fn near_ai_retries_after_bridge_execution_failures() {
     use std::os::unix::fs::PermissionsExt;
 
     let directory = tempfile::tempdir().unwrap();
@@ -762,8 +762,20 @@ async fn near_ai_retries_after_bridge_spawn_failure() {
     };
 
     let failed = verifier.verify(request.clone()).await;
-    assert_eq!(failed.failure, VerificationFailure::NotVerified);
+    assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
     assert!(failed.diagnostic.unwrap().contains("failed to spawn"));
+
+    for (script, diagnostic) in [
+        ("exit 3", "exited with status"),
+        ("printf 'invalid JSON'", "returned invalid JSON"),
+    ] {
+        std::fs::write(&command, format!("#!/bin/sh\ncat >/dev/null\n{script}\n")).unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let failed = verifier.verify(request.clone()).await;
+        assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
+        assert!(failed.diagnostic.unwrap().contains(diagnostic));
+    }
+
     let output = json!({
         "result": "verified",
         "attested_scope": "router",
@@ -1027,7 +1039,7 @@ case "$payload" in
   *'"model_id":"unavailable"'*)
     printf '%s\n' unavailable >> "$1"
     sleep 1
-    printf '%s' '{"result":"failed","failure":"evidence_unavailable"}'
+    printf '%s' '{"result":"failed","failure":"evidence_unavailable","reason":"NEAR AI attestation report fetch failed: read timed out"}'
     ;;
   *)
     printf '%s\n' verified >> "$1"
@@ -1090,6 +1102,7 @@ esac"#;
     .expect("healthy model must refresh within the refresh lead");
     assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
     assert_eq!(repeated.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(failed.diagnostic, repeated.diagnostic);
     assert_eq!(refreshed.result, VerificationResult::Verified);
     assert!(verifier.cached(&unavailable).is_none());
     assert!(verifier.cache_remaining(&unavailable).is_none());

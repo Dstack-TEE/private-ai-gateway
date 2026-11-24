@@ -319,12 +319,6 @@ impl ExternalProviderVerifier {
     async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let cache_key = self.cache_key(&request);
         let started = Instant::now();
-        let event = self.verifier_event(request).await;
-        self.maybe_cache_event(cache_key, &event, started);
-        event
-    }
-
-    async fn verifier_event(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -340,19 +334,17 @@ impl ExternalProviderVerifier {
             Ok(input) => input,
             Err(err) => {
                 return self
-                    .failed_event(request, format!("failed to encode verifier input: {err}"));
+                    .unavailable_event(request, format!("failed to encode verifier input: {err}"));
             }
         };
         let output = match self.run(input).await {
             Ok(output) => output,
-            // A process error or deadline can originate in the gateway.
-            // Fetch failures are reported explicitly by the bridge.
-            Err(err) => return self.failed_event(request, err),
+            Err(err) => return self.unavailable_event(request, err),
         };
         let output: ExternalProviderVerifierOutput = match serde_json::from_slice(&output) {
             Ok(output) => output,
             Err(err) => {
-                return self.failed_event(
+                return self.unavailable_event(
                     request,
                     format!("provider verifier returned invalid JSON: {err}"),
                 );
@@ -365,6 +357,9 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
+                // Cache only a validated bridge result, including any fetch failure
+                // reported explicitly by the NEAR AI bridge.
+                self.maybe_cache_event(cache_key, &event, started);
                 event
             }
             Err(err) => self.failed_event(request, err),
@@ -628,6 +623,17 @@ impl ExternalProviderVerifier {
             ..Default::default()
         }
     }
+
+    fn unavailable_event(
+        &self,
+        request: UpstreamVerificationRequest,
+        reason: impl Into<String>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            failure: VerificationFailure::EvidenceUnavailable,
+            ..self.failed_event(request, reason)
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -839,7 +845,7 @@ mod process_tests {
                 let pids = read_pids();
                 tokio::time::advance(Duration::from_secs(1)).await;
                 let error = run.await;
-                assert_eq!(error.failure, VerificationFailure::NotVerified);
+                assert_eq!(error.failure, VerificationFailure::EvidenceUnavailable);
                 assert_eq!(
                     error.diagnostic.as_deref(),
                     Some("provider verifier timed out after 1s")

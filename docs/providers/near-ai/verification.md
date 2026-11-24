@@ -72,7 +72,8 @@ an HTTP timeout, the verifier keeps any still-valid verified entry.
 Otherwise, it caches that `evidence_unavailable` result for up to 10 seconds,
 capped by the time between a scheduled refresh and the verified entry's
 expiry. Bridge execution failures, including an elapsed subprocess
-deadline, produce `not_verified` and are retried on a cold request.
+deadline, also produce `evidence_unavailable`. The next cold request retries
+bridge execution immediately.
 The receipt records the selected model, and the session records router
 channel evidence.
 
