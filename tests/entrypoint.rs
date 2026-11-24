@@ -493,7 +493,7 @@ fn deploy_readme_documents_one_command_deploy_and_seed_config() {
 fn docs_include_config_and_env_reference() {
     let reference = repo_text("docs/configuration-reference.md");
     for needle in [
-        "Configuration Reference",
+        "# Configuration reference",
         "Config Fields",
         "Environment Variables",
         "`state_dir`",
