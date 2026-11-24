@@ -49,13 +49,16 @@ Nonce discovery throughput and unbound served weights remain limits on use.
   AMD SEV-SNP, and its release notes say the network has yet to admit SNP guests.
   [SNP feed](https://api.chutes.ai/servers/snp/measurements),
   [sek8s v1.5.0 release](https://github.com/chutesai/sek8s/releases/tag/v1.5.0)
-- The production gateway's public session listing shows Chutes sessions verified
-  with the current adapter. The direct probe received HTTP 401 from E2EE
-  instance discovery, which requires a Chutes credential. The direct check
-  therefore left E2EE key binding, encrypted invocation, streaming, and live
-  discovery limits untested. The deployed Chutes API revision and the gateway's
-  production route pins were outside the evidence collected.
-  [Public session listing](https://tee.redpill.ai/v1/aci/sessions)
+- The direct probe received HTTP 401 from E2EE instance discovery, which
+  requires a Chutes credential. The direct check therefore left E2EE key
+  binding, encrypted invocation, streaming, and live discovery limits untested.
+  The deployed Chutes API revision and the gateway's production route pins
+  were outside the evidence collected.
+
+### Production gateway observation (2026-11-23 20:15 PST)
+
+The production gateway's public session listing showed Chutes sessions verified
+with the current adapter. [Public session listing](https://tee.redpill.ai/v1/aci/sessions)
 
 ### Provenance and open findings
 
@@ -72,6 +75,7 @@ Nonce discovery throughput and unbound served weights remain limits on use.
    rejects a quote with the TDX debug bit set. The sek8s guide marks the legacy
    endpoint used by the adapter as deprecated.
    [Chutes public feed source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L485-L522),
+   [Chutes release-candidate build flag](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L729),
    [Chutes release-candidate policy](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/util.py#L1235-L1273),
    [measurement guide](https://github.com/chutesai/sek8s/blob/v1.5.0/docs/reproducing-measurements.md)
 3. **Release process.** sek8s publishes tagged source and release notes with
