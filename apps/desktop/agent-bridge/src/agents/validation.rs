@@ -610,6 +610,21 @@ impl Projector {
                 .all(|field| holds_managed_field(agent, doc, field))
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
+        let helper_stale = stale_helper(
+            agent,
+            record,
+            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
+            self.file_credentials
+                .then_some(self.tokens.path(agent.id()).as_path()),
+        ) && helper_fields_hold(agent, record, doc.as_ref())
+            && record
+                .fields
+                .iter()
+                .filter(|field| !is_helper_field(agent, field))
+                .all(|field| {
+                    is_any_model_selection_field(field)
+                        || holds_managed_field(agent, doc.as_ref().unwrap(), field)
+                });
         status.connected = managed && token;
         status.authorized = !record.disabled && managed && token;
         if record.cleanup_pending {
@@ -623,6 +638,15 @@ impl Projector {
             status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention =
                 Some("This connection is disabled; Disconnect to restore your config".to_string());
+        } else if helper_stale {
+            status.repair_action = Some(AgentRepairAction::Reconnect);
+            status.connected = false;
+            status.authorized = false;
+            status.attention = Some(
+                "This connection uses an outdated credential helper path or command. Disconnect, \
+                 then Connect again to update it."
+                    .to_string(),
+            );
         } else if !managed {
             if status.error.is_none() {
                 status.repair_action = Some(AgentRepairAction::Reconnect);
@@ -636,21 +660,6 @@ impl Projector {
             status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention = Some(
                 "This agent's access is revoked; retry Disconnect to restore its config"
-                    .to_string(),
-            );
-        } else if stale_helper(
-            agent,
-            record,
-            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
-            self.file_credentials
-                .then_some(self.tokens.path(agent.id()).as_path()),
-        ) {
-            status.repair_action = Some(AgentRepairAction::Reconnect);
-            status.connected = false;
-            status.authorized = false;
-            status.attention = Some(
-                "This connection uses an outdated credential helper path or command. Disconnect, \
-                 then Connect again to update it."
                     .to_string(),
             );
         } else if status.connected {
@@ -794,5 +803,29 @@ impl Projector {
             agent.name(),
             agent.config_path(&self.home, self.tool_env).display()
         )
+    }
+}
+
+fn helper_fields_hold(agent: Agent, record: &Connection, doc: Option<&ConfigDoc>) -> bool {
+    let Some(doc) = doc else {
+        return false;
+    };
+    record
+        .fields
+        .iter()
+        .filter(|field| is_helper_field(agent, field))
+        .all(|field| field.holds(owned_value(doc, field).as_ref()))
+}
+
+fn is_helper_field(agent: Agent, field: &OwnedField) -> bool {
+    match agent {
+        Agent::Codex => {
+            field.path == owned(&["model_providers", "private_ai_proxy", "auth", "command"])
+                || field.path == owned(&["model_providers", "private_ai_proxy", "auth", "args"])
+        }
+        Agent::ClaudeCode => field.path == owned(&["apiKeyHelper"]),
+        Agent::Hermes => field.path == owned(&["providers", "private-ai-proxy", "key_cmd"]),
+        Agent::Pi | Agent::OhMyPi => field.path == owned(&["providers", "private-ai-proxy"]),
+        Agent::OpenCode | Agent::OpenClaw | Agent::Dsh => false,
     }
 }
