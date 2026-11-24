@@ -5,10 +5,6 @@ on:
     - cron: '17 * * * *'
   workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
-
 concurrency:
   group: gateway-measurements
   cancel-in-progress: false
@@ -17,6 +13,8 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -30,17 +28,22 @@ jobs:
       - run: uv sync --locked
 
       - name: Compare release measurements with every live domain
-        id: check
-        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: uv run --locked python scripts/gateway_measurements.py check --summary
 
+  reconcile-issue:
+    needs: check
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
       - name: Reconcile drift issue
-        if: ${{ !cancelled() }}
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          CHECK_RESULT: ${{ needs.check.result }}
         with:
           script: |
             const repo = context.repo;
@@ -50,7 +53,7 @@ jobs:
               ...repo, labels: label, state: 'open', per_page: 100,
             });
             const issue = issues.find(item => !item.pull_request && item.title === title);
-            if (process.env.CHECK_OUTCOME === 'success') {
+            if (process.env.CHECK_RESULT === 'success') {
               if (issue) {
                 await github.rest.issues.update({...repo, issue_number: issue.number, state: 'closed'});
               }
@@ -63,15 +66,9 @@ jobs:
               await github.rest.issues.createLabel({...repo, name: label, color: 'B60205'});
             }
             const run = `${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}`;
-            const body = process.env.CHECK_OUTCOME === 'failure'
-              ? `Release/live measurement check failed. [Check summary](${run})`
-              : `The measurement check did not run. [Workflow setup](${run})`;
+            const body = `Release/live measurement workflow failed. [Workflow run](${run})`;
             if (issue) {
               await github.rest.issues.update({...repo, issue_number: issue.number, body});
             } else {
               await github.rest.issues.create({...repo, title, body, labels: [label]});
             }
-
-      - name: Fail on drift or unavailable evidence
-        if: always() && steps.check.outcome != 'success'
-        run: exit 1

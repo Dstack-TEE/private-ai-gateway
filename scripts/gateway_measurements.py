@@ -28,7 +28,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 SCHEMA = "gateway-measurements/v1"
 DEFAULT_REPO = "Dstack-TEE/private-ai-gateway"
-RELEASE_PATTERN = r"gateway-prod-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[1-9][0-9]*)?"
+RELEASE_PATTERN = re.compile(r"gateway-prod-([0-9]{4}-[0-9]{2}-[0-9]{2})(?:-([1-9][0-9]*))?")
 CHECK_RETRY_DELAYS = (5, 15)
 FIELDS = {
     "app": ("compose_hash", "app_id", "repo_url", "repo_commit", "launcher_image"),
@@ -268,7 +268,7 @@ def validate(measurements):
     require(set(measurements) == {"schema", "release", "domains", "app", "kms", "os", "tls"},
             "invalid measurements fields")
     require(measurements["schema"] == SCHEMA, f"expected schema {SCHEMA}")
-    require(re.fullmatch(RELEASE_PATTERN, text(measurements["release"])), "invalid gateway release tag")
+    require(RELEASE_PATTERN.fullmatch(text(measurements["release"])), "invalid gateway release tag")
     domains = measurements["domains"]
     require(isinstance(domains, list) and domains and len(set(domains)) == len(domains), "expected unique domains")
     for hostname in domains:
@@ -322,14 +322,18 @@ def release_measurements(repo):
             page = response.json()
             require(isinstance(page, list) and all(isinstance(release, dict) for release in page),
                     "GitHub releases response must be a list of objects")
-            releases.extend(release for release in page
-                            if not release["draft"] and re.fullmatch(RELEASE_PATTERN, release["tag_name"]))
+            for release in page:
+                if release["draft"]:
+                    continue
+                tag = RELEASE_PATTERN.fullmatch(release["tag_name"])
+                if tag:
+                    day, sequence = tag.groups()
+                    releases.append(((day, int(sequence or 1)), release))
             url = response.links.get("next", {}).get("url")
-        published = [release for release in releases if not release["prerelease"]]
+        published = [(key, release) for key, release in releases if not release["prerelease"]]
         require(published, "no published gateway-prod release found")
-        latest = max(published, key=lambda release: release["published_at"])
-        accepted = [latest] + [release for release in releases
-                               if release["prerelease"] and release["published_at"] > latest["published_at"]]
+        latest_key, latest = max(published, key=lambda item: item[0])
+        accepted = [latest] + [release for key, release in releases if release["prerelease"] and key > latest_key]
         snapshots = []
         for release in accepted:
             assets = [asset for asset in release["assets"] if asset["name"] == "measurements.json"]

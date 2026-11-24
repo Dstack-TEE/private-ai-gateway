@@ -293,7 +293,7 @@ class CheckTests(unittest.TestCase):
         self.assertIn("ff" * 32, error)
         self.assertEqual(sum("/v1/aci/attestation" in url for url in calls), 3)
 
-    def test_rollout_accepts_both_complete_snapshots_on_different_domains(self):
+    def test_rollout_accepts_higher_prerelease_tag_announced_earlier(self):
         scheduled = copy.deepcopy(EXPECTED)
         scheduled["release"] = "gateway-prod-2026-11-06"
         scheduled["tls"]["tee.redpill.ai"] = "ee" * 32
@@ -301,7 +301,7 @@ class CheckTests(unittest.TestCase):
         keys = report["attestation"]["workload_keyset"]["tls_public_keys"]
         next(key for key in keys if key["domain"] == "tee.redpill.ai")["spki_sha256"] = "ee" * 32
         result, output, error, _ = self.run_check(
-            releases=[release(scheduled, prerelease=True), release()],
+            releases=[release(scheduled, prerelease=True, published_at="2026-11-04T00:00:00Z"), release()],
             assets={RELEASE: EXPECTED, scheduled["release"]: scheduled},
             reports={"tee.redpill.ai": report},
         )
@@ -322,32 +322,43 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("no accepted release matches", error)
 
-    def test_same_day_suffixed_release_is_the_latest(self):
-        suffixed = copy.deepcopy(EXPECTED)
-        suffixed["release"] = f"{RELEASE}-2"
+    def test_higher_full_release_tag_wins_with_earlier_publication_time(self):
+        latest = {**EXPECTED, "release": "gateway-prod-2026-11-06"}
         older = copy.deepcopy(EXPECTED)
         older["tls"]["tee.redpill.ai"] = "ee" * 32
-        result, output, error, _ = self.run_check(
-            releases=[release(suffixed, published_at="2026-11-06T00:00:00Z"), release(older)],
-            assets={RELEASE: older, suffixed["release"]: suffixed},
+        result, output, error, calls = self.run_check(
+            releases=[release(older), release(latest, published_at="2026-11-04T00:00:00Z")],
+            assets={RELEASE: older, latest["release"]: latest},
         )
         self.assertEqual((result, error), (0, ""))
-        self.assertIn(f"tee.redpill.ai: matches {RELEASE}-2", output)
+        self.assertIn(f"tee.redpill.ai: matches {latest['release']}", output)
+        self.assertNotIn(f"https://fixture.invalid/{RELEASE}.json", calls)
 
-    def test_stale_prerelease_cannot_authorize_rollback(self):
+    def test_same_day_release_sequences_sort_numerically(self):
+        suffixed = copy.deepcopy(EXPECTED)
+        suffixed["release"] = f"{RELEASE}-10"
+        older = copy.deepcopy(EXPECTED)
+        older["release"] = f"{RELEASE}-2"
+        older["tls"]["tee.redpill.ai"] = "ee" * 32
+        result, output, error, _ = self.run_check(
+            releases=[release(older), release(suffixed)],
+            assets={older["release"]: older, suffixed["release"]: suffixed},
+        )
+        self.assertEqual((result, error), (0, ""))
+        self.assertIn(f"tee.redpill.ai: matches {RELEASE}-10", output)
+
+    def test_older_prerelease_tag_cannot_authorize_rollback_even_if_announced_later(self):
         published = copy.deepcopy(EXPECTED)
         published["tls"]["tee.redpill.ai"] = "ff" * 32
         old = copy.deepcopy(EXPECTED)
         old["release"] = "gateway-prod-2026-11-03"
-        for timestamp in ("2026-11-04T00:00:00Z", release()["published_at"]):
-            with self.subTest(published_at=timestamp):
-                result, _, error, calls = self.run_check(
-                    releases=[release(old, prerelease=True, published_at=timestamp), release(published)],
-                    assets={RELEASE: published, old["release"]: old},
-                )
-                self.assertEqual(result, 1)
-                self.assertIn("no accepted release matches", error)
-                self.assertNotIn(f"https://fixture.invalid/{old['release']}.json", calls)
+        result, _, error, calls = self.run_check(
+            releases=[release(old, prerelease=True, published_at="2026-11-06T00:00:00Z"), release(published)],
+            assets={RELEASE: published, old["release"]: old},
+        )
+        self.assertEqual(result, 1)
+        self.assertIn("no accepted release matches", error)
+        self.assertNotIn(f"https://fixture.invalid/{old['release']}.json", calls)
 
     def test_served_tls_key_must_match_same_release_as_attestation(self):
         result, output, error, _ = self.run_check(served_spkis={"tee.redpill.ai": "ff" * 32})

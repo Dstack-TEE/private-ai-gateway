@@ -87,17 +87,19 @@ uv run --locked python scripts/gateway_measurements.py check
 # Optional: --repo owner/repo (defaults to Dstack-TEE/private-ai-gateway)
 ```
 
-The check selects the newest published production release by `published_at`
-and open production prereleases published after that release. Stale prereleases
-cannot extend acceptance of an earlier deployment. It loads each `measurements.json`, then
-fetches public `/v1/aci/attestation` evidence from every domain in those assets.
+The check selects the full production release with the highest rollout tag and
+accepts production prereleases with higher tags. It sorts tags by date, then by
+the numeric suffix, which defaults to 1. GitHub's publication timestamp can
+reflect the prerelease announcement before promotion. Older tags cannot extend
+acceptance of an earlier deployment. The check loads each `measurements.json`,
+then fetches public `/v1/aci/attestation` evidence from every domain in those assets.
 Each domain must match one complete accepted snapshot, comparing every schema
 field except `release`; domain ordering is ignored. The SPKI observed in the TLS
 handshake on that same connection must also match that snapshot's value for
 the domain. Missing peer-certificate evidence fails closed. A rollout can serve the old
 snapshot on one domain and a prerelease snapshot on another. Individual fields
-from different releases cannot be combined to pass. Publishing the new release
-automatically ends the acceptance window for older prereleases.
+from different releases cannot be combined to pass. Promoting the new release
+automatically ends the acceptance window for older tags.
 
 A mismatch prints a unified JSON diff and exits 1. Missing assets and malformed
 evidence also fail the check. For each domain, the check retries connection
@@ -112,6 +114,7 @@ runs hourly and on manual dispatch. A serving domain that recovers within the
 three attempts does not trigger an issue. A failed check opens or updates one
 `measurement-drift` issue, and a passing check closes it. The workflow runs
 with `--summary` to publish domain-level outcomes, and the issue links to the
-workflow run. It uses only `contents: read` and `issues: write` permissions.
+workflow run. The check job has `contents: read`. A separate job uses
+`issues: write` to reconcile the issue from the check job's result.
 Scheduled checks start once the workflow is on the default branch; neither
 the workflow nor the script deploys the gateway or changes release assets.
