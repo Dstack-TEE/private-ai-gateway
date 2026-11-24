@@ -133,10 +133,9 @@ impl Connection {
     fn restored(&self) -> bool {
         self.suspended
             && self.selection.is_none()
-            && self
-                .fields
-                .iter()
-                .all(|field| retain_provider_field(field, &self.fields))
+            && self.fields.iter().all(|field| {
+                retain_provider_field(field, &self.fields) || is_any_model_selection_field(field)
+            })
     }
 
     fn disconnected(&self) -> bool {

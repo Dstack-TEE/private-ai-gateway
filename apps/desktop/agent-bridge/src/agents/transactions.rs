@@ -346,9 +346,9 @@ impl Projector {
         }
         if let Some(record) = store.get_mut(agent.id()) {
             let fields = record.fields.clone();
-            record
-                .fields
-                .retain(|field| retain_provider_field(field, &fields));
+            record.fields.retain(|field| {
+                retain_provider_field(field, &fields) || is_any_model_selection_field(field)
+            });
             for field in &mut record.fields {
                 let inactive = inactive_provider_value(field);
                 if doc.get_value(&refs(&field.path)) == inactive {
