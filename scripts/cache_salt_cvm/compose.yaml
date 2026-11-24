@@ -1,11 +1,8 @@
 # Disposable CVM for the per-user cache-salt live test.
 # Runbook: docs/cache-salt-cvm-test.md. Never deploy this as a real gateway.
 #
-# Mirrors redpill-ai/private-ai-launcher-compose docker-compose.no-ingress.yml:
-# the same launcher image, source pin, dstack KMS socket and middleware mode.
-# A two-tenant mock control plane (inlined below) replaces the real one, the
-# official Privatemode proxy and dstack-verifier run beside the gateway as in
-# production, and node-exporter is dropped. Replace
+# Runs the launcher with the dstack KMS socket, a two-tenant mock control plane,
+# and the Privatemode proxy and dstack-verifier sidecars. Replace
 # COMMIT_SHA_PLACEHOLDER with a full commit pushed to the gateway repository.
 # Secret values arrive as dstack encrypted env; only their names appear here.
 
@@ -156,7 +153,7 @@ configs:
         {
           "name": "pd-qwen-test",
           "provider": "phala-direct",
-          "base_url": "https://qwen3-8-27b.usc2-87.phala.com",
+          "base_url": "${PHALA_DIRECT_QWEN_BASE_URL:?set PHALA_DIRECT_QWEN_BASE_URL}",
           "models": {"pd-qwen": "qwen/qwen3.8-27b"},
           "verifier_request_timeout_seconds": 600,
           "bearer_token": "${PHALA_DIRECT_QWEN_TOKEN:?set PHALA_DIRECT_QWEN_TOKEN}"
@@ -164,7 +161,7 @@ configs:
         {
           "name": "pd-glm-test",
           "provider": "phala-direct",
-          "base_url": "https://glm-5-3.gpu16.phala.com",
+          "base_url": "${PHALA_DIRECT_GLM_BASE_URL:?set PHALA_DIRECT_GLM_BASE_URL}",
           "models": {"pd-glm": "z-ai/glm-5.3"},
           "verifier_request_timeout_seconds": 600,
           "bearer_token": "${PHALA_DIRECT_GLM_TOKEN:?set PHALA_DIRECT_GLM_TOKEN}"

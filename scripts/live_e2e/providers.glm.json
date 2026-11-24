@@ -1,21 +1,21 @@
 [
   {
-    "name": "tinfoil-glm51-live",
+    "name": "tinfoil-glm53-live",
     "provider": "tinfoil",
     "base_url": "https://inference.tinfoil.sh",
-    "public_model": "glm51-tinfoil",
-    "upstream_model": "glm-5-1",
+    "public_model": "glm53-tinfoil",
+    "upstream_model": "glm-5-3",
     "api_key_env": "TINFOIL_API_KEY",
     "binding": "tls_spki_sha256",
     "capabilities": ["chat", "streaming", "tools", "structured_outputs", "context"],
     "structured_output_max_tokens": 2048
   },
   {
-    "name": "near-ai-glm51-live",
+    "name": "near-ai-glm53-flash-live",
     "provider": "near-ai",
     "base_url": "https://cloud-api.near.ai",
-    "public_model": "glm51-near",
-    "upstream_model": "zai-org/GLM-5.1-FP8",
+    "public_model": "glm53-flash-near",
+    "upstream_model": "z-ai/glm-5.3-flash",
     "api_key_env": "NEARAI_API_KEY",
     "binding": "tls_spki_sha256",
     "requires": ["DSTACK_VERIFIER_URL"],

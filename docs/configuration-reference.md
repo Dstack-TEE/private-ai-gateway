@@ -253,7 +253,7 @@ provider origin and maps one or more public model IDs to provider model IDs.
     "provider": "tinfoil",
     "base_url": "https://inference.tinfoil.sh",
     "models": {
-      "confidential-chat": "kimi-k2-6"
+      "confidential-chat": "gpt-oss-120b"
     },
     "bearer_token": "<provider-api-key>"
   }
