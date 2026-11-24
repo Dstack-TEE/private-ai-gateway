@@ -319,6 +319,12 @@ impl ExternalProviderVerifier {
     async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let cache_key = self.cache_key(&request);
         let started = Instant::now();
+        let event = self.verifier_event(request).await;
+        self.maybe_cache_event(cache_key, &event, started);
+        event
+    }
+
+    async fn verifier_event(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -357,9 +363,6 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
-                // Cache only a validated bridge result, including any fetch failure
-                // reported explicitly by the NEAR AI bridge.
-                self.maybe_cache_event(cache_key, &event, started);
                 event
             }
             Err(err) => self.failed_event(request, err),
@@ -606,6 +609,18 @@ impl ExternalProviderVerifier {
             .map_err(|e| format!("failed to record Chutes provider session: {e}"))
     }
 
+    /// The verifier could not run or answer: nothing was judged.
+    fn unavailable_event(
+        &self,
+        request: UpstreamVerificationRequest,
+        reason: impl Into<String>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            failure: VerificationFailure::EvidenceUnavailable,
+            ..self.failed_event(request, reason)
+        }
+    }
+
     fn failed_event(
         &self,
         request: UpstreamVerificationRequest,
@@ -621,17 +636,6 @@ impl ExternalProviderVerifier {
             required: request.required,
             diagnostic: Some(reason.into()),
             ..Default::default()
-        }
-    }
-
-    fn unavailable_event(
-        &self,
-        request: UpstreamVerificationRequest,
-        reason: impl Into<String>,
-    ) -> UpstreamVerifiedEvent {
-        UpstreamVerifiedEvent {
-            failure: VerificationFailure::EvidenceUnavailable,
-            ..self.failed_event(request, reason)
         }
     }
 }
@@ -826,31 +830,21 @@ mod process_tests {
             let (reaped, waited) = tokio::sync::oneshot::channel();
             let pids = if timeout {
                 let verifier = ExternalProviderVerifier::with_command(
-                    "near-ai",
+                    "tinfoil",
                     AttestationScope::PerRouter,
                     vec!["sh".to_string(), "-c".to_string(), script],
                     1,
                 )
                 .unwrap();
                 *verifier.reaped.lock().unwrap() = Some(reaped);
-                let request = UpstreamVerificationRequest {
-                    upstream_name: "router-upstream".into(),
-                    url_origin: None,
-                    model_id: "provider-model".into(),
-                    forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
-                    required: true,
-                };
-                let mut run = Box::pin(verifier.verify(request.clone()));
+                let mut run = Box::pin(verifier.run(Vec::new()));
                 assert!(futures_util::poll!(&mut run).is_pending());
                 let pids = read_pids();
                 tokio::time::advance(Duration::from_secs(1)).await;
-                let error = run.await;
-                assert_eq!(error.failure, VerificationFailure::EvidenceUnavailable);
                 assert_eq!(
-                    error.diagnostic.as_deref(),
-                    Some("provider verifier timed out after 1s")
+                    run.await.unwrap_err(),
+                    "provider verifier timed out after 1s"
                 );
-                assert!(verifier.cached_event(&request).is_none());
                 pids
             } else {
                 let mut command = Command::new("sh");

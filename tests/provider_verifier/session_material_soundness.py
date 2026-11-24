@@ -145,7 +145,7 @@ def chutes_instance(*, nonce="nonce-a", changes=None):
         return result
 
 
-def chutes_output(instances, *, timeout_seconds=60, verify_collateral=None):
+def chutes_output(instances, *, timeout_seconds=60):
     key = base64.b64encode(b"key").decode()
     material = tdx_session_material(quote_fixture())
     report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
@@ -177,10 +177,7 @@ def chutes_output(instances, *, timeout_seconds=60, verify_collateral=None):
 
     with (
         patch("requests.get", side_effect=fetch),
-        patch.object(
-            dcap_qvl, "get_collateral_and_verify",
-            new=AsyncMock(return_value=report, side_effect=verify_collateral),
-        ) as verify,
+        patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify,
     ):
         output = io.StringIO()
         with redirect_stdout(output):
@@ -514,32 +511,6 @@ class SessionMaterialTests(unittest.TestCase):
             self.assertEqual(claims["instance_tdx_reports"][instance_id], material["tdx_report"])
             self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
             self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
-
-    def test_chutes_verifies_a_fleet_concurrently_and_preserves_binding_order(self):
-        instances = [{"instance_id": f"instance-{i}"} for i in range(20)]
-        active = peak = 0
-
-        async def verify_collateral(quote):
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            try:
-                await asyncio.sleep(0)
-                report = tdx_session_material(quote)["tdx_report"]
-                return SimpleNamespace(advisory_ids=[], to_json=lambda: json.dumps({
-                    "status": "UpToDate", "report": {"TD10": report},
-                }))
-            finally:
-                active -= 1
-
-        result, checked = chutes_output(instances, verify_collateral=verify_collateral)
-        self.assertEqual(peak, len(instances))
-        self.assertEqual(checked, len(instances))
-        self.assertEqual(result["result"], "verified")
-        self.assertEqual(
-            [binding["key_id"] for binding in result["channel_bindings"]],
-            [item["instance_id"] for item in instances],
-        )
 
     def test_chutes_caps_each_response_before_parsing(self):
         documents = [

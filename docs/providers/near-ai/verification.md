@@ -67,13 +67,9 @@ for that cache key. Requests for a sibling model can verify independently.
 An explicit model name mismatch on refresh
 immediately replaces even a current verified entry for that model because the
 upstream now reports a different model. Requests reuse the mismatch for up to
-60 seconds. If the bridge reports that the evidence fetch failed, including
-an HTTP timeout, the verifier keeps any still-valid verified entry.
-Otherwise, it caches that `evidence_unavailable` result for up to 10 seconds,
-capped by the time between a scheduled refresh and the verified entry's
-expiry. Bridge execution failures, including an elapsed subprocess
-deadline, also produce `evidence_unavailable`. The next cold request retries
-bridge execution immediately.
+60 seconds. If evidence is unavailable, the verifier keeps any still-valid
+verified entry. Otherwise, it caches the failure for up to 10 seconds, capped
+by the time between a scheduled refresh and the verified entry's expiry.
 The receipt records the selected model, and the session records router
 channel evidence.
 

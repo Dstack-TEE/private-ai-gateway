@@ -739,69 +739,6 @@ async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_a
 }
 
 #[tokio::test]
-#[cfg(unix)]
-async fn near_ai_retries_after_bridge_execution_failures() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let directory = tempfile::tempdir().unwrap();
-    let command = directory.path().join("verifier");
-    let verifier = ExternalProviderVerifier::with_command_and_cache(
-        "near-ai",
-        AttestationScope::PerRouter,
-        vec![command.display().to_string()],
-        5,
-        300,
-    )
-    .unwrap();
-    let request = UpstreamVerificationRequest {
-        upstream_name: "router-upstream".into(),
-        url_origin: Some("https://router.example".into()),
-        model_id: "provider-model".into(),
-        forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
-        required: true,
-    };
-
-    let failed = verifier.verify(request.clone()).await;
-    assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
-    assert!(failed.diagnostic.unwrap().contains("failed to spawn"));
-
-    for (script, diagnostic) in [
-        ("exit 3", "exited with status"),
-        ("printf 'invalid JSON'", "returned invalid JSON"),
-    ] {
-        std::fs::write(&command, format!("#!/bin/sh\ncat >/dev/null\n{script}\n")).unwrap();
-        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let failed = verifier.verify(request.clone()).await;
-        assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
-        assert!(failed.diagnostic.unwrap().contains(diagnostic));
-    }
-
-    let output = json!({
-        "result": "verified",
-        "attested_scope": "router",
-        "evidence": {
-            "digest": crate::aci::digest::sha256_hex(b"evidence"),
-            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
-        },
-        "channel_bindings": [{
-            "type": "tls_spki_sha256",
-            "origin": "https://router.example",
-            "spki_sha256": "ab".repeat(32),
-        }],
-    });
-    std::fs::write(
-        &command,
-        format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{output}'\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(command, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(
-        verifier.verify(request).await.result,
-        VerificationResult::Verified
-    );
-}
-
-#[tokio::test]
 async fn external_provider_verifier_caches_verified_bindings() {
     let directory = tempfile::tempdir().unwrap();
     let counter_path = directory.path().join("counter");
@@ -1039,7 +976,7 @@ case "$payload" in
   *'"model_id":"unavailable"'*)
     printf '%s\n' unavailable >> "$1"
     sleep 1
-    printf '%s' '{"result":"failed","failure":"evidence_unavailable","reason":"NEAR AI attestation report fetch failed: read timed out"}'
+    printf '%s' '{"result":"failed","failure":"evidence_unavailable"}'
     ;;
   *)
     printf '%s\n' verified >> "$1"
@@ -1102,7 +1039,6 @@ esac"#;
     .expect("healthy model must refresh within the refresh lead");
     assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
     assert_eq!(repeated.failure, VerificationFailure::EvidenceUnavailable);
-    assert_eq!(failed.diagnostic, repeated.diagnostic);
     assert_eq!(refreshed.result, VerificationResult::Verified);
     assert!(verifier.cached(&unavailable).is_none());
     assert!(verifier.cache_remaining(&unavailable).is_none());

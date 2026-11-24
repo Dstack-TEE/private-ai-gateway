@@ -402,6 +402,7 @@ async def _verify_chutes(request: dict[str, Any]) -> None:
 
     discovery_rounds = chutes_discovery_rounds(options)
     discovery_interval = chutes_discovery_interval_seconds(options)
+    pubkeys_responses = []
     pubkeys_url = f"{api_base}/e2e/instances/{chute_id}"
     pubkey_items: dict[str, dict[str, Any]] = {}
     nonce_expires_in = None
@@ -418,6 +419,7 @@ async def _verify_chutes(request: dict[str, Any]) -> None:
             pubkeys_body = read_bounded_body(response, MAX_PUBLIC_KEYS_BYTES, "Chutes public keys")
             pubkeys_type = response_content_type(response)
         pubkeys_data = json.loads(pubkeys_body.decode("utf-8"))
+        pubkeys_responses.append(pubkeys_data)
         raw_items.append(
             raw_http_item(
                 f"chutes.e2ee_instances.{round_index}",
