@@ -8,7 +8,7 @@ The `phala-direct` adapter verifies a version 2 attestation report from a per-mo
 | Verifier | `scripts/provider_verifier/phala_direct.py` through the provider-verifier bridge |
 | External dependency | dstack verifier at `DSTACK_VERIFIER_URL` (default `http://localhost:8080`) |
 | Enforced binding | `tls_spki_sha256` |
-| Evidence endpoint | `<base_url>/v1/attestation/report?version=2&signing_algo=ecdsa&nonce=<random>`. Production origins require bearer authentication. |
+| Evidence endpoint | `<base_url>/v1/attestation/report?version=2&signing_algo=ecdsa&nonce=<random>` |
 
 ## Producer requirement
 

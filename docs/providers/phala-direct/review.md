@@ -16,8 +16,9 @@ Date: 2026-11-23 PST (currency check). Original review 2026-06-10 UTC, updated
 The audit used verified session evidence from the production gateway. The
 trust boundary remains the per-model dstack CVM.
 
-- Phala Inference Guard (PIG) `v0.12.41` (`d2b62a6a`) was the primary
-  attestation producer. [PIG release](https://github.com/Phala-Network/phala-inference-guard/releases/tag/v0.12.41)
+- Phala Inference Guard (PIG) was the primary attestation producer. Published
+  image matches identified `v0.12.41` (`d2b62a6a`).
+  [PIG release](https://github.com/Phala-Network/phala-inference-guard/releases/tag/v0.12.41)
 - The check also covered dstack-vllm-proxy `v0.2.20` (`4120cd26`). Its release
   commit is the merge commit for the version 2 attestation change.
   [vllm-proxy release](https://github.com/Dstack-TEE/vllm-proxy/releases/tag/v0.2.20)
@@ -29,15 +30,17 @@ trust boundary remains the per-model dstack CVM.
 
 ### Verdict
 
-Still **acceptable with conditions**. All checked origins serve version 2,
-which satisfies the June version 2 condition. Strict inclusion requires a
-review of PIG source and log handling, reviewed compose and image pins,
-enforced TCB and OS policy, and model-weight provenance.
+Still **acceptable with conditions**. The June version 2 condition is met.
+Strict inclusion requires review of PIG source, runtime policy and log
+handling, reviewed compose and image pins, enforced TCB and OS policy, and
+model-weight provenance.
 
 ### Live check (20:08–20:20 PST)
 
-- All checked origins had verified sessions with attestation version 2, TCB
-  status `UpToDate`, a production OS image, and TDX debug mode disabled.
+- Attestation version 2 is live on all checked origins.
+- All checked origins run production OS images.
+- The verified sessions recorded TCB status `UpToDate` and TDX debug mode
+  disabled.
 - For all checked origins, the audit recomputed the stored evidence digest, the
   `report_data` binding of the signing address, TLS SPKI and request nonce,
   and the SHA-256 of `app_compose` against the measured `compose-hash` event.
@@ -53,8 +56,10 @@ enforced TCB and OS policy, and model-weight provenance.
    [PIG attestation source](https://github.com/Phala-Network/phala-inference-guard/blob/v0.12.41/internal/runtime/attestation/report.go)
 2. **Log handling (criterion 5).** Strict inclusion requires evidence that
    log handling keeps request content inside the TEE.
-3. **Compose and image provenance (criteria 7 and 13).** The adapter checks
-   compose integrity. Strict inclusion still requires a reviewed allowlist
+3. **Compose and image provenance (criteria 6, 7 and 13).** The adapter checks
+   compose integrity. The runtime policy of the measured production Compose
+   was not reviewed, and not every measured image digest was mapped to a
+   published release. Strict inclusion still requires a reviewed allowlist
    and public pre-rollout publication of measurements.
 4. **TCB and OS policy (criterion 14).** The adapter records both claims.
    Strict inclusion requires enforcing them.
@@ -67,6 +72,8 @@ enforced TCB and OS policy, and model-weight provenance.
 - The production gateway's sessions establish live adapter compatibility
   for the checked origins. The deployed gateway revision and other origins
   remain unverified.
+- Review of the measured production Compose's runtime policy and mapping
+  every measured image digest to a published release remain open.
 - Source-to-image reproducibility and whether request content can leave the
   TEE through logs remain unverified.
 
@@ -107,8 +114,9 @@ can *prove* it on this path or only record an operator assertion.
   today the config's `accepted_image_digests` / `accepted_subjects` fields are wired to
   the native `aci-service` path, not this external bridge.
 - `production_os_image` is now decided from dstack's published image metadata (bound to the
-  attested `os_image_hash`), so dev images are flagged. A strict release tier still needs
-  a decision on whether to reject non-production images.
+  attested `os_image_hash`), so dev images are flagged today (the deployed fleet is all
+  `is_dev: true`). Remaining: decide whether to **gate** on it (reject non-prod) for a
+  strict release tier, vs. the current record-only behavior.
 - Set and enforce a TCB freshness policy (reject `OutOfDate` per criterion 14).
 - Confirm the production TLS endpoint is terminated by the attested CVM (dstack-ingress
   sidecar), with no off-TEE terminator — otherwise the SPKI binding is vacuous.
