@@ -1,17 +1,5 @@
 # Changelog
 
-## Unreleased
-
-* **Protection resumes after logout, reboot, and crashes.** `pap start` enables supervision for supported Linux and macOS CLI installations when the shell has no agent path or proxy overrides. `pap service enable` uses the service manager's environment. `pap service disable` ends protection, restores agents, and turns off supervision.
-* **`pap service stop` restores agents after the backend has exited.** It clears the saved session so the next login does not resume protection.
-* **`pap agents connect` starts protection.** If protection cannot start, the command exits 1 with the reason before saving the connection. `--dry-run` leaves the backend and protection state alone.
-
-### Bug Fixes
-
-* Keep Oh My Pi model filters and path-scoped provider filters advisory, and honor global provider disables in `config.yml` and `config.yaml`.
-* Preserve user-added Claude Code provider switches until Reconnect, and restore the generated Claude Code model picker and dsh default-model entry when stopping protection.
-* Report OpenCode model selections on Windows without `ProgramData`, detect OpenClaw fallback-only model overrides, and clean up empty OpenClaw model selector containers on disconnect.
-
 ## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
 
 Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, network changes and routine commands that used to interrupt it, and adds `pap update` and `pap service restart`.
