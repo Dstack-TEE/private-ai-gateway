@@ -275,6 +275,7 @@ pub(crate) enum Mode {
     OversizedResponse,
     Unsealed,
     RouterError,
+    Conflict(&'static str),
     Truncated,
     TruncatedLine,
     Reordered,
@@ -450,6 +451,9 @@ async fn chat(
         .push((headers, body.clone()));
     if broker.mode == Mode::RouterError {
         return (StatusCode::BAD_GATEWAY, "provider-controlled text").into_response();
+    }
+    if let Mode::Conflict(body) = broker.mode {
+        return (StatusCode::CONFLICT, body).into_response();
     }
     if broker.mode == Mode::OversizedResponse {
         let mut response = oversized_response();
@@ -631,6 +635,40 @@ async fn buffered_response_without_a_verified_signature_is_a_generic_error() {
                 "{err}"
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn only_the_stale_key_conflict_triggers_reverification() {
+    let stale = Fixture::new(Mode::Conflict(concat!(
+        r#"{"error":""#,
+        "e2ee_key_mismatch",
+        r#": re-fetch the enc key and re-seal"}"#,
+    )))
+    .await;
+    assert!(matches!(
+        stale.buffered().await,
+        Err(UpstreamError::ChannelBindingMismatch(_))
+    ));
+    assert!(matches!(
+        stale
+            .backend
+            .forward_stream_verified_prepared(stale.chat(true), &stale.event)
+            .await,
+        Err(UpstreamError::ChannelBindingMismatch(_))
+    ));
+    assert_eq!(stale.signature_calls(), 0);
+
+    for body in [
+        r#"{"error":"unrelated conflict"}"#,
+        concat!(r#"{"error":"other: "#, "e2ee_key_mismatch", r#""}"#),
+        "e2ee_key_mismatch",
+    ] {
+        let fixture = Fixture::new(Mode::Conflict(body)).await;
+        assert!(matches!(
+            fixture.buffered().await,
+            Err(UpstreamError::Upstream { status: 409 })
+        ));
     }
 }
 

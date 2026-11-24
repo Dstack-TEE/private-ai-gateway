@@ -1,6 +1,5 @@
 //! 0G verifier against a mock router, chain RPC and brokers. Quotes are the
-//! real compute-network-19 quote with report_data patched; DCAP-to-root is
-//! stubbed.
+//! dstack 0.6.5 quote fixture with patched report fields. DCAP-to-root is stubbed.
 
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +9,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
 
 use super::super::zero_g::{PreviewCandidate, ZeroGProviderVerifier};
 use crate::aci::receipt::{ChannelBinding, VerificationResult};
@@ -18,18 +17,22 @@ use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 const MODEL: &str = "glm-5.3";
 const QUOTE_HEX: &str =
-    include_str!("../../../../tests/fixtures/0g-private-computer/quote-cn19.hex");
+    include_str!("../../../../tests/fixtures/0g-private-computer/quote-dstack-0.6.5.hex");
 const REPORT_DATA: usize = 568;
+const MR_CONFIG_ID: usize = 232;
 const RTMR2: usize = 472;
+const RTMR3: usize = 520;
+const COMPOSE_HASH: [u8; 32] = [0x23; 32];
 
-/// The compute-network-19 quote's boot chain (dstack-nvidia-0.5.4.1).
+/// The dstack 0.6.5 quote's boot chain.
 const BOOT_CHAIN: &str =
-    "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc";
+    "tdx-boot-chain:sha256:8c79554388166a9b2484a13ea4ccce08a81854a0993dc27b5c3b6adcfacc9d34";
 
 /// Candidates: `a` is sound; `i` is sound for 0GM, whose on-chain id
 /// `0GM-1.0-35B-A3B` differs from the router's `canonical_id`; each other
-/// letter breaks one check.
-const NAMES: [&str; 9] = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+/// letter through h breaks one admission check. j through l have insufficient
+/// evidence for a Compose claim.
+const NAMES: [&str; 12] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
 
 /// The model id the router offers for `name` (and its on-chain record serves).
 fn offered(name: &str) -> &'static str {
@@ -99,7 +102,73 @@ fn quote(name: &str) -> Value {
     if name == "f" {
         quote[RTMR2] ^= 1;
     }
-    json!({"quote": hex::encode(quote)})
+    let (mut reply, rtmr3, mr_config_id) = measured_compose();
+    quote[RTMR3..RTMR3 + 48].copy_from_slice(&rtmr3);
+    quote[MR_CONFIG_ID..MR_CONFIG_ID + 48].copy_from_slice(&mr_config_id);
+    match name {
+        "i" => {
+            // v1 carries the Compose hash in the register itself.
+            quote[MR_CONFIG_ID] = 1;
+            quote[MR_CONFIG_ID + 1..MR_CONFIG_ID + 33].copy_from_slice(&COMPOSE_HASH);
+            reply = json!({});
+        }
+        "j" => {
+            let mut log: Vec<Value> =
+                serde_json::from_str(reply["event_log"].as_str().unwrap()).unwrap();
+            log[1]["event_payload"] = hex::encode([0x99; 32]).into();
+            reply["event_log"] = serde_json::to_string(&log).unwrap().into();
+        }
+        "k" => quote[MR_CONFIG_ID + 1] ^= 1,
+        "l" => reply = json!({}),
+        _ => {}
+    }
+    reply["quote"] = hex::encode(quote).into();
+    reply
+}
+
+fn measured_compose() -> (Value, [u8; 48], [u8; 48]) {
+    const EVENT_TYPE: u32 = 0x0800_0001;
+    let events: [(&str, &[u8]); 7] = [
+        ("app-id", &[0x42; 20]),
+        ("compose-hash", &COMPOSE_HASH),
+        ("init-script-hash", &[0x11; 32]),
+        ("gpu-policy-hash", &[0x33; 32]),
+        ("instance-id", &[0x44; 20]),
+        ("key-provider", br#"{"name":"local-sgx","id":"5566"}"#),
+        ("system-ready", &[]),
+    ];
+    let mut rtmr3 = [0; 48];
+    let mut log = Vec::new();
+    for (event, payload) in events {
+        let digest = Sha384::digest(
+            [
+                EVENT_TYPE.to_le_bytes().as_slice(),
+                b":",
+                event.as_bytes(),
+                b":",
+                payload,
+            ]
+            .concat(),
+        );
+        rtmr3 = Sha384::digest([rtmr3.as_slice(), &digest].concat()).into();
+        log.push(json!({
+            "imr": 3, "event_type": EVENT_TYPE, "event": event,
+            "event_payload": hex::encode(payload), "digest": "",
+        }));
+    }
+    let mut mr_config_id = [0; 48];
+    mr_config_id[0] = 3;
+    // SHA-256 of the V3 domain and JCS document for the events above.
+    hex::decode_to_slice(
+        "839c997e24134f80aaac14c3f7ada2305b0293fb4feba5e81c5a67690aaa2719",
+        &mut mr_config_id[1..33],
+    )
+    .unwrap();
+    (
+        json!({"event_log": serde_json::to_string(&log).unwrap()}),
+        rtmr3,
+        mr_config_id,
+    )
 }
 
 /// Stubbed DCAP-to-root: provider `h`'s quote is refused.
@@ -229,6 +298,7 @@ async fn model_identity_comes_only_from_configuration_and_chain() {
         .await
         .unwrap();
     assert_eq!(verified.provider.model, "0GM-1.0-35B-A3B");
+    assert_eq!(verified.claims["compose_hash"], hex::encode(COMPOSE_HASH));
 
     // A router substituting a legitimate provider for model B under a
     // configured model A, either by offering B or by mislabelling it A, and
@@ -286,6 +356,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert_eq!(instance["signing_address"], signer("a"));
     assert_eq!(instance["tcb_status"], "UpToDate");
     assert_eq!(instance["boot_chain"], BOOT_CHAIN);
+    assert_eq!(instance["compose_hash"], hex::encode(COMPOSE_HASH));
     let (headers, body) = mock.preview_requests.lock().unwrap()[0].clone();
     assert_eq!(headers["x-0g-provider-trust-mode"], "private");
     assert_eq!(body, json!({"model": MODEL, "service_type": "chatbot"}));
@@ -296,6 +367,19 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert_eq!(event.result, VerificationResult::Failed);
     assert!(event.channel_bindings.is_empty());
     assert!(verifier.cached(&request()).is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn omits_compose_claim_without_matching_event_log_and_register() {
+    let (_, verifier, server) = fixture().await;
+    for name in ["j", "k", "l"] {
+        let verified = verifier
+            .verify_candidate(&candidate(name, MODEL), MODEL)
+            .await
+            .unwrap();
+        assert!(!verified.claims.contains_key("compose_hash"), "{name}");
+    }
     server.abort();
 }
 
