@@ -9,8 +9,8 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
 | Verifier ID | `0g-private-computer/native-e2ee/v1` |
 | Enforced binding | `e2ee_public_key_sha256`, `key_id` = provider address |
 | Transport | 0G E2EE v1 (HPKE base, X25519 / HKDF-SHA256 / ChaCha20-Poly1305) through the router, `src/aci/upstream/zero_g/` |
-| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.10.19.2` (`6d823311`) |
-| Audit | [Acceptable with conditions](review.md), 2026-10-20 |
+| Protocol | `0gfoundation/0g-pc-e2ee` `protocol/SPEC.md` at `release-2026.10.19.2` (`6d823311`). The [reviewed upstream release](review.md#round-2-2026-11-23-pst) is `release-2026.11.20.3`. The adapter's chat profile still uses base mode without `_bind`. |
+| Audit | [Acceptable with conditions](review.md#round-2-2026-11-23-pst), 2026-11-23 PST |
 
 ## Configuration
 
@@ -23,7 +23,8 @@ The `0g-private-computer` adapter reaches 0G's private (TeeML) tier through the 
   "zg_chain_rpc_url": "https://evmrpc.0g.ai",
   "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
   "accepted_subjects": [
-    "tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"
+    "tdx-boot-chain:sha256:8c79554388166a9b2484a13ea4ccce08a81854a0993dc27b5c3b6adcfacc9d34",
+    "tdx-boot-chain:sha256:8dbfd8fe8bdef1ed5aca189e78f8e143e7c74d79bcbc04c3a38003f3cd0ef191"
   ],
   "models": {"glm-5.3": "glm-5.3", "0gm-1.0-35b-a3b": "0GM-1.0-35B-A3B"}
 }]
@@ -42,18 +43,22 @@ Per configured model, cached for `verifier_cache_seconds` (verified results only
 5. Require the quote's boot chain to be one of the route's `accepted_subjects`.
 6. Require `report_data` = `enc_pub(32) ‖ signer(20) ‖ version 1 ‖ zero(8)` and the signer to equal the on-chain `teeSignerAddress`.
 
-A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed`, no prompt is sent, and the request is refused like any other verification failure (503 `upstream_verification_failed` with a refusal receipt), whether or not the caller required verification. On 2026-10-20 only compute-network-19 passed. compute-network-41 and the Baidu/Tencent relays declare `TargetSeparated: true`; compute-network-41 forwards to RedPill's gateway, so a gateway request never reaches the provider that forwards to RedPill.
+A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed`, no prompt is sent, and the request is refused like any other verification failure (503 `upstream_verification_failed` with a refusal receipt), whether or not the caller required verification.
+
+On 2026-11-23 PST, `glm-5.3` (`compute-network-19e`) and `0GM-1.0-35B-A3B` (`compute-network-20c`) passed the on-chain and quote checks with the round-2 pins below. The separated providers from round 1 were absent from the registry. See the [round-2 audit](review.md#round-2-2026-11-23-pst) for the live checks and their limits.
 
 ### Boot-chain pins
 
 A `tdx-boot-chain:sha256:<hex>` subject is SHA-256 over the 144 bytes MRTD ‖ RTMR1 ‖ RTMR2 of a dstack OS image: the firmware, the kernel, and the cmdline (which pins the rootfs verity hash) with initrd. It deliberately excludes RTMR0 (VM shape) and RTMR3 (the application), which vary per provider. armet-ai's `tdx-measurement` subject covers all five registers and the launch configuration, so it cannot express this.
 
-| Image | Subject |
-| --- | --- |
-| `dstack-nvidia-0.5.4.1` (compute-network-19, glm-5.3) | `tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc` |
-| `dstack-nvidia-0.5.9` (compute-network-20, 0GM) | `tdx-boot-chain:sha256:bebbc1f26600aa7e415962d919d1919613d7be1d3ce9f4043c19f6785da11c0e` |
+| Image | Subject | Audit status |
+| --- | --- | --- |
+| `dstack-0.6.5` (compute-network-19e, `glm-5.3`) | `tdx-boot-chain:sha256:8c79554388166a9b2484a13ea4ccce08a81854a0993dc27b5c3b6adcfacc9d34` | Observed on 2026-11-23 PST |
+| `dstack-nvidia-0.5.15` (compute-network-20c, `0GM-1.0-35B-A3B`) | `tdx-boot-chain:sha256:8dbfd8fe8bdef1ed5aca189e78f8e143e7c74d79bcbc04c3a38003f3cd0ef191` | Observed on 2026-11-23 PST |
+| `dstack-nvidia-0.5.4.1` (compute-network-19, `glm-5.3`) | `tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc` | Round 1 only. Absent from the brokers checked in round 2. |
+| `dstack-nvidia-0.5.9` (compute-network-20, `0GM-1.0-35B-A3B`) | `tdx-boot-chain:sha256:bebbc1f26600aa7e415962d919d1919613d7be1d3ce9f4043c19f6785da11c0e` | Round 1 only. Absent from the brokers checked in round 2. |
 
-The register values come from 0G's provider allowlist (`client/evidence/brokerimages.json` at the pinned release). It derives each entry with dstack-mr from the published release (`os_image_hash` `86b18137…` and `806a352e…`; the latter is the production image `scripts/dstack_os_image.py` lists). PAG has not recomputed them. To derive a subject, take MRTD, RTMR1 and RTMR2 from a dstack-mr measurement of the release, and confirm them against a verified quote:
+The round-2 register values match the single-pass entries in [0G's `brokerimages.json` at `release-2026.11.20.3`](https://github.com/0gfoundation/0g-pc-e2ee/blob/37d697f2944f31aaaf10c5d1a1c81376ad364cf5/client/evidence/brokerimages.json). Their `os_image_hash` values are `4771a29e…8623` and `3bb7d262…4ef2`, respectively. 0G derives the registers with dstack-mr from the published OS images. The audit matched the registers to live quotes. Independent derivation from the release artifacts remains unverified. To derive a subject, take MRTD, RTMR1 and RTMR2 from a dstack-mr measurement of the release and confirm them against a verified quote:
 
 ```sh
 printf '%s' "$MRTD$RTMR1$RTMR2" | xxd -r -p | sha256sum
@@ -72,13 +77,13 @@ The backend uses the first provider, in preview order, whose recorded key hashes
 - The router receives exactly: the API key, `X-0G-Provider-Trust-Mode: private`, `X-0G-Provider-Address` (and `-Identity` when the preview gave one) and `X-0G-Provider-Allow-Fallbacks: false`. Caller and route headers are not forwarded. `_e2ee.signer_addr` pins the verified signer.
 - A non-200 router or broker response keeps its status and loses its body: failover, the capacity retry, the recorded attempt and the client's status treat it like that status from any upstream, and its body is not returned.
 
-Middleware injects a per-user `cache_salt`, sealed by the adapter and merged into the served request by the broker; see [Prefix-cache isolation](../../prefix-cache-isolation.md) for observed enforcement and limitations.
+Middleware injects a per-user `cache_salt` and the adapter seals it. Source reading of broker `v0.6.4` and `v0.6.5` found that the top-level allowlist for self-hosted engines omits `cache_salt`, so the broker may drop it after opening the request. Forwarding and cache isolation remain unverified live for these versions. See the [earlier prefix-cache test](../../prefix-cache-isolation.md#observed-enforcement).
 
 ## Responses
 
 Every frame must be sealed, seal `choices`, not seal `usage` or `model`, not unbind `usage`, and decrypt to exactly its declared fields. Frames open in order under one HPKE context, so reordering, dropping or tampering fails.
 
-Only the decrypted fields and the bound cleartext reach the caller. A field named in a frame's `unbound_fields` is outside the AAD and the §8 binding, so an intermediary can set it undetected (§5.2; §8.2: "a router-injected `x_0g_trace` is unauthenticated by construction"). Every unbound field is therefore dropped when the frame opens, after its AEAD and binding checks, and the §8 signature still covers the frames as received. Live frames declare `["model", "x_0g_trace"]` unbound; `x_0g_trace` carries the router's billing amounts and provider address. 0G unbinds `model` so the router can restore its alias (§5.2), so the caller gets the `model` this request bound, which is the configured on-chain id. A streamed frame left with no value to deliver is not emitted. The last live frame is one: it carries only `x_0g_trace` and an empty sealed `choices`.
+Only the decrypted fields and the bound cleartext reach the caller. A field named in a frame's `unbound_fields` is outside the AAD and the §8 binding, so an intermediary can set it undetected (§5.2; §8.2: "a router-injected `x_0g_trace` is unauthenticated by construction"). Every unbound field is therefore dropped when the frame opens, after its AEAD and binding checks, and the §8 signature still covers the frames as received. In round 1, live frames declared `["model", "x_0g_trace"]` unbound. `x_0g_trace` carried the router's billing amounts and provider address. 0G unbinds `model` so the router can restore its alias (§5.2), so the caller gets the `model` this request bound, which is the configured on-chain id. A streamed frame left with no value to deliver is not emitted. In round 1, the last live frame carried only `x_0g_trace` and an empty sealed `choices`.
 
 The §8 signature is fetched from `<record url>/v1/proxy/signature/<ZG-Res-Key>` on the broker, not the router, with three attempts on 404, 5xx and transport errors. Its text must equal the binding computed locally over the sealed request and every frame (`zg-sig-v1/e2ee-ct` or `zg-sig-v1/e2ee-ct-stream`), and it must recover (EIP-191) to the verified signer.
 
@@ -96,7 +101,7 @@ A receipt cites the session of the provider that served it. That session's claim
 
 ## Provider behavior
 
-These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this adapter and with redpill-model-tests. They come from the provider and model, not the transport:
+These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `compute-network-19` (broker `v0.5.5`). They were not re-observed in round 2.
 
 - Reasoning cannot be turned off. `reasoning_effort` `none` or `minimal`, or `chat_template_kwargs.enable_thinking: false`, stop the provider from returning reasoning separately, but the model still reasons. Its thinking and a closing `</think>` then land in `content`, and a long run can hit the token limit.
 - On short prompts, `reasoning_effort` `low` and `medium` produce about one reasoning token, and `high` through `max` only a little more. Without `reasoning_effort`, or with `chat_template_kwargs.enable_thinking: true`, the model reasons by default. Under the `reasoning_effort` format, `reasoning: {"enabled": true}` becomes `medium` and can return no reasoning text.
@@ -112,16 +117,17 @@ These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this
 | `tcb_up_to_date` | Hardware-proven from the provider's TCB status. |
 | `os_known_good`, `gpu_attested`, `serving_software_known_good`, `model_weights_provenance` | Unknown. |
 
-`claims.extra` also records `boot_chain`, `compose_hash` (v1 `mr_config_id`), `onchain_verifiability` (recorded, not trusted) and `plaintext_destination_verified: false`.
+`claims.extra` records `boot_chain`, `onchain_verifiability` (informational) and `plaintext_destination_verified: false`. The adapter records `compose_hash` only for the v1 `mr_config_id` layout (prefix `0x01`), so the claim is absent for the reviewed `dstack-0.6.5` provider (prefix `0x03`). This layout is independent of the `report_data` version.
 
 ## Limitations
 
-- Where the broker sends plaintext is not proven. Per-model targets come from unmeasured broker config, plaintext forwarding follows redirects, and the controller holds `docker.sock`. Confinement to the provider TEE is not claimed.
+- The reviewed deployments specify their in-CVM targets in quote-bound Compose, and the broker restricts redirects to the same origin. The adapter does not pin the Compose hash or prove plaintext confinement.
 - The private tier is enforced by the router. PAG's own gates are the on-chain record and quote checks above, so a provider that misdeclares `TargetSeparated` passes them.
 - There is no quote freshness challenge (0G's quote takes no nonce). GPU evidence (0G's `ZG-Quote-Signature` over NVIDIA evidence) and weights are not checked.
 - A send failure does not fall back to another verified provider.
+- When a broker generates its encryption key at startup, a restart can make a cached key stale. The adapter treats HTTP 409 `e2ee_key_mismatch` as an upstream error, so requests using the stale key can fail until the verification cache refreshes.
 - Receipts carry no per-response signature-status field: the outcome is implied by the receipt existing (buffered) or by the stream ending in `[DONE]` (streamed).
-- Response cleartext floats could fail to open, because `serde_json` float parsing is not guaranteed correctly rounded. This fails closed; current responses carry none.
+- Response cleartext floats can cause a frame to fail closed because `serde_json` float parsing is not guaranteed to round correctly. Round-1 responses carried no cleartext floats.
 
 ## Tests
 
@@ -129,5 +135,5 @@ These were observed on glm-5.3 at compute-network-19 on 2026-10-21, through this
   - interop with `tests/fixtures/0g-private-computer/interop.json`, produced by 0G's Go protocol library at the pinned release ([provenance](../../../tests/fixtures/0g-private-computer/README.md)), plus the broker signature KAT;
   - tampered, reordered, truncated and unsealed frames;
   - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and binding mismatch.
-- `src/aci/verifier/tests/zero_g.rs`: the real compute-network-19 quote with patched report_data. It covers TargetSeparated, unacknowledged signer, model mismatch, signer mismatch, boot chain, quote redirect, and root-check rejections, and failing closed when no candidate passes.
+- `src/aci/verifier/tests/zero_g.rs`: the quote from the round-1 host `compute-network-19` with patched report_data. It covers TargetSeparated, unacknowledged signer, model mismatch, signer mismatch, boot chain, quote redirect, and root-check rejections, and failing closed when no candidate passes.
 - `tests/0g_private_computer_live.rs`: an ignored live glm-5.3 test, including a sealed JSON-mode request with `reasoning_effort`. See [Live E2E test suite](../../live-e2e-test-suite.md).
