@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import gzip
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -30,6 +31,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import dcap_qvl
 import jwt
 import requests
+from urllib3.response import HTTPResponse
 from confidential_verifier.providers.nearai import NearaiProvider
 from confidential_verifier.verifiers.nearai import NearAICloudVerifier
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -76,6 +78,14 @@ def run_near_bridge(model_id):
     return json.loads(output.getvalue())
 
 
+def http_response(body, *, status=200, headers=None):
+    response = requests.Response()
+    response.status_code = status
+    response.raw = io.BytesIO(body)
+    response.headers.update(headers or {})
+    return response
+
+
 def near_output(
     *,
     measured="aa" * 32,
@@ -96,7 +106,7 @@ def near_output(
     if attestations is None:
         attestations = [{"model_name": "model-a", "intel_quote": "ab"}]
     report = {"gateway_attestation": gateway, "model_attestations": attestations}
-    response = SimpleNamespace(json=lambda: report, raise_for_status=lambda: None)
+    response = http_response(json.dumps(report).encode())
     result = {"is_valid": valid, "details": {"dstack": {"details": {
         "tcb_status": tcb_status, "app_info": {"compose_hash": measured},
     }}}}
@@ -135,7 +145,7 @@ def chutes_instance(*, nonce="nonce-a", changes=None):
         return result
 
 
-def chutes_output(instances, *, timeout_seconds=60):
+def chutes_output(instances, *, timeout_seconds=60, verify_collateral=None):
     key = base64.b64encode(b"key").decode()
     material = tdx_session_material(quote_fixture())
     report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
@@ -147,7 +157,9 @@ def chutes_output(instances, *, timeout_seconds=60):
         **{f"rtmr{i}": material["tdx_report"][f"rt_mr{i}"] for i in range(4)},
     }
 
-    def fetch(url, params=None, **_kwargs):
+    def fetch(url, params=None, *, stream, **_kwargs):
+        if not stream:
+            raise AssertionError(f"response was not streamed: {url}")
         if url.endswith("/servers/tdx/measurements"):
             data = [profile]
         elif url.endswith("/evidence"):
@@ -161,11 +173,14 @@ def chutes_output(instances, *, timeout_seconds=60):
             ]}
         else:
             raise AssertionError(f"unexpected network boundary: {url}")
-        return SimpleNamespace(status_code=200, content=json.dumps(data).encode(), headers={}, raise_for_status=lambda: None)
+        return http_response(json.dumps(data).encode())
 
     with (
         patch("requests.get", side_effect=fetch),
-        patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify,
+        patch.object(
+            dcap_qvl, "get_collateral_and_verify",
+            new=AsyncMock(return_value=report, side_effect=verify_collateral),
+        ) as verify,
     ):
         output = io.StringIO()
         with redirect_stdout(output):
@@ -336,6 +351,33 @@ class SessionMaterialTests(unittest.TestCase):
             self.assertNotIn("near_model", output["evidence"])
             self.assertEqual(checked.await_count, len(outcomes))
 
+    def test_near_caps_decoded_report_before_parsing(self):
+        body = b' ' * 2048 + b'{}'
+        compressed = gzip.compress(body)
+
+        def response():
+            result = http_response(b"")
+            result.raw = HTTPResponse(
+                body=io.BytesIO(compressed),
+                headers={"Content-Encoding": "gzip", "Content-Length": str(len(compressed))},
+                preload_content=False,
+            )
+            return result
+
+        for limit, expected in [
+            (len(body) - 1, "response exceeds"),
+            (len(body), "missing model_attestations"),
+        ]:
+            with (
+                self.subTest(limit=limit),
+                patch.object(NearaiProvider, "MAX_REPORT_BYTES", limit),
+                patch("requests.get", return_value=response()) as get,
+            ):
+                output = run_near_bridge("model-a")
+                self.assertEqual(output["failure"], "evidence_invalid")
+                self.assertIn(expected, output["reason"])
+                self.assertTrue(get.call_args.kwargs["stream"])
+
     def test_near_stalled_report_times_out(self):
         release = Event()
         reached = Event()
@@ -470,6 +512,61 @@ class SessionMaterialTests(unittest.TestCase):
             self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
             self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
 
+    def test_chutes_limits_cpu_verification_and_preserves_binding_order(self):
+        instances = [{"instance_id": f"instance-{i}"} for i in range(20)]
+        active = peak = 0
+
+        async def verify_collateral(quote):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0)
+                report = tdx_session_material(quote)["tdx_report"]
+                return SimpleNamespace(advisory_ids=[], to_json=lambda: json.dumps({
+                    "status": "UpToDate", "report": {"TD10": report},
+                }))
+            finally:
+                active -= 1
+
+        result, checked = chutes_output(instances, verify_collateral=verify_collateral)
+        self.assertEqual(peak, 8)
+        self.assertEqual(checked, len(instances))
+        self.assertEqual(result["result"], "verified")
+        self.assertEqual(
+            [binding["key_id"] for binding in result["channel_bindings"]],
+            [item["instance_id"] for item in instances],
+        )
+
+    def test_chutes_caps_each_response_before_parsing(self):
+        documents = [
+            ("MAX_MEASUREMENTS_BYTES", "Chutes measurements", b"[]"),
+            ("MAX_EVIDENCE_BYTES", "Chutes instance evidence", b"{}"),
+            ("MAX_PUBLIC_KEYS_BYTES", "Chutes public keys", b"{}"),
+        ]
+        for index, (setting, label, _) in enumerate(documents):
+            responses = [
+                http_response(body if i != index else b"too large")
+                for i, (_, _, body) in enumerate(documents[: index + 1])
+            ]
+            output = io.StringIO()
+            with (
+                self.subTest(setting=setting),
+                patch.object(chutes, setting, 2),
+                patch("requests.get", side_effect=responses) as get,
+                redirect_stdout(output),
+            ):
+                asyncio.run(chutes.verify_chutes({
+                    "model_id": "00000000-0000-0000-0000-000000000000",
+                    "provider_options": {"chutes_api_key": "fixture"},
+                }))
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["failure"], "evidence_invalid")
+                self.assertIn(f"{label} response exceeds", result["reason"])
+                self.assertEqual(get.call_count, index + 1)
+                self.assertTrue(all(request.kwargs["stream"] for request in get.call_args_list))
+                self.assertTrue(responses[-1].raw.closed)
+
     def test_chutes_keeps_cpu_binding_when_jwks_fetch_fails(self):
         instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
         with (
@@ -511,22 +608,24 @@ class SessionMaterialTests(unittest.TestCase):
 
     def test_chutes_measurements_fallback_only_when_tdx_endpoint_is_unavailable(self):
         base = "https://chutes.example"
-        legacy = requests.Response()
-        legacy.status_code = 200
-        modern = requests.Response()
-        modern.status_code = 404
+        legacy = http_response(b"[]", headers={"content-type": "application/json"})
+        modern = http_response(b"{}", status=404)
         with patch("requests.get", side_effect=[modern, legacy]) as get:
-            self.assertEqual(chutes.chutes_fetch_measurements(base, 10), (f"{base}/servers/tee/measurements", legacy))
+            self.assertEqual(
+                chutes.chutes_fetch_measurements(base, 10),
+                (f"{base}/servers/tee/measurements", "application/json", b"[]"),
+            )
+            self.assertTrue(modern.raw.closed)
             self.assertEqual(get.call_args_list, [
-                call(f"{base}/servers/tdx/measurements", timeout=10),
-                call(f"{base}/servers/tee/measurements", timeout=10),
+                call(f"{base}/servers/tdx/measurements", timeout=10, stream=True),
+                call(f"{base}/servers/tee/measurements", timeout=10, stream=True),
             ])
 
-        modern.status_code = 503
+        modern = http_response(b"{}", status=503)
         with patch("requests.get", return_value=modern) as get:
             with self.assertRaises(requests.HTTPError):
                 chutes.chutes_fetch_measurements(base, 10)
-            get.assert_called_once_with(f"{base}/servers/tdx/measurements", timeout=10)
+            get.assert_called_once_with(f"{base}/servers/tdx/measurements", timeout=10, stream=True)
 
     def test_chutes_flat_profile_rejects_missing_or_mismatched_rtmr(self):
         report = tdx_session_material(quote_fixture())["tdx_report"]

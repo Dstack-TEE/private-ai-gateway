@@ -21,10 +21,18 @@ The adapter resolves the model's chute ID and fetches three documents from the C
 - nonce-bound instance evidence from `/chutes/{chute_id}/evidence?nonce=<random>`; and
 - the E2EE instances and their public keys from `/e2e/instances/{chute_id}`.
 
+The bridge caps the decoded body of each response before parsing JSON. The
+limits are 1 MiB for measurements and 40 MiB each for instance evidence and
+each round of public-key discovery. Oversized responses fail with
+`evidence_invalid`. In public sampling the largest measurements response
+was 73,197 bytes and the largest instance evidence response was 1,469,516
+bytes. Public-key discovery requires Chutes credentials.
+
 The adapter compares `tee_type` case-insensitively and skips evidence tagged
 with another type. Evidence with a missing or null tag must pass the same TDX
-checks. For each eligible instance with evidence and an E2EE public key, the
-adapter runs these checks.
+checks. The bridge runs CPU quote verification for up to eight eligible
+instances at a time and considers all eligible instances in the response.
+For each instance with evidence and an E2EE public key, it runs these checks.
 
 1. Computes `expected = SHA256(nonce || e2e_pubkey)` over the provider's exact string concatenation.
 2. Reads `report_data` from the TDX quote at byte offset `48 + 520` and requires its first 32 bytes to equal `expected`. Chutes uses the upper 32 bytes for a hash of the attestation proxy certificate's public key. The adapter checks only the first 32 bytes for E2EE binding. [Chutes quote verification source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/util.py#L1235-L1265)

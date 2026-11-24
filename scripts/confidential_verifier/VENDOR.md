@@ -32,6 +32,8 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
   it can verify the gateway component when a correctly named model report lacks
   a model TDX quote. The model verifier's `fetch_report` still requires `intel_quote`.
   NEAR AI report, catalog, and NVIDIA requests use connect and read timeouts.
+  The report fetch uses `scripts/verifier_http.py` to cap decoded HTTP bytes
+  before JSON parsing.
   The shared NVIDIA client accepts an optional timeout.
 - `RedpillProvider` is renamed `RedPillProvider`.
 

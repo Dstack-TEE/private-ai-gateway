@@ -17,6 +17,7 @@ from typing import Any
 from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 from .common import (
+    ResponseTooLarge,
     emit,
     evidence_bundle,
     failed,
@@ -167,6 +168,9 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             f"NEAR AI attestation report fetch failed: {exc}",
             failure="evidence_unavailable",
         )
+        return
+    except ResponseTooLarge as exc:
+        failed(provider, str(exc), failure="evidence_invalid")
         return
     except ValueError:
         failed(provider, "NEAR AI attestation report is malformed", failure="evidence_invalid")

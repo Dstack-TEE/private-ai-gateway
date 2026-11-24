@@ -10,7 +10,13 @@ import re
 import sys
 from typing import Any
 
+if __package__ == "scripts.provider_verifier":
+    from ..verifier_http import ResponseTooLarge, read_bounded_body
+else:
+    from verifier_http import ResponseTooLarge, read_bounded_body
+
 __all__ = [
+    "ResponseTooLarge",
     "emit",
     "verifier_id_for",
     "failed",
@@ -22,6 +28,7 @@ __all__ = [
     "evidence_bundle",
     "json_evidence_bundle",
     "raw_http_item",
+    "read_bounded_body",
     "response_content_type",
     "raw_http_bundle_evidence",
     "sha256_base64_key",
