@@ -1,16 +1,109 @@
 # SecretAI direct-instance review
 
-Date: 2026-05-22 UTC.
+Date: 2026-11-23 PST (currency check). Original review: 2026-05-22 UTC.
 
 > [!NOTE]
-> This is a dated admissions audit, written before the gateway had a SecretAI
-> adapter. It records the evidence and decision from the date above, plus later
-> status notes that carry their own dates. Source paths refer to the repository
-> layout at the time. As of 2026-07-20, JEDI (SEV-SNP) and RYTN (TDX) expose
-> canonical evidence bound to the inference SPKI and pass the gateway verifier,
-> so statements below that the adapter is deferred or that the channel binds a
-> full certificate are superseded. Use [verification.md](verification.md) for
-> the adapter algorithm, claims, and limitations.
+> The [current review](#currency-check-2026-11-23-pst) covers JEDI on SecretVM
+> artifacts `v0.0.33`, compose `sha256:d8ba9343…`, with Caddy → LiteLLM → vLLM.
+> The [original review](#original-review-2026-05-22-utc) covers
+> `v0.0.26-beta.2` and is retained as history. See [verification.md](verification.md)
+> for the current adapter algorithm, claims, and limitations.
+
+## Currency check (2026-11-23 PST)
+
+Reviewed the deployment at `secretai-jedi.scrtlabs.com:21434`, running SecretVM
+artifacts `v0.0.33` (`gpu_prod`, `4xlarge`, SEV-SNP) and compose
+`sha256:d8ba9343eeaf43d6fd94458bd6d754d74f04363f4999b84959af80a4c604eae3`.
+The uptime, TLS certificate date, and compose comments place the rollout around
+2026-10-09 PDT. The compose configures Caddy → LiteLLM → two vLLM engines with
+model aliases `qwen3-coder:30b` and `qwen3-vl:30b`, replacing the earlier Ollama
+and `gpt-oss:120b` configuration.
+
+### Current verdict
+
+The reviewed JEDI deployment remains **acceptable with conditions** for
+direct-instance use. Configure `accepted_subjects` with a reviewed workload ID
+wherever known serving software is required, and review each compose change
+before updating the allowlist. Source and platform provenance remain open for
+strict inclusion. RYTN was unreachable during this review, and its current
+deployment remains unverified.
+
+### Live checks (2026-11-23 20:07–20:11 PST)
+
+- The gateway adapter with `secretvm-verify==0.12.0` returned `verified` for
+  unpinned JEDI. It verified the strict SEV-SNP chain, observed guest policy
+  `0x30000` and reported TCB `10/0/23/88` (equal to the embedded minimum),
+  matched the live TLS SPKI digest to `report_data[0:32]`, verified NVIDIA NRAS
+  for one `GH100` using the nonce in `report_data[32:64]`, and found a unique
+  workload registry match. The full workload ID is in
+  [the pin example](verification.md#configure-a-secretai-origin).
+- Verification with the July pin (`…sha256:ea08d2b8…5bb7cf2`) failed closed
+  because the deployed workload ID differs. An unpinned configuration accepted
+  the new workload after the mandatory checks passed.
+- `/cpu`, `/gpu`, and `/docker-compose` returned `200` and `text/plain` on
+  `:21434`. Repeated `/cpu` and `/gpu` fetches returned identical bytes and
+  `POST /cpu` returned `405`. JEDI served no evidence on `:29343`. The deployment
+  uses SPKI binding and static lease evidence on the inference origin.
+- `family_id`, `image_id`, and `host_data` were zero in the signed SEV-SNP
+  report. The verifier derived workload identity from the launch measurement.
+- RYTN (`secretai-rytn.scrtlabs.com`) could be resolved, but connections failed
+  on each port tested, including `:21434` and `:29343`.
+- The public upstream artifact registry includes `v0.0.35` on its main branch.
+  The reviewed JEDI workload matches `v0.0.33` in the gateway's bundled registry.
+  [Upstream registry commit `a5d0d7c2` (2026-09-17)](https://github.com/scrtlabs/secretvm-verify/commit/a5d0d7c21cceef8305dbbb0589cf10dabe7a2047)
+
+### Measured workload changes
+
+- Every container image is digest-pinned. The deployed Caddy digest
+  `sha256:ece39745…fd5739` maps to `secret-ai-caddy` tag `v0.1.24`.
+- The measured `x-secretvm` block keeps the attestation server on loopback
+  behind Caddy and disables `/logs`, `/services`, `/vm_upgrades`, and `/resources`.
+- The measured Caddyfile sets log level `INFO`. The measured LiteLLM config
+  sets `set_verbose: false` and has no callbacks or database configured.
+  LiteLLM handles plaintext prompts inside the measured SecretVM.
+
+### Open findings
+
+- **Runtime policy (criterion 6).** The compose injects `usr/.env` into Caddy
+  and both privileged vLLM containers. The file is outside the launch
+  measurement and can change settings such as `HF_ENDPOINT`, `DEVPORTAL_URL`,
+  and x402 settings without changing the workload ID.
+- **Model weights.** vLLM is configured to fetch third-party 4-bit AWQ
+  quantizations `cyankiwi/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit` and
+  `cyankiwi/Qwen3-VL-30B-A3B-Instruct-AWQ-4bit` without revision pins.
+  Weights provenance remains unknown.
+- **Source and platform provenance (criterion 13).** Both layers are **TODO**.
+  Public source for the deployed Caddy image and SecretVM guest OS build was
+  unavailable during the check. The guest OS measurement matched SCRT's
+  artifact registry.
+- **Auth and metering transport.** The compose sets `SKIP_SSL_VALIDATION=true`
+  for Caddy. What the flag disables could not be confirmed without the deployed
+  Caddy source. If it disables certificate validation on the key-validation and
+  metering calls, their integrity depends on the network path. Request content
+  is not involved.
+- **Public usage metadata.** `/metrics` and `/gpu-status` responded without
+  authentication, exposing aggregate request and token counts, key counts,
+  and GPU load.
+- **SEV-SNP TCB freshness (criterion 14).** JEDI's reported TCB matched the
+  gateway minimum established on 2026-07-21. AMD's current recommendation for
+  this platform was outside the scope of the check.
+
+### Evidence gaps
+
+Inference and `/v1/models` require a SecretAI API key and remain unverified.
+The check could not re-verify RYTN, inspect the deployed Caddy or guest OS build
+source, or inspect `usr/.env`. The on-chain worker registry was outside the
+scope of the live check.
+
+## Original review (2026-05-22 UTC)
+
+The historical record below covers SecretVM artifacts `v0.0.26-beta.2` and
+includes later notes with their own dates. Source paths reflect the layout at
+the time. On 2026-07-20, the gateway verifier passed JEDI (SEV-SNP) and RYTN
+(TDX) using evidence bound to the inference SPKI. The current state described
+above supersedes the original review's passages on deferring the adapter,
+pinning the full certificate, and using `:29343` for attestation. See
+[verification.md](verification.md) for the adapter's current behavior.
 
 Source repos reviewed:
 
