@@ -459,7 +459,11 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
 #[test]
 fn hermes_active_profile_selects_the_profile_config() {
     let sandbox = sandbox("hermes-active-profile");
-    let root = sandbox.home.join(".hermes");
+    let root = if cfg!(windows) {
+        sandbox.home.join("AppData").join("Local").join("hermes")
+    } else {
+        sandbox.home.join(".hermes")
+    };
     write(&root.join("active_profile"), "work\n");
     assert_eq!(
         Agent::Hermes.config_path(&sandbox.home, false),
