@@ -20,10 +20,11 @@ The adapter resolves the model's chute ID and fetches three documents from the C
 - nonce-bound instance evidence from `/chutes/{chute_id}/evidence?nonce=<random>`; and
 - the E2EE instances and their public keys from `/e2e/instances/{chute_id}`.
 
-For each instance that has both evidence and an E2EE public key, it:
+The adapter requires a TDX quote to produce a binding. For each instance that
+has both evidence and an E2EE public key, it:
 
 1. Computes `expected = SHA256(nonce || e2e_pubkey)` over the provider's exact string concatenation.
-2. Reads `report_data` from the TDX quote at byte offset `48 + 520` and requires its first 32 bytes to equal `expected`.
+2. Reads `report_data` from the TDX quote at byte offset `48 + 520` and requires its first 32 bytes to equal `expected`. Chutes uses the upper 32 bytes for a hash of the attestation proxy certificate's public key. The adapter checks only the first 32 bytes for E2EE binding. [Chutes quote verification source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/util.py#L1235-L1265)
 3. Rejects the TDX debug attribute.
 4. Fetches DCAP collateral and verifies the quote with `dcap_qvl`.
 5. Requires the verified MRTD and RTMR0-3 to match one of the fetched measurement profiles.
@@ -75,7 +76,7 @@ The bridge records a stale TCB status instead of rejecting it. Relying parties t
 ## Limitations
 
 - Middleware injects a per-user, provider-separated `cache_salt` into text-generation bodies before receipt hashing and Chutes encryption. Caller salt strings only subdivide the user's partition. Passthrough to vLLM is an observed provider behavior, not an attestation-backed cache-isolation guarantee. See the [live isolation observation](../../prefix-cache-isolation.md#observed-enforcement) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
-- Chutes decides which measurements count. The adapter fetches the accepted profiles from Chutes' own `/servers/tee/measurements` without authentication on every verification and does not compare them with a reviewed list.
+- Chutes decides which measurements count. On each verification, the adapter uses the unauthenticated `/servers/tee/measurements` feed as its allowlist. The public Chutes API source omits release-candidate profiles from this feed, including those for debug builds. Upstream deprecates the endpoint in favor of `/servers/tdx/measurements`. Both feeds returned the same measurement tuples in [round 2](review.md#round-2-2026-11-23-pst). [Chutes measurement source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L485-L522), [sek8s measurement guide](https://github.com/chutesai/sek8s/blob/v1.5.0/docs/reproducing-measurements.md)
 - GPU evidence is supplemental. Failure or absence does not reject an otherwise verified CPU and E2EE-key binding.
 - GPU evidence is not hardware-bound to the serving CPU TEE. A passing NRAS result shows a genuine confidential-computing GPU for the nonce, not that it served the request.
 - Measurement matching does not prove which model weights are loaded.
@@ -95,7 +96,7 @@ jq -n \
     provider: "chutes",
     upstream_name: "chutes-live",
     url_origin: "https://api.chutes.ai",
-    model_id: "moonshotai/Kimi-K2.5-TEE",
+    model_id: "moonshotai/Kimi-K3-TEE",
     forwarded_body_hash: $hash,
     required: true,
     timeout_seconds: 300,
