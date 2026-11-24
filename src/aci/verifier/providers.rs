@@ -368,11 +368,10 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
     }
 }
 
-/// Verifier for `PhalaDirect` upstreams: a Phala dstack-vllm-proxy attestation
-/// endpoint reached directly (per model). The external bridge fetches the
-/// `version=2` attestation report, verifies the dstack TDX quote, GPU evidence,
-/// and the report_data binding (signing address + nonce + custom-domain TLS
-/// SPKI), and returns a `tls_spki_sha256` channel binding the
+/// Verifier for per-model Phala Inference Guard or dstack-vllm-proxy endpoints.
+/// The external bridge checks the version 2 report's dstack TDX quote, measured
+/// compose, and report_data binding (signing address + nonce + custom-domain
+/// TLS SPKI). It returns a `tls_spki_sha256` channel binding the
 /// [`OpenAICompatibleBackend`] pins on the forward connection.
 ///
 /// (Named "direct" because it is expected to be superseded by an ACI-compatible
@@ -406,6 +405,16 @@ impl PhalaDirectProviderVerifier {
         self.verifier = self
             .verifier
             .with_option("phala_direct_bearer_token", token);
+        self
+    }
+
+    /// Optional measured compose pins (`dstack-compose:sha256:<hex>`).
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        for subject in subjects {
+            self.verifier = self
+                .verifier
+                .with_option(format!("phala_direct_accepted_subject:{subject}"), "true");
+        }
         self
     }
 

@@ -13,8 +13,9 @@ existed only as an uncommitted edit, and a clean checkout failed with
 ## Provenance
 
 - **Upstream repo:** `Phala-Network/private-ai-verifier`
-- **Baseline commit:** `2d2f5cf2281ec65ed43a3d3f44fcbcf0239952b7` (branch `master`)
-- **Vendored:** the pristine committed `confidential_verifier/` tree at that commit.
+- **Baseline commit:** `51c2b5a83d6d753b9a29288e0ed522ab2d65bac4` (branch `master`)
+- **Vendored:** the `confidential_verifier/` tree at that commit with the local changes below. The
+  baseline includes the `attestation: None` compatibility fix for dstack-verifier >= 0.5.6.
 
 ## Local changes on top of the baseline
 
@@ -30,10 +31,6 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
   when fetching the attestation report. It raises an explicit error when the
   first model attestation lacks a non-empty `intel_quote` string.
 - `RedpillProvider` is renamed `RedPillProvider`.
-- `verifiers/dstack.py`: `DstackVerifier.verify` sends `"attestation": None` in the `/verify` body.
-  dstack-verifier >= 0.5.6 serializes the request with `serde_human_bytes` and no field default, so the
-  optional `attestation` field must be present even when unused. Older verifiers ignore the extra key,
-  so this is backward compatible. Required to verify dstack >= 0.5.6 CVMs (e.g. OS image 0.5.6/0.5.8).
 
 ## Re-syncing with upstream
 
