@@ -16,12 +16,14 @@ See [Private Chutes configuration](configuration.md) for dedicated origins and c
 
 The adapter resolves the model's chute ID and fetches three documents from the Chutes API:
 
-- the accepted measurement profiles from `/servers/tee/measurements`;
+- the accepted measurement profiles from `/servers/tdx/measurements`, with
+  `/servers/tee/measurements` as a fallback for deployments that lack the TDX route;
 - nonce-bound instance evidence from `/chutes/{chute_id}/evidence?nonce=<random>`; and
 - the E2EE instances and their public keys from `/e2e/instances/{chute_id}`.
 
-The adapter requires a TDX quote to produce a binding. For each instance that
-has both evidence and an E2EE public key, it:
+The adapter skips evidence explicitly tagged with a `tee_type` other than
+`tdx`. Untagged legacy evidence must pass the same TDX checks. For each
+eligible instance with evidence and an E2EE public key, the adapter runs these checks.
 
 1. Computes `expected = SHA256(nonce || e2e_pubkey)` over the provider's exact string concatenation.
 2. Reads `report_data` from the TDX quote at byte offset `48 + 520` and requires its first 32 bytes to equal `expected`. Chutes uses the upper 32 bytes for a hash of the attestation proxy certificate's public key. The adapter checks only the first 32 bytes for E2EE binding. [Chutes quote verification source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/util.py#L1235-L1265)
@@ -29,7 +31,7 @@ has both evidence and an E2EE public key, it:
 4. Fetches DCAP collateral and verifies the quote with `dcap_qvl`.
 5. Requires the verified MRTD and RTMR0-3 to match one of the fetched measurement profiles.
 6. Records the TCB status returned by the quote verifier.
-7. Posts the GPU evidence to NVIDIA NRAS over HTTPS with `expected` as the nonce. It reads `x-nvidia-overall-att-result` and `eat_nonce` from NVIDIA's response and records the outcome as supplemental metadata.
+7. Posts the GPU evidence to NVIDIA NRAS with `expected` as the nonce. It verifies the platform JWT's ES384 signature against NVIDIA's published JWKS and checks the issuer, platform subject, and expiry. It records a positive supplemental result only when the signed `x-nvidia-overall-att-result` is true and `eat_nonce` equals `expected`. [NVIDIA NRAS JWKS](https://docs.api.nvidia.com/attestation/reference/nras-jwks-api)
 
 An instance produces a binding only if steps 1 through 5 succeed. At least one instance binding is required for the provider result to be `verified`. A wrong nonce or a substituted E2EE key fails step 2 with `Chutes E2EE key binding does not match report_data`, and a tampered quote fails DCAP signature verification.
 
@@ -66,7 +68,7 @@ The gateway decrypts before receipt finalization, so the receipt's response hash
 | --- | --- |
 | `tee_attested` | Asserted as hardware-proven from the verified TDX quote and bound E2EE channel. |
 | `tcb_up_to_date` | Hardware-proven from the instance's TCB status: asserted for `UpToDate`, refuted for any other reported status, unknown when absent. |
-| `gpu_attested` | Asserted as verifier-derived only when this instance's NRAS result succeeds and its nonce matches. |
+| `gpu_attested` | Asserted as verifier-derived when this instance has a valid, positive NRAS platform JWT with a matching nonce. Unknown otherwise. |
 | `os_known_good` | Unknown. The verifier does not classify the OS image. |
 | `serving_software_known_good` | Unknown. |
 | `model_weights_provenance` | Unknown. |
@@ -76,13 +78,15 @@ The bridge records a stale TCB status instead of rejecting it. Relying parties t
 ## Limitations
 
 - Middleware injects a per-user, provider-separated `cache_salt` into text-generation bodies before receipt hashing and Chutes encryption. Caller salt strings only subdivide the user's partition. Passthrough to vLLM is an observed provider behavior, not an attestation-backed cache-isolation guarantee. See the [live isolation observation](../../prefix-cache-isolation.md#observed-enforcement) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
-- Chutes decides which measurements count. On each verification, the adapter uses the unauthenticated `/servers/tee/measurements` feed as its allowlist. The public Chutes API source omits release-candidate profiles from this feed, including those for debug builds. Upstream deprecates the endpoint in favor of `/servers/tdx/measurements`. Both feeds returned the same measurement tuples in [round 2](review.md#round-2-2026-11-23-pst). [Chutes measurement source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L485-L522), [sek8s measurement guide](https://github.com/chutesai/sek8s/blob/v1.5.0/docs/reproducing-measurements.md)
+- The adapter uses Chutes' public measurement feed as its allowlist. It falls back to the deprecated feed on HTTP 404, 405, 410, or 501. Both feeds returned the same measurement tuples in [round 2](review.md#round-2-2026-11-23-pst). The public Chutes API source omits release-candidate profiles from the legacy feed, including those for debug builds. [Chutes measurement source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L485-L522), [sek8s measurement guide](https://github.com/chutesai/sek8s/blob/v1.5.0/docs/reproducing-measurements.md)
 - GPU evidence is supplemental. Failure or absence does not reject an otherwise verified CPU and E2EE-key binding.
 - GPU evidence is not hardware-bound to the serving CPU TEE. A passing NRAS result shows a genuine confidential-computing GPU for the nonce, not that it served the request.
 - Measurement matching does not prove which model weights are loaded.
 - Instance discovery and evidence endpoints are provider-controlled and rate-limited. `/e2e/instances` limits aggressively: the default three discovery rounds can trigger a `429` on a cold chute, and `chutes_e2ee_discovery_rounds: "1"` is gentler.
 
 ## Reproduce
+
+Run the hermetic checks with `uv run --locked python tests/provider_verifier/session_material_soundness.py`.
 
 Set `PROVIDER_API_KEY` to your Chutes API key, then run this command in Bash
 from the repository root.
