@@ -26,9 +26,17 @@ pub(super) async fn issue_redpill_key(
     if let Some(funding) = request.funding {
         // Legacy key endpoints reject unknown fields. Check the read-only
         // balance contract before sending an explicit funding choice.
-        let (status, data) =
-            request_json(client.get(balance_url).bearer_auth(access_token)).await?;
-        request.funding = if status.is_success() {
+        let balance =
+            send_account_request(client.get(balance_url).bearer_auth(access_token)).await?;
+        request.funding = if !balance.status().is_success() && funding == AccountFunding::Credits {
+            // Billing read permissions and rate limits are independent of key issuance.
+            // The caller still checks the returned key's funding before saving it.
+            None
+        } else {
+            let (status, data) = parse_json_response(balance).await?;
+            if !status.is_success() {
+                return Err(account_error(status, &data));
+            }
             if data.get("used_percent").is_some() && data.get("resets_at").is_some() {
                 Some(funding)
             } else if funding == AccountFunding::Credits {
@@ -38,8 +46,6 @@ pub(super) async fn issue_redpill_key(
                     "Account: This RedPill server does not support subscription keys.",
                 ));
             }
-        } else {
-            return Err(account_error(status, &data));
         };
     }
     response(

@@ -242,6 +242,72 @@ async fn redpill_funding_uses_the_same_installation_and_omits_the_field_for_lega
 }
 
 #[tokio::test]
+async fn redpill_only_falls_back_to_unspecified_funding_for_balance_when_the_probe_is_rejected() {
+    let key_exchanges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = Router::new()
+        .route(
+            "/balance/forbidden",
+            get(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"detail": {"error": "billing_permission_required"}})),
+                )
+            }),
+        )
+        .route(
+            "/balance/rate-limited",
+            get(|| async { (StatusCode::TOO_MANY_REQUESTS, "Too many requests") }),
+        )
+        .route(
+            "/key",
+            post({
+                let key_exchanges = key_exchanges.clone();
+                move |Json(request): Json<Value>| async move {
+                    assert!(request.get("funding").is_none());
+                    key_exchanges.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Json(json!({"funding": "credits"}))
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    let client = client().unwrap();
+    let key_url = format!("{base}/key");
+    let installation_id = Uuid::new_v4().to_string();
+    for (path, expected_error) in [
+        ("forbidden", "permission to view this balance"),
+        ("rate-limited", "HTTP 429"),
+    ] {
+        let balance_url = format!("{base}/balance/{path}");
+        let issue = |funding| {
+            issue_redpill_key(
+                &client,
+                &key_url,
+                &balance_url,
+                "test-token",
+                KeyRequest {
+                    installation_id: installation_id.clone(),
+                    name: "Test",
+                    workspace_id: 1,
+                    funding: Some(funding),
+                },
+            )
+        };
+        let credits = issue(AccountFunding::Credits).await.unwrap();
+        assert_eq!(
+            issued_funding(&credits, Some(AccountFunding::Credits)).unwrap(),
+            Some(AccountFunding::Credits)
+        );
+        let error = issue(AccountFunding::Subscription).await.unwrap_err();
+        assert!(error.to_string().contains(expected_error), "{error}");
+    }
+    assert_eq!(key_exchanges.load(std::sync::atomic::Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
 async fn failed_authorization_is_terminal_and_repeatable() {
     let profile = ConfidentialProfileInput {
         id: "profile-test".into(),
