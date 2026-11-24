@@ -45,18 +45,13 @@ def reported_model_name(entry: dict[str, Any]) -> str | None:
     return entry.get("model_name")
 
 
-def production_os_image(details: dict[str, Any]) -> bool | None:
-    is_dev = details.get("os_image_is_dev")
-    return not is_dev if details.get("os_image_hash_verified") and isinstance(is_dev, bool) else None
-
-
 async def verify_model_candidates(
     verifier: Any,
     entries: list[dict[str, Any]],
     nonce: str,
-) -> dict[str, Any]:
+) -> dict[str, int]:
     # A shared key is ambiguous even if one quote fails. If no unique key
-    # exists, checking the quotes cannot enable response attribution.
+    # exists, there is no single evidence entry to reference.
     addresses = []
     for entry in entries:
         address = entry.get("signing_address")
@@ -79,7 +74,7 @@ async def verify_model_candidates(
         return {}
 
     verified = {}
-    for address, entry in zip(addresses, entries):
+    for index, (address, entry) in enumerate(zip(addresses, entries)):
         payload = entry.get("nvidia_payload")
         if payload:
             try:
@@ -101,16 +96,8 @@ async def verify_model_candidates(
             or compose_hash != (entry.get("info") or {}).get("compose_hash")
         ):
             return {}
-        if counts[address] != 1:
-            continue
-        verified[address] = {
-            "compose_hash": compose_hash,
-            "compose_hash_verified": True,
-            "tcb_status": dstack.get("tcb_status"),
-            "production_os_image": production_os_image(dstack),
-            "gpu_evidence_present": bool(payload),
-            "gpu_verified": (details.get("gpu") or {}).get("model_verified") is True,
-        }
+        if counts[address] == 1:
+            verified[address] = index
     return verified
 
 
@@ -119,13 +106,13 @@ async def bounded_model_verification(
     entries: list[dict[str, Any]],
     nonce: str,
     budget: float,
-) -> dict[str, Any]:
+) -> dict[str, int]:
     if budget <= 0:
         return {}
     # dstack and NRAS use blocking HTTP. The worker lives only as long as this
     # single verifier subprocess, so optional checks cannot hold up gateway
     # evidence or outlive the process deadline.
-    outcome: Future[dict[str, Any]] = Future()
+    outcome: Future[dict[str, int]] = Future()
 
     def verify() -> None:
         if outcome.set_running_or_notify_cancel():
@@ -301,14 +288,10 @@ async def verify_nearai(request: dict[str, Any]) -> None:
                 else {}
             )
         if candidates:
-            for candidate in candidates.values():
-                candidate["gateway_production_os_image"] = production_os_image(
-                    gateway_dstack.get("details") or {}
-                )
-            provider_claims["model_enclave_candidates"] = candidates
-            evidence["near_model"] = evidence_bundle(
-                model_evidence, ATTESTATION_URL, "application/json"
-            )
+            evidence["near_model"] = {
+                **evidence_bundle(model_evidence, ATTESTATION_URL, "application/json"),
+                "verified_candidates": candidates,
+            }
 
     emit(
         {

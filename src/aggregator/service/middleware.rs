@@ -22,8 +22,8 @@ use super::{
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::request_id::request_id_from_headers;
 use crate::aci::upstream::{
-    is_near_chat_request, PreparedUpstreamRequest, UpstreamError, UpstreamRequest,
-    UpstreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    EVENT_UPSTREAM_RESPONSE_ATTESTED,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::endpoint::Endpoint;
@@ -611,7 +611,6 @@ impl AciService {
                     &req.aci_session_ids,
                     &prepared.model_id,
                     Some(&receipt_journal),
-                    !stream && is_near_chat_request(&prepared),
                 ) {
                     Ok(admission) => admission,
                     Err(error @ ServiceError::EarlyResponseKeysetExpired) => {

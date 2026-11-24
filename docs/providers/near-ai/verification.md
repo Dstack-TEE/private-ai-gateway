@@ -1,15 +1,15 @@
 # NEAR AI verification
 
 The NEAR AI adapter verifies the public cloud gateway as a router-scoped TDX
-channel. A successful buffered chat completion can also cite a response-bound
-model enclave session when its signature matches verified preflight evidence.
+channel. A successful buffered chat receipt can also record verification of
+the model signing key against an entry in the preflight report.
 
 | Property | Value |
 | --- | --- |
-| Attestation scope | Router, with supplemental response-bound model enclave sessions |
+| Attestation scope | Router, with supplemental model key signature verification |
 | Verifier | `scripts/provider_verifier/nearai.py` and vendored `NearAICloudVerifier` |
 | External dependency | dstack verifier at `DSTACK_VERIFIER_URL` (default `http://localhost:8080`) |
-| Enforced binding | `tls_spki_sha256` for forwarding, EIP-191 for supplemental receipt attribution |
+| Enforced binding | `tls_spki_sha256` for forwarding, EIP-191 for model key signatures |
 | Evidence endpoint | `https://cloud-api.near.ai/v1/attestation/report` |
 
 ## Verification algorithm
@@ -43,7 +43,7 @@ bounds the local dstack verification, including any cold OS-image download.
 
 The bridge then requires a `gateway_attestation`, a `tls_cert_fingerprint`, and a valid component result, and emits one router-scoped TLS SPKI binding. A missing report-data value, nonce, signing address, or TLS fingerprint fails verification.
 
-For response attribution, the bridge checks all reported model candidates
+For model key verification, the bridge checks all reported model candidates
 against the same fresh nonce. Each candidate needs a TDX quote, a replayed
 event log, a measured compose hash matching the supplied compose, and quote
 report data binding its ECDSA signing key and TLS fingerprint. A supplied GPU
@@ -52,7 +52,7 @@ bundle can contain up to eight candidates and 2 MiB of JSON. This supplemental
 stage gets up to eight seconds within the verifier subprocess deadline.
 Incomplete or invalid model evidence and a supplemental timeout leave the
 verified router channel available. A key shared by several reported candidates
-is ineligible for response attribution.
+has no unique evidence entry to reference.
 
 ## Channel binding and forwarding
 
@@ -73,8 +73,8 @@ Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. S
 ## Buffered response binding
 
 The adapter adds `x-no-aliasing: true` and `accept-encoding: identity` on the
-buffered upstream chat path when a bearer token and pre-admitted model
-candidate sessions are available. After a 2xx completion it requests
+buffered upstream chat path when a bearer token and eligible preflight model
+evidence are available. After a 2xx completion it requests
 `GET /v1/signature/{chat_id}?signing_algo=ecdsa` and requires:
 
 - A `provider_tee` ECDSA signature.
@@ -84,13 +84,17 @@ candidate sessions are available. After a 2xx completion it requests
 - An EIP-191 recovered signing address matching the advertised address and
   exactly one candidate from the verified report available at admission.
 
-The receipt then cites the candidate session and records the signature in
-`upstream.response_attested`. An unsuccessful lookup or binding records
-`bound: false` when a lookup was eligible and leaves the response and router
-session intact. A caller-pinned router session stays in use for the request.
-Model sessions are available by the ID cited in a receipt. Router sessions
-remain the discoverable pins because the gateway controls delivery to the
-router before forwarding the prompt.
+The receipt always cites the verified router session. For a successful
+check, `upstream.response_attested` records `bound: true`, the signature,
+the recovered signer, and `candidate_evidence`. This reference contains the
+digest and source URL of the exact preflight bundle and the zero-based index
+in its `model_attestations` array. The gateway retains only the reference.
+Rechecking the quote requires a separately retained copy of the exact
+bundle. The source URL returns a fresh report.
+
+An unsuccessful check when a lookup was eligible records `bound: false`
+and leaves the completed response and router receipt available. Requests
+with an explicit router session pin skip the signature lookup.
 
 The lookup has a one-second end-to-end HTTP deadline, an 8 KiB body limit,
 no retries or redirects, and at most 16 in-flight lookups per configured
@@ -124,11 +128,10 @@ The round-1 live checks against `cloud-api.near.ai` rejected these tampered inpu
 | `serving_software_known_good` | Unknown. |
 | `model_weights_provenance` | Unknown. |
 
-For a response-bound model session, the TCB claim reflects both the gateway
-and the selected candidate. The OS claim requires verified production OS
-images on both, and a verified development image on either refutes the claim.
-The model's NVIDIA check is supplemental verifier-derived evidence. The
-individual gateway and model TCB statuses are available in `claims.extra`.
+The signature and its evidence reference stay in the receipt extension.
+Router sessions reuse reviewed material across nonce-only refreshes and
+rotate when router measurements change. Candidate evidence creates no
+session or session-store record.
 
 ## Limitations
 
@@ -140,14 +143,14 @@ individual gateway and model TCB statuses are available in `claims.extra`.
   admin-controlled aliases on the server. See the
   [round-2 findings](review.md#open-findings).
 - A bound signature proves that a holder of the reported model key signed the
-  exact exchange. NEAR can share a signing key across replicas and measured
-  deployments. Uniqueness in an observed report does not prove the identity
-  of a physical replica or rule out other key holders. See
+  exact exchange. NEAR can share a signing key with deployments absent from
+  the preflight report. Serving deployment identity and its TCB, OS, and GPU
+  status remain unproven by the signature. See
   [NEAR's verification policy](https://docs.near.ai/cloud/verification/reference/verification-policy)
   and [nearai/cloud-api#1422](https://github.com/nearai/cloud-api/issues/1422).
 - A non-`UpToDate` TCB status can remain `is_valid` and is represented as a refuted typed claim, not a bridge failure.
-- Gateway verification accepts missing compose material. Model response
-  attribution requires the measured compose and its hash. Workload and model
+- Gateway verification accepts missing compose material. Model key verification
+  requires the measured compose and its hash. Workload and model
   weights allowlisting remain outside this verification.
 - Supplemental GPU verification can run when the gateway report includes a payload. The bridge preserves its presence and acceptance in `gateway_gpu_check`, and reviewed material includes those outcomes. The NVIDIA path decodes JWTs without signature verification and does not bind device identity to the serving CPU, so it cannot establish authenticated GPU identity or continuity.
 

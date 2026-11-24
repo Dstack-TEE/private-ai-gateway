@@ -9,10 +9,9 @@ use crate::aci::receipt::{
     VerificationFailure, VerificationResult, VerificationRound,
 };
 use crate::aci::upstream::{
-    is_near_chat_request, PreparedUpstreamRequest, UpstreamError, UpstreamRequest,
-    UpstreamResponse, UpstreamStreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
+    PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
 };
-use crate::aci::verifier::NearAiProviderVerifier;
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
     AttestedSession, EvidenceRef, SessionClaims, SessionDocument, WorkloadIdentityRef,
@@ -22,8 +21,7 @@ use crate::aggregator::session_store::SessionLease;
 use crate::endpoint::Endpoint;
 
 use super::claims::{
-    instance_id, is_multi_instance, near_enclave_session_claims, per_instance_session_claims,
-    session_claims_for_event,
+    instance_id, is_multi_instance, per_instance_session_claims, session_claims_for_event,
 };
 use super::e2ee_crypto::encrypt_e2ee_response_body;
 use super::e2ee_crypto::is_sse_content_type;
@@ -113,7 +111,6 @@ pub(super) struct AdmittedUpstream {
     pub(super) admitted_at: u64,
     sessions: Vec<SessionGroup>,
     requires_instance: bool,
-    allow_near_response_binding: bool,
 }
 
 /// The admitted session selected by the response. Sibling leases are released
@@ -153,14 +150,7 @@ impl AdmittedUpstream {
                 ))?;
             Some(self.sessions.swap_remove(index).lease)
         } else {
-            let index = served_instance_id
-                .and_then(|id| {
-                    self.sessions
-                        .iter()
-                        .position(|s| s.instance_key.as_deref() == Some(id))
-                })
-                .or_else(|| self.sessions.iter().position(|s| s.instance_key.is_none()));
-            index.map(|index| self.sessions.swap_remove(index).lease)
+            self.sessions.pop().map(|s| s.lease)
         };
         Ok(SelectedUpstream {
             event: self.event,
@@ -344,7 +334,6 @@ impl AciService {
             &req.aci_session_ids,
             &prepared.model_id,
             None,
-            is_near_chat_request(&prepared),
         )?;
 
         let (upstream_response, admission) = match self
@@ -579,7 +568,6 @@ impl AciService {
             &req.aci_session_ids,
             &prepared.model_id,
             None,
-            false,
         )?;
 
         let (upstream_response, admission) = match self
@@ -857,7 +845,6 @@ impl AciService {
                     let AdmittedUpstream {
                         event: previous,
                         sessions,
-                        allow_near_response_binding,
                         ..
                     } = admission;
                     drop(sessions);
@@ -894,7 +881,6 @@ impl AciService {
                                 aci_session_ids,
                                 &prepared.model_id,
                                 receipt_journal,
-                                allow_near_response_binding,
                             ) {
                                 Ok(admission) => admission,
                                 Err(err) => return ReverifyOutcome::RefreshFailed(err),
@@ -1086,16 +1072,8 @@ impl AciService {
         allowed_ids: &[String],
         model_id: &str,
         receipt_journal: Option<&MiddlewareReceiptJournal>,
-        allow_near_response_binding: bool,
     ) -> Result<AdmittedUpstream, ServiceError> {
-        let now = self.clock.now_secs();
-        let sessions = self.record_attested_upstream_session(&event, now)?;
-        let mut near_sessions = self.admit_near_response_sessions(
-            &mut event,
-            &sessions,
-            allow_near_response_binding && allowed_ids.is_empty(),
-            now,
-        );
+        let sessions = self.record_attested_upstream_session(&event, self.clock.now_secs())?;
         // Acquisition may wait behind a session established by another caller.
         // The forwarding decision follows acquisition, never its lookup snapshot.
         let admitted_at = self.clock.now_secs();
@@ -1129,107 +1107,28 @@ impl AciService {
                 UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
             ));
         }
+        if (!allowed.is_empty() || admitted_sessions.is_empty())
+            && event.provider_type.as_deref() == Some("near-ai")
+        {
+            // A pin uses only the router. With no admitted session there is no
+            // verified router receipt to supplement.
+            if let Some(evidence) = event.evidence.as_mut().and_then(Value::as_object_mut) {
+                evidence.remove("near_model");
+            }
+        }
         // Preserve direct and failed/non-TEE events; they have no sessions.
         if !admitted_sessions.is_empty() {
             event.channel_bindings = bindings;
-        }
-        if near_sessions.iter().all(|session| {
-            session.lease.established_at() <= admitted_at
-                && admitted_at < session.lease.expires_at()
-        }) {
-            admitted_sessions.append(&mut near_sessions);
-        } else if let Some(claims) = event
-            .provider_claims
-            .as_mut()
-            .and_then(Value::as_object_mut)
-        {
-            claims.remove("model_enclave_candidates");
         }
         let requires_instance = !self.serves_directly()
             && is_multi_instance(event.provider_type.as_deref())
             && event.result == VerificationResult::Verified;
         Ok(AdmittedUpstream {
             requires_instance,
-            allow_near_response_binding,
             event,
             admitted_at,
             sessions: admitted_sessions,
         })
-    }
-
-    /// A response signature can select a supplemental session only when the
-    /// request was admitted through the router without a client session pin.
-    /// Discovery and pins use only the router, which is the channel to which
-    /// we can control delivery before sending the prompt.
-    fn admit_near_response_sessions(
-        &self,
-        event: &mut UpstreamVerifiedEvent,
-        router_sessions: &[SessionGroup],
-        allowed: bool,
-        now: u64,
-    ) -> Vec<SessionGroup> {
-        if event.provider_type.as_deref() != Some("near-ai") {
-            return Vec::new();
-        }
-        let evidence = event
-            .evidence
-            .as_mut()
-            .and_then(Value::as_object_mut)
-            .and_then(|evidence| evidence.remove("near_model"));
-        let candidates = event
-            .provider_claims
-            .as_mut()
-            .and_then(Value::as_object_mut)
-            .and_then(|claims| claims.remove("model_enclave_candidates"));
-        let (Some(evidence), Some(Value::Object(candidates)), [router]) =
-            (evidence, candidates, router_sessions)
-        else {
-            return Vec::new();
-        };
-        if !allowed || event.verifier_id != NearAiProviderVerifier::VERIFIER_ID {
-            return Vec::new();
-        }
-        let enclave_event = UpstreamVerifiedEvent {
-            evidence: Some(evidence),
-            ..event.clone()
-        };
-        let sessions = candidates
-            .iter()
-            .map(|(signer, candidate)| {
-                let claims = near_enclave_session_claims(&enclave_event, signer, candidate);
-                let lease = self.seal_attested_session(
-                    &enclave_event,
-                    Some(WorkloadIdentityRef {
-                        signing_address: Some(signer.clone()),
-                        ..Default::default()
-                    }),
-                    router.bindings.clone(),
-                    claims,
-                    now,
-                )?;
-                Ok(SessionGroup {
-                    instance_key: Some(signer.clone()),
-                    bindings: router.bindings.clone(),
-                    lease,
-                })
-            })
-            .collect::<Result<Vec<_>, ServiceError>>();
-        match sessions {
-            Ok(sessions) => {
-                if let Some(claims) = event
-                    .provider_claims
-                    .as_mut()
-                    .and_then(Value::as_object_mut)
-                {
-                    claims.insert("model_enclave_candidates".into(), Value::Object(candidates));
-                }
-                sessions
-            }
-            Err(err) => {
-                tracing::warn!(%err, "failed to admit supplemental NEAR AI response session");
-                Vec::new()
-            }
-        }
     }
 
     /// Return the channel's current session id, sealing (serializing once) and

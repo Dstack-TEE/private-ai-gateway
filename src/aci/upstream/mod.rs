@@ -47,7 +47,6 @@ pub use cache_salt::CacheSaltField;
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
-pub(crate) use near::is_near_chat_request;
 pub use near::{NearAiBackend, EVENT_UPSTREAM_RESPONSE_ATTESTED};
 pub use openai::OpenAICompatibleBackend;
 pub(crate) use privatemode::{forwarding_client, readiness_client};
@@ -117,9 +116,8 @@ pub struct UpstreamResponse {
     /// several (Chutes: the serving instance id). Lets the receipt cite that
     /// instance's attested session; `None` for single-channel backends.
     pub served_instance_id: Option<String>,
-    /// Per-response enclave attestation to record in the receipt (NEAR AI:
-    /// the serving enclave's signature and whether it bound). `None` when the
-    /// backend has none.
+    /// Supplemental signature verification to record in the receipt. This
+    /// does not select the session cited by the receipt.
     pub response_attestation: Option<serde_json::Map<String, serde_json::Value>>,
 }
 

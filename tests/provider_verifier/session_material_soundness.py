@@ -289,7 +289,6 @@ class SessionMaterialTests(unittest.TestCase):
                 output = near_output(attestations=[entry])
                 self.assertEqual(output["result"], "verified")
                 self.assertEqual(output["attested_scope"], "router")
-                self.assertNotIn("model_enclave_candidates", output["provider_claims"])
                 self.assertNotIn("near_model", output["evidence"])
         for entry in (
             {"provider": "chutes", "model": "model-b", "quote_b64": "qw=="},
@@ -315,8 +314,7 @@ class SessionMaterialTests(unittest.TestCase):
         }}
         checked = AsyncMock(return_value=valid)
         output = near_output(attestations=[first], component=checked)
-        self.assertEqual(set(output["provider_claims"]["model_enclave_candidates"]), {signer})
-        self.assertIn("near_model", output["evidence"])
+        self.assertEqual(output["evidence"]["near_model"]["verified_candidates"], {signer: 0})
         checked.assert_awaited_once()
 
         checked = AsyncMock(return_value=valid)
@@ -324,7 +322,7 @@ class SessionMaterialTests(unittest.TestCase):
             attestations=[first, {**first, "intel_quote": "cd"}, {**first, "signing_address": other}],
             component=checked,
         )
-        self.assertEqual(set(mixed["provider_claims"]["model_enclave_candidates"]), {other})
+        self.assertEqual(mixed["evidence"]["near_model"]["verified_candidates"], {other: 2})
         self.assertEqual(checked.await_count, 3)
 
         for second, outcomes in (
@@ -335,7 +333,7 @@ class SessionMaterialTests(unittest.TestCase):
             checked = AsyncMock(side_effect=outcomes)
             output = near_output(attestations=[first, second], component=checked)
             self.assertEqual(output["result"], "verified")
-            self.assertNotIn("model_enclave_candidates", output["provider_claims"])
+            self.assertNotIn("near_model", output["evidence"])
             self.assertEqual(checked.await_count, len(outcomes))
 
     def test_near_stalled_report_times_out(self):
@@ -391,7 +389,7 @@ class SessionMaterialTests(unittest.TestCase):
             self.assertTrue(reached.is_set())
             self.assertFalse(finished.is_set())
             self.assertEqual(output["result"], "verified")
-            self.assertNotIn("model_enclave_candidates", output["provider_claims"])
+            self.assertNotIn("near_model", output["evidence"])
         finally:
             release.set()
             if reached.is_set():

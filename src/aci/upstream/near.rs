@@ -1,13 +1,14 @@
 //! Optional NEAR AI response binding for verified, buffered chat completions.
 //! The router's TLS binding remains the admission boundary.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
@@ -17,10 +18,11 @@ use super::{
     UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::verifier::NearAiProviderVerifier;
 use crate::endpoint::Endpoint;
 use tokio::sync::Semaphore;
 
-/// Receipt extension event recording the per-response enclave signature.
+/// Receipt extension event recording verification of the model key signature.
 pub const EVENT_UPSTREAM_RESPONSE_ATTESTED: &str = "upstream.response_attested";
 
 const SIGNATURE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -40,6 +42,13 @@ pub struct NearResponseSignature {
     pub signature_kind: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct NearModelEvidence {
+    digest: String,
+    source_url: String,
+    verified_candidates: BTreeMap<String, usize>,
+}
+
 /// Check a `provider_tee` signature against the exact bytes exchanged and
 /// return the recovered signer (lowercase `0x` address).
 pub fn bind_response_signature(
@@ -52,7 +61,7 @@ pub fn bind_response_signature(
         Some("provider_tee") => {}
         Some(other) => {
             return Err(format!(
-                "signature kind {other:?} is not bound to a model enclave"
+                "signature kind {other:?} does not identify a model signing key"
             ))
         }
         None => return Err("signature kind missing".to_string()),
@@ -113,7 +122,7 @@ pub fn recover_eip191_signer(message: &str, signature_hex: &str) -> Result<Strin
     Ok(format!("0x{}", hex::encode(&hash[12..])))
 }
 
-pub(crate) fn is_near_chat_request(req: &PreparedUpstreamRequest) -> bool {
+fn is_near_chat_request(req: &PreparedUpstreamRequest) -> bool {
     req.request
         .path
         .as_deref()
@@ -218,7 +227,7 @@ impl NearAiBackend {
     async fn attest_response(
         &self,
         req: &PreparedUpstreamRequest,
-        candidates: &serde_json::Map<String, Value>,
+        evidence: &NearModelEvidence,
         response: &mut UpstreamResponse,
     ) {
         #[derive(Deserialize)]
@@ -237,19 +246,27 @@ impl NearAiBackend {
                 &req.request.body,
                 &response.body,
             ) {
-                Ok(signer) if candidates.contains_key(&signer) => {
-                    response.served_instance_id = Some(signer);
-                    json!({
-                        "provider": "near-ai", "bound": true, "signature_kind": sig.signature_kind,
-                        "signing_algo": sig.signing_algo, "signing_address": sig.signing_address,
-                        "text": sig.text, "signature": sig.signature,
-                    })
-                }
-                Ok(_) => {
-                    json!({"provider": "near-ai", "bound": false, "reason": "signer absent from verified candidates"})
+                Ok(signer) => {
+                    if let Some(index) = evidence.verified_candidates.get(&signer) {
+                        json!({
+                            "provider": "near-ai", "bound": true, "signature_kind": sig.signature_kind,
+                            "signing_algo": sig.signing_algo, "signing_address": signer,
+                            "text": sig.text, "signature": sig.signature,
+                            "candidate_evidence": {
+                                "digest": evidence.digest,
+                                "source_url": evidence.source_url,
+                                "model_attestation_index": index,
+                            },
+                        })
+                    } else {
+                        json!({
+                            "provider": "near-ai", "bound": false, "signing_address": signer,
+                            "reason": "signer has no unique verified report entry",
+                        })
+                    }
                 }
                 Err(_) => {
-                    json!({"provider": "near-ai", "bound": false, "reason": "signature does not bind this response to a model enclave"})
+                    json!({"provider": "near-ai", "bound": false, "reason": "signature does not bind the exchanged bytes to a model signing key"})
                 }
             },
             Err(reason) => json!({"provider": "near-ai", "bound": false, "reason": reason}),
@@ -285,18 +302,22 @@ impl UpstreamBackend for NearAiBackend {
         mut req: PreparedUpstreamRequest,
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        let candidates = event
-            .provider_claims
+        let evidence = event
+            .evidence
             .as_ref()
-            .and_then(|claims| claims.get("model_enclave_candidates"))
-            .and_then(Value::as_object)
-            .filter(|candidates| !candidates.is_empty());
-        let Some(candidates) = candidates.filter(|_| {
-            is_near_chat_request(&req)
-                && event.result == VerificationResult::Verified
-                && event.model_id == req.model_id
-                && !event.channel_bindings.is_empty()
-        }) else {
+            .and_then(|evidence| evidence.get("near_model"));
+        let Some(evidence) = evidence
+            .filter(|_| {
+                is_near_chat_request(&req)
+                    && event.result == VerificationResult::Verified
+                    && event.verifier_id == NearAiProviderVerifier::VERIFIER_ID
+                    && event.provider_type.as_deref() == Some("near-ai")
+                    && event.model_id == req.model_id
+                    && !event.channel_bindings.is_empty()
+            })
+            .and_then(|evidence| NearModelEvidence::deserialize(evidence).ok())
+            .filter(|evidence| !evidence.verified_candidates.is_empty())
+        else {
             return self.inner.forward_verified_prepared(req, event).await;
         };
 
@@ -306,7 +327,7 @@ impl UpstreamBackend for NearAiBackend {
             .forward_verified_prepared(req.clone(), event)
             .await?;
         if (200..300).contains(&response.status_code) {
-            self.attest_response(&req, candidates, &mut response).await;
+            self.attest_response(&req, &evidence, &mut response).await;
         }
         Ok(response)
     }
@@ -541,27 +562,41 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        for admitted in [true, false] {
+        for matched in [true, false] {
             let mut response = UpstreamResponse {
                 status_code: 200,
                 body: RESP.to_vec(),
                 ..Default::default()
             };
-            let candidate = if admitted {
+            let candidate = if matched {
                 signing_address.as_str()
             } else {
                 "other"
             };
-            let candidates = serde_json::Map::from_iter([(candidate.into(), Value::Null)]);
+            let evidence = NearModelEvidence {
+                digest: crate::aci::digest::sha256_hex(b"candidate report"),
+                source_url: "https://cloud-api.near.ai/v1/attestation/report".into(),
+                verified_candidates: BTreeMap::from([(candidate.into(), 2)]),
+            };
             backend
-                .attest_response(&request, &candidates, &mut response)
+                .attest_response(&request, &evidence, &mut response)
                 .await;
             assert_eq!(response.body, RESP);
-            assert_eq!(
-                response.served_instance_id.as_deref(),
-                admitted.then_some(signing_address.as_str())
-            );
-            assert_eq!(response.response_attestation.unwrap()["bound"], admitted);
+            assert!(response.served_instance_id.is_none());
+            let fields = response.response_attestation.unwrap();
+            assert_eq!(fields["bound"], matched);
+            assert_eq!(fields["signing_address"], signing_address);
+            if matched {
+                assert_eq!(
+                    fields["candidate_evidence"],
+                    json!({
+                        "digest": evidence.digest, "source_url": evidence.source_url,
+                        "model_attestation_index": 2,
+                    })
+                );
+            } else {
+                assert!(!fields.contains_key("candidate_evidence"));
+            }
         }
         for (id, reason) in [
             ("not-found", "signature not found"),

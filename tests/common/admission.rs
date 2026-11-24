@@ -46,6 +46,7 @@ pub struct Backend {
     pub instance: Mutex<Option<String>>,
     pub tls_key: Mutex<Option<String>>,
     pub response_headers: Mutex<HashMap<String, String>>,
+    pub response_attestation: Mutex<Option<serde_json::Map<String, serde_json::Value>>>,
 }
 impl Backend {
     async fn respond(
@@ -83,7 +84,7 @@ impl Backend {
                     body: RESPONSE.to_vec(),
                     headers: self.response_headers.lock().unwrap().clone(),
                     served_instance_id: self.instance.lock().unwrap().clone(),
-                    response_attestation: None,
+                    response_attestation: self.response_attestation.lock().unwrap().clone(),
                 })
             }
         }
@@ -174,6 +175,7 @@ impl Harness {
             instance: Mutex::new(None),
             tls_key: Mutex::new(None),
             response_headers: Mutex::new(HashMap::new()),
+            response_attestation: Mutex::new(None),
         });
         let verifier = Arc::new(CachedVerifier(Mutex::new(verified_event(
             "admission-test",

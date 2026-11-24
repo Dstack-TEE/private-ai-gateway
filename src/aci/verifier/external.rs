@@ -505,8 +505,14 @@ impl ExternalProviderVerifier {
                     .as_object_mut()
                     .and_then(|obj| obj.remove("near_model"))
                 {
-                    if let Ok(bundle) = canonical_verified_evidence(Some(bundle)) {
-                        canonical["near_model"] = bundle;
+                    if EvidenceRef::from_value(&bundle).decode().is_some() {
+                        // Validate the exact preflight bytes once. Forwarding
+                        // and receipts only need the compact reference.
+                        canonical["near_model"] = serde_json::json!({
+                            "digest": bundle["digest"],
+                            "source_url": bundle["source_url"],
+                            "verified_candidates": bundle["verified_candidates"],
+                        });
                     }
                 }
             }
@@ -850,6 +856,63 @@ mod process_tests {
 mod session_material_tests {
     use super::*;
     use crate::aggregator::service::reviewed_session_material;
+
+    #[test]
+    fn near_model_evidence_keeps_only_a_verified_reference() {
+        let verifier = ExternalProviderVerifier::with_command(
+            "near-ai",
+            AttestationScope::PerRouter,
+            vec!["unused".into()],
+            5,
+        )
+        .unwrap();
+        let router = EvidenceRef::from_bytes("application/json", b"{}");
+        let model = EvidenceRef::from_bytes(
+            "application/json",
+            br#"{"model_attestations":[{"signing_address":"0x1111111111111111111111111111111111111111"}]}"#,
+        );
+        let reference = serde_json::json!({
+            "digest": model.digest,
+            "source_url": "https://cloud-api.near.ai/v1/attestation/report",
+            "verified_candidates": {"0x1111111111111111111111111111111111111111": 0},
+        });
+        for valid_digest in [true, false] {
+            let mut evidence = serde_json::to_value(&router).unwrap();
+            let mut supplement = reference.clone();
+            supplement["data"] = serde_json::json!(model.data_uri);
+            if !valid_digest {
+                supplement["digest"] = serde_json::json!(router.digest);
+            }
+            evidence["near_model"] = supplement;
+            let output = serde_json::from_value(serde_json::json!({
+                "result": "verified",
+                "attested_scope": "router",
+                "channel_bindings": [{
+                    "type": "tls_spki_sha256", "origin": "https://near.example", "spki_sha256": "ab".repeat(32)
+                }],
+                "evidence": evidence,
+            })).unwrap();
+            let event = verifier
+                .event_from_output(
+                    UpstreamVerificationRequest {
+                        upstream_name: "near".into(),
+                        url_origin: Some("https://near.example".into()),
+                        model_id: "model".into(),
+                        forwarded_body_hash: String::new(),
+                        required: true,
+                    },
+                    &output,
+                )
+                .unwrap();
+            assert_eq!(event.result, VerificationResult::Verified);
+            let evidence = event.evidence.unwrap();
+            assert_eq!(EvidenceRef::from_value(&evidence), router);
+            assert_eq!(
+                evidence.get("near_model"),
+                valid_digest.then_some(&reference)
+            );
+        }
+    }
 
     #[test]
     fn legacy_custom_and_incomplete_outputs_remain_accepted_but_evidence_sensitive() {

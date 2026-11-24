@@ -33,8 +33,8 @@ pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn Provider
 }
 
 /// Build the typed claim set for a verified event. Raw `provider_claims` are
-/// preserved in `claims.extra` so a deep auditor sees the provider scope.
-/// NEAR AI's model candidate facts apply only to response-bound sessions.
+/// always preserved verbatim in `claims.extra` so a deep auditor sees the full
+/// provider scope, typed or not.
 pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
     let mut claims = if event.result == VerificationResult::Verified {
         claim_mapper(event.provider_type.as_deref()).claims(event)
@@ -43,58 +43,10 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
     };
     if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
         for (key, value) in map {
-            if event.provider_type.as_deref() == Some("near-ai")
-                && key == "model_enclave_candidates"
-            {
-                continue;
-            }
             claims.extra.insert(key.clone(), value.clone());
         }
     }
     claims
-}
-
-/// Combine the selected NEAR enclave's claims with the router's TCB and OS.
-pub(super) fn near_enclave_session_claims(
-    event: &UpstreamVerifiedEvent,
-    signer: &str,
-    candidate: &Value,
-) -> SessionClaims {
-    let gateway_tcb = event
-        .provider_claims
-        .as_ref()
-        .and_then(|claims| claims["tcb_status"].as_str());
-    let enclave_tcb = candidate["tcb_status"].as_str();
-    let tcb_status = [gateway_tcb, enclave_tcb]
-        .into_iter()
-        .flatten()
-        .find(|status| !status.eq_ignore_ascii_case("uptodate"))
-        .or_else(|| gateway_tcb.zip(enclave_tcb).map(|(status, _)| status));
-    let gateway_os = candidate["gateway_production_os_image"].as_bool();
-    let enclave_os = candidate["production_os_image"].as_bool();
-    let production_os = match (gateway_os, enclave_os) {
-        (Some(false), _) | (_, Some(false)) => Some(false),
-        (Some(true), Some(true)) => Some(true),
-        _ => None,
-    };
-    session_claims_for_event(&UpstreamVerifiedEvent {
-        provider_type: event.provider_type.clone(),
-        result: event.result,
-        provider_claims: Some(serde_json::json!({
-            "trust_boundary": "near-ai-model-enclave",
-            "canonical_model_id": event.model_id,
-            "signing_address": signer,
-            "gateway_tcb_status": gateway_tcb,
-            "instance_tcb_status": enclave_tcb,
-            "tcb_status": tcb_status,
-            "compose_hash": candidate["compose_hash"],
-            "compose_hash_verified": candidate["compose_hash_verified"],
-            "production_os_image": production_os,
-            "gpu_evidence_present": candidate["gpu_evidence_present"],
-            "gpu_verified": candidate["gpu_verified"],
-        })),
-        ..Default::default()
-    })
 }
 
 /// Reviewed adapter capability, never inferred from a provider name alone.
