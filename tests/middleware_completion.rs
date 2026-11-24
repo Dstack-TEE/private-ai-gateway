@@ -5345,7 +5345,15 @@ fn assert_admitted_receipt(
 async fn tinfoil_enclave_header_is_recorded_in_buffered_and_streaming_receipts() {
     use admission::{candidate, request, Attempt, Harness, RESPONSE};
 
-    for (streaming, provider) in [(false, "tinfoil"), (true, "tinfoil"), (false, "near-ai")] {
+    let max_length = "a".repeat(256);
+    let over_limit = format!("{max_length}b");
+    for (streaming, provider, header, recorded) in [
+        (false, "tinfoil", max_length.as_str(), true),
+        (true, "tinfoil", "replica.example", true),
+        (false, "near-ai", "replica.example", false),
+        (false, "tinfoil", over_limit.as_str(), false),
+        (true, "tinfoil", over_limit.as_str(), false),
+    ] {
         let h = Harness::new(vec![Attempt::Response {
             status: 200,
             at: 109,
@@ -5355,7 +5363,7 @@ async fn tinfoil_enclave_header_is_recorded_in_buffered_and_streaming_receipts()
             .response_headers
             .lock()
             .unwrap()
-            .insert("tinfoil-enclave".into(), "replica.example".into());
+            .insert("tinfoil-enclave".into(), header.into());
         let journal = MiddlewareReceiptJournal::default();
         let result = h
             .service
@@ -5392,8 +5400,8 @@ async fn tinfoil_enclave_header_is_recorded_in_buffered_and_streaming_receipts()
             .unwrap()
             .iter()
             .find(|event| event["type"] == "upstream.tinfoil_enclave");
-        let expected = json!({"type": "upstream.tinfoil_enclave", "enclave": "replica.example"});
-        assert_eq!(event, (provider == "tinfoil").then_some(&expected));
+        let expected = json!({"type": "upstream.tinfoil_enclave", "enclave": header});
+        assert_eq!(event, recorded.then_some(&expected));
     }
 }
 

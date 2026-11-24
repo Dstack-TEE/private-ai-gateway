@@ -51,9 +51,10 @@ The hardware signature covers the whole report, including the TLS fingerprint in
 The gateway compares the binding with the live HTTPS certificate before forwarding.
 All models behind the same Tinfoil router share the verifier cache and session.
 The served model remains a receipt field. When the admitted router's final
-response includes `Tinfoil-Enclave`, the gateway records its value in the
-signed `upstream.tinfoil_enclave` receipt event. This is the router's report
-about the selected replica, with no independent gateway attestation of that replica.
+response includes a `Tinfoil-Enclave` value of 1 to 256 bytes, the gateway
+records it in the signed `upstream.tinfoil_enclave` receipt event. This is the
+router's report about the selected replica, with no independent gateway
+attestation of that replica.
 
 ## Session reuse
 

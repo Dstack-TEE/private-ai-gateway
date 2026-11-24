@@ -37,6 +37,8 @@ use super::{
     CHAT_COMPLETIONS_PATH,
 };
 
+const MAX_TINFOIL_ENCLAVE_HEADER_BYTES: usize = 256;
+
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
 /// each non-success variant to its own policy — abort (single forward) or fail
 /// over to the next candidate (middleware).
@@ -1206,7 +1208,8 @@ impl AciService {
             Some(session_id) => {
                 builder.add_upstream_verified_with_session(event, &session_id)?;
                 if let Some(enclave) = upstream_headers.get("tinfoil-enclave").filter(|value| {
-                    event.provider_type.as_deref() == Some("tinfoil") && !value.is_empty()
+                    event.provider_type.as_deref() == Some("tinfoil")
+                        && (1..=MAX_TINFOIL_ENCLAVE_HEADER_BYTES).contains(&value.len())
                 }) {
                     builder.add_extension_event(
                         "upstream.tinfoil_enclave",

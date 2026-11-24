@@ -502,7 +502,8 @@ extension events, which verifiers that do not know them ignore (ACI §7.4):
 
 An admitted Tinfoil router response can also add an `upstream.tinfoil_enclave`
 extension event. Its `enclave` string records the `Tinfoil-Enclave` header
-from the selected response. See [Tinfoil verification](providers/tinfoil/verification.md#channel-binding-and-forwarding).
+from the selected response when its value is 1 to 256 bytes.
+See [Tinfoil verification](providers/tinfoil/verification.md#channel-binding-and-forwarding).
 
 ## Model catalogs
 
