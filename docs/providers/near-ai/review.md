@@ -1,14 +1,124 @@
 # NEAR AI gateway review
 
-Date: 2026-05-18 UTC. Verdict and lease contract updated 2026-06-15 for
-router-scoped sessions.
+Date: 2026-11-23 PST (round 2). Original review 2026-05-18 UTC. Verdict and
+lease contract updated 2026-06-15 for router-scoped sessions.
 
 > [!NOTE]
-> This is a dated admissions audit. It records the evidence and decision from
-> the date above, plus later status notes that carry their own dates. Source
-> paths refer to the repository layout at the time. Use
-> [verification.md](verification.md) for the adapter algorithm, claims, and
-> limitations.
+> This is a dated admission record. [Round 2](#round-2-2026-11-23-pst)
+> reviews the production release `prod-20261119-a61bf3b` and supersedes the
+> earlier verdict and workload claims. Source paths reflect each round's
+> reviewed release. See [verification.md](verification.md) for current adapter
+> behavior.
+
+## Round 2 (2026-11-23 PST)
+
+Reviewed the deployed NEAR AI gateway release
+[`prod-20261119-a61bf3b`](https://github.com/nearai/cloud-api/releases/tag/prod-20261119-a61bf3b).
+It corresponds to `nearai/cloud-api` commit
+`a61bf3b44498d1447f3e39e1d3b84a18dbc5a568`, 429 commits after round 1, and
+image
+`nearaidev/cloud-api@sha256:d996bb08f36f0cc913ed7763f7c42bf4124e386a679e397a9acd8a3e69f3a704`.
+The supporting source revisions were `nearai/nearai-cloud-verifier`
+`94554726` and `nearai/cvm-ingress` `5654d298`. The round-1
+`nearai/private-ml-sdk` and `nearai/vllm-router` revisions are unchanged and
+both repositories are archived.
+
+### Verdict
+
+**Acceptable with conditions** for the gateway channel (router-scoped
+attestation).
+
+**Not acceptable** for model-scoped verified-inference claims: findings 1
+and 2 fall under the [hard reject conditions](../audit-criteria.md#hard-reject-conditions)
+for unverified model paths and alias selection. Admission for verified model
+inference is withheld until backend workload admission and model-identity
+matching are enforced.
+
+- Configure canonical model IDs from `/v1/model/list`. NEAR administrators can
+  change which model an alias resolves to.
+- Use NEAR-hosted models (`providerType: vllm`). This verdict excludes
+  third-party providers routed through NEAR.
+
+### Live Check (2026-11-23 20:07–20:12 PST)
+
+- `/v1/attestation/report` returned HTTP 200 without credentials when called
+  with a fresh nonce and `include_tls_fingerprint=true`. The quote's
+  `report_data` bound the nonce and SHA-256 of the concatenated signing
+  address and TLS SPKI fingerprint. The live TLS endpoint served the attested
+  SPKI fingerprint
+  `73862c254372091cc6895b900111503860694f8916ebf0c63b18d245ba8ba5ad`.
+- The gateway reported app ID `f550fdfb4eb8ad787c1bcd423f091cbb4a4431ae`,
+  compose hash `1787a4af87eaf4bb139b555c3148ea6cffb01442b9fd7db4304e23b24f4db993`,
+  and OS `dstack-0.5.12` with hash
+  `8db40cb23008d6213668b5816702d100b37b859a8a5bfd18d938ae3a1b3715bd`. The
+  measured compose hash matched the RTMR3 event, and the compose pinned the
+  release image digest. GitHub build provenance verified for that digest and
+  linked it to `nearai/cloud-api` at `a61bf3b4`.
+- At Base mainnet block `61515511`, the app contract allowed the measured
+  gateway compose hash and returned `true` for `allowAnyDevice()`.
+- With dstack-verifier 0.6.1, the adapter returned `verified` with TCB status
+  `UpToDate` for `Qwen/Qwen3.8-27B` and
+  `black-forest-labs/FLUX.2-klein-4B`. The probed Chutes, Tinfoil, and
+  external models failed lease establishment. The retired
+  `google/gemma-4-31B-it` returned HTTP 400.
+- Catalog flags remain advisory. The external model `levanto/sage-2` was
+  marked `verifiable: true` and its attestation endpoint returned HTTP 503.
+
+### Resolved or Improved
+
+- The measured compose runs `cvm-ingress` in the gateway CVM. The reviewed
+  ingress source configures nginx to terminate TLS there and encrypts the
+  certificate archive with a dstack KMS-derived key before storing it in S3.
+- The measured gateway compose, pinned image digest, GitHub build provenance,
+  and on-chain compose allowlist provide evidence for a gateway workload pin.
+  The adapter still lacks that pin. See
+  [verification.md](verification.md#limitations).
+
+### Open Findings
+
+1. **Production has no backend image or compose allowlist.** The NEAR-hosted
+   [measurement policy](https://github.com/nearai/cloud-api/blob/a61bf3b44498d1447f3e39e1d3b84a18dbc5a568/crates/services/src/attestation/measurement.rs)
+   skips the OS-image hash check when `ALLOWED_IMAGE_HASHES` is empty.
+   `REQUIRE_TCB_UP_TO_DATE` controls whether a stale TCB fails verification
+   instead of raising a warning. Neither setting is present in the measured
+   production compose or its allowed environment variables. The source check
+   found no separate backend compose or app ID allowlist. For workload
+   identity, any genuine non-debug dstack TDX CVM can pass the backend
+   attestation checks with valid report-data binding. This blocks admission
+   for verified model inference under the hard reject condition for
+   unverified model paths.
+2. **Administrators can retarget model aliases.** The attestation report
+   requested for `zai-org/GLM-5.1-FP8` named `z-ai/glm-5.3-flash`. The
+   adapter still returned `verified` for the alias. This blocks admission
+   for verified model inference under the hard reject condition for silent
+   alias selection.
+3. **Third-party routes are outside the reviewed scope.** Chutes and Tinfoil
+   models can be marked verifiable in the catalog. Lease establishment failed
+   for the probed models.
+4. **Gateway releases are published at promotion.** Pre-rollout publication
+   remains open under criterion 7.
+5. **Telemetry and persistence cross the gateway boundary.** The measured
+   compose exports container logs to a remote collector and the gateway
+   uses an external database. Which request or response data reaches either
+   destination remains unverified.
+
+### Not Re-verified
+
+- Authenticated inference, response model identity under an alias, signature
+  lookup, cache metadata, and request fidelity were outside the live check.
+- The prior live tamper checks were not repeated. This round recomputed the
+  nonce and TLS binding.
+- Backend TLS pinning, failure handling, and routing were not re-audited at
+  the deployed revision. The source search for backend allowlists covered the
+  measurement policy and relevant references, with the full provider pool
+  implementation outside the review. The round-1 data-plane and cache
+  sections describe `057135fa`. The old `vllm` module paths moved into
+  `crates/inference_providers/src/attested/`.
+- The ingress and telemetry image digests were not traced to source. Gateway
+  and backend OS images were not traced to reproducible builds. The
+  on-chain allowlist history, owner key custody, and KMS root remain unreviewed.
+
+## Round 1 (2026-05-18 UTC)
 
 Provider endpoint: `https://cloud-api.near.ai`.
 Gateway source: `nearai/cloud-api`.
@@ -31,7 +141,7 @@ Source reports:
 > `ca7ddbd`), addressing the P0 "verify gateway identity/provenance/TLS binding" item
 > below. The strict gateway compose/image digest pin remains a follow-up.
 
-## Verdict
+### Verdict
 
 NEAR AI gateway mode is acceptable as a gateway-soundness provider when the
 verification lease is established through the verified gateway.
@@ -56,7 +166,7 @@ verified gateway channel
 (workload identity + source provenance + runtime policy + TLS SPKI binding)
 ```
 
-## Criteria Status
+### Criteria Status
 
 Passed:
 
@@ -102,7 +212,7 @@ P1 TODOs:
   catalog flags.
 - Add a live cache/locality observability test if NEAR exposes enough metadata.
 
-## Lease Contract
+### Lease Contract
 
 The NEAR provider adapter establishes one verification lease per gateway channel
 (router scope): every accepted model behind the gateway shares it.
@@ -136,7 +246,7 @@ Private AI Gateway Rust core should not contain a NEAR model-attestation parser.
 provider verifier owns the provider-specific lease establishment rules. Rust
 only consumes the verified lease and enforces the channel binding.
 
-## Data-Plane Findings
+### Data-Plane Findings
 
 For `provider_type = 'vllm'` models with an `inference_url`, the NEAR gateway
 has a credible verified-backend data plane.
@@ -170,7 +280,7 @@ Important source references:
 - `crates/inference_providers/src/vllm/mod.rs`
 - `crates/services/src/attestation/verification.rs`
 
-## Catalog and External-Provider Findings
+### Catalog and External-Provider Findings
 
 NEAR's gateway also supports non-TEE external providers in the same codebase:
 OpenAI-compatible providers, Anthropic, and Gemini.
@@ -197,7 +307,7 @@ Adapter rule:
 The verified gateway channel is authoritative for lease establishment.
 ```
 
-## `model_attestations[]` Semantics
+### `model_attestations[]` Semantics
 
 The attestation endpoint returns `model_attestations[]` by fetching backend
 attestation evidence through the gateway's verified/pinned backend path. The
@@ -218,7 +328,7 @@ sound per-model attestation and are not recorded in the attested session. A
 future request-bound, per-instance model attestation would surface them on the
 receipt — not in the channel session.
 
-## Required Gateway Assumptions
+### Required Gateway Assumptions
 
 Gateway-soundness mode is acceptable only when these assumptions are verified
 or pinned:
@@ -239,7 +349,7 @@ or pinned:
   the receipt as an identifier; binding the exact backend instance to a specific
   request is a roadmap refinement.
 
-## Privacy and Operations Caveats
+### Privacy and Operations Caveats
 
 The review found feature surfaces that matter to the trust boundary:
 
@@ -255,7 +365,7 @@ The review found feature surfaces that matter to the trust boundary:
 These caveats do not require Private AI Gateway to re-verify nested model attestations.
 They are gateway provenance/config requirements.
 
-## Load Balancing and Cache Findings
+### Load Balancing and Cache Findings
 
 NEAR has a real prefix-aware routing implementation, but the result is not
 externally observable today.
@@ -329,7 +439,7 @@ Cache locality:
 - Multiple `cloud-api` gateway replicas likely have independent PrefixRouter
   state; cache locality is per gateway replica, not global.
 
-## Live Evidence
+### Live Evidence
 
 Live probes during review:
 
@@ -344,10 +454,8 @@ Live probes during review:
   bucket id, or cache-hit metadata.
 - `/v1/signature/<bogus-chat-id>` returned a chat-id keyed not-found shape,
   confirming the signature lookup path exists.
-- Existing gateway live artifact:
-  `/tmp/private-ai-gateway-live-e2e/20260518-053819`.
 
-## Adapter Behavior
+### Adapter Behavior
 
 - NEAR verification is a gateway-soundness lease: the gateway identity, source
   provenance, runtime policy, and TLS SPKI binding are verified. NEAR AI is a
@@ -361,7 +469,7 @@ Live probes during review:
 - `/v1/model/list` catalog flags are never trusted; the lease is authorized by
   the verified gateway channel.
 
-## Remaining
+### Remaining
 
 - Surface and pin the gateway compose/image digest in the NEAR verifier result,
   mapping audited source/release evidence to accepted deployment digests.
@@ -380,7 +488,7 @@ Live probes during review:
 - Track whether live NEAR enables strict image-hash and TCB freshness policy,
   then fold those expectations into the verifier bridge.
 
-## Source & platform provenance, and TCB status
+### Source & platform provenance, and TCB status
 
 Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
 
@@ -394,7 +502,7 @@ Tracking criteria 13–14 of [audit-criteria.md](../audit-criteria.md):
 - **TCB status / freshness**: **TODO** — the dstack-verifier currently accepts
   `OutOfDate`; set and enforce a policy per criterion 14.
 
-## Open Questions
+### Open Questions
 
 - Can we run NEAR's `nearai-cloud-verifier` end to end against the live gateway
   report and recover the exact source commit/image digest?

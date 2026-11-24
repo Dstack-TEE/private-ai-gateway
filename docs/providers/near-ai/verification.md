@@ -1,6 +1,8 @@
 # NEAR AI verification
 
-The NEAR AI adapter verifies the public cloud gateway as one router-scoped TDX channel. It does not bind a request to the nested model instance that ultimately served it.
+The NEAR AI adapter verifies the public cloud gateway as one router-scoped TDX
+channel. A verified session attests this gateway channel. Backend model
+workload identity remains unverified.
 
 | Property | Value |
 | --- | --- |
@@ -41,7 +43,7 @@ TLS attestation. It does not establish the image model instance, workload,
 or weights provenance. NEAR image responses carry no token usage; middleware
 billing uses `images.count` and synthesizes `usage.cost` from image pricing.
 
-These tampered inputs were rejected live against `cloud-api.near.ai`:
+The round-1 live checks against `cloud-api.near.ai` rejected these tampered inputs:
 
 | Tampered input | Rejection |
 | --- | --- |
@@ -63,7 +65,13 @@ These tampered inputs were rejected live against `cloud-api.near.ai`:
 ## Limitations
 
 - No workload pin. Any dstack CVM that passes the dstack verifier with matching `report_data` is accepted as the NEAR AI gateway. The adapter does not compare the compose, app ID, or image with a reviewed value.
-- The bridge verifies the gateway component only. It does not fetch or verify `model_attestations[]` for the request's model.
+- The bridge verifies the gateway component only. Fetching the report still
+  requires a non-empty `model_attestations[]` whose first entry has an
+  `intel_quote` field. Reports without that shape fail lease establishment.
+- NEAR resolves admin-controlled aliases on the server. The adapter does not
+  compare the requested ID with the report's `model_name`, so it can establish
+  a gateway lease under a retargeted alias. See the
+  [round-2 findings](review.md#open-findings).
 - Nothing in the emitted session identifies the downstream model CVM that served a response.
 - A non-`UpToDate` TCB status can remain `is_valid` and is represented as a refuted typed claim, not a bridge failure.
 - Missing compose material is not a failure. A compose that does not match a present hash is rejected, but the adapter does not require both values.
@@ -77,27 +85,26 @@ Run the hermetic report-data tamper test:
 cargo test --test soundness_report_data
 ```
 
-For a live verifier run, start a trusted dstack verifier, set
-`DSTACK_VERIFIER_URL` explicitly, and load `NEARAI_API_KEY` into the environment.
-The attestation endpoint requires authentication. Construct the credential
-inside the process so it does not appear in command-line arguments:
+For a live verifier run, start a trusted dstack verifier and set
+`DSTACK_VERIFIER_URL` explicitly. The
+[2026-11-23 PST live check](review.md#live-check-2026-11-23-20072012-pst) used
+dstack-verifier 0.6.1 and the attestation endpoint answered without credentials.
+The bridge sends a bearer token when one is configured.
 
 ```sh
 export DSTACK_VERIFIER_URL='http://localhost:18080'
 python3 - <<'PY' | uv run python scripts/private_ai_provider_verifier.py
 import json
-import os
 
 print(json.dumps({
     "api_version": "aci.provider-verifier.request.v1",
     "provider": "near-ai",
     "upstream_name": "near-ai-live",
     "url_origin": "https://cloud-api.near.ai",
-    "model_id": "google/gemma-4-31B-it",
+    "model_id": "Qwen/Qwen3.8-27B",
     "forwarded_body_hash": "sha256:" + "0" * 64,
     "required": True,
     "timeout_seconds": 300,
-    "provider_options": {"near_ai_api_key": os.environ["NEARAI_API_KEY"]},
 }))
 PY
 ```
