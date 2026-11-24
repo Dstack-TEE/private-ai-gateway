@@ -220,12 +220,30 @@ pub struct AccountLoginOptions {
     /// Workspace ID; required if the organization has several workspaces.
     #[arg(long)]
     pub workspace: Option<i64>,
+    /// RedPill billing method. Defaults to the account's available subscription or balance.
+    #[arg(long, value_enum)]
+    pub funding: Option<FundingChoice>,
     /// Print the authorization URL without launching a browser.
     #[arg(long)]
     pub no_browser: bool,
     /// Maximum sign-in wait in seconds
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=900))]
     pub timeout: u64,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum FundingChoice {
+    Subscription,
+    Balance,
+}
+
+impl From<FundingChoice> for desktop_core::contracts::AccountFunding {
+    fn from(choice: FundingChoice) -> Self {
+        match choice {
+            FundingChoice::Subscription => Self::Subscription,
+            FundingChoice::Balance => Self::Credits,
+        }
+    }
 }
 
 #[derive(Subcommand)]

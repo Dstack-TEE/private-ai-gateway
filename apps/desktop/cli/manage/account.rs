@@ -51,6 +51,9 @@ pub(super) fn login(
                 .into(),
         );
     }
+    if options.funding.is_some() && provider != ServiceProvider::Redpill {
+        return Err("--funding is only available for RedPill.".into());
+    }
     let label = provider.label();
     let remote_url = provider
         .preset_url()
@@ -92,12 +95,18 @@ pub(super) fn login(
         std::thread::sleep(Duration::from_millis(500));
     };
     let workspace_id = workspace(&details, options.workspace, global)?;
+    let funding = if provider == ServiceProvider::Redpill {
+        choose_funding(client, global, &login.id, options.funding.map(Into::into))?
+    } else {
+        None
+    };
     let operation_id = uuid::Uuid::new_v4().to_string();
     let initial = client.call(rpc::BeginAccountSave {
         operation_id: operation_id.clone(),
         id: login.id,
         profile,
         workspace_id,
+        funding,
     });
     // Once submitted, an uncertain response must be reconciled by operation ID.
     pending.id = None;
@@ -119,6 +128,51 @@ pub(super) fn login(
                 })?;
             }
         }
+    }
+}
+
+fn choose_funding(
+    client: &Client,
+    global: &Global,
+    login_id: &str,
+    requested: Option<AccountFunding>,
+) -> Result<Option<AccountFunding>, String> {
+    let balance = client
+        .call(rpc::GetAccountBalance {
+            target: AccountBalanceTarget::Login {
+                id: login_id.into(),
+            },
+        })
+        .ok()
+        .flatten();
+    let Some(balance) = balance.filter(|balance| balance.used_percent.is_some()) else {
+        return Ok(requested);
+    };
+    if let Some(used) = balance.used_percent {
+        eprintln!("Weekly subscription usage: {used}% used.");
+    }
+    if let Some(reset) = balance.resets_at {
+        eprintln!("Resets at {reset}.");
+    }
+    if requested.is_some() || !global.interactive() {
+        return Ok(requested);
+    }
+    eprint!("Billing method [Subscription / Balance] (Subscription): ");
+    io::stderr()
+        .flush()
+        .map_err(|_| "Cannot show billing method prompt")?;
+    let mut input = String::new();
+    if io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| "Cannot read billing method")?
+        == 0
+    {
+        return Err("Choose a billing method with --funding and retry login.".into());
+    }
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "subscription" => Ok(Some(AccountFunding::Subscription)),
+        "balance" => Ok(Some(AccountFunding::Credits)),
+        _ => Err("Choose Subscription or Balance with --funding and retry login.".into()),
     }
 }
 
@@ -186,6 +240,8 @@ mod tests {
             "redpill",
             "--workspace",
             "123",
+            "--funding",
+            "balance",
             "--no-browser",
         ])
         .unwrap();
@@ -197,6 +253,10 @@ mod tests {
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
+        assert_eq!(
+            options.funding.map(Into::into),
+            Some(super::AccountFunding::Credits)
+        );
         assert!(options.no_browser);
         assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",

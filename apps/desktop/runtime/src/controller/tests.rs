@@ -150,6 +150,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
             account_name: Some("Personal".into()),
             images: None,
             scope: None,
+            funding: None,
         };
         let expected = auth.clone();
         let worker = tokio::spawn(async move {
@@ -201,7 +202,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
         };
         assert_eq!(
             runtime
-                .save_account_login("login-test".into(), different_provider, None)
+                .save_account_login("login-test".into(), different_provider, None, None)
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -267,6 +268,7 @@ fn offline_removal_queues_cleanup_and_uncommitted_retirement_preserves_active_ke
                         account_name: None,
                         images: None,
                         scope: None,
+                        funding: None,
                     },
                     verified_at: Some(1),
                 },
@@ -517,6 +519,7 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
             uuid::Uuid::new_v4().to_string(),
             "login-test".into(),
             profile,
+            None,
             None,
         )
         .unwrap();
@@ -1551,6 +1554,7 @@ fn clearing_an_account_key_queues_its_revocation() {
         account_name: None,
         images: None,
         scope: None,
+        funding: None,
     };
     runtime
         .update_config(|settings| {

@@ -123,7 +123,7 @@ function StatusSurface(): React.JSX.Element {
           <span className="min-w-0 flex-1 truncate text-left">{profile?.name ?? "Set Up"}</span>
           {profile && <ChevronDown aria-hidden="true" />}
         </Button>
-        {profile?.auth.kind === "oauth" && <AccountBalanceValue provider={profile.provider} target={{ kind: "profile", profileId: profile.id }} credentialRef={profile.credentialRef} enabled={protectedNow} />}
+        {profile?.auth.kind === "oauth" && <AccountBalanceValue provider={profile.provider} target={{ kind: "profile", profileId: profile.id }} credentialRef={profile.credentialRef} funding={profile.auth.funding} enabled={protectedNow} />}
         <IconButton size="icon-sm" label="Privacy verification" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "privacy" })}><Info aria-hidden="true" /></IconButton>
         </>}
         </div>

@@ -63,6 +63,7 @@ pub(super) async fn phala_at(
                 account_id: account.clone(),
                 account_name: Some(account),
                 images: None,
+                funding: None,
                 scope: Some(Box::new(AccountScope {
                     workspace: Some(workspace),
                     workspace_slug: Some(string(

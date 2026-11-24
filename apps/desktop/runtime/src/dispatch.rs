@@ -39,11 +39,13 @@ pub(crate) async fn dispatch(
             id,
             profile,
             workspace_id,
+            funding,
         } => respond::<rpc::BeginAccountSave, _>(runtime.begin_account_save(
             operation_id,
             id,
             profile,
             workspace_id,
+            funding,
         )),
         Command::AccountSaveResult { operation_id } => {
             respond::<rpc::AccountSaveResult, _>(runtime.account_save_result(&operation_id))

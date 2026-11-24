@@ -10,6 +10,13 @@ pub(super) struct UsageReport {
 impl Drop for UsageReport {
     fn drop(&mut self) {
         if let Some(capture) = self.capture.take() {
+            // Record known billing refusals without altering the response
+            // delivered to the agent or logging arbitrary upstream text.
+            if self.event.detail.is_empty() && !capture.streamed && !capture.body_overflow {
+                if let Some(refusal) = subscription_refusal(self.event.status, &capture.body) {
+                    self.event.detail = refusal;
+                }
+            }
             let usage = capture.finish();
             self.event.input_tokens = usage.input_tokens;
             self.event.output_tokens = usage.output_tokens;
@@ -19,6 +26,26 @@ impl Drop for UsageReport {
             self.event.at = now_secs();
             self.state.emit(self.event.clone());
         }
+    }
+}
+
+fn subscription_refusal(status: u16, body: &[u8]) -> Option<String> {
+    if !matches!(status, 402 | 403 | 429) || body.len() > 4096 {
+        return None;
+    }
+    let envelope: Value = serde_json::from_slice(body).ok()?;
+    let message = envelope.get("error")?.get("message")?.as_str()?;
+    match (status, message) {
+        (402, "Subscription is not active. Renew your subscription or use a credits key.")
+        | (403, "This model is not included in your subscription plan. Use a credits key for this model.")
+        | (403, "The requested provider is not available on your subscription plan.")
+        | (429, "Subscription usage limit reached.") => Some(message.to_owned()),
+        (429, _) => {
+            let reset = message.strip_prefix("Subscription usage limit reached. Resets at ")?.strip_suffix('.')?;
+            desktop_core::account::subscription_reset_at(reset)?;
+            Some(message.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -173,5 +200,39 @@ pub(super) fn number_f64(value: &Value) -> Option<f64> {
 fn merge_event(latest: &mut UsageValues, data: &str) {
     if let Some(usage) = decode_usage(data.as_bytes()) {
         latest.merge(usage);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_refusals_record_safe_messages_and_quota_reset() {
+        let parse = |status, message| {
+            subscription_refusal(
+                status,
+                json!({"error": {"message": message}})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        for (status, message) in [
+            (402, "Subscription is not active. Renew your subscription or use a credits key."),
+            (403, "This model is not included in your subscription plan. Use a credits key for this model."),
+            (403, "The requested provider is not available on your subscription plan."),
+            (429, "Subscription usage limit reached."),
+            (429, "Subscription usage limit reached. Resets at 2026-11-27T09:00:00.000Z."),
+        ] {
+            assert_eq!(parse(status, message).as_deref(), Some(message));
+            assert!(parse(400, message).is_none());
+        }
+        assert!(parse(429, "Subscription usage limit reached. Resets at tomorrow.").is_none());
+        assert!(parse(
+            429,
+            "Too many concurrent requests for this subscription. Please retry shortly."
+        )
+        .is_none());
+        assert!(parse(403, "An arbitrary upstream error.").is_none());
     }
 }

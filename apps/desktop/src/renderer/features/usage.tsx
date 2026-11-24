@@ -236,7 +236,9 @@ function Evidence({ activity }: { activity: RequestActivity }): React.JSX.Elemen
         </>
       )}
     </dl>
-    {activity.detail && <ProofNote label="Verification details" title="Verification details" className="break-words whitespace-pre-wrap">{activity.detail}</ProofNote>}
+    {activity.detail && (activity.leftDevice && [402, 403, 429].includes(activity.status)
+      ? <p className="text-sm break-words">{activity.detail}</p>
+      : <ProofNote label="Verification details" title="Verification details" className="break-words whitespace-pre-wrap">{activity.detail}</ProofNote>)}
     {activity.leftDevice && <ProofNote label="Proof scope" title="What the proof checks">
       The verifier checks the request digest, the service signature against its attested keyset, and the response digest. This verifies the exchanged data, not answer accuracy.
     </ProofNote>}

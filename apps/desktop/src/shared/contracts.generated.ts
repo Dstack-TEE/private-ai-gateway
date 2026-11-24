@@ -129,7 +129,7 @@ export type ServiceProvider = "phala" | "redpill" | "custom";
  * A provider as the profile editor presents it.
  */
 export type ServiceProviderInfo = { id: ServiceProvider, label: string, presetUrl: string | null, keyLabel: string, accountLogin: boolean, workspaces: boolean, };
-export type ProfileAuth = { "kind": "apiKey" } | { "kind": "oauth", accountId: string, accountName?: string, images?: AccountImages, scope?: AccountScope, };
+export type ProfileAuth = { "kind": "apiKey" } | { "kind": "oauth", accountId: string, accountName?: string, images?: AccountImages, scope?: AccountScope, funding?: AccountFunding, };
 export type AccountImages = { user: string | null, organization: string | null, };
 export type AccountScope = { organizationId?: string | null, organizationSlug?: string | null, organization: string | null, workspace: string | null, workspaceSlug?: string | null, workspaceId: number | null, };
 export type ConfidentialProfile = { id: string, credentialRef?: string, name: string, provider: ServiceProvider, remoteUrl: string, auth: ProfileAuth,
@@ -140,7 +140,8 @@ credentialSaved: boolean, verifiedAt?: number, };
 export type ConfidentialProfileInput = { id: string, name: string, provider: ServiceProvider, remoteUrl: string, };
 export type AccountWorkspace = { id: number, name: string, isDefault: boolean, };
 export type AccountLoginDetails = { auth: ProfileAuth, workspaces: Array<AccountWorkspace>, };
-export type AccountBalance = { balanceUsd: string, canTopUp: boolean, organizationId: string | null, grantedUsd: string | null, scope: AccountScope, };
+export type AccountFunding = "credits" | "subscription";
+export type AccountBalance = { balanceUsd: string, canTopUp: boolean, organizationId: string | null, grantedUsd: string | null, scope: AccountScope, usedPercent: number | null, resetsAt: string | null, };
 export type AccountBalanceTarget = { "kind": "login", id: string, } | { "kind": "profile", profileId: string, };
 export type LoginPresentation = { id: string, url: string, userCode: string | null, };
 export type StartConfig = { remoteUrl: string, };
@@ -352,7 +353,7 @@ export type UiRequests = {
   agent_service_running: { agentId: string, };
   stop_agent_service: { agentId: string, };
   start_backend_service: Record<string, never>;
-  save_account_login: { id: string, profile: ConfidentialProfileInput, workspaceId?: number, };
+  save_account_login: { id: string, profile: ConfidentialProfileInput, workspaceId?: number, funding?: AccountFunding, };
   get_organization_url: { organizationSlug: string, };
   get_top_up_url: { provider: ServiceProvider, scopeSlug?: string, };
   list_listen_addresses: Record<string, never>;

@@ -253,6 +253,13 @@ pub struct AccountLoginDetails {
     pub workspaces: Vec<AccountWorkspace>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountFunding {
+    Credits,
+    Subscription,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountBalance {
@@ -261,6 +268,10 @@ pub struct AccountBalance {
     pub organization_id: Option<String>,
     pub granted_usd: Option<String>,
     pub scope: AccountScope,
+    #[serde(default)]
+    pub used_percent: Option<u8>,
+    #[serde(default)]
+    pub resets_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, TS)]
@@ -304,6 +315,9 @@ pub enum ProfileAuth {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         scope: Option<Box<AccountScope>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        funding: Option<AccountFunding>,
     },
 }
 
@@ -838,6 +852,7 @@ mod typescript {
             ConfidentialProfileInput,
             AccountWorkspace,
             AccountLoginDetails,
+            AccountFunding,
             AccountBalance,
             AccountBalanceTarget,
             LoginPresentation,

@@ -1,7 +1,11 @@
 use super::*;
 use std::sync::Arc;
 
-use axum::{http::HeaderMap, routing::get, Router};
+use axum::{
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use tokio::net::TcpListener;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -19,6 +23,7 @@ fn account_presentation_uses_clerk_identity_and_restricts_avatar_sources() {
         account_name,
         images,
         scope,
+        ..
     } = details.auth
     else {
         panic!("Expected OAuth identity")
@@ -66,6 +71,8 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
         .unwrap()
         .unwrap();
     assert_eq!(balance.balance_usd, "0");
+    assert_eq!(balance.used_percent, None);
+    assert_eq!(balance.resets_at, None);
     let phala = parse_account_balance(&ServiceProvider::Phala, StatusCode::OK,
         &json!({"workspace":{"name":"Research","slug":"phala-research"},"credits":{"balance":"2","granted_balance":"0"}})
     ).unwrap().unwrap();
@@ -108,6 +115,130 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
         assert!(top_up_url(&ServiceProvider::Phala, id).is_err());
         assert!(organization_url(id).is_err());
     }
+}
+
+#[test]
+fn redpill_balance_keeps_credit_balance_and_only_accepts_valid_subscription_usage() {
+    let mut data = json!({
+        "balance_usd": "12.50", "can_top_up": true, "organization_id": "org_test",
+        "organization_slug": "research-team", "organization_name": "Research",
+        "used_percent": 0, "resets_at": "2026-11-27T09:00:00Z",
+        "quota_usd": "123", "multiplier": "0.25"
+    });
+    let parse = |data: &Value| {
+        parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, data)
+            .unwrap()
+            .unwrap()
+    };
+    let active = parse(&data);
+    assert_eq!(active.balance_usd, "12.50");
+    assert_eq!(active.used_percent, Some(0));
+    assert_eq!(active.resets_at.as_deref(), Some("2026-11-27T09:00:00Z"));
+    let serialized = serde_json::to_value(active).unwrap();
+    assert!(serialized.get("quotaUsd").is_none());
+    assert!(serialized.get("multiplier").is_none());
+    data["used_percent"] = Value::Null;
+    data["resets_at"] = Value::Null;
+    let inactive = parse(&data);
+    assert_eq!(inactive.used_percent, None);
+    assert_eq!(inactive.resets_at, None);
+    data["used_percent"] = json!(101);
+    data["resets_at"] = json!("tomorrow");
+    let malformed = parse(&data);
+    assert_eq!(malformed.used_percent, None);
+    assert_eq!(malformed.resets_at, None);
+    assert_eq!(malformed.balance_usd, "12.50");
+}
+
+#[tokio::test]
+async fn redpill_funding_uses_the_same_installation_and_omits_the_field_for_legacy_servers() {
+    let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/balance", get({
+            let legacy = legacy.clone();
+            move || async move {
+                if legacy.load(std::sync::atomic::Ordering::Relaxed) {
+                    Json(json!({"balance_usd":"0"}))
+                } else {
+                    Json(json!({"balance_usd":"0","used_percent":0,"resets_at":"2026-11-27T09:00:00Z"}))
+                }
+            }
+        }))
+        .route("/key", post({
+            let legacy = legacy.clone();
+            let requests = requests.clone();
+            move |Json(request): Json<Value>| async move {
+                let response = if legacy.load(std::sync::atomic::Ordering::Relaxed) {
+                    assert!(request.get("funding").is_none());
+                    json!({})
+                } else {
+                    json!({"funding": request.get("funding").cloned().unwrap_or(json!("subscription"))})
+                };
+                requests.lock().unwrap().push(request);
+                Json(response)
+            }
+        }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let _server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    let client = client().unwrap();
+    let key_url = format!("{base}/key");
+    let balance_url = format!("{base}/balance");
+    let installation_id = Uuid::new_v4().to_string();
+    let issue = |funding| {
+        issue_redpill_key(
+            &client,
+            &key_url,
+            &balance_url,
+            "test-token",
+            KeyRequest {
+                installation_id: installation_id.clone(),
+                name: "Test",
+                workspace_id: 1,
+                funding,
+            },
+        )
+    };
+
+    let default = issue(None).await.unwrap();
+    assert_eq!(
+        issued_funding(&default, None).unwrap(),
+        Some(AccountFunding::Subscription)
+    );
+    let credits = issue(Some(AccountFunding::Credits)).await.unwrap();
+    assert_eq!(
+        issued_funding(&credits, Some(AccountFunding::Credits)).unwrap(),
+        Some(AccountFunding::Credits)
+    );
+    let subscription = issue(Some(AccountFunding::Subscription)).await.unwrap();
+    assert_eq!(
+        issued_funding(&subscription, Some(AccountFunding::Subscription)).unwrap(),
+        Some(AccountFunding::Subscription)
+    );
+    assert!(issued_funding(&subscription, Some(AccountFunding::Credits)).is_err());
+
+    legacy.store(true, std::sync::atomic::Ordering::Relaxed);
+    let legacy_default = issue(None).await.unwrap();
+    assert_eq!(issued_funding(&legacy_default, None).unwrap(), None);
+    let legacy_credits = issue(Some(AccountFunding::Credits)).await.unwrap();
+    assert_eq!(
+        issued_funding(&legacy_credits, Some(AccountFunding::Credits)).unwrap(),
+        None
+    );
+    assert!(issue(Some(AccountFunding::Subscription)).await.is_err());
+    assert!(issued_funding(&legacy_default, Some(AccountFunding::Subscription)).is_err());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(requests
+        .iter()
+        .all(|request| request["installation_id"] == installation_id));
+    assert!(requests[0].get("funding").is_none());
+    assert_eq!(requests[1]["funding"], "credits");
+    assert_eq!(requests[2]["funding"], "subscription");
 }
 
 #[tokio::test]
@@ -160,6 +291,7 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
                 account_name: None,
                 images: None,
                 scope: None,
+                funding: None,
             },
             workspaces: vec![AccountWorkspace {
                 id: 7,
@@ -169,7 +301,7 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
         },
     };
     for selection in [None, Some(999)] {
-        let result = authorization.issue(&profile, selection).await;
+        let result = authorization.issue(&profile, selection, None).await;
         assert_eq!(
             result.err().unwrap().to_string(),
             "Choose a workspace before saving"

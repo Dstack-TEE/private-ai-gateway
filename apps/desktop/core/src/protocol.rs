@@ -169,6 +169,7 @@ commands! {
         id: String,
         profile: ConfidentialProfileInput,
         workspace_id: Option<i64>,
+        funding: Option<AccountFunding>,
     } -> AccountSaveResult;
     AccountSaveResult { operation_id: String } -> AccountSaveResult;
     GetAccountDetails { profile_id: String } -> AccountLoginDetails;
