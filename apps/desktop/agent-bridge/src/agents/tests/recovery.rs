@@ -60,6 +60,73 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
 }
 
 #[test]
+fn pi_default_model_edit_restores_when_provider_still_belongs_to_pap() {
+    let sandbox = sandbox("pi-selector-restore");
+    let config = Agent::Pi.config_path(&sandbox.home, false);
+    write(&config, "{}");
+    let settings = config.with_file_name("settings.json");
+    write(
+        &settings,
+        r#"{"defaultProvider":"original","defaultModel":"native"}"#,
+    );
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::Pi, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Json, &fs::read_to_string(&settings).unwrap()).unwrap();
+    doc.set_str(&["defaultModel"], "user-choice").unwrap();
+    write(&settings, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::Pi);
+    assert_eq!(
+        ConfigDoc::parse(Format::Json, &fs::read_to_string(&settings).unwrap())
+            .unwrap()
+            .get_str(&["defaultModel"])
+            .as_deref(),
+        Some("native")
+    );
+}
+
+#[test]
+fn omp_default_role_edit_restores_private_model_on_disconnect() {
+    let sandbox = sandbox("omp-selector-restore");
+    let config = Agent::OhMyPi.config_path(&sandbox.home, false);
+    write(&config, "{}");
+    let settings = config.with_file_name("config.yml");
+    write(&settings, "modelRoles:\n  default: original/native\n");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OhMyPi, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&settings).unwrap()).unwrap();
+    doc.set_str(&["modelRoles", "default"], "private-ai-proxy/user-choice")
+        .unwrap();
+    write(&settings, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::OhMyPi);
+    assert_eq!(
+        ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&settings).unwrap())
+            .unwrap()
+            .get_str(&["modelRoles", "default"])
+            .as_deref(),
+        Some("original/native")
+    );
+}
+
+#[test]
+fn hermes_disconnect_restores_pap_model_endpoint_overrides() {
+    let sandbox = sandbox("hermes-model-endpoint-restore");
+    let config = Agent::Hermes.config_path(&sandbox.home, false);
+    write(&config, "model:\n  default: original\n");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::Hermes, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&config).unwrap()).unwrap();
+    doc.set_str(&["model", "base_url"], "http://127.0.0.1:4180/v1")
+        .unwrap();
+    doc.set_str(&["model", "api_mode"], "chat_completions")
+        .unwrap();
+    write(&config, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::Hermes);
+    let restored = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(restored.get_str(&["model", "base_url"]), None);
+    assert_eq!(restored.get_str(&["model", "api_mode"]), None);
+}
+
+#[test]
 fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     let sandbox = sandbox("link-restore-retry");
     let agent = Agent::ClaudeCode;

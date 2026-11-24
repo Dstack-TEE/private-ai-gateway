@@ -1185,6 +1185,7 @@ pub(super) fn restore(
         if !field.holds(current.as_ref())
             && !(is_any_model_selection_field(field)
                 && (routing_unchanged || private_model_selection(current.as_ref())))
+            && !hermes_model_override(field, current.as_ref(), record)
         {
             continue;
         }
@@ -1246,6 +1247,32 @@ pub(super) fn restore(
         consumed_secrets,
         ..Edit::default()
     })
+}
+
+fn hermes_model_override(
+    field: &OwnedField,
+    current: Option<&ConfigValue>,
+    record: &Connection,
+) -> bool {
+    if field.value.is_some()
+        || (field.path != owned(&["model", "base_url"])
+            && field.path != owned(&["model", "api_mode"]))
+    {
+        return false;
+    }
+    match field.path.last().map(String::as_str) {
+        Some("api_mode") => current == Some(&ConfigValue::Str("chat_completions".into())),
+        Some("base_url") => {
+            let Some(endpoint) = record.endpoint.as_deref() else {
+                return false;
+            };
+            let Ok(api) = desktop_core::endpoint(endpoint, &["v1"]) else {
+                return false;
+            };
+            current == Some(&ConfigValue::Str(api.to_string()))
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn private_model_selection(value: Option<&ConfigValue>) -> bool {

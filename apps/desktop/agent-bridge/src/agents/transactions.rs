@@ -283,7 +283,7 @@ impl Projector {
         let path = record
             .restore_path()
             .map_err(AgentError::ConfigurationConflict)?;
-        if record.disabled || agent == Agent::Dsh {
+        if record.disabled || matches!(agent, Agent::Dsh | Agent::Pi | Agent::OhMyPi) {
             if let Some(journal) = &record.selection {
                 if let Some(selection) =
                     selection::restoration(agent, path, journal, self.secrets.as_ref())

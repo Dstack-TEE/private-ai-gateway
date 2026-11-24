@@ -235,11 +235,11 @@ connect pi model="gpt-5.4" catalog=7674a52c: changes sha256:92320ef17e14 [defaul
 reconcile catalog=d4dc6aa2 => ~ .pi/agent/models.json (600) sha256:7e941299c274; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1ec2c4d41549
 move the Local API to http://127.0.0.1:5190
 retarget catalog=d4dc6aa2 => ~ .pi/agent/models.json (600) sha256:d4226df0d3de; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4e0074d32fc2
-reconcile no-catalog => ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9876d549ec6b
+reconcile no-catalog => ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9876d549ec6b
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token pi: rotated; ~ .pi/agent/models.json (600) sha256:d4226df0d3de; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:5ac91a4dcdee
+reconcile catalog=d4dc6aa2 => token pi: rotated; ~ .pi/agent/models.json (600) sha256:d4226df0d3de; ~ .pi/agent/settings.json (600) sha256:06c16f113633; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4e0074d32fc2
 scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["pi"]
-disconnect all => token pi: revoked; ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:57f92ebf3384
+disconnect all => token pi: revoked; ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:57f92ebf3384
 # pi home credentials
 use home credentials
 write .pi/agent/models.json (600) sha256:1ab24943cef9
@@ -274,11 +274,11 @@ connect oh-my-pi model="gpt-5.4" catalog=7674a52c: changes sha256:c8661c743632 [
 reconcile catalog=d4dc6aa2 => ~ .omp/agent/models.yml (600) sha256:77fee51bf058; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:fcff3fc4c337
 move the Local API to http://127.0.0.1:5190
 retarget catalog=d4dc6aa2 => ~ .omp/agent/models.yml (600) sha256:edb1a97d3503; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:13e1d4cc51bd
-reconcile no-catalog => ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ff06fabd5830
+reconcile no-catalog => ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ff06fabd5830
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token oh-my-pi: rotated; ~ .omp/agent/models.yml (600) sha256:edb1a97d3503; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2a03498739c2
+reconcile catalog=d4dc6aa2 => token oh-my-pi: rotated; ~ .omp/agent/config.yml (600) sha256:6bbf7cb89755; ~ .omp/agent/models.yml (600) sha256:edb1a97d3503; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:13e1d4cc51bd
 scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
-disconnect all => token oh-my-pi: revoked; ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d24afc76294b
+disconnect all => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d24afc76294b
 # oh-my-pi home credentials
 use home credentials
 write .omp/agent/models.yml (600) sha256:2aabed80a4fc
