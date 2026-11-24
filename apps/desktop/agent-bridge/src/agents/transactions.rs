@@ -283,13 +283,15 @@ impl Projector {
         let path = record
             .restore_path()
             .map_err(AgentError::ConfigurationConflict)?;
-        if let Some(journal) = &record.selection {
-            if let Some(selection) =
-                selection::restoration(agent, path, journal, self.secrets.as_ref())
-                    .map_err(|_| AgentError::RestorationFailed)?
-            {
-                if !selection.changes.is_empty() {
-                    selection::commit(&selection).map_err(|_| AgentError::RestorationFailed)?;
+        if record.disabled || agent == Agent::Dsh {
+            if let Some(journal) = &record.selection {
+                if let Some(selection) =
+                    selection::restoration(agent, path, journal, self.secrets.as_ref())
+                        .map_err(|_| AgentError::RestorationFailed)?
+                {
+                    if !selection.changes.is_empty() {
+                        selection::commit(&selection).map_err(|_| AgentError::RestorationFailed)?;
+                    }
                 }
             }
         }
@@ -306,7 +308,21 @@ impl Projector {
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
-            restore(&mut doc, &record, self.secrets.as_ref())?
+            let mut suspend_record = record.clone();
+            suspend_record.fields.retain(|field| {
+                if !is_any_model_selection_field(field) {
+                    return true;
+                }
+                let current = owned_value(&doc, field);
+                field.holds(current.as_ref())
+                    || private_model_selection(current.as_ref())
+                    || record
+                        .options
+                        .default_model
+                        .as_ref()
+                        .is_some_and(|model| current == Some(ConfigValue::Str(model.clone())))
+            });
+            restore(&mut doc, &suspend_record, self.secrets.as_ref())?
         } else {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.

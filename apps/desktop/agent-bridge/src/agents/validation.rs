@@ -142,6 +142,11 @@ impl Projector {
             options: &options,
         };
         let mut fields = fields(agent, &inputs)?;
+        if agent == Agent::OpenClaw {
+            for (id, model) in openclaw::entry_models(doc) {
+                fields.push(set(&["agents", "entries", id.as_str(), "model"], model));
+            }
+        }
         if agent == Agent::OpenCode && self.opencode_v2_config(doc) {
             if let Some(field) = fields
                 .iter_mut()
@@ -259,6 +264,12 @@ impl Projector {
                 }
                 if doc.contains(&["fallback_model"]) {
                     return Err(AgentError::ConfigurationConflict("Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string()));
+                }
+                if doc
+                    .get_value(&["fallback_providers"])
+                    .is_some_and(|value| !matches!(value, ConfigValue::List(values) if values.is_empty()))
+                {
+                    return Err(AgentError::ConfigurationConflict("Hermes fallback_providers is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string()));
                 }
                 let existing = doc.get_str(model_selection_paths(Agent::Hermes)[0].path);
                 let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
@@ -648,10 +659,19 @@ impl Projector {
                     .is_some_and(|provider| provider != "private-ai-proxy")
             {
                 status.connected = false;
-                status.authorized = false;
                 status.attention = Some(
                     "OpenCode's selected model uses another provider, so this agent is not routed through Private AI Proxy. Choose a private-ai-proxy model to use the connection."
                         .to_string(),
+                );
+            } else if agent == Agent::OpenClaw
+                && openclaw::entry_models(doc.as_ref().unwrap())
+                    .iter()
+                    .any(|(_, model)| !model.starts_with("private-ai-proxy/"))
+            {
+                status.connected = false;
+                status.authorized = false;
+                status.attention = Some(
+                    "An OpenClaw agent entry selects another provider, so that agent is not routed through Private AI Proxy. Choose a private-ai-proxy model for the entry.".to_string(),
                 );
             } else if let (Some(catalog), Some(model)) =
                 (catalog, selected_model(agent, doc.as_ref()))

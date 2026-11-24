@@ -94,7 +94,31 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
     {
         return Err("The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten".into());
     }
+    if doc
+        .get_value(&["disabledProviders"])
+        .is_some_and(|value| config_filter_matches(&value, PROVIDER))
+    {
+        return Err("Oh My Pi disabledProviders excludes private-ai-proxy; resolve that filter before connecting".into());
+    }
+    if doc
+        .get_value(&["enabledModels"])
+        .is_some_and(|value| !config_filter_matches(&value, "private-ai-proxy/"))
+    {
+        return Err("Oh My Pi enabledModels excludes private-ai-proxy models; resolve that filter before connecting".into());
+    }
     Ok(())
+}
+
+fn config_filter_matches(value: &ConfigValue, target: &str) -> bool {
+    let ConfigValue::List(values) = value else {
+        return false;
+    };
+    values.iter().any(|value| {
+        let mut parts = value.split('*');
+        let prefix = parts.next().unwrap_or_default();
+        let suffix = parts.next().unwrap_or_default();
+        parts.next().is_none() && target.starts_with(prefix) && target.ends_with(suffix)
+    })
 }
 
 pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {

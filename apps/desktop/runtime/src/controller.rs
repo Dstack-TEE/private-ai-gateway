@@ -239,7 +239,7 @@ impl DesktopRuntime {
             launcher,
             helper_path,
             #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
-            mut staged_helper,
+            staged_helper,
             task_runtime,
             agent_configuration,
             agent_access_error,
@@ -254,6 +254,8 @@ impl DesktopRuntime {
         let instance = lock::instance(&data_dir)
             .map_err(|error| format!("Cannot take the instance lock: {error}"))?
             .ok_or(LaunchError::AlreadyRunning)?;
+        #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
+        let mut staged_helper = staged_helper;
         #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
         if agent_configuration {
             match crate::helper_staging::stage(&helper_path, &data_dir) {

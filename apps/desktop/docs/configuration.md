@@ -265,6 +265,11 @@ unlocked OS keychain for a process running as you.
   OpenCode 2 configurations use the native `providers` provider shape when
   their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
   shape.
+- **Agent integration limits.** Claude Code project `.claude/settings.json` and
+  `.claude/settings.local.json` can override `ANTHROPIC_BASE_URL`. Codex's
+  `managed_config.toml` is outside this integration. Oh My Pi project config
+  and non-default roles such as `smol`, `slow`, `plan` and `commit` are not
+  routed by this connection.
 - Clients do not check whether the gateway runs a production or development dstack
   OS image. A development image permits operator access to the gateway. Users who
   need assurance about the OS image should verify the quote, event log, and VM

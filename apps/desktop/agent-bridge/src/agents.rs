@@ -333,6 +333,9 @@ impl Projector {
     }
 
     pub fn with_staged_helper(mut self, staged_helper: PathBuf) -> Self {
+        if cfg!(windows) {
+            return self;
+        }
         self.staged_helper = Some(staged_helper);
         self
     }

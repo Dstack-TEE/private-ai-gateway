@@ -117,6 +117,11 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 ),
                 absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
                 absent(&["env", "ANTHROPIC_API_KEY"]),
+                absent(&["env", "ANTHROPIC_MODEL"]),
+                absent(&["env", "CLAUDE_CODE_USE_BEDROCK"]),
+                absent(&["env", "CLAUDE_CODE_USE_VERTEX"]),
+                absent(&["env", "CLAUDE_CODE_USE_FOUNDRY"]),
+                absent(&["env", "CLAUDE_CODE_USE_MANTLE"]),
             ];
             if let Some(model) = default_model {
                 fields.push(set(model_selection_paths(Agent::ClaudeCode)[0].path, model));
@@ -165,6 +170,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                         .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
+                absent(&["model", "base_url"]),
+                absent(&["model", "api_mode"]),
             ];
             if let Some(model) = default_model {
                 fields.push(set(model_selection_paths(Agent::Hermes)[1].path, model));
@@ -222,7 +229,7 @@ pub(super) fn opencode_provider_v2(provider: &serde_json::Value) -> serde_json::
         .and_then(serde_json::Value::as_object)
     {
         let mut settings = serde_json::Map::new();
-        for key in ["baseURL", "apiKey"] {
+        for key in ["baseURL", "apiKey", "headers", "body"] {
             if let Some(value) = options.get(key) {
                 settings.insert(key.into(), value.clone());
             }

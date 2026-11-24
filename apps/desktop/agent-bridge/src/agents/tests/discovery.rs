@@ -145,6 +145,62 @@ fn changing_a_connected_agents_model_keeps_access() {
 }
 
 #[test]
+fn claude_provider_switch_flags_are_removed_and_restored() {
+    let sandbox = sandbox("claude-provider-switch");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_USE_MANTLE":"1"}}"#,
+    );
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog(), &claude_options());
+    let connected = doc(&sandbox, Agent::ClaudeCode);
+    for flag in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+    ] {
+        assert_eq!(connected.get_str(&["env", flag]), None);
+    }
+    disconnect(&sandbox, Agent::ClaudeCode);
+    let restored = doc(&sandbox, Agent::ClaudeCode);
+    for flag in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+    ] {
+        assert_eq!(restored.get_str(&["env", flag]).as_deref(), Some("1"));
+    }
+}
+
+#[test]
+fn openclaw_agent_entry_models_are_journaled_and_restored() {
+    let sandbox = sandbox("openclaw-entry-model");
+    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"agents":{"entries":{"main":{"model":"private-ai-proxy/openai/gpt-oss-20b"}}}}"#,
+    );
+    apply_connect(&sandbox, Agent::OpenClaw, &catalog(), &claude_options());
+    let mut config = doc(&sandbox, Agent::OpenClaw);
+    config
+        .set_str(
+            &["agents", "entries", "main", "model"],
+            "private-ai-proxy/phala/qwen",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, Agent::OpenClaw);
+    assert_eq!(
+        doc(&sandbox, Agent::OpenClaw)
+            .get_str(&["agents", "entries", "main", "model"])
+            .as_deref(),
+        Some("private-ai-proxy/openai/gpt-oss-20b")
+    );
+}
+
+#[test]
 fn opencode_external_model_is_reported_as_unrouted() {
     let sandbox = sandbox("external-opencode-model");
     let catalog = catalog();
@@ -163,7 +219,8 @@ fn opencode_external_model_is_reported_as_unrouted() {
         .into_iter()
         .find(|status| status.id == Agent::OpenCode.id())
         .unwrap();
-    assert!(!status.authorized, "{status:?}");
+    assert!(status.authorized, "{status:?}");
+    assert!(!status.connected, "{status:?}");
     assert!(status.attention.unwrap().contains("not routed"));
 }
 
@@ -397,6 +454,17 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
         assert!(output.status.success(), "{case}: {output:?}");
     }
+}
+
+#[test]
+fn hermes_active_profile_selects_the_profile_config() {
+    let sandbox = sandbox("hermes-active-profile");
+    let root = sandbox.home.join(".hermes");
+    write(&root.join("active_profile"), "work\n");
+    assert_eq!(
+        Agent::Hermes.config_path(&sandbox.home, false),
+        root.join("profiles").join("work").join("config.yaml")
+    );
 }
 
 #[test]

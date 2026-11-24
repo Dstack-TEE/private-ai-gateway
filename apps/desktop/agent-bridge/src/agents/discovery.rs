@@ -1,6 +1,11 @@
 use super::*;
 
 pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
+    if tool_env {
+        if let Some(path) = env_path("HERMES_HOME").and_then(nonblank) {
+            return path;
+        }
+    }
     if cfg!(windows) {
         tool_env
             .then(|| env_path("LOCALAPPDATA"))
@@ -11,6 +16,18 @@ pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
     } else {
         home.join(".hermes")
     }
+}
+
+pub(super) fn hermes_config_path(home: &Path, tool_env: bool) -> PathBuf {
+    let root = hermes_native_dir(home, tool_env);
+    let profile = fs::read_to_string(root.join("active_profile"))
+        .ok()
+        .map(|profile| profile.trim().to_string())
+        .filter(|profile| !profile.is_empty());
+    profile.map_or_else(
+        || root.join("config.yaml"),
+        |profile| root.join("profiles").join(profile).join("config.yaml"),
+    )
 }
 
 /// A path override that is not blank, trimmed as Hermes reads it.

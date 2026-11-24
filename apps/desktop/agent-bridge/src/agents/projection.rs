@@ -94,7 +94,7 @@ const CODEX_MODEL: ModelSelectionPath = ModelSelectionPath {
     entry: None,
 };
 const CLAUDE_MODEL: ModelSelectionPath = ModelSelectionPath {
-    path: &["env", "ANTHROPIC_MODEL"],
+    path: &["model"],
     entry: None,
 };
 const OPENCODE_MODEL: ModelSelectionPath = ModelSelectionPath {
@@ -139,6 +139,13 @@ pub(super) fn model_selection_paths(agent: Agent) -> &'static [ModelSelectionPat
 }
 
 pub(super) fn is_model_selection_field(agent: Agent, field: &OwnedField) -> bool {
+    if agent == Agent::OpenClaw
+        && field.path.len() == 4
+        && field.path.starts_with(&owned(&["agents", "entries"]))
+        && field.path.last().is_some_and(|key| key == "model")
+    {
+        return true;
+    }
     model_selection_paths(agent).iter().any(|selection| {
         field.path == owned(selection.path)
             && field.entry.as_ref().map(|entry| entry.key.id.as_str()) == selection.entry
@@ -222,7 +229,10 @@ fn normalize_regenerable_values(
         return;
     };
     match agent {
-        Agent::Codex | Agent::ClaudeCode => {}
+        Agent::Codex => {}
+        Agent::ClaudeCode => {
+            *current = expected.clone();
+        }
         Agent::OpenCode | Agent::Pi | Agent::OhMyPi | Agent::OpenClaw => {
             normalize_model_map(expected, current)
         }
@@ -361,8 +371,14 @@ fn routing_value(value: &serde_json::Value) -> serde_json::Value {
         .get("settings")
         .and_then(serde_json::Value::as_object)
     {
-        if let Some(base_url) = settings.get("baseURL") {
-            routing.insert("settings".into(), serde_json::json!({"baseURL": base_url}));
+        let mut selected = serde_json::Map::new();
+        for key in ["baseURL", "package", "body", "headers"] {
+            if let Some(value) = settings.get(key) {
+                selected.insert(key.into(), value.clone());
+            }
+        }
+        if !selected.is_empty() {
+            routing.insert("settings".into(), serde_json::Value::Object(selected));
         }
     }
     if let Some(headers) = object.get("headers") {
@@ -1232,7 +1248,7 @@ pub(super) fn restore(
     })
 }
 
-fn private_model_selection(value: Option<&ConfigValue>) -> bool {
+pub(super) fn private_model_selection(value: Option<&ConfigValue>) -> bool {
     match value {
         Some(ConfigValue::Str(value)) => value.starts_with("private-ai-proxy/"),
         Some(ConfigValue::Json(value)) => {

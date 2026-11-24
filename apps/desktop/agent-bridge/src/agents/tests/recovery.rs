@@ -273,15 +273,15 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
         doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
         Some(ENDPOINT)
     );
+    assert_eq!(doc.get_str(&["env", "ANTHROPIC_MODEL"]), None);
     assert_eq!(
-        doc.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
+        doc.get_str(&["model"]).as_deref(),
         Some("openai/gpt-oss-20b")
     );
     assert!(doc
         .get_str(&["apiKeyHelper"])
         .unwrap()
         .contains("--agent-token claude-code"));
-    assert_eq!(doc.get_str(&["model"]).as_deref(), Some("opus"));
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
