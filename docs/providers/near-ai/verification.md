@@ -25,6 +25,9 @@ different name fails verification. An entry with the right name and no
 The remote report fetch and NVIDIA verification use a 3-second connect
 timeout and a 10-second read timeout. The Rust subprocess deadline also
 bounds the local dstack verification, including any cold OS-image download.
+The vendored report fetch streams up to 8 MiB of decoded bytes before JSON
+parsing. Larger reports fail with `evidence_invalid`. The largest of five
+sampled public reports was 833,375 bytes.
 
 `NearAICloudVerifier.verify_gateway_component` checks the
 `gateway_attestation` component.
@@ -58,8 +61,10 @@ has no unique evidence entry to reference.
 
 The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest through `report_data`. The gateway pins that digest against the live NEAR AI HTTPS certificate before sending the request.
 
-The verifier caches and refreshes verification by upstream model ID so each
-model passes the name check. An explicit model name mismatch on refresh
+The verifier caches and refreshes verification by upstream and model ID so
+each model passes the name check. Cold requests and refreshes share a lock
+for that cache key. Requests for a sibling model can verify independently.
+An explicit model name mismatch on refresh
 immediately replaces even a current verified entry for that model because the
 upstream now reports a different model. Requests reuse the mismatch for up to
 60 seconds. If evidence is unavailable, the verifier keeps any still-valid
@@ -160,7 +165,7 @@ Run the hermetic report-data, model selection and bridge checks.
 
 ```sh
 cargo test --locked --test soundness_report_data --test session_material_soundness
-CARGO_BUILD_JOBS=4 cargo test --locked --lib near_ai_caches_model_failures_and_refreshes_healthy_siblings
+CARGO_BUILD_JOBS=4 cargo test --locked --lib aci::verifier::tests::near_ai_
 CARGO_BUILD_JOBS=4 cargo test --locked --lib aci::upstream::near
 ```
 

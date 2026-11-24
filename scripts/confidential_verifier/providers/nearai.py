@@ -1,12 +1,21 @@
-import requests
+import json
 import secrets
 from typing import List, Dict, Any, Optional
+
+import requests
+
+if __package__ == "scripts.confidential_verifier.providers":
+    from ...verifier_http import read_bounded_body
+else:
+    from verifier_http import read_bounded_body
+
 from .base import ServiceProvider
 from ..types import AttestationReport
 
 
 class NearaiProvider(ServiceProvider):
     HTTP_TIMEOUT = (3, 10)
+    MAX_REPORT_BYTES = 8 * 1024 * 1024
 
     def __init__(self, include_tls_fingerprint: bool = False, api_key: Optional[str] = None):
         self.api_base = "https://cloud-api.near.ai/v1"
@@ -32,8 +41,6 @@ class NearaiProvider(ServiceProvider):
         nvidia_payload = first.get("nvidia_payload")
         if isinstance(nvidia_payload, str):
             try:
-                import json
-
                 nvidia_payload = json.loads(nvidia_payload)
             except ValueError:
                 pass
@@ -82,11 +89,12 @@ class NearaiProvider(ServiceProvider):
             print(f"[Near] TLS fingerprint binding enabled")
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = requests.get(
-            url, params=params, headers=headers, timeout=self.HTTP_TIMEOUT
-        )
-        response.raise_for_status()
-        data = response.json()
+        with requests.get(
+            url, params=params, headers=headers, timeout=self.HTTP_TIMEOUT, stream=True
+        ) as response:
+            response.raise_for_status()
+            body = read_bounded_body(response, self.MAX_REPORT_BYTES, "NEAR AI attestation report")
+            data = json.loads(body.decode(response.encoding) if response.encoding else body)
         if not isinstance(data, dict):
             raise ValueError("NEAR AI attestation report must be an object")
         data["include_tls_fingerprint"] = use_tls_fingerprint

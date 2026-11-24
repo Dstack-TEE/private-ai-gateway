@@ -21,6 +21,13 @@ The adapter resolves the model's chute ID and fetches three documents from the C
 - nonce-bound instance evidence from `/chutes/{chute_id}/evidence?nonce=<random>`; and
 - the E2EE instances and their public keys from `/e2e/instances/{chute_id}`.
 
+The bridge caps the decoded body of each response before parsing JSON. The
+limits are 1 MiB for measurements and 40 MiB each for instance evidence and
+each round of public-key discovery. Oversized responses fail with
+`evidence_invalid`. In public sampling the largest measurements response
+was 73,197 bytes and the largest instance evidence response was 1,469,516
+bytes. Public-key discovery requires Chutes credentials.
+
 The adapter compares `tee_type` case-insensitively and skips evidence tagged
 with another type. Evidence with a missing or null tag must pass the same TDX
 checks. For each eligible instance with evidence and an E2EE public key, the

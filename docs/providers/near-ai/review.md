@@ -16,6 +16,10 @@ attestation entry to name the requested upstream model and reports a missing
 finding 2 for newly verified leases. The evidence still attests the gateway
 channel and the backend workload admission finding remains open.
 
+**Adapter status (2026-11-24 PST).** Cold-verification locking is scoped to
+the model cache key, and the bridge caps decoded report size before parsing.
+[Current verification algorithm](verification.md#verification-algorithm)
+
 ## Round 2 (2026-11-23 PST)
 
 Reviewed the deployed NEAR AI gateway release

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use aci_verify::decode_hex_32;
@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use super::CachedProviderEvent;
@@ -30,6 +31,8 @@ use crate::aggregator::upstream_config::AttestationScope;
 
 const NEAR_AI_MODEL_MISMATCH_TTL: Duration = Duration::from_secs(60);
 const NEAR_AI_EVIDENCE_UNAVAILABLE_TTL: Duration = Duration::from_secs(10);
+
+type VerifyLocks = HashMap<Option<ExternalProviderVerifierCacheKey>, Weak<AsyncMutex<()>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
@@ -103,7 +106,7 @@ pub(super) struct ExternalProviderVerifier {
     cache_ttl_seconds: u64,
     near_ai_unavailable_ttl: Duration,
     cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedProviderEvent>>>,
-    verify_lock: Arc<tokio::sync::Mutex<()>>,
+    verify_locks: Arc<Mutex<VerifyLocks>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
     #[cfg(test)]
     reaped: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
@@ -143,7 +146,7 @@ impl ExternalProviderVerifier {
             cache_ttl_seconds,
             near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            verify_lock: Arc::new(tokio::sync::Mutex::new(())),
+            verify_locks: Default::default(),
             chutes_session_store: None,
             #[cfg(test)]
             reaped: Default::default(),
@@ -171,7 +174,7 @@ impl ExternalProviderVerifier {
             cache_ttl_seconds: 0,
             near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
-            verify_lock: Arc::new(tokio::sync::Mutex::new(())),
+            verify_locks: Default::default(),
             chutes_session_store: None,
             #[cfg(test)]
             reaped: Default::default(),
@@ -218,6 +221,23 @@ impl ExternalProviderVerifier {
         key
     }
 
+    fn verify_lock(&self, request: &UpstreamVerificationRequest) -> Arc<AsyncMutex<()>> {
+        // NEAR checks model identity even though its attested channel is shared.
+        // Other providers continue to serialize bridge runs per configuration.
+        let key = (self.provider == "near-ai").then(|| self.cache_key(request));
+        let mut locks = self
+            .verify_locks
+            .lock()
+            .expect("external provider verifier locks poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(AsyncMutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
     pub(super) async fn verify(
         &self,
         request: UpstreamVerificationRequest,
@@ -225,7 +245,8 @@ impl ExternalProviderVerifier {
         if let Some(event) = self.cached_event(&request) {
             return event;
         }
-        let _verify_guard = self.verify_lock.lock().await;
+        let lock = self.verify_lock(&request);
+        let _verify_guard = lock.lock().await;
         if let Some(event) = self.cached_event(&request) {
             return event;
         }
@@ -290,7 +311,8 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let _verify_guard = self.verify_lock.lock().await;
+        let lock = self.verify_lock(&request);
+        let _verify_guard = lock.lock().await;
         self.verify_uncached(request).await
     }
 

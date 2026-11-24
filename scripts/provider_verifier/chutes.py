@@ -17,6 +17,7 @@ import jwt
 import requests
 
 from .common import (
+    ResponseTooLarge,
     emit,
     evidence_bundle,
     failed,
@@ -24,6 +25,7 @@ from .common import (
     provider_options,
     raw_http_bundle_evidence,
     raw_http_item,
+    read_bounded_body,
     request_timeout_seconds,
     response_content_type,
     sha256_base64_key,
@@ -38,6 +40,9 @@ NRAS_JWKS_TIMEOUT_SECONDS = 5
 NRAS_POST_TIMEOUT_SECONDS = 5
 NRAS_GPU_BUDGET_SECONDS = 10
 NRAS_GPU_CONCURRENCY = 8
+MAX_MEASUREMENTS_BYTES = 1024 * 1024
+MAX_EVIDENCE_BYTES = 40 * 1024 * 1024
+MAX_PUBLIC_KEYS_BYTES = 40 * 1024 * 1024
 VERIFIER_EXIT_MARGIN_SECONDS = 2
 
 
@@ -152,14 +157,17 @@ def chutes_measurement_name(
     return None
 
 
-def chutes_fetch_measurements(api_base: str, timeout: int) -> tuple[str, requests.Response]:
+def chutes_fetch_measurements(api_base: str, timeout: int) -> tuple[str, str, bytes]:
     url = f"{api_base}/servers/tdx/measurements"
-    response = requests.get(url, timeout=timeout)
+    response = requests.get(url, timeout=timeout, stream=True)
     if response.status_code in (404, 405, 410, 501):
+        response.close()
         url = f"{api_base}/servers/tee/measurements"
-        response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return url, response
+        response = requests.get(url, timeout=timeout, stream=True)
+    with response:
+        response.raise_for_status()
+        body = read_bounded_body(response, MAX_MEASUREMENTS_BYTES, "Chutes measurements")
+        return url, response_content_type(response), body
 
 
 def chutes_fetch_nras_keys() -> dict[str, jwt.PyJWK]:
@@ -316,6 +324,13 @@ async def chutes_verify_instance(
 
 
 async def verify_chutes(request: dict[str, Any]) -> None:
+    try:
+        await _verify_chutes(request)
+    except ResponseTooLarge as exc:
+        failed("chutes", str(exc), failure="evidence_invalid")
+
+
+async def _verify_chutes(request: dict[str, Any]) -> None:
     started_at = asyncio.get_running_loop().time()
     provider = "chutes"
     options = provider_options(request)
@@ -325,10 +340,11 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     if not api_key:
         evidence = None
         try:
-            measurements_url, response = chutes_fetch_measurements(api_base, 15)
-            body = response.content
+            measurements_url, content_type, body = chutes_fetch_measurements(api_base, 15)
             json.loads(body)
-            evidence = evidence_bundle(body, measurements_url, response_content_type(response))
+            evidence = evidence_bundle(body, measurements_url, content_type)
+        except ResponseTooLarge:
+            raise
         except (requests.RequestException, ValueError):
             pass
         failed(
@@ -351,34 +367,35 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     )
     attestation_url = f"{api_base}/chutes/{chute_id}/evidence"
 
-    measurements_url, measurements_response = chutes_fetch_measurements(api_base, timeout)
-    measurements_body = measurements_response.content
+    measurements_url, measurements_type, measurements_body = chutes_fetch_measurements(api_base, timeout)
     measurements = json.loads(measurements_body.decode("utf-8"))
     raw_items = [
         raw_http_item(
             "chutes.measurements",
             measurements_url,
-            response_content_type(measurements_response),
+            measurements_type,
             measurements_body,
         )
     ]
 
     nonce = secrets.token_hex(32)
-    evidence_response = requests.get(
+    with requests.get(
         attestation_url,
         params={"nonce": nonce},
         headers=headers,
         timeout=timeout,
-    )
-    evidence_response.raise_for_status()
-    evidence_body = evidence_response.content
+        stream=True,
+    ) as response:
+        response.raise_for_status()
+        evidence_body = read_bounded_body(response, MAX_EVIDENCE_BYTES, "Chutes instance evidence")
+        evidence_type = response_content_type(response)
     evidence_data = json.loads(evidence_body.decode("utf-8"))
     evidence_items = evidence_data.get("evidence") or []
     raw_items.append(
         raw_http_item(
             "chutes.attestation_evidence",
             f"{attestation_url}?nonce={nonce}",
-            response_content_type(evidence_response),
+            evidence_type,
             evidence_body,
         )
     )
@@ -386,25 +403,28 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     discovery_rounds = chutes_discovery_rounds(options)
     discovery_interval = chutes_discovery_interval_seconds(options)
     pubkeys_responses = []
+    pubkeys_url = f"{api_base}/e2e/instances/{chute_id}"
     pubkey_items: dict[str, dict[str, Any]] = {}
     nonce_expires_in = None
     for round_index in range(discovery_rounds):
         if round_index > 0 and discovery_interval > 0:
             time.sleep(discovery_interval)
-        pubkeys_response = requests.get(
-            f"{api_base}/e2e/instances/{chute_id}",
+        with requests.get(
+            pubkeys_url,
             headers=headers,
             timeout=timeout,
-        )
-        pubkeys_response.raise_for_status()
-        pubkeys_body = pubkeys_response.content
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            pubkeys_body = read_bounded_body(response, MAX_PUBLIC_KEYS_BYTES, "Chutes public keys")
+            pubkeys_type = response_content_type(response)
         pubkeys_data = json.loads(pubkeys_body.decode("utf-8"))
         pubkeys_responses.append(pubkeys_data)
         raw_items.append(
             raw_http_item(
                 f"chutes.e2ee_instances.{round_index}",
-                f"{api_base}/e2e/instances/{chute_id}",
-                response_content_type(pubkeys_response),
+                pubkeys_url,
+                pubkeys_type,
                 pubkeys_body,
             )
         )
@@ -446,7 +466,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             failure="evidence_invalid",
             evidence=raw_http_bundle_evidence(
                 raw_items,
-                source_url=f"{api_base}/e2e/instances/{chute_id}",
+                source_url=pubkeys_url,
             ),
         )
         return

@@ -877,6 +877,80 @@ printf '%s' '{output}'"#
 }
 
 #[tokio::test]
+async fn near_ai_cold_verification_is_single_flight_per_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let calls = directory.path().join("primary-calls");
+    let release = directory.path().join("release");
+    let output = json!({
+        "result": "verified",
+        "attested_scope": "router",
+        "evidence": {
+            "digest": crate::aci::digest::sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://router.example",
+            "spki_sha256": "ab".repeat(32),
+        }],
+    });
+    let script = r#"case "$(cat)" in
+  *'"model_id":"primary"'*)
+    printf '1' >> "$1"
+    while [ ! -f "$2" ]; do sleep 0.01; done
+    ;;
+esac
+printf '%s' "$3""#;
+    let verifier = ExternalProviderVerifier::with_command_and_cache(
+        "near-ai",
+        AttestationScope::PerRouter,
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            script.into(),
+            "near-ai-single-flight-test".into(),
+            calls.display().to_string(),
+            release.display().to_string(),
+            output.to_string(),
+        ],
+        20,
+        300,
+    )
+    .unwrap();
+    let request = UpstreamVerificationRequest {
+        upstream_name: "router-upstream".into(),
+        url_origin: Some("https://router.example".into()),
+        model_id: "primary".into(),
+        forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+        required: true,
+    };
+    let (first, duplicate) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(verifier.verify(request.clone()), async {
+            while !calls.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let mut duplicate = Box::pin(verifier.verify(request.clone()));
+            assert!(futures_util::poll!(&mut duplicate).is_pending());
+            let sibling = verifier
+                .verify(UpstreamVerificationRequest {
+                    model_id: "sibling".into(),
+                    ..request.clone()
+                })
+                .await;
+            assert_eq!(sibling.result, VerificationResult::Verified);
+            std::fs::write(&release, "").unwrap();
+            duplicate.await
+        })
+    })
+    .await
+    .expect("cold sibling verification must complete while the primary is stalled");
+    assert_eq!(first.result, VerificationResult::Verified);
+    assert_eq!(duplicate.result, VerificationResult::Verified);
+    assert_eq!(first.verification_round, duplicate.verification_round);
+    assert_eq!(std::fs::read_to_string(&calls).unwrap(), "1");
+}
+
+#[tokio::test]
 async fn near_ai_caches_model_failures_and_refreshes_healthy_siblings() {
     let directory = tempfile::tempdir().unwrap();
     let calls = directory.path().join("calls");
@@ -968,10 +1042,14 @@ esac"#;
     assert_eq!(refreshed.result, VerificationResult::Verified);
     assert!(verifier.cached(&unavailable).is_none());
     assert!(verifier.cache_remaining(&unavailable).is_none());
-    assert_eq!(
-        std::fs::read_to_string(&calls).unwrap(),
-        "alias\nverified\nverified\nunavailable\nverified\n"
-    );
+    let calls_before_expiry = std::fs::read_to_string(&calls).unwrap();
+    let mut concurrent_calls: Vec<_> = calls_before_expiry
+        .strip_prefix("alias\nverified\nverified\n")
+        .unwrap()
+        .lines()
+        .collect();
+    concurrent_calls.sort_unstable();
+    assert_eq!(concurrent_calls, ["unavailable", "verified"]);
 
     tokio::time::pause();
     tokio::time::advance(refresh_lead).await;
@@ -993,7 +1071,7 @@ esac"#;
     );
     assert_eq!(
         std::fs::read_to_string(&calls).unwrap(),
-        "alias\nverified\nverified\nunavailable\nverified\nunavailable\n"
+        format!("{calls_before_expiry}unavailable\n")
     );
 
     tokio::time::advance(std::time::Duration::from_secs(31)).await;
