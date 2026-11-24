@@ -1,6 +1,14 @@
 use super::*;
 
 impl Projector {
+    fn active_helper(&self) -> &Path {
+        if cfg!(windows) {
+            &self.helper_exe
+        } else {
+            self.staged_helper.as_deref().unwrap_or(&self.helper_exe)
+        }
+    }
+
     pub(super) fn current_record<'a>(
         &self,
         agent: Agent,
@@ -83,7 +91,7 @@ impl Projector {
         }
         openclaw::validate_staged_helper(
             &self.bundled_helper,
-            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
+            self.active_helper(),
             &self.tokens.path(Agent::OpenClaw.id()),
         )
     }
@@ -135,7 +143,7 @@ impl Projector {
         let inputs = Inputs {
             file_credentials: self.file_credentials,
             endpoint: &self.endpoint,
-            helper_exe: self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
+            helper_exe: self.active_helper(),
             token_path: &self.tokens.path(agent.id()),
             codex_catalog_path: &codex_catalog_path,
             catalog,
@@ -613,7 +621,7 @@ impl Projector {
         let helper_stale = stale_helper(
             agent,
             record,
-            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
+            self.active_helper(),
             self.file_credentials
                 .then_some(self.tokens.path(agent.id()).as_path()),
         ) && helper_fields_hold(agent, record, doc.as_ref())
@@ -718,9 +726,9 @@ impl Projector {
             }
             if refusal.is_none() && agent == Agent::OpenClaw {
                 let token = self.tokens.path(agent.id());
-                let (helper, file) = (&self.helper_exe, self.file_credentials);
+                let file = self.file_credentials;
                 refusal = openclaw::validate_config(doc, Some(record)).err();
-                let staged = self.staged_helper.as_deref().unwrap_or(helper);
+                let staged = self.active_helper();
                 if refusal.is_none() && openclaw::stale_credentials(record, staged, &token, file) {
                     refusal =
                         Some("The OpenClaw helper changed; Disconnect, then Connect again".into());
