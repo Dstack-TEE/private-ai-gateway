@@ -1,5 +1,142 @@
 # ArmetAI per-model TDX review
 
+Date: 2026-11-23 PST (currency check).
+
+> [!NOTE]
+> This is a dated admission record. See [Documentation conventions](../../README.md#documentation-conventions).
+> The [currency check](#currency-check-2026-11-23-pst) records the maintainers'
+> findings. The [historical self-assessment](#historical-self-assessment)
+> covers the earlier vLLM deployment.
+
+ArmetAI operates `https://ctf.armet.ai` on a Fortanix confidential-computing
+stack. The earlier `poc1.armet.ai` endpoint did not resolve during this check.
+
+## Currency check (2026-11-23 PST)
+
+The review covered Fortanix's attestation reference at `5ba767a9`, dated
+2026-11-19 PST, and the public workload image it pins by manifest digest
+`sha256:b5269d74e1506add71a61566ad9a94f8e1b41fa7ef4170ba3f2cde176dd0b1c4`.
+The image contains SGLang `v0.5.23` at `297e54fd` and ArmetAI's entrypoint,
+attestation server, TLS key generation and ACME scripts under `/opt/cvn`.
+Fortanix identifies guest components at `d3ae8f2c` as part of the guest measured
+in RTMR1 and RTMR2.
+[Attestation reference](https://github.com/fortanix/armet-ctf/tree/5ba767a9553173bb4fc3977a979f8e7cbc0e36b8),
+[SGLang source](https://github.com/sgl-project/sglang/commit/297e54fd105e974cdf401e5b4d20253a22c16f90),
+[Guest components source](https://github.com/fortanix/guest-components/commit/d3ae8f2c572e474d7fd36b76ba4f10042c05fefd).
+
+### Current verdict
+
+**Decision pending.** The report endpoint now requires an API key. The
+unauthenticated probe yielded no fresh quote, so the gateway's verification
+and channel binding could not be confirmed for the SGLang deployment.
+
+### Changes since the October record
+
+| Item | 2026-10-15 record | November public reference or observation |
+| --- | --- | --- |
+| Source and workload image | Source review pending, image digest unrecorded | Fortanix reference at `5ba767a9` and digest-pinned image above |
+| Serving engine | vLLM | SGLang `v0.5.23` |
+| MRCONFIGID | `bc080317…d039aa` | `e5cdf268…5225` (four changes since the October record) |
+| RTMR0 | `484e310a…db14` in the October provider reference | `b5b6a409…5419` |
+| MRTD, RTMR1, RTMR2, RTMR3 | October provider values | Same values in the November reference |
+| Measurement subject | `da6f26e8…0c8a`, quote-verified | **Predicted** `1e2dcdb9…b9ba` |
+| TLS leaf and SPKI | Let's Encrypt `YE2`, `a2e07c25…bb2c` | Let's Encrypt `YE1`, `caf91a40…fed8` observed |
+| Report authentication | Unauthenticated requests worked | Provider documents a bearer API key |
+| GPU topology | 8 × GH100 verified | 8 × H200 SXM and 4 × NVSwitch in one NVIDIA Protected PCIe group, per provider |
+| Weights | Provenance unknown | Initdata pins a SHA-384 digest and the provider publishes a per-file manifest |
+
+The **predicted subject** is
+`tdx-measurement:sha256:1e2dcdb9709a6a399233e4bb78dd3cea9de4dfde74d9a5e5439881d33977b9ba`.
+This calculation uses the published registers, TD_ATTRIBUTES
+`0000001000000000`, XFAM `e702060000000000` and zero MROWNER and
+MROWNERCONFIG as in the October record. The same calculation reproduces the
+October quote-verified subject from the October reference at `a0599a97`.
+Treat the November result as a candidate for the authenticated probe.
+
+### Live and public checks (2026-11-23 20:07–20:09 PST)
+
+- `ctf.armet.ai` resolved to `52.53.179.221`. The observed leaf
+  (`CN=ctf.armet.ai`) was valid from 2026-11-19 00:08 PST and had
+  SPKI SHA-256 `caf91a407e44b55e00aabc69c6990599e5e3e624619de887981b9b995cfbfed8`.
+- A v2 report request for `GLM-5.3-Flash` with a fresh nonce and no credential
+  returned HAProxy HTML with HTTP `429` on three attempts. An unauthenticated
+  request for the wrong model also returned `429`. These responses did not
+  establish whether the `429` was due to rate limiting or missing credentials.
+  `/` and `/v1/models` returned `401`, and `/healthz` returned `404`.
+- SHA-384 of `initdata.toml` at `5ba767a9` matched the published MRCONFIGID
+  `e5cdf268…5225`. At `a0599a97` it matched the October quote value
+  `bc080317…d039aa`.
+- The Docker Hub manifest bytes matched the pinned image digest. SHA-384 of
+  `weights-manifest.txt` matched `MODEL_WEIGHTS_SHA384` in `initdata.toml`
+  (`b52f7ca1…35a5`).
+
+### Findings from the published configuration and image
+
+- **Workload and TLS custody (criteria 1 and 2).** The public initdata embeds
+  a policy that requires exact environment, mounts and digest-pinned workload
+  and pause images, and denies exec, policy replacement, stdin writes, RNG
+  reseeding, clock setting and tracing. The reviewed image generates the TLS
+  key at boot in guest tmpfs for the in-TD HAProxy user. The ACME helper uses
+  TLS-ALPN-01 as a separate user and renews with the same CSR. The attestation
+  service computes the adapter's v2 `report_data` commitment and reads
+  the model ID from the engine.
+- **Privacy boundary (criterion 5).** The policy allows `ReadStreamRequest`,
+  so the host can read container output. The TLS-terminating `haproxy.cfg`
+  and API-key files sit in encrypted image layers. Initdata configures Fortanix
+  DSM for layer-key release. The proxy's routing and logging settings require
+  provider disclosure.
+- **GPU evidence (criterion 6).** The image's report service adds
+  `switch_arch`, `switch_evidence_list` and `switch_evidence_present` to
+  `nvidia_payload`. The adapter passes the full payload to NRAS for GPU
+  verification and has no switch verification step. NRAS acceptance of the
+  expanded payload remains untested.
+- **Release publication (criterion 7).** The image build, TLS leaf validity
+  start and reference commit fall within about an hour on 2026-11-19 PST.
+  The exact rollout time remains unconfirmed. The public record provides
+  no evidence of advance publication, release tags, a changelog or an
+  emergency publication policy.
+- **Provenance (criterion 13).** The entrypoint checks `/weights` against
+  the initdata-pinned digest before serving. The public material does not
+  document reproducible builds for the guest kernel, initrd or TDVF firmware,
+  or supply a Dockerfile or signed provenance for the workload image.
+
+### Evidence needed for a decision
+
+Use a provider-issued bearer API key for an
+[authenticated bridge probe](verification.md#tests-and-reproduction)
+against `https://ctf.armet.ai` for `GLM-5.3-Flash`. Verify a fresh, non-debug
+TDX quote with DCAP and record the measurements, TCB status and TDX module
+identity. Confirm the quote-derived subject against the prediction and compare
+the attested SPKI with the live TLS leaf. Require the bridge to return
+`verified`, including the v2 `report_data` and signed, nonce-matched NRAS GPU
+checks with the expanded payload. Repeat the report request with a fresh nonce
+and a wrong model ID to check for `409`.
+
+Request the following evidence from ArmetAI.
+
+1. The decrypted `haproxy.cfg` or a reviewed disclosure of its routing,
+   forwarding and logging, and confirmation that the external frontend uses
+   TCP passthrough.
+2. Confirmation that host-readable container output contains no prompts,
+   completions or tool payloads, with the logging controls that enforce it.
+3. An inventory of the keys Fortanix DSM releases, including the encrypted
+   layers they unlock, the release policy and confirmation that DSM supplies
+   no TLS private key.
+
+If those checks and answers close the open findings, the proposed verdict is
+**acceptable with conditions** covering measurement pins, pre-rollout
+publication (criterion 7) and platform provenance (criterion 13).
+
+### Other unverified items
+
+The provider's initdata round-trip and policy tests were not run. The weights
+manifest was not compared with a fresh Hugging Face download. The encrypted
+API-key layers and parts of the certificate installation and ACME scripts
+were outside the image review. Tool calling, streaming and tenant isolation
+with `cache_salt` were last tested on vLLM and still need testing on SGLang.
+
+## Historical self-assessment
+
 Date: 2026-09-29 UTC. Updated: 2026-10-15 UTC.
 
 > [!NOTE]
