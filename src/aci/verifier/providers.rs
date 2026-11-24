@@ -667,6 +667,18 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
         }
     }
 
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        self.verifier_for(&request)
+            .ok()?
+            .reverify_instance(request, previous, instance_id)
+            .await
+    }
+
     fn invalidate(&self, request: &UpstreamVerificationRequest) {
         if let Ok(verifier) = self.verifier_for(request) {
             verifier.invalidate(request);

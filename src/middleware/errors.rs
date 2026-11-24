@@ -157,9 +157,10 @@ fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
         ) => (502, None, None),
         // Fail-closed before or during the send; which binding and why is the
         // log's to say.
-        ServiceError::Upstream(UpstreamError::ChannelBindingMismatch(_)) => {
-            (502, None, Some(CHANNEL_BINDING_MESSAGE.to_string()))
-        }
+        ServiceError::Upstream(
+            UpstreamError::ChannelBindingMismatch(_)
+            | UpstreamError::ResponseBindingMismatch { .. },
+        ) => (502, None, Some(CHANNEL_BINDING_MESSAGE.to_string())),
         ServiceError::TestKeysInProduction
         | ServiceError::InvalidSourceProvenance
         | ServiceError::InvalidAttestedSessionTtl

@@ -158,6 +158,10 @@ pub enum UpstreamError {
     Timeout(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
+    /// The provider's first response frame failed PSK authentication before
+    /// delivery. Reverify this instance at most once.
+    #[error("upstream response binding mismatch")]
+    ResponseBindingMismatch { instance_id: String },
     /// The upstream answered `status` and the adapter withheld the body, which
     /// is unverified. Carries the status alone: an error's `Display` reaches
     /// logs, where a response body has no place. The service forwards it as

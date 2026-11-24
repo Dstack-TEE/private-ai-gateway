@@ -380,7 +380,8 @@ impl From<&UpstreamError> for ErrorClass {
             | UpstreamError::EnvelopeTruncated
             | UpstreamError::ResponseTooLarge => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
-            UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,
+            UpstreamError::ChannelBindingMismatch(_)
+            | UpstreamError::ResponseBindingMismatch { .. } => Self::UpstreamChannelBindingMismatch,
             UpstreamError::Upstream { .. } => Self::UpstreamHttpError,
         }
     }

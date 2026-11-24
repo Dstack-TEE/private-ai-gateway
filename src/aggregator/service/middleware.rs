@@ -75,7 +75,8 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
         | UpstreamError::SseTruncated
         | UpstreamError::EnvelopeTruncated
         | UpstreamError::ResponseTooLarge
-        | UpstreamError::ChannelBindingMismatch(_) => Some(502),
+        | UpstreamError::ChannelBindingMismatch(_)
+        | UpstreamError::ResponseBindingMismatch { .. } => Some(502),
     }
 }
 
@@ -475,6 +476,7 @@ impl AciService {
         // The longest `Retry-After` among this pass's capacity rejections.
         let mut capacity_wait: Duration;
 
+        let mut response_binding_reverified = false;
         loop {
             capacity_indices.clear();
             capacity_wait = Duration::ZERO;
@@ -638,6 +640,7 @@ impl AciService {
                             // Failover path: flush a possibly-stale binding on any
                             // terminal mismatch so the next candidate/request re-verifies.
                             true,
+                            &mut response_binding_reverified,
                             |prepared, event| async move {
                                 self.upstream
                                     .forward_stream_verified_prepared(prepared, &event)
@@ -848,6 +851,7 @@ impl AciService {
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
+                        &mut response_binding_reverified,
                         |prepared, event| async move {
                             self.upstream
                                 .forward_verified_prepared(prepared, &event)

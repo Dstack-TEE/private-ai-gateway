@@ -544,5 +544,16 @@ pub trait UpstreamVerifier: Send + Sync {
         self.verify(request).await
     }
 
+    /// Reverify a selected instance while preserving cached sibling instances.
+    /// Returns only the refreshed instance for readmission on the failed send.
+    async fn reverify_instance(
+        &self,
+        _request: UpstreamVerificationRequest,
+        _previous: &UpstreamVerifiedEvent,
+        _instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        None
+    }
+
     fn invalidate(&self, _request: &UpstreamVerificationRequest) {}
 }

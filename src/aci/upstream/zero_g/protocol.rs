@@ -4,10 +4,11 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use hkdf::Hkdf;
 use hpke::aead::{AeadCtxR, ChaCha20Poly1305};
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
-use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
+use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, PskBundle, Serializable};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -20,6 +21,8 @@ pub(super) type Kem = X25519HkdfSha256;
 pub(super) const SEAL_INFO: &[u8] = b"0g-pc/v1/seal";
 pub(super) const RESP_INFO: &[u8] = b"0g-pc/v1/resp";
 pub(super) const E2EE: &str = "_e2ee";
+pub(super) const RESP_BIND_INFO: &[u8] = b"0g-pc/v1/resp-bind";
+pub(super) const BIND: &str = "_bind";
 
 /// Fields sent in the clear but bound in the AAD: those 0G's router reads
 /// before the broker opens the request. Every other field is sealed: §5.1 lets
@@ -45,8 +48,12 @@ const CLEARTEXT_FIELDS: &[&str] = &[
 ];
 
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct ProtocolError(String);
+pub(crate) enum ProtocolError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("first 0G response frame failed PSK authentication")]
+    FirstBoundFrame,
+}
 
 impl From<ProtocolError> for UpstreamError {
     fn from(err: ProtocolError) -> Self {
@@ -55,7 +62,7 @@ impl From<ProtocolError> for UpstreamError {
 }
 
 fn fail<T>(message: impl Into<String>) -> Result<T, ProtocolError> {
-    Err(ProtocolError(message.into()))
+    Err(ProtocolError::Invalid(message.into()))
 }
 
 /// Seal a chat request to `enc_pub`, pinned to `signer`. Returns the envelope
@@ -64,11 +71,14 @@ pub(crate) fn seal_chat_request(
     mut request: Map<String, Value>,
     enc_pub: &[u8; 32],
     signer: &str,
+    response_binding: bool,
 ) -> Result<(Value, ResponseOpener), UpstreamError> {
-    if request.contains_key(E2EE) {
-        return Err(UpstreamError::InvalidRequest(
-            "request field \"_e2ee\" is reserved".to_string(),
-        ));
+    for field in [E2EE, BIND] {
+        if request.contains_key(field) {
+            return Err(UpstreamError::InvalidRequest(format!(
+                "request field {field:?} is reserved"
+            )));
+        }
     }
     if !request.contains_key("messages") {
         return Err(UpstreamError::InvalidRequest(
@@ -88,16 +98,24 @@ pub(crate) fn seal_chat_request(
     }
     let model = request.get("model").cloned();
     let recipient = <Kem as hpke::Kem>::PublicKey::from_bytes(enc_pub)
-        .map_err(|_| ProtocolError("invalid provider encryption key".into()))?;
+        .map_err(|_| ProtocolError::Invalid("invalid provider encryption key".into()))?;
     let mut rng = rand::rngs::OsRng;
     let (response_secret, response_public) = Kem::gen_keypair(&mut rng);
+    if response_binding {
+        request.insert(
+            BIND.into(),
+            URL_SAFE_NO_PAD
+                .encode(response_psk(&response_secret))
+                .into(),
+        );
+    }
     let (encapped, mut context) = hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
         &OpModeS::Base,
         &recipient,
         SEAL_INFO,
         &mut rng,
     )
-    .map_err(|e| ProtocolError(e.to_string()))?;
+    .map_err(|e| ProtocolError::Invalid(e.to_string()))?;
 
     let (sealed, mut envelope): (Map<_, _>, Map<_, _>) = request
         .into_iter()
@@ -115,13 +133,27 @@ pub(crate) fn seal_chat_request(
         }),
     );
     let aad = envelope_aad(&envelope)?;
-    let plaintext = serde_json::to_vec(&sealed).map_err(|e| ProtocolError(e.to_string()))?;
+    let plaintext =
+        serde_json::to_vec(&sealed).map_err(|e| ProtocolError::Invalid(e.to_string()))?;
     let ciphertext = context
         .seal(&plaintext, &aad)
-        .map_err(|e| ProtocolError(e.to_string()))?;
+        .map_err(|e| ProtocolError::Invalid(e.to_string()))?;
     envelope[E2EE]["ciphertext"] = URL_SAFE_NO_PAD.encode(&ciphertext).into();
-    let opener = ResponseOpener::new(response_secret, binding_hash(&aad, &ciphertext), model);
+    let opener = ResponseOpener::new(
+        response_secret,
+        binding_hash(&aad, &ciphertext),
+        model,
+        response_binding,
+    );
     Ok((Value::Object(envelope), opener))
+}
+
+fn response_psk(secret: &<Kem as hpke::Kem>::PrivateKey) -> [u8; 32] {
+    let mut psk = [0; 32];
+    Hkdf::<Sha256>::new(None, &secret.to_bytes())
+        .expand(RESP_BIND_INFO, &mut psk)
+        .expect("32-byte HKDF output is valid");
+    psk
 }
 
 #[derive(Deserialize)]
@@ -144,6 +176,7 @@ pub(crate) struct ResponseOpener {
     model: Option<Value>,
     frame_hashes: Vec<[u8; 32]>,
     saw_final: bool,
+    response_binding: bool,
 }
 
 impl ResponseOpener {
@@ -151,6 +184,7 @@ impl ResponseOpener {
         secret: <Kem as hpke::Kem>::PrivateKey,
         request_hash: [u8; 32],
         model: Option<Value>,
+        response_binding: bool,
     ) -> Self {
         Self {
             secret,
@@ -159,7 +193,12 @@ impl ResponseOpener {
             model,
             frame_hashes: Vec::new(),
             saw_final: false,
+            response_binding,
         }
+    }
+
+    pub(super) fn requires_response_binding(&self) -> bool {
+        self.response_binding
     }
 
     /// Open the next frame into its bound cleartext fields merged with the
@@ -180,7 +219,7 @@ impl ResponseOpener {
         }
         let meta: FrameMeta = match frame.get(E2EE) {
             Some(meta) => serde_json::from_value(meta.clone())
-                .map_err(|e| ProtocolError(format!("malformed 0G frame envelope: {e}")))?,
+                .map_err(|e| ProtocolError::Invalid(format!("malformed 0G frame envelope: {e}")))?,
             None => return fail("0G response frame is not sealed"),
         };
         let sealed_fields = meta.sealed_fields;
@@ -193,25 +232,48 @@ impl ResponseOpener {
         {
             return fail("0G response frame seals or unbinds fields the chat profile forbids");
         }
+        let first_bound_frame = self.response_binding && self.context.is_none();
         if self.context.is_none() {
             let (Some(1), Some(enc)) = (meta.v, meta.enc) else {
                 return fail("first 0G response frame lacks version 1 and enc");
             };
             let encapped = <Kem as hpke::Kem>::EncappedKey::from_bytes(&decode(&enc)?)
-                .map_err(|_| ProtocolError("invalid 0G response enc".into()))?;
+                .map_err(|_| ProtocolError::Invalid("invalid 0G response enc".into()))?;
+            let psk;
+            let mode = if self.response_binding {
+                psk = response_psk(&self.secret);
+                OpModeR::Psk(PskBundle {
+                    psk: &psk,
+                    psk_id: RESP_BIND_INFO,
+                })
+            } else {
+                OpModeR::Base
+            };
             self.context = Some(
-                hpke::setup_receiver(&OpModeR::Base, &self.secret, &encapped, RESP_INFO)
-                    .map_err(|e| ProtocolError(e.to_string()))?,
+                hpke::setup_receiver(&mode, &self.secret, &encapped, RESP_INFO).map_err(
+                    |error| {
+                        if first_bound_frame {
+                            ProtocolError::FirstBoundFrame
+                        } else {
+                            ProtocolError::Invalid(error.to_string())
+                        }
+                    },
+                )?,
             );
         }
         let ciphertext = decode(&meta.ciphertext)?;
         let aad = envelope_aad(&frame)?;
         let context = self.context.as_mut().expect("context set above");
         let plaintext = context.open(&ciphertext, &aad).map_err(|_| {
-            ProtocolError("0G response frame failed authenticated decryption".into())
+            if first_bound_frame {
+                ProtocolError::FirstBoundFrame
+            } else {
+                ProtocolError::Invalid("0G response frame failed authenticated decryption".into())
+            }
         })?;
-        let sealed: Map<String, Value> = serde_json::from_slice(&plaintext)
-            .map_err(|_| ProtocolError("decrypted 0G response is not a JSON object".into()))?;
+        let sealed: Map<String, Value> = serde_json::from_slice(&plaintext).map_err(|_| {
+            ProtocolError::Invalid("decrypted 0G response is not a JSON object".into())
+        })?;
         frame.remove(E2EE);
         let mut declared = sealed_fields;
         declared.sort();
@@ -285,7 +347,7 @@ pub(crate) fn verify_signature(
 }
 
 pub(super) fn recover_signer(text: &str, signature: &str) -> Result<String, ProtocolError> {
-    let invalid = || ProtocolError("malformed 0G signature".into());
+    let invalid = || ProtocolError::Invalid("malformed 0G signature".into());
     let bytes = hex::decode(signature.trim_start_matches("0x")).map_err(|_| invalid())?;
     let [rs @ .., v] = bytes.as_slice() else {
         return Err(invalid());
@@ -321,9 +383,10 @@ pub(super) fn envelope_aad(envelope: &Map<String, Value>) -> Result<Vec<u8>, Pro
         return fail("envelope carries no _e2ee object");
     };
     let mut meta = meta.clone();
-    let unbound: Option<Vec<String>> =
-        serde_json::from_value(meta.get("unbound_fields").cloned().unwrap_or_default())
-            .map_err(|_| ProtocolError("unbound_fields must be an array of strings".into()))?;
+    let unbound: Option<Vec<String>> = serde_json::from_value(
+        meta.get("unbound_fields").cloned().unwrap_or_default(),
+    )
+    .map_err(|_| ProtocolError::Invalid("unbound_fields must be an array of strings".into()))?;
     let mut bound = envelope.clone();
     for field in unbound.unwrap_or_default() {
         bound.remove(&field);
@@ -331,11 +394,11 @@ pub(super) fn envelope_aad(envelope: &Map<String, Value>) -> Result<Vec<u8>, Pro
     meta.remove("ciphertext");
     bound.insert(E2EE.into(), Value::Object(meta));
     serde_json_canonicalizer::to_vec(&Value::Object(bound))
-        .map_err(|e| ProtocolError(e.to_string()))
+        .map_err(|e| ProtocolError::Invalid(e.to_string()))
 }
 
 pub(super) fn decode(value: &str) -> Result<Vec<u8>, ProtocolError> {
     URL_SAFE_NO_PAD
         .decode(value)
-        .map_err(|_| ProtocolError("0G field is not unpadded base64url".into()))
+        .map_err(|_| ProtocolError::Invalid("0G field is not unpadded base64url".into()))
 }

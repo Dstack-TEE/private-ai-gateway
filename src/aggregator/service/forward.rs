@@ -345,6 +345,7 @@ impl AciService {
                 None,
                 // Single forward: only flush the cache for an event we own.
                 false,
+                &mut false,
                 |prepared, event| async move {
                     self.upstream
                         .forward_verified_prepared(prepared, &event)
@@ -571,6 +572,7 @@ impl AciService {
                 None,
                 // Single forward: only flush the cache for an event we own.
                 false,
+                &mut false,
                 |prepared, event| async move {
                     self.upstream
                         .forward_stream_verified_prepared(prepared, &event)
@@ -770,7 +772,9 @@ impl AciService {
 
     /// Forward with an owned admission, refreshing and readmitting on a binding
     /// mismatch up to [`CHANNEL_BINDING_REVERIFY_ATTEMPTS`] times. Return the
-    /// admission belonging to the successful attempt.
+    /// admission belonging to the successful attempt. A first-frame PSK
+    /// mismatch consumes one retry and refreshes only its serving instance.
+    /// The caller shares that one retry across its failover candidates.
     ///
     /// `caller_supplied_event` (the gateway does not own the event) suppresses
     /// reverify entirely. On a *terminal* mismatch the gateway's verifier cache
@@ -787,6 +791,7 @@ impl AciService {
         aci_session_ids: &[String],
         receipt_journal: Option<&MiddlewareReceiptJournal>,
         always_invalidate_on_mismatch: bool,
+        response_binding_reverified: &mut bool,
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
     where
@@ -794,6 +799,11 @@ impl AciService {
         Fwd: FnMut(PreparedUpstreamRequest, UpstreamVerifiedEvent) -> Fut,
         Fut: std::future::Future<Output = Result<R, UpstreamError>>,
     {
+        let response_started = || {
+            receipt_journal
+                .and_then(MiddlewareReceiptJournal::early_response_keyset)
+                .is_some()
+        };
         let mut reverify_attempts = 0;
         loop {
             // The future owns its inputs; the admission keeps its leases until
@@ -813,16 +823,50 @@ impl AciService {
                     admission = admission.withheld_without_instance();
                     return ReverifyOutcome::Forwarded(R::withheld(status), Box::new(admission));
                 }
-                Err(UpstreamError::ChannelBindingMismatch(_))
+                Err(err)
                     if !caller_supplied_event
-                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS
+                        && (matches!(err, UpstreamError::ChannelBindingMismatch(_))
+                            || (!*response_binding_reverified
+                                && !response_started()
+                                && matches!(
+                                    err,
+                                    UpstreamError::ResponseBindingMismatch { .. }
+                                ))) =>
                 {
-                    drop(admission);
+                    let AdmittedUpstream {
+                        event: previous,
+                        sessions,
+                        ..
+                    } = admission;
+                    drop(sessions);
                     reverify_attempts += 1;
-                    match self
-                        .refresh_upstream_event(prepared, verification_required)
-                        .await
+                    let refreshed = if let UpstreamError::ResponseBindingMismatch { instance_id } =
+                        &err
                     {
+                        *response_binding_reverified = true;
+                        let Some(verifier) = &self.upstream_verifier else {
+                            return ReverifyOutcome::Failed(err);
+                        };
+                        let request =
+                            self.upstream_verification_request(prepared, verification_required);
+                        let Some(event) = verifier
+                            .reverify_instance(request, &previous, instance_id)
+                            .await
+                        else {
+                            return ReverifyOutcome::Failed(err);
+                        };
+                        // Middleware may have started its SSE heartbeat during the quote fetch.
+                        if response_started() {
+                            return ReverifyOutcome::Failed(err);
+                        }
+                        self.recorded_upstream_event(prepared, verification_required, Some(event))
+                            .await
+                    } else {
+                        self.refresh_upstream_event(prepared, verification_required)
+                            .await
+                    };
+                    match refreshed {
                         Ok(event) => {
                             admission = match self.admit_upstream(
                                 event,

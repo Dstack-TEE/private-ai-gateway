@@ -119,8 +119,8 @@ fn quote(name: &str) -> Value {
             reply["event_log"] = serde_json::to_string(&log).unwrap().into();
         }
         "k" => quote[MR_CONFIG_ID + 1] ^= 1,
-        "l" => reply = json!({}),
-        _ => {}
+        "l" => reply = json!({"e2ee_features": "resp-bind"}),
+        _ => reply["e2ee_features"] = json!(["future-feature", "resp-bind"]),
     }
     reply["quote"] = hex::encode(quote).into();
     reply
@@ -184,6 +184,8 @@ struct Mock {
     origin: String,
     preview: Mutex<Vec<&'static str>>,
     preview_requests: Mutex<Vec<(HeaderMap, Value)>>,
+    quote_requests: Mutex<Vec<String>>,
+    a_quote_features: Mutex<Option<Value>>,
 }
 
 async fn preview(
@@ -214,7 +216,8 @@ async fn rpc(State(mock): State<Arc<Mock>>, Json(call): Json<Value>) -> Json<Val
     Json(json!({"jsonrpc": "2.0", "id": 1, "result": service_record(&mock.origin, name)}))
 }
 
-async fn broker_quote(Path(name): Path<String>) -> Response {
+async fn broker_quote(State(mock): State<Arc<Mock>>, Path(name): Path<String>) -> Response {
+    mock.quote_requests.lock().unwrap().push(name.clone());
     if name == "g" {
         return (
             StatusCode::TEMPORARY_REDIRECT,
@@ -222,7 +225,13 @@ async fn broker_quote(Path(name): Path<String>) -> Response {
         )
             .into_response();
     }
-    Json(quote(&name)).into_response()
+    let mut reply = quote(&name);
+    if name == "a" {
+        if let Some(features) = mock.a_quote_features.lock().unwrap().as_ref() {
+            reply["e2ee_features"] = features.clone();
+        }
+    }
+    Json(reply).into_response()
 }
 
 async fn fixture() -> (
@@ -299,6 +308,7 @@ async fn model_identity_comes_only_from_configuration_and_chain() {
         .unwrap();
     assert_eq!(verified.provider.model, "0GM-1.0-35B-A3B");
     assert_eq!(verified.claims["compose_hash"], hex::encode(COMPOSE_HASH));
+    assert!(!verified.provider.response_binding);
 
     // A router substituting a legitimate provider for model B under a
     // configured model A, either by offering B or by mislabelling it A, and
@@ -357,6 +367,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert_eq!(instance["tcb_status"], "UpToDate");
     assert_eq!(instance["boot_chain"], BOOT_CHAIN);
     assert_eq!(instance["compose_hash"], hex::encode(COMPOSE_HASH));
+    assert_eq!(instance["response_binding"], true);
     let (headers, body) = mock.preview_requests.lock().unwrap()[0].clone();
     assert_eq!(headers["x-0g-provider-trust-mode"], "private");
     assert_eq!(body, json!({"model": MODEL, "service_type": "chatbot"}));
@@ -371,6 +382,42 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
 }
 
 #[tokio::test]
+async fn scoped_reverification_updates_only_the_failed_broker() {
+    let (mock, verifier, server) = fixture().await;
+    *mock.preview.lock().unwrap() = vec!["a", "j"];
+    let event = verifier.verify(request()).await;
+    let instances = &event.provider_claims.as_ref().unwrap()["instances"];
+    assert_eq!(instances[address("a")]["response_binding"], true);
+    let expiry = verifier.cache_remaining(&request()).unwrap();
+
+    *mock.a_quote_features.lock().unwrap() = Some(json!([]));
+    let refreshed = verifier
+        .reverify_instance(request(), &event, &address("a"))
+        .await
+        .unwrap();
+    assert_eq!(refreshed.result, VerificationResult::Verified);
+    assert_eq!(refreshed.channel_bindings, event.channel_bindings[..1]);
+    let refreshed_instances = &refreshed.provider_claims.unwrap()["instances"];
+    assert!(refreshed_instances[address("a")]
+        .get("response_binding")
+        .is_none());
+    assert!(refreshed_instances.get(address("j")).is_none());
+
+    let cached = verifier.cached(&request()).unwrap();
+    assert_eq!(cached.channel_bindings, event.channel_bindings);
+    let cached_instances = &cached.provider_claims.unwrap()["instances"];
+    assert_eq!(
+        cached_instances[address("a")],
+        refreshed_instances[address("a")]
+    );
+    assert_eq!(cached_instances[address("j")], instances[address("j")]);
+    assert!(verifier.cache_remaining(&request()).unwrap() <= expiry);
+    assert_eq!(*mock.quote_requests.lock().unwrap(), ["a", "j", "a"]);
+    assert_eq!(mock.preview_requests.lock().unwrap().len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
 async fn omits_compose_claim_without_matching_event_log_and_register() {
     let (_, verifier, server) = fixture().await;
     for name in ["j", "k", "l"] {
@@ -379,6 +426,7 @@ async fn omits_compose_claim_without_matching_event_log_and_register() {
             .await
             .unwrap();
         assert!(!verified.claims.contains_key("compose_hash"), "{name}");
+        assert!(!verified.provider.response_binding, "{name}");
     }
     server.abort();
 }

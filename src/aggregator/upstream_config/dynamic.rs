@@ -233,6 +233,23 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
         }
     }
 
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        let verifier = self
+            .state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .clone()?;
+        verifier
+            .reverify_instance(request, previous, instance_id)
+            .await
+    }
+
     fn invalidate(&self, request: &UpstreamVerificationRequest) {
         let verifier = self
             .state
