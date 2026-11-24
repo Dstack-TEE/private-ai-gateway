@@ -32,6 +32,7 @@ import tarfile
 import tempfile
 import types
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -152,34 +153,33 @@ def _run(
     gpu_ok=True,
     os_image_hash=SEED_DEV_HASH,
     compose_hash=MEASURED_COMPOSE_HASH,
-    resolve_override=None,
+    accepted_subjects=(),
 ) -> dict:
     """Run verify_phala_direct with stubs and return the emitted JSON result.
 
     OS-image resolution stays offline: seeded hashes resolve from
     KNOWN_OS_IMAGES, and DSTACK_OS_IMAGE_OFFLINE blocks any network for unseeded
-    ones (so an unknown hash yields production_os_image=None). resolve_override
-    lets a case force a specific decision (e.g. a production image).
+    ones (so an unknown hash yields production_os_image=None).
     """
     orig_get = requests_mod.get
     orig_dstack = dstack_mod.DstackVerifier
     orig_gpu = nvidia_mod.NvidiaGpuVerifier
-    orig_resolve = osimg_mod.resolve_os_image
     orig_offline = os.environ.get("DSTACK_OS_IMAGE_OFFLINE")
     requests_mod.get = _make_requests_get(report_builder)
     dstack_mod.DstackVerifier = lambda url=None: _StubDstack(
         url, is_valid=dstack_valid, os_image_hash=os_image_hash, compose_hash=compose_hash
     )
     nvidia_mod.NvidiaGpuVerifier = _stub_gpu(gpu_ok)
-    if resolve_override is not None:
-        osimg_mod.resolve_os_image = resolve_override
     os.environ["DSTACK_OS_IMAGE_OFFLINE"] = "1"
     request = {
         "provider": "phala-direct",
         "upstream_name": "phala-a",
         "url_origin": URL_ORIGIN,
         "model_id": "test-model",
-        "provider_options": {"phala_direct_bearer_token": "tok"},
+        "provider_options": {
+            "phala_direct_bearer_token": "tok",
+            **{f"phala_direct_accepted_subject:{subject}": "true" for subject in accepted_subjects},
+        },
         "timeout_seconds": 5,
     }
     buf = io.StringIO()
@@ -190,7 +190,6 @@ def _run(
         requests_mod.get = orig_get
         dstack_mod.DstackVerifier = orig_dstack
         nvidia_mod.NvidiaGpuVerifier = orig_gpu
-        osimg_mod.resolve_os_image = orig_resolve
         if orig_offline is None:
             os.environ.pop("DSTACK_OS_IMAGE_OFFLINE", None)
         else:
@@ -244,21 +243,38 @@ def check() -> list[str]:
     if out.get("result") != "failed" or "compose hash" not in (out.get("reason") or ""):
         f.append(f"no-measured-compose: expected failure, got {out!r}")
 
-    # --- a production OS image resolves to production_os_image=true ---
+    # --- a matching measured compose pin permits verification ---
     out = _run(
         report_builder=lambda n: _report(n),
-        resolve_override=lambda h, **kw: {
-            "is_dev": False,
-            "version": "0.5.9",
-            "verified": True,
-            "source": "seed",
-        },
+        accepted_subjects=(f"dstack-compose:sha256:{MEASURED_COMPOSE_HASH}",),
     )
-    claims = out.get("provider_claims") or {}
     if out.get("result") != "verified":
-        f.append(f"prod-image: expected verified, got {out!r}")
-    elif claims.get("production_os_image") is not True or claims.get("os_image_is_dev") is not False:
-        f.append(f"prod-image: expected production_os_image=true, got {claims!r}")
+        f.append(f"compose-pin-match: expected verified, got {out!r}")
+
+    # --- measured compose integrity alone cannot satisfy a different pin ---
+    out = _run(
+        report_builder=lambda n: _report(n),
+        accepted_subjects=("dstack-compose:sha256:" + "ab" * 32,),
+    )
+    if out.get("result") != "failed" or out.get("failure") != "provenance_not_accepted":
+        f.append(f"compose-pin-mismatch: expected provenance rejection, got {out!r}")
+
+    # --- the added production releases resolve from their measured hashes offline ---
+    production_images = {
+        "0.6.6": "5aa762ee7cddc62174c13e1081d56f7ab2a9aebc513973a1d63b3775fda250ec",
+        "0.6.5": "4771a29e03e93f0e2d5e37174cd8bb1112942c9689deb36b16c5df9e183d8623",
+        "0.6.3": "38a6f97b60e47eb9d68c13246bbd872e83fb9b39d178b4e0d3091285cd07b572",
+        "0.5.15": "4597735f1a38ad8ec9f781356b88737fc052062deb7c9aaa4be89bf1b35643ca",
+    }
+    for version, image_hash in production_images.items():
+        out = _run(report_builder=lambda n: _report(n), os_image_hash=image_hash)
+        claims = out.get("provider_claims") or {}
+        if out.get("result") != "verified" or (
+            claims.get("production_os_image") is not True
+            or claims.get("os_image_is_dev") is not False
+            or claims.get("os_image_version") != version
+        ):
+            f.append(f"prod-image-{version}: expected verified with production OS, got {out!r}")
 
     # --- an unresolvable os_image_hash (unknown + offline) stays undecided (None) ---
     out = _run(report_builder=lambda n: _report(n), os_image_hash="ff" * 32)
@@ -408,7 +424,10 @@ def check_os_image() -> list[str]:
 
 
 def main() -> int:
-    failures = check() + check_os_image()
+    with tempfile.TemporaryDirectory() as cache_dir, patch.dict(
+        os.environ, {"DSTACK_OS_IMAGE_CACHE_DIR": cache_dir}
+    ):
+        failures = check() + check_os_image()
     if failures:
         print("PHALA-DIRECT BRIDGE SOUNDNESS FAILURES:")
         for item in failures:
