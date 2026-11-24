@@ -34,7 +34,9 @@ export async function stagePortable({ sourceDir, targetTriple, platform, destina
     }
     await copyFile(source, target);
     if (targetTriple === UNIVERSAL_MACOS_TARGET) {
-      execFileSync("xcrun", ["lipo", target, "-verify_arch", "arm64", "x86_64"], { stdio: "inherit" });
+      // Xcode 27's lipo accepts one architecture per -verify_arch, so compare -archs.
+      const archs = execFileSync("xcrun", ["lipo", "-archs", target], { encoding: "utf8" }).trim().split(/\s+/).sort().join(" ");
+      if (archs !== "arm64 x86_64") throw new Error(`${name} is not a Universal macOS executable: ${archs}`);
     }
     if (platform !== "windows") {
       await chmod(target, 0o755);

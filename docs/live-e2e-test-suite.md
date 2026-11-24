@@ -1,4 +1,4 @@
-# Run the Live End-to-End Suite
+# Run the live end-to-end suite
 
 The live suite starts a local gateway, calls real provider APIs, verifies
 returned artifacts, and preserves local artifacts for diagnosis. It is an
@@ -31,7 +31,8 @@ The implementation lives in `scripts/live_e2e/`.
    and require `GET /v1/models` to list every entry's `public_model`.
 4. Run one chat lifecycle case for each provider with the `chat` capability.
 5. Run one embeddings case for each provider with the `embeddings` capability.
-6. Run one image generation case for each provider with the `images` capability.
+6. Run reranking, image generation, image edits, audio transcription and speech
+   cases for entries with the corresponding capabilities (below).
 7. Run structured-output fidelity cases for `full` and `strict-release` profiles.
 8. Write `summary.json` and stop the gateway.
 
@@ -69,7 +70,7 @@ For each entry with the `chat` capability, the case:
 
 `audio_transcriptions` provider capability runs
 `cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
-committed 94,958-byte synthetic spoken WAV in both `json` and `verbose_json`
+committed 94,958-byte [synthetic spoken WAV](../scripts/live_e2e/fixtures/README.md) in both `json` and `verbose_json`
 formats. It checks required field types, recognizable fixture
 words, positive integer billable seconds, response allowlists, null chat id,
 received/returned body hashes, the serving attested session, and offline
@@ -113,6 +114,22 @@ Credential-free coverage includes a buffered 120-second upstream delay using
 Tokio's controllable clock in `tests/middleware_completion.rs`, so CI does not
 wait two minutes and no heartbeat can turn an image into an SSE response.
 
+### Rerank, image edit and speech cases
+
+These cases use `cases/lifecycle.py` to fetch and verify the report, receipt,
+attested session, and exact request/response bytes with `pap audit`.
+
+| Capability / case | Endpoint and checks | Provider entry / model |
+| --- | --- | --- |
+| `rerank` / `cases/rerank.py` | `/v1/rerank`: one ranked result, numeric relevance score, positive input-token usage and response allowlist. | `near-ai-live-rerank` / `Qwen/Qwen3-Reranker-0.6B` |
+| `images_edits` / `cases/images_edits.py` | `/v1/images/edits`: committed `fixtures/edit.png`, inline image schema/base64/magic checks, exact multipart hash and null receipt `chat_id`. | `near-ai-live-images-edits` / `black-forest-labs/FLUX.2-klein-4B` |
+| `speech` / `cases/speech.py` | `/v1/audio/speech`: nonempty WAV audio, audio content type and signed `usage.reported` Unicode scalar count. | `tinfoil-live-speech` / `qwen3-tts` (voice `ryan`) |
+
+The NEAR entries require `NEARAI_API_KEY` and `DSTACK_VERIFIER_URL`; speech
+requires `TINFOIL_API_KEY`. All three use TLS SPKI binding and the suite's
+normal dstack socket and `pap` prerequisites. Select an entry with `--provider`
+as for the image generation case. Each selected case consumes provider quota.
+
 ### Embeddings case
 
 For each entry with the `embeddings` capability, the case sends a fixed
@@ -121,14 +138,16 @@ non-empty `data[]` whose first `embedding` is numeric and not all zero.
 Embeddings responses carry no `id`, so the case looks up the receipt with the
 `x-receipt-id` response header. It then runs the same audit, requires
 `receipt.endpoint == "/v1/embeddings"`, and checks the receipt events and cited
-sessions as the lifecycle case does. In the checked-in matrix, only the
-`chutes-live-embed` entry has the `embeddings` capability.
+sessions as the lifecycle case does. To run it, pass `--providers-file` with an
+entry for an embeddings model that your gateway can attest. For a Chutes TEE
+embedding deployment, [the standalone probe](../examples/live_chutes_embedding.rs)
+also exercises the encrypted transport.
 
 The suite does not run load tests, availability measurements, browser verification, or every auxiliary smoke script in `scripts/live_e2e/`.
 
 ## Run the local multi-upstream smoke test
 
-The credential-free local smoke suite builds a smoke image and runs two mock ACI upstreams and one router gateway with Docker Compose. All three mount the [forwarded dstack socket](getting-started.md#connect-to-the-dstack-sdk). It does not call the live provider matrix.
+The credential-free local smoke suite builds a smoke image and runs two mock ACI upstreams and one router gateway with Docker Compose. All three mount the [forwarded dstack socket](local-development.md#connect-to-the-dstack-sdk). It does not call the live provider matrix.
 
 It needs Docker with the Compose plugin, `curl`, `jq`, `cargo`, `sha256sum`, `awk`, and `openssl`. `scripts/local_multi_upstream_smoke.sh --help` lists the ports and paths it uses.
 
@@ -154,7 +173,7 @@ It needs `docker buildx`, the `phala` CLI, `curl`, `jq`, `cargo`, `sha256sum`, a
 
 ## Prerequisites
 
-Install the [development prerequisites](getting-started.md#prerequisites) and
+Install the [development prerequisites](local-development.md#prerequisites) and
 build the gateway:
 
 ```sh
@@ -210,11 +229,11 @@ The temporary gateway needs a dstack key provider. By default the suite expects:
 unix:/tmp/aci-dstack-sock-dev.dstack.sock
 ```
 
-Start a local dstack simulator or [forward a trusted test CVM socket](getting-started.md#connect-to-the-dstack-sdk) to that path before running the suite. Use `--dstack-endpoint` to select another endpoint.
+Start a local dstack simulator or [forward a trusted test CVM socket](local-development.md#connect-to-the-dstack-sdk) to that path before running the suite. Use `--dstack-endpoint` to select another endpoint.
 
 Preflight and the gateway launcher set `DSTACK_VERIFIER_URL` to `http://localhost:18080` when it is not already set, so the NEAR AI and Phala direct verifiers use that dstack verifier during the run. NEAR AI entries declare this variable as a prerequisite.
 
-The run uses the vendored Python verifier unless `PRIVATE_AI_VERIFIER_DIR` overrides it; see [Install dependencies](getting-started.md#install-dependencies).
+The run uses the vendored Python verifier unless `PRIVATE_AI_VERIFIER_DIR` overrides it; see [Install dependencies](local-development.md#install-dependencies).
 
 ## Run a preflight check
 
@@ -288,7 +307,7 @@ Optional fields are:
 | --- | --- |
 | `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, `audio_transcriptions`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
 | `requires` | Additional environment variables preflight must find. |
-| `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
+| `structured_output_max_tokens` | Token limit for the structured-output case, default `512`. Reasoning models can exhaust that budget before generating `message.content`. The Tinfoil and NEAR AI chat entries use `2048`. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |
 | `session_refresh_seconds` | Provider session refresh interval. |
 | `chutes_e2ee_api_base` | Alternate Chutes E2EE discovery origin. |
@@ -356,6 +375,8 @@ The main runner does not dispatch every script in the directory. Run these separ
 | `bfcl_v4.py` | BFCL tool-calling evaluation. See [Run the BFCL evaluation](#run-the-bfcl-evaluation). |
 | `user_verify.py` | Verifies a received response. See [Verify a received response](#verify-a-received-response). |
 
+[Test per-user cache salts on a disposable CVM](cache-salt-cvm-test.md) covers prompt-cache partitioning against a deployed gateway; its scripts live in `scripts/cache_salt_cvm/`.
+
 Read each script's `--help` output before use. These tools call live systems and can consume provider quota. Run the router smokes from `scripts/`, for example `uv run python live_e2e/router_session_smoke.py tinfoil`.
 
 ## Verify a received response
@@ -381,7 +402,7 @@ The output is the `pap audit --json` transcript: a `checks` array with each chec
 
 ```sh
 uv run python scripts/live_e2e/bfcl_v4.py \
-  --providers-file scripts/live_e2e/providers.glm51.json \
+  --providers-file scripts/live_e2e/providers.glm.json \
   --test-category single_turn,multi_turn \
   --max-cases 20 \
   --no-build
@@ -398,7 +419,10 @@ The wrapper needs a BFCL checkout at `--bfcl-dir` (default `BFCL_DIR`, or `../go
 | `--max-cases` | Cap on total cases, keeping a spread of categories. |
 | `--provider`, `--port`, `--dstack-endpoint`, `--artifacts-dir`, `--env-file`, `--no-build` | Same meaning as for `run.py`. |
 
-`scripts/live_e2e/providers.glm51.json` maps the GLM 5.1 family across Tinfoil, NEAR AI, and Chutes, so one BFCL run compares three providers on the same model family, each through its own attestation and transport path.
+`scripts/live_e2e/providers.glm.json` compares three served GLM variants through
+their respective attestation and transport paths. It uses GLM 5.3 on Tinfoil,
+GLM 5.3 Flash on NEAR AI, and GLM 5.1 on Chutes. Scores reflect both the
+model variant and the provider.
 
 ## Failure diagnosis
 
@@ -414,4 +438,4 @@ Start with `summary.json`, then inspect `aggregator.log` and the failing provide
 | Receipt or session assertion failure | Compare the raw receipt, session artifact, and the [API reference](api-reference.md) before changing the test. |
 | Strict-reference failure | Confirm the model and policy really changed before updating `provider_refs/`. |
 
-For credential-free validation, use the [repository checks](getting-started.md#run-the-repository-checks) instead of the live suite.
+For credential-free validation, use the [repository checks](local-development.md#run-the-repository-checks) instead of the live suite.

@@ -79,12 +79,12 @@ agentsRevision: number, };
  * The verifier's state. `Verifying` lasts until the service identity and
  * the catalog are both in.
  */
-export type VerificationStatus = "stopped" | "verifying" | "verified" | "blocked" | "error";
+export type VerificationStatus = "stopped" | "verifying" | "verified" | "error";
 export type Protection = { phase: ProtectionPhase, title: string, tone: Tone, action: ProtectionAction, };
 /**
  * What protection is doing, as the user sees it.
  */
-export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "verificationFailed" | "blocked" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
+export type ProtectionPhase = "starting" | "reconnecting" | "localApiUnavailable" | "verifyingConfiguration" | "verifying" | "verificationFailed" | "interrupted" | "profileRequired" | "notProtected" | "configurationVerified" | "apiKeyRequired" | "protected";
 export type ProtectionAction = { operation: ProtectionOperation, label: string, enabled: boolean, };
 /**
  * What the protection switch and the tray's protection item do.

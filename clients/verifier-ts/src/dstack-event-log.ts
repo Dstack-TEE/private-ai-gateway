@@ -101,8 +101,8 @@ function equal(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }
 
-/** Validate V2 preimages, bind RTMR3 fields to their advertised digests, then
- * replay recomputed digests (cc_eventlog::replay_events::<Sha384>). */
+/** Validate V2 preimages, check any advertised RTMR3 digests, and replay
+ * recomputed digests (cc_eventlog::replay_events::<Sha384>). */
 export async function replayDstackRtmr3(events: DstackEvent[]): Promise<Uint8Array> {
   let mr: Uint8Array = new Uint8Array(48);
   for (const [index, event] of events.entries()) {
@@ -127,7 +127,8 @@ export async function replayDstackRtmr3(events: DstackEvent[]): Promise<Uint8Arr
       throw new AciFormatError(`dstack RTMR3 event ${index} is not a runtime event`);
     }
     const digest = await sha384(preimage);
-    if (!equal(digest, event.digest)) {
+    // Legacy GetQuote can omit V1 digests. RTMR3 still binds the replay.
+    if (event.digest.length !== 0 && !equal(digest, event.digest)) {
       throw new AciFormatError(`dstack runtime event ${index} digest does not match its fields`);
     }
     const input = new Uint8Array(96);

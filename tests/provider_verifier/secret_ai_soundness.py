@@ -17,7 +17,7 @@ import io
 import json
 import sys
 import types
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -318,7 +318,12 @@ def check() -> list[str]:
     _check_fetch_policy(failures)
     _check_cpu_input_policy(failures)
 
-    output = _run()
+    warning = "SecretAI has no accepted_subjects workload pin configured"
+    unpinned_stderr = io.StringIO()
+    with redirect_stderr(unpinned_stderr):
+        output = _run()
+    if warning not in unpinned_stderr.getvalue():
+        failures.append("genuine: missing warning for unpinned workload")
     if output.get("result") != "verified":
         failures.append(f"genuine: expected verified, got {output!r}")
     else:
@@ -349,7 +354,11 @@ def check() -> list[str]:
         if not str(evidence.get("data") or "").startswith("data:multipart/mixed;"):
             failures.append("genuine: raw CPU/GPU/compose evidence bundle is missing")
 
-    pinned = _run(accepted_workloads=(WORKLOAD.workload_id,))
+    pinned_stderr = io.StringIO()
+    with redirect_stderr(pinned_stderr):
+        pinned = _run(accepted_workloads=(WORKLOAD.workload_id,))
+    if warning in pinned_stderr.getvalue():
+        failures.append("pinned-workload: warned despite a configured pin")
     pinned_claims = pinned.get("provider_claims") or {}
     if (
         pinned.get("result") != "verified"

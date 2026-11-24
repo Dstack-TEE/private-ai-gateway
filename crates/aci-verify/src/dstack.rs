@@ -22,6 +22,23 @@ pub use event_log::DstackEventLog;
 #[derive(Debug)]
 pub struct VerifiedEventLog(Vec<DstackEventLog>);
 
+impl VerifiedEventLog {
+    /// RTMR3 runtime events before the guest's system-ready marker. Returns
+    /// `None` if the log does not establish where boot ended.
+    pub fn boot_events(&self) -> Option<impl Iterator<Item = &DstackEventLog>> {
+        let is_runtime = |event: &DstackEventLog| event.imr == 3 && event.is_runtime_event();
+        let ready = self
+            .0
+            .iter()
+            .position(|event| is_runtime(event) && event.event == "system-ready")?;
+        Some(
+            self.0[..ready]
+                .iter()
+                .filter(move |event| is_runtime(event)),
+        )
+    }
+}
+
 /// Replay the dstack event log to RTMR3 and require it to match the quote's
 /// `rt_mr3` (`None` for a quote that is not TDX), returning the verified
 /// log.

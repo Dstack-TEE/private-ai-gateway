@@ -128,7 +128,9 @@ pub(super) fn replay_rtmr3(events: &[DstackEventLog]) -> Result<[u8; 48], String
             return Err(format!("dstack RTMR3 event {index} is not a runtime event"));
         }
         let digest: [u8; 48] = Sha384::digest(event.runtime_preimage()?).into();
-        if digest.as_slice() != event.digest {
+        // Legacy GetQuote responses can omit V1 digests. The final RTMR3
+        // comparison still authenticates the replay of the recomputed digests.
+        if !event.digest.is_empty() && digest.as_slice() != event.digest {
             return Err(format!(
                 "dstack runtime event {index} digest does not match its fields"
             ));

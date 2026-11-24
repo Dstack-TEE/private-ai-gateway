@@ -66,7 +66,7 @@ async def main() -> None:
         elif provider == "armet-ai":
             await verify_armet_ai(request)
         else:
-            failed(str(provider), f"unsupported provider: {provider!r}")
+            failed(str(provider), f"unsupported provider: {provider!r}", failure="verifier_misconfigured")
     except Exception as exc:
         failed(str(provider), str(exc))
 

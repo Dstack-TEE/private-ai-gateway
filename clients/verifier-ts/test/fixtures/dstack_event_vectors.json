@@ -173,6 +173,57 @@
       "valid": true
     },
     {
+      "name": "v1-omitted-digests",
+      "events": [
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "app-id",
+          "event_payload": "1111111111111111111111111111111111111111"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "compose-hash",
+          "event_payload": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "event_payload": "abcdff"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "compose-hash",
+          "event_payload": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "system-ready",
+          "event_payload": ""
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "",
+          "event": "compose-hash",
+          "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "app_compose": "services:\n  gateway:\n    image: demo\n",
+      "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
+      "valid": true
+    },
+    {
       "name": "v1-forged-payload",
       "events": [
         {

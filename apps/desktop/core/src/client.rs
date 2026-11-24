@@ -426,6 +426,13 @@ impl Client {
         self.shutdown_owned(None, ShutdownMode::Quit)
     }
 
+    /// Stops this installation's backend as a restart does: the protection
+    /// session stays for the next backend to resume, and connected agents
+    /// stay pointed at the Local API.
+    pub fn stop_for_restart(&self) -> Result<(), String> {
+        self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::UpdateRestart)
+    }
+
     pub fn restart_service(&self) -> Result<(), String> {
         let expected = installed_backend()?;
         if self.is_running()? {

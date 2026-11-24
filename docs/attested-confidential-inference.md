@@ -71,7 +71,8 @@ against the code:
 | Destination | Contents | Defined in |
 | --- | --- | --- |
 | Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the public endpoint, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and the cache-affinity key (`prefixHash`, with `sessionKind`) | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
-| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, successful image count/size/quality, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
+| Catalog request to the control plane | The catalog path and query string, the TEE-only `tee=true` override, and, when the request carried a bearer key, its SHA-256 as `x-api-key-hash` | `catalog_get` in `src/middleware/control.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, successful image count/size/quality, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, the upstream's request identifier (`upstreamRequestId`), and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make this checkable:
@@ -81,6 +82,10 @@ Two properties make this checkable:
   such as `upstream_timeout` or `stream_truncated`. An upstream error body is
   read only to choose a class (`classify_upstream` in
   `src/middleware/errors.rs`).
+- `upstreamRequestId` carries no message text either. It is the upstream's
+  request-id response header or the `id` of a success body, and it is kept only
+  when it is at most 128 characters drawn from letters, digits, and `_.:-`
+  (`src/aci/upstream/request_id.rs`). Anything else is left out.
 - `tests/middleware_completion.rs` plants a marker in upstream error text on the
   buffered, streaming, and in-band stream paths. It captures every log event at
   `TRACE` and fails if the marker appears in any log line or usage report.
@@ -177,6 +182,33 @@ evidence used by the verifier.
 A receipt proves what the attested gateway recorded. A deep session audit lets
 the relying party reappraise the provider evidence instead of accepting the
 gateway's `verified` label alone.
+
+For streaming responses, publication at the first destination terminal requires
+the source protocol's own terminal on a route with an established protocol, or
+clean EOF, accepted from the provider adapter after any authentication barrier.
+The selected backend declares protocol evidence for the shaped upstream wire
+operation, including on custom paths. The route protocol always controls decoding
+and billing; a contradictory declaration is a routing failure for every streaming
+operation. An unknown declaration retains EOF publication.
+The gateway publishes before returning the first destination terminal's bytes.
+The body then stays open, reading the source until EOF while emitting no bytes
+after the destination terminal. Accounting observes allowlisted upstream usage
+in the source protocol through EOF or disconnect; settlement remains at source
+EOF. The received hash covers the accepted source prefix through its
+terminal block, or all source bytes at clean EOF; the returned hash includes the
+destination terminal's final wire bytes. Later source bytes are excluded from the
+received hash. A disconnect after a terminal with a published receipt settles as
+completed with the usage observed so far, retaining any failure status.
+
+A bridge-generated failure terminal without a source terminal retains normal
+source consumption and EOF finalization. At clean source EOF, synthesized
+terminals publish in the poll that returns them. Middleware source-read, decoder
+or transform failures before publication can prevent completion and leave no
+receipt. Later failures retain their report status while an already-published
+receipt remains available. Cancellation or failure can leave a reserved receipt id
+unpublished even after an error
+terminal. Publication proves neither client delivery nor model-generation
+completeness.
 
 ### Audit the receipt
 
@@ -281,11 +313,13 @@ Rust and TypeScript port its V1/V2 digest, preimage and replay semantics.
 Rust uses the pinned upstream crate only as a test oracle: its `serde_jcs`
 dependency forces `serde_json/float_roundtrip`, which breaks the desktop's
 historical connection-config recovery. Rust can switch to the crate when
-upstream drops or gates that dependency; TS awaits an upstream JS/wasm package. Both recompute every
-RTMR3 runtime digest, require it to match the advertised digest and replay to
-the quoted RTMR3, and select the first runtime `compose-hash` before
+upstream drops or gates that dependency. TypeScript awaits an upstream JS/wasm
+package. Both recompute every RTMR3 runtime digest, check any advertised digest,
+require replay to the quoted RTMR3, and select the first runtime `compose-hash` before
 `system-ready`, following upstream `find_event`. V2 additionally requires the
-supplied preimage to match both the digest and the canonical JCS event bytes.
+supplied preimage to match both the advertised digest and the canonical JCS
+event bytes. Legacy V1 logs with omitted or empty digests still have to
+reproduce the quoted RTMR3 from their event fields.
 RTMR3 entries of other types are rejected because their payload binding cannot
 be reconstructed. Shared fixtures generated with upstream check both ports. Regenerate them from
 the repository root with `cargo run -q -p aci-verify --example dstack_event_vectors > clients/verifier-ts/test/fixtures/dstack_event_vectors.json`.

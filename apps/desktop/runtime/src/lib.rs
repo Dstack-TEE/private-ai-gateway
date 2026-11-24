@@ -11,7 +11,6 @@ mod api;
 mod balance_cache;
 pub mod controller;
 mod dispatch;
-mod endpoint_inventory;
 mod error;
 #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
 mod helper_staging;

@@ -260,6 +260,40 @@ pub async fn check_installation() -> Result<UpdateNotice, String> {
     check(configured, channel, version, installation).await
 }
 
+/// One step from its words, quoted as a POSIX shell would read them.
+pub fn step(words: &[&str]) -> Result<String, String> {
+    shlex::try_join(words.iter().copied()).map_err(|_| "Cannot write the upgrade command".into())
+}
+
+/// The first of the steps shown for a manual upgrade. It ends protection and
+/// restores connected agents, as stopping by hand should.
+pub const STOP_STEP: &str = "private-ai-proxy --yes service stop";
+
+/// Runs upgrade `steps` in order, in a scratch directory for what they
+/// download, and stops at the first that fails. Each step and its output go
+/// to stderr, leaving stdout to the caller's own result.
+pub fn run(steps: &[String]) -> Result<(), String> {
+    let directory = tempfile::tempdir()
+        .map_err(|error| format!("Cannot create a download directory: {error}"))?;
+    for step in steps {
+        let words = shlex::split(step).ok_or("The upgrade command is invalid")?;
+        let (program, arguments) = words
+            .split_first()
+            .ok_or("The upgrade command is invalid")?;
+        eprintln!("$ {step}");
+        let status = std::process::Command::new(program)
+            .args(arguments)
+            .current_dir(directory.path())
+            .stdout(std::io::stderr())
+            .status()
+            .map_err(|error| format!("Cannot run `{step}`: {error}"))?;
+        if !status.success() {
+            return Err(format!("`{step}` failed"));
+        }
+    }
+    Ok(())
+}
+
 /// `root` and `version` come from the compiled feed and a parsed SemVer, so the
 /// steps contain no text from the downloaded manifest. Commands are POSIX
 /// shell words joined by `shlex`.
@@ -289,11 +323,8 @@ fn upgrade_steps(
     let tag = format!("desktop-v{version}");
     let asset =
         |name: &str| -> Result<String, String> { Ok(crate::endpoint(root, &[&tag, name])?.into()) };
-    let command = |words: &[&str]| {
-        shlex::try_join(words.iter().copied())
-            .map_err(|_| "Cannot write the upgrade command".to_string())
-    };
-    let stop = command(&["private-ai-proxy", "--yes", "service", "stop"])?;
+    let command = step;
+    let stop = STOP_STEP.to_string();
     Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
         Installation::DesktopPacman => (
@@ -361,6 +392,20 @@ mod tests {
 
     const FEED: &str =
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
+
+    #[cfg(unix)]
+    #[test]
+    fn steps_run_in_order_and_stop_at_the_first_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let touch = |name: &str| {
+            let path = directory.path().join(name);
+            shlex::try_join(["touch", path.to_str().unwrap()]).unwrap()
+        };
+        let steps = [touch("first"), "false".into(), touch("second")];
+        assert_eq!(run(&steps).unwrap_err(), "`false` failed");
+        assert!(directory.path().join("first").exists());
+        assert!(!directory.path().join("second").exists());
+    }
 
     #[test]
     fn beta_feed_carries_stable_releases_but_stable_never_carries_betas() {

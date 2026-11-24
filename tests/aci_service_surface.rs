@@ -7,7 +7,7 @@
 //! legacy E2EE request paths.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use private_ai_gateway::aci::e2ee::{
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
     receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult, VerificationRound,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
@@ -39,8 +39,8 @@ use private_ai_gateway::aci::upstream::{
     MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
-    UpstreamVerifier,
+    AciService, AciServiceConfig, Clock, FixedClock, InMemoryReceiptStore,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::session::EvidenceRef;
 use private_ai_gateway::http::{build_router, build_router_with_admin};
@@ -128,6 +128,7 @@ struct RecordingUpstream {
     /// is a candidate for a constrained request (§5.3).
     is_tee: Option<bool>,
     response_body: Vec<u8>,
+    response_content_type: &'static str,
     stream_status: u16,
     stream_headers: HashMap<String, String>,
     stream_chunks: Vec<Bytes>,
@@ -143,6 +144,7 @@ impl Default for RecordingUpstream {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 200,
             stream_headers,
             stream_chunks: vec![
@@ -196,6 +198,14 @@ impl RecordingUpstream {
 
 #[async_trait]
 impl UpstreamBackend for RecordingUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<Value>(&req.body)
             .ok()
@@ -226,7 +236,10 @@ impl UpstreamBackend for RecordingUpstream {
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            self.response_content_type.to_string(),
+        );
         headers.insert(
             "x-typesafe-request-id".to_string(),
             "upstream-id".to_string(),
@@ -302,7 +315,25 @@ impl UpstreamVerifier for AlwaysFailed {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
-            reason: Some("quote verification failed".to_string()),
+            diagnostic: Some("quote verification failed".to_string()),
+            ..event_from_request(&request, VerificationResult::Failed)
+        }
+    }
+}
+
+/// A verifier that could not fetch the evidence and says so in its own words.
+struct EvidenceFetchFailed;
+
+const FETCH_DIAGNOSTIC: &str = "failed to fetch attestation report: \
+    HTTPSConnectionPool(host='surface-upstream.example', port=443): Read timed out.";
+
+#[async_trait]
+impl UpstreamVerifier for EvidenceFetchFailed {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            failure: VerificationFailure::EvidenceUnavailable,
+            diagnostic: Some(FETCH_DIAGNOSTIC.to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
         }
     }
@@ -394,6 +425,20 @@ fn harness_with(
     verifier: Arc<dyn UpstreamVerifier>,
     enable_e2ee: bool,
 ) -> Harness {
+    harness_with_clock(
+        upstream,
+        verifier,
+        enable_e2ee,
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+}
+
+fn harness_with_clock(
+    upstream: RecordingUpstream,
+    verifier: Arc<dyn UpstreamVerifier>,
+    enable_e2ee: bool,
+    clock: Arc<dyn Clock>,
+) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream_calls = upstream.calls();
@@ -420,7 +465,7 @@ fn harness_with(
             verifier,
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
-            Arc::new(FixedClock(1_700_000_000)),
+            clock,
         )
         .unwrap(),
     );
@@ -472,6 +517,7 @@ async fn media_missing_authorization_refuses_streamed_uploads_before_consult() {
             Arc::new(
                 Middleware::new(
                     PrefixHashKey::new([7; 32]),
+                    private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
                     &serde_json::from_value(
                         serde_json::json!({"control_url":format!("http://{address}")}),
                     )
@@ -573,6 +619,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 400,
             stream_headers: headers,
             stream_chunks: vec![Bytes::from_static(
@@ -694,8 +741,17 @@ fn e2ee_chat_request(
     nonce: &str,
     stream: bool,
 ) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    e2ee_chat_request_at(h, client_secret, nonce, stream, 1_700_000_000)
+}
+
+fn e2ee_chat_request_at(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+    nonce: &str,
+    stream: bool,
+    timestamp: u64,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
     let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     let aad = aci_request_aad(
         &model_key.algo,
@@ -1249,6 +1305,40 @@ async fn empty_tool_calls_are_stripped_and_visible_as_differing_hashes() {
 // Fail-closed refusal (§7.5)
 // ---------------------------------------------------------------------------
 
+/// A refusal and its signed receipt name the cause from the closed set. The
+/// verifier's own account, which quotes what failed, reaches neither.
+#[tokio::test]
+async fn refusal_names_the_cause_and_never_the_verifiers_own_words() {
+    let h = harness_with(
+        RecordingUpstream::default(),
+        Arc::new(EvidenceFetchFailed),
+        false,
+    );
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            CONSTRAINED_REQUEST,
+            &[("authorization", "Bearer requester-a")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+    let reason = "upstream verification failed: the upstream's attestation evidence could not \
+                  be obtained";
+    assert_eq!(json_body(&resp)["error"]["message"], reason);
+    assert_eq!(json_body(&resp)["error"]["code"], "evidence_unavailable");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "upstream.verified")["reason"],
+        reason
+    );
+    assert!(!payload.to_string().contains("surface-upstream.example"));
+}
+
 #[tokio::test]
 async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let h = harness_with(RecordingUpstream::default(), Arc::new(AlwaysFailed), false);
@@ -1281,10 +1371,10 @@ async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let verified = payload_event(&payload, "upstream.verified");
     assert_eq!(verified["result"], "failed");
     assert_eq!(verified["required"], true);
-    assert!(verified["reason"]
-        .as_str()
-        .unwrap()
-        .contains("quote verification failed"));
+    assert_eq!(
+        verified["reason"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(verified.get("session_id").is_none());
     assert!(payload["event_log"]
         .as_array()
@@ -1766,6 +1856,198 @@ async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
         .await;
     assert_eq!(second.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_detection_covers_the_full_timestamp_window() {
+    let now = 1_700_000_000;
+    for (timestamp_offset, replay_offsets) in [(0, &[300][..]), (300, &[300, 600][..])] {
+        let clock = Arc::new(admission::TestClock(AtomicU64::new(now)));
+        let h = harness_with_clock(
+            RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+            Arc::new(AlwaysVerified),
+            true,
+            clock.clone(),
+        );
+        let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+        let nonce = hex_nonce("nonce-window");
+        let timestamp = now + timestamp_offset;
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, timestamp);
+        let first = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(first.status, StatusCode::OK);
+
+        for replay_offset in replay_offsets {
+            clock.set(now + replay_offset);
+            let repeated = h
+                .requester
+                .post_owned_headers("/v1/chat/completions", &body, &headers)
+                .await;
+            assert_eq!(repeated.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error_type(&repeated), "e2ee_replay_detected");
+        }
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+
+        let after_window = timestamp + 301;
+        clock.set(after_window);
+        let expired = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+
+        // An entry is released once its timestamp can no longer be accepted.
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, after_window);
+        let next = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(next.status, StatusCode::OK);
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn e2ee_v2_rechecks_timestamp_before_claim_after_entry_expiry() {
+    struct ValidationSnapshotClock {
+        current: admission::TestClock,
+        validation_snapshot: Mutex<Option<u64>>,
+    }
+    impl Clock for ValidationSnapshotClock {
+        fn now_secs(&self) -> u64 {
+            self.validation_snapshot
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| self.current.now_secs())
+        }
+    }
+
+    let timestamp = 1_700_000_000;
+    let clock = Arc::new(ValidationSnapshotClock {
+        current: admission::TestClock(AtomicU64::new(timestamp)),
+        validation_snapshot: Mutex::new(None),
+    });
+    let h = harness_with_clock(
+        RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+        Arc::new(AlwaysVerified),
+        true,
+        clock.clone(),
+    );
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let nonce = hex_nonce("nonce-claim-time");
+    let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    clock.current.set(timestamp + 301);
+    let (other_body, other_headers) = e2ee_chat_request_at(
+        &h,
+        &client_secret,
+        &hex_nonce("nonce-next-claim"),
+        false,
+        timestamp + 301,
+    );
+    let other = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &other_body, &other_headers)
+        .await;
+    assert_eq!(other.status, StatusCode::OK);
+
+    // The initial validation snapshot is at the inclusive boundary; the claim
+    // must use the current clock after the earlier entry has been evicted.
+    *clock.validation_snapshot.lock().unwrap() = Some(timestamp + 300);
+    let expired = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_identity_is_independent_of_client_key() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let nonce = hex_nonce("nonce-client-keys");
+    for (client_key, expected_status) in [
+        ([0x58; 32], StatusCode::OK),
+        ([0x59; 32], StatusCode::BAD_REQUEST),
+    ] {
+        let client_secret = k256::SecretKey::from_slice(&client_key).unwrap();
+        let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+        let response = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(response.status, expected_status);
+        if expected_status == StatusCode::BAD_REQUEST {
+            assert_eq!(error_type(&response), "e2ee_replay_detected");
+        }
+    }
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_detection_normalizes_service_key_hex_case() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-service-key"));
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    let model_key = &mut headers
+        .iter_mut()
+        .find(|(name, _)| *name == "x-model-pub-key")
+        .unwrap()
+        .1;
+    *model_key = model_key.to_ascii_uppercase();
+    let second = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(second.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_failed_decryption_leaves_nonce_available() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-decryption"));
+    let mut invalid_payload: Value = serde_json::from_slice(&body).unwrap();
+    let content = &mut invalid_payload["messages"][0]["content"];
+    let mut ciphertext = hex::decode(content.as_str().unwrap()).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    *content = Value::String(hex::encode(ciphertext));
+
+    let invalid = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&invalid_payload).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&invalid), "e2ee_decryption_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+
+    let valid = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(valid.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -2393,7 +2675,7 @@ async fn aci_verified_makes_an_unconstrained_request_fail_closed() {
 // --- SSE stream-repair suite (restored from main: c643fb5, 3ea864e, c26878d) ---
 
 #[tokio::test]
-async fn a_stream_cut_mid_event_is_not_given_an_error() {
+async fn a_stream_cut_mid_event_discards_the_pending_payload_and_emits_an_error_tail() {
     let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\","),
@@ -2409,7 +2691,7 @@ async fn a_stream_cut_mid_event_is_not_given_an_error() {
 
     assert_eq!(
         resp.body,
-        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"id\":\"chat-stream-1\","
+        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n"
     );
 }
 
@@ -2590,9 +2872,10 @@ async fn a_responses_stream_missing_its_terminal_is_completed_without_a_tail() {
 // upstream never sent would dispatch a fragment the client would otherwise
 // discard, and it would fail on that instead of reading the error.
 // A transport failure reaches the finalizer, which holds the protocol state
-// that decides whether the client can still be told. It appends the error only
-// when the stream stopped on a complete event without its terminal; a stream
-// that already ended, or stopped mid-event, is left as it is.
+// that decides whether the client can still be told. It appends the error before
+// the protocol terminal; a stream that already ended is left as it is. An
+// incomplete event never reaches the
+// client, so appending the protocol error is safe even after a mid-event reset.
 #[tokio::test]
 async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
     struct Case {
@@ -2647,21 +2930,26 @@ async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
             path: "/v1/chat/completions",
             request: chat,
             chunks: vec![Bytes::from_static(b"data: {\"id\":\"c\",")],
-            expect_error: false,
-            expect_in_error: "",
+            expect_error: true,
+            expect_in_error: "data: [DONE]",
         },
         Case {
             // The error continues the event numbering rather than restarting
             // it, which is why the finalizer builds it: only there is the last
             // sequence known.
-            name: "responses stream drops after sequence 4",
+            name: "responses stream drops after sequences 3 and 9",
             path: "/v1/responses",
             request: responses,
-            chunks: vec![Bytes::from_static(
-                b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\n",
-            )],
+            chunks: vec![
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3}\n\n",
+                ),
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":9}\n\n",
+                ),
+            ],
             expect_error: true,
-            expect_in_error: "\"sequence_number\":5",
+            expect_in_error: "\"sequence_number\":10",
         },
     ];
     for case in cases {
@@ -3557,7 +3845,7 @@ async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
     clock.set(105);
     let mut failed = a.clone();
     failed.result = VerificationResult::Failed;
-    failed.reason = Some("fixture verification failure".to_string());
+    failed.diagnostic = Some("fixture verification failure".to_string());
     *verifier.0.lock().unwrap() = failed;
     assert!(listed_sessions(&h, "").await.is_empty());
     assert_ne!(pin_session(&h, &original).await.status, StatusCode::OK);
@@ -4223,7 +4511,9 @@ async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_
     .unwrap();
     assert_eq!(params["model"], "aci-model");
     assert_eq!(params["response_format"], "json");
-    assert_eq!(form.file, "spoken audio");
+    assert!(
+        matches!(form.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "spoken audio")
+    );
     let receipt = h
         .service
         .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
@@ -4468,7 +4758,7 @@ async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eig
                 .await
                 .unwrap();
                 assert_eq!(params["model"], "aci-model");
-                assert_eq!(file.file, "spoken audio");
+                assert!(matches!(file.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "spoken audio"));
                 let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
                 axum::http::Response::builder()
                     .status(400)
@@ -4584,4 +4874,236 @@ async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(json_body(&response)["text"], "hello");
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
+    let request =
+        br#"{"model":"aci-model","query":"q","documents":["a",{"text":"b"}],"top_n":1,"user":"alice"}"#;
+    for (upstream, status) in [
+        (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
+        (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let response = h.requester.post("/v1/rerank", request, &[("authorization", "Bearer tenant-key")]).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        if status == StatusCode::OK {
+            assert_eq!(body["results"], serde_json::json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}]));
+            assert_eq!(body["usage"], serde_json::json!({"prompt_tokens":5,"total_tokens":5}));
+            assert!(body.get("provider").is_none());
+        } else {
+            assert!(body.get("usage").is_none());
+        }
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/rerank");
+        assert_eq!(payload_event(&payload, "response.returned")["body_hash"], sha256_hex(&response.body));
+        let calls = h.upstream_calls.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("user").is_none());
+        assert_eq!(forwarded["documents"], serde_json::json!(["a", "b"]));
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+    }
+}
+
+#[tokio::test]
+async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body() {
+    for (upstream, requested, status) in [
+        (
+            serde_json::json!({"id":"private","file_path":"private","peak_memory_mb":99,"data":[{"b64_json":"image","url":"private"}]}),
+            1,
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"data":[{"url":"private"}]}),
+            1,
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 2]}),
+            10,
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 11]}),
+            10,
+            StatusCode::BAD_GATEWAY,
+        ),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(
+            &serde_json::to_vec(&upstream).unwrap(),
+        ));
+        let raw = common::image_edit_request("aci-model", requested);
+        let response = h
+            .requester
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/images/edits")
+                    .header("authorization", "Bearer tenant-key")
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .header("x-aci-provider", r#"{"order":["near"]}"#)
+                    .body(Body::from(raw.clone()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        assert!(!body.to_string().contains("private"));
+        if status == StatusCode::OK {
+            assert_eq!(
+                body["data"],
+                serde_json::json!(vec![
+                    serde_json::json!({"b64_json":"image"});
+                    upstream["data"].as_array().unwrap().len()
+                ])
+            );
+        }
+        let forwarded = h.upstream_calls.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+        assert!(!forwarded.headers.contains_key("x-aci-provider"));
+        let (params, image) = private_ai_gateway::middleware::image_edits::parse(
+            forwarded.body.clone(),
+            forwarded.content_type.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(params["model"], "aci-model");
+        assert_eq!(params["response_format"], "b64_json");
+        assert_eq!(params["n"], requested);
+        assert!(
+            matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\x89PNG\r\n\x1a\nimage".as_slice())
+        );
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/images/edits");
+        for (event, bytes) in [
+            ("request.received", raw.as_slice()),
+            ("request.forwarded", forwarded.body.as_ref()),
+            ("response.returned", response.body.as_ref()),
+        ] {
+            assert_eq!(
+                payload_event(&payload, event)["body_hash"],
+                sha256_hex(bytes)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    let h = harness_with_upstream(RecordingUpstream {
+        response_body: audio.to_vec(),
+        response_content_type: "Audio/WAV; rate=24000",
+        ..Default::default()
+    });
+    let raw = serde_json::to_vec(&serde_json::json!({"model":"aci-model","input":"界🙂e\u{301}","voice":"ryan","stream_format":"audio"})).unwrap();
+    let response = h
+        .requester
+        .post(
+            "/v1/audio/speech",
+            &raw,
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.headers["content-type"], "audio/wav");
+    assert_eq!(response.body, audio);
+    let calls = h.upstream_calls.lock().unwrap();
+    assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+    let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+    assert!(forwarded.get("stream_format").is_none());
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/audio/speech");
+    assert_eq!(
+        payload_event(&payload, "usage.reported")["usage"],
+        serde_json::json!({"type":"characters","characters":4})
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(audio)
+    );
+}
+
+#[tokio::test]
+async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
+    let content_type = "text/event-stream";
+    let h = harness_with_upstream(RecordingUpstream {
+        response_body: b"private upstream data".to_vec(),
+        response_content_type: content_type,
+        ..Default::default()
+    });
+    let response = h
+        .requester
+        .post(
+            "/v1/audio/speech",
+            br#"{"model":"aci-model","input":"hello","voice":"ryan"}"#,
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY, "{content_type}");
+    assert_eq!(response.headers["content-type"], "application/json");
+    assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&response.body)
+    );
+    assert!(!payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "usage.reported"));
+}
+
+#[tokio::test]
+async fn buffered_auth_e2ee_and_carrier_refusals_precede_parsing() {
+    let h = harness();
+    for path in ["/v1/rerank", "/v1/images/edits", "/v1/audio/speech"] {
+        for (headers, status) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("authorization", "Bearer tenant-key"),
+                    ("x-e2ee-test", "true"),
+                ],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = h.requester.post(path, b"not a request", &headers).await;
+            assert_eq!(response.status, status, "{path}");
+        }
+    }
+    let response = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[
+                ("authorization", "Bearer tenant-key"),
+                ("x-aci-provider", "null"),
+            ],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }

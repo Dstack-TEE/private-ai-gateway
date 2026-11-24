@@ -70,7 +70,7 @@ pub use report::{
 pub use simple::{PreverifiedUpstreamVerifier, StaticUpstreamVerifier};
 pub use zero_g::ZeroGProviderVerifier;
 
-/// A verified event cached by a provider verifier, re-labelled per request.
+/// A cached verification result, re-labelled per request.
 #[derive(Clone, Debug)]
 struct CachedProviderEvent {
     expires_at: tokio::time::Instant,

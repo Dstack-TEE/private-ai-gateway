@@ -7,7 +7,9 @@ use common::admission;
 mod common;
 
 use async_trait::async_trait;
-use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use private_ai_gateway::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -78,6 +80,14 @@ impl StubUpstream {
 
 #[async_trait]
 impl UpstreamBackend for StubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -434,7 +444,8 @@ async fn verified_upstream_binding_fails_without_persisted_session() {
         verifier_id: "stub-verifier-1".to_string(),
         result: VerificationResult::Verified,
         required: true,
-        reason: None,
+        failure: Default::default(),
+        diagnostic: None,
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "https://stub-upstream".to_string(),
@@ -578,7 +589,7 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#);
     let event = UpstreamVerifiedEvent {
         verifier_id: "stub-verifier-1".to_string(),
-        reason: Some("quote did not match expected app-id".to_string()),
+        diagnostic: Some("quote did not match expected app-id".to_string()),
         ..failed_event("stub-upstream", "x")
     };
     let err = svc
@@ -586,9 +597,12 @@ async fn verifier_event_failed_with_required_fails_before_forwarding() {
         .await
         .unwrap_err();
     match err {
-        ServiceError::UpstreamVerification(kind) => {
-            assert!(kind.to_string().contains("quote did not match"), "{kind}");
-        }
+        // The error's text is what a client and a receipt get: the cause,
+        // never the verifier's own words.
+        ServiceError::UpstreamVerification(kind) => assert_eq!(
+            kind.to_string(),
+            "upstream verification failed: the upstream's attestation was not verified"
+        ),
         other => panic!("expected UpstreamVerification, got {other:?}"),
     }
     assert!(received.lock().unwrap().is_none());
@@ -841,7 +855,7 @@ async fn verifier_event_failed_for_aci_request_fails_before_forwarding() {
     let (svc, received) = make_service(br#"{"id":"chat-xyz"}"#);
     let event = UpstreamVerifiedEvent {
         verifier_id: "stub-verifier-1".to_string(),
-        reason: Some("quote did not match expected app-id".to_string()),
+        diagnostic: Some("quote did not match expected app-id".to_string()),
         ..failed_event("stub-upstream", "x")
     };
     let err = svc
@@ -849,8 +863,9 @@ async fn verifier_event_failed_for_aci_request_fails_before_forwarding() {
         .await
         .unwrap_err();
     match err {
-        ServiceError::UpstreamVerification(UpstreamVerificationError::VerifierFailed(reason)) => {
-            assert!(reason.contains("quote did not match"));
+        // The verifier's own words stay in the log; the error carries the cause.
+        ServiceError::UpstreamVerification(UpstreamVerificationError::VerifierFailed(failure)) => {
+            assert_eq!(failure, VerificationFailure::NotVerified);
         }
         other => panic!("expected VerifierFailed, got {other:?}"),
     }
@@ -1361,6 +1376,14 @@ async fn streaming_exchange_keeps_its_admitted_keyset_across_renewals() {
 
     #[async_trait]
     impl UpstreamBackend for PausedUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused"
         }
@@ -1526,6 +1549,14 @@ async fn assert_buffered_receipt_uses_current_keyset(direct: bool) {
 
     #[async_trait]
     impl UpstreamBackend for PausedUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused-buffered"
         }

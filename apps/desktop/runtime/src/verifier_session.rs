@@ -17,11 +17,10 @@ use std::{
     time::Duration,
 };
 
-use crate::endpoint_inventory::InventoryUpdater;
 use crate::usage::UsageStore;
 use crate::Error;
 use aci_protocol::types::ServiceCapabilities;
-use agent_bridge::catalog::{Catalog, EndpointInventory, Surface};
+use agent_bridge::catalog::{Catalog, Surface};
 use agent_bridge::proxy::{ProxyEvent, ProxyState, Session};
 use desktop_core::config as settings_config;
 use desktop_core::contracts::{
@@ -35,9 +34,13 @@ use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
+/// How long a verified session's service gets to answer a probe.
+#[cfg(not(test))]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct SessionManager {
-    inventory: Option<Arc<InventoryUpdater>>,
     inner: Mutex<RuntimeState>,
     proxy: Arc<ProxyState>,
     usage: Arc<UsageStore>,
@@ -101,6 +104,18 @@ pub struct VerifierConfig {
     pub remote_url: String,
 }
 
+/// What attesting a protecting session's service again found.
+pub enum Reverified {
+    /// No session is protecting; there is nothing to verify in place.
+    NotProtecting,
+    /// The same service: the session went on undisturbed.
+    Kept,
+    /// Another service that verifies: the session restarts on it.
+    Changed,
+    /// It did not verify: the session is closed and retried.
+    Failed(String),
+}
+
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
 
 /// The status and error a state change introduced, for the service log.
@@ -161,15 +176,12 @@ struct RuntimeState {
 impl RuntimeState {
     /// Verification is lost: the epoch moves so a catalog read still in
     /// flight can neither publish nor clear this state, and the identity must
-    /// be reported again before anything opens. The status is an error unless
-    /// a security block holds. The session goes on while the user still
-    /// intends it.
+    /// be reported again before anything opens. The session goes on while
+    /// the user still intends it.
     fn lose_verification(&mut self) {
         self.epoch += 1;
         self.identity_ready = false;
-        if self.state.status != VerificationStatus::Blocked {
-            self.state.status = VerificationStatus::Error;
-        }
+        self.state.status = VerificationStatus::Error;
         self.state.reconnecting = crate::recovery::connection_intended(&self.state);
         self.state.progress = None;
         self.state.catalog = None;
@@ -204,10 +216,6 @@ impl RuntimeState {
 }
 
 impl SessionManager {
-    pub(crate) fn with_endpoint_inventory(mut self, inventory: InventoryUpdater) -> Self {
-        self.inventory = Some(Arc::new(inventory));
-        self
-    }
     pub fn new(
         proxy: Arc<ProxyState>,
         usage: Arc<UsageStore>,
@@ -256,7 +264,6 @@ impl SessionManager {
                 state,
             }),
             proxy,
-            inventory: None,
             usage,
             launcher,
             task_runtime,
@@ -296,7 +303,9 @@ impl SessionManager {
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}").into());
+            return Err(Error::invalid_state(format!(
+                "The Local API is unavailable: {error}. Free the port or choose another with `pap settings set local-api.port <port>`."
+            )));
         }
         if runtime.task.is_some() {
             return Err(Error::already_running(&runtime.state));
@@ -357,7 +366,10 @@ impl SessionManager {
         }
         drop(runtime);
 
-        self.publish_unverified(generation, 0, Some(session_id.clone()));
+        // Agents wait for a session the user intends, not for the
+        // verification of a profile being saved.
+        let intended = continuing || !verification_only;
+        self.publish_unverified(generation, 0, intended.then(|| session_id.clone()));
         self.publish();
         let state = self.snapshot();
         let weak = Arc::downgrade(self);
@@ -398,10 +410,7 @@ impl SessionManager {
                 let _ = task.stop();
                 return Err("Protection start was superseded".into());
             }
-            if matches!(
-                runtime.state.status,
-                VerificationStatus::Error | VerificationStatus::Blocked
-            ) {
+            if runtime.state.status == VerificationStatus::Error {
                 let _ = task.stop();
             } else {
                 runtime.task = Some(task);
@@ -435,7 +444,7 @@ impl SessionManager {
                 }
                 match state.status {
                     VerificationStatus::Verified => return Ok(state),
-                    VerificationStatus::Blocked | VerificationStatus::Error => {
+                    VerificationStatus::Error => {
                         let failure = self.lock()?.failure.clone();
                         return Err(failure.unwrap_or_else(|| {
                             state
@@ -660,6 +669,18 @@ impl SessionManager {
 
     /// A request the local proxy answered itself, before any receipt.
     pub fn record_proxy_event(&self, event: ProxyEvent) {
+        // The only trace of a request an agent saw fail, next to the session
+        // changes around it.
+        if event.status >= 400 && !event.detail.is_empty() {
+            tracing::warn!(
+                "Local API {} {} -> {} for {}: {}",
+                event.method,
+                event.path,
+                event.status,
+                event.agent.as_deref().unwrap_or("an unknown client"),
+                event.detail
+            );
+        }
         if event.path == "/v1/models" {
             return;
         }
@@ -720,6 +741,59 @@ impl SessionManager {
         changes.write();
     }
 
+    /// Attests the protecting session's service again where it runs.
+    pub async fn verify_running(&self) -> Reverified {
+        let running = self.lock().ok().and_then(|runtime| {
+            let service = runtime
+                .state
+                .is_protected()
+                .then(|| runtime.service.clone());
+            Some((runtime.generation, service.flatten()?))
+        });
+        let Some((generation, service)) = running else {
+            return Reverified::NotProtecting;
+        };
+        if let Err(reason) = service.verify_again().await {
+            return Reverified::Failed(reason);
+        }
+        // The same verifier, still open: a service that turned out to be
+        // another one retired it.
+        let kept = self.lock().is_ok_and(|runtime| {
+            runtime.generation == generation
+                && runtime.service.is_some()
+                && runtime.state.is_protected()
+        });
+        if kept {
+            Reverified::Kept
+        } else {
+            Reverified::Changed
+        }
+    }
+
+    /// Whether the verified session's service can still be reached. Blocks the
+    /// calling thread, which must not be a runtime worker.
+    pub fn service_answers(self: &Arc<Self>) -> bool {
+        let Some(service) = self.lock().ok().and_then(|runtime| runtime.service.clone()) else {
+            return false;
+        };
+        let Ok(request) = axum::http::Request::get("/v1/models").body(axum::body::Body::empty())
+        else {
+            return false;
+        };
+        // An error the service answered or a local refusal leaves the
+        // session to the verifier, which closes it when it must. No answer
+        // in time is a connection the address change left dead: nothing
+        // else would notice it before a request waited out its timeout.
+        self.task_runtime.block_on(async move {
+            tokio::time::timeout(SERVICE_PROBE_TIMEOUT, service.call(request, None))
+                .await
+                .is_ok_and(|response| {
+                    response.extensions().get()
+                        != Some(&agent_bridge::proxy::VerifierRefusal::Unreachable)
+                })
+        })
+    }
+
     /// Refresh discovery without revoking the current verified session.
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
         let (generation, epoch) = {
@@ -735,7 +809,7 @@ impl SessionManager {
         Ok(self.snapshot())
     }
 
-    async fn load_catalog(self: &Arc<Self>, generation: u64, epoch: u64) -> Result<(), String> {
+    async fn load_catalog(&self, generation: u64, epoch: u64) -> Result<(), String> {
         let read = {
             let mut runtime = self.lock()?;
             if runtime.generation != generation || runtime.epoch != epoch || !runtime.identity_ready
@@ -757,30 +831,37 @@ impl SessionManager {
         if runtime.service.is_none() {
             return Ok(());
         }
-        let result = result.and_then(|mut catalog| {
-            if let Some(endpoint) = runtime.state.remote_url.as_deref() {
-                let inventory = match &self.inventory {
-                    Some(updater) => updater.current(),
-                    None => EndpointInventory::bundled()?,
-                };
-                catalog.apply_endpoint_inventory(endpoint, &inventory)?;
-            }
-            Ok(catalog)
-        });
         let outcome = match result {
             Ok(catalog) => {
+                // A refresh leaves an error other work reported in place.
+                if runtime.state.status != VerificationStatus::Verified {
+                    runtime.state.error = None;
+                }
                 runtime.state.status = VerificationStatus::Verified;
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
-                runtime.state.error = None;
-                self.publish_catalog(&mut runtime, catalog);
+                let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
+                runtime.last_catalog = Some(summary.clone());
+                runtime.state.catalog = Some(summary);
+                runtime.catalog = Some(catalog.clone());
+                if !runtime.verification_only {
+                    runtime.state.protected_since.get_or_insert_with(now_secs);
+                    self.proxy.publish(Session {
+                        generation: runtime.generation,
+                        epoch: runtime.epoch,
+                        session_id: Some(runtime.session_id.clone()),
+                        service: runtime.service.clone(),
+                        verified: true,
+                        catalog: Some(catalog),
+                    });
+                }
                 Ok(())
             }
             Err(error) => {
                 let message = format!("Cannot read the verified model list: {error}");
                 if runtime.state.status == VerificationStatus::Verified {
-                    // A failed manual refresh keeps the session it had.
-                    runtime.state.error = Some(message.clone());
+                    // A failed refresh keeps the session and catalog it had;
+                    // only its caller hears of it.
                     Err(message)
                 } else {
                     // The first catalog read failed: never leave a running
@@ -794,82 +875,7 @@ impl SessionManager {
         };
         drop(runtime);
         self.publish();
-        if outcome.is_ok() {
-            self.refresh_inventory(generation, epoch);
-        }
         outcome
-    }
-
-    fn publish_catalog(&self, runtime: &mut RuntimeState, catalog: Catalog) {
-        let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
-        runtime.last_catalog = Some(summary.clone());
-        runtime.state.catalog = Some(summary);
-        runtime.catalog = Some(catalog.clone());
-        if !runtime.verification_only {
-            runtime.state.protected_since.get_or_insert_with(now_secs);
-            self.proxy.publish(Session {
-                generation: runtime.generation,
-                epoch: runtime.epoch,
-                session_id: Some(runtime.session_id.clone()),
-                service: runtime.service.clone(),
-                verified: true,
-                catalog: Some(catalog),
-            });
-        }
-    }
-
-    fn refresh_inventory(self: &Arc<Self>, generation: u64, epoch: u64) {
-        let Some(updater) = self.inventory.clone() else {
-            return;
-        };
-        let eligible = self.lock().is_ok_and(|runtime| {
-            runtime
-                .state
-                .remote_url
-                .as_deref()
-                .is_some_and(Catalog::has_endpoint_inventory)
-        });
-        if !eligible {
-            return;
-        }
-        let manager = Arc::downgrade(self);
-        self.task_runtime.spawn(async move {
-            updater.refresh().await;
-            let Some(manager) = manager.upgrade() else {
-                return;
-            };
-            if let Err(error) = manager.apply_inventory(generation, epoch) {
-                tracing::warn!("Cannot apply model endpoint inventory: {error}");
-            }
-        });
-    }
-
-    fn apply_inventory(&self, generation: u64, epoch: u64) -> Result<(), String> {
-        let mut runtime = self.lock()?;
-        if runtime.generation != generation
-            || runtime.epoch != epoch
-            || !runtime.identity_ready
-            || runtime.state.status != VerificationStatus::Verified
-        {
-            return Ok(());
-        }
-        let (Some(mut catalog), Some(endpoint)) =
-            (runtime.catalog.clone(), runtime.state.remote_url.as_deref())
-        else {
-            return Ok(());
-        };
-        let Some(updater) = &self.inventory else {
-            return Ok(());
-        };
-        let previous = catalog.revision.clone();
-        catalog.apply_endpoint_inventory(endpoint, &updater.current())?;
-        if catalog.revision == previous {
-            return Ok(());
-        }
-        self.publish_catalog(&mut runtime, catalog);
-        drop(runtime);
-        self.publish();
-        Ok(())
     }
 
     fn update(&self, change: impl FnOnce(&mut AppState)) {
@@ -912,10 +918,7 @@ impl SessionManager {
             return Ok(());
         }
         runtime.task = None;
-        if !matches!(
-            runtime.state.status,
-            VerificationStatus::Error | VerificationStatus::Blocked
-        ) {
+        if runtime.state.status != VerificationStatus::Error {
             runtime.state.error = Some(match error {
                 Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
                 None => "Verifier stopped unexpectedly".to_string(),
@@ -961,9 +964,13 @@ impl SessionManager {
         runtime.service = None;
         runtime.verification_only = false;
         runtime.lose_verification();
-        let (epoch, session_id) = (runtime.epoch, runtime.session_id.clone());
+        let session_id = runtime
+            .state
+            .session_active
+            .then(|| runtime.session_id.clone());
+        let epoch = runtime.epoch;
         drop(runtime);
-        self.publish_unverified(generation, epoch, Some(session_id));
+        self.publish_unverified(generation, epoch, session_id);
         if let Some(mut task) = task {
             let _ = task.stop();
         }
@@ -1010,31 +1017,13 @@ pub(crate) fn active_key_saved(profiles: &[ConfidentialProfile], active_profile_
 
 /// Summarizes a verified catalog for clients, carrying forward removed ids.
 fn catalog_summary(catalog: &Catalog, previous: Option<&CatalogSummary>) -> CatalogSummary {
-    let inventory_surfaces = [
-        Surface::ChatCompletions,
-        Surface::Messages,
-        Surface::Responses,
-    ];
     let models: Vec<ModelSummary> = catalog
         .models
         .iter()
         .map(|model| {
-            let supported_endpoints: Vec<String> = inventory_surfaces
-                .iter()
-                .copied()
-                .filter(|surface| model.supports(*surface))
-                .map(|surface| surface.path().to_string())
-                .collect();
-            // Preserve no-inventory semantics for models that pass every text
-            // surface; an explicit empty list prevents decisions-only models
-            // from falling through the renderer's legacy `None` behavior.
-            let supported_endpoints = if model.supported_surfaces.is_none()
-                && supported_endpoints.len() == inventory_surfaces.len()
-            {
-                None
-            } else {
-                Some(supported_endpoints)
-            };
+            // None means every text surface; an explicit empty list keeps
+            // models without text output out of the renderer's text pickers.
+            let supported_endpoints = (!model.supports(Surface::ChatCompletions)).then(Vec::new);
             ModelSummary {
                 id: model.id().to_string(),
                 name: model.display_name().to_string(),

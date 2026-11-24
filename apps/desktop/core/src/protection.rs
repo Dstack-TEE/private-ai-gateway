@@ -15,7 +15,6 @@ pub enum VerificationStatus {
     Stopped,
     Verifying,
     Verified,
-    Blocked,
     Error,
 }
 
@@ -41,7 +40,6 @@ pub enum ProtectionPhase {
     /// `checks` and `error` say why. Protection stays off, also while a retry
     /// runs.
     VerificationFailed,
-    Blocked,
     Interrupted,
     ProfileRequired,
     NotProtected,
@@ -98,7 +96,6 @@ impl Protection {
             ProtectionPhase::VerifyingConfiguration => ("Verifying configuration…", Tone::Neutral),
             ProtectionPhase::Verifying => ("Verifying…", Tone::Neutral),
             ProtectionPhase::VerificationFailed => ("Verification failed", Tone::Danger),
-            ProtectionPhase::Blocked => ("Protection blocked", Tone::Danger),
             ProtectionPhase::Interrupted => ("Protection interrupted", Tone::Danger),
             ProtectionPhase::ProfileRequired | ProtectionPhase::NotProtected => {
                 ("Not protected", Tone::Neutral)
@@ -158,7 +155,6 @@ fn phase(state: &AppState) -> ProtectionPhase {
             ProtectionPhase::VerifyingConfiguration
         }
         VerificationStatus::Verifying => ProtectionPhase::Verifying,
-        VerificationStatus::Blocked => ProtectionPhase::Blocked,
         VerificationStatus::Error if state.verification_failed => {
             ProtectionPhase::VerificationFailed
         }
@@ -216,10 +212,6 @@ mod tests {
         assert_eq!(
             action(&state(VerificationStatus::Verifying, false)).label,
             "Cancel Verification"
-        );
-        assert_eq!(
-            action(&state(VerificationStatus::Blocked, true)).operation,
-            ProtectionOperation::Stop
         );
         for status in [VerificationStatus::Stopped, VerificationStatus::Error] {
             let mut reconnecting = state(status, true);

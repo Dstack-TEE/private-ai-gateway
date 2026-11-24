@@ -1,4 +1,4 @@
-# Configuration Reference
+# Configuration reference
 
 Private AI Gateway reads one static JSON file at startup and owns one writable
 state directory. Upstream routes have a separate JSON schema because operators
@@ -204,6 +204,10 @@ forward the original `Host`.
 
 ### Streaming keepalives and early commit
 
+`middleware.sse_keepalive_ms` applies to middleware. Zero disables both middleware
+idle heartbeats and early commitment. Direct serving uses the same keep-alive stage
+with a fixed 5-second interval; it has no configuration setting or early commit.
+
 The interval starts when the gateway begins forwarding to an upstream. If an
 eligible stream has no upstream response headers after one interval, the
 gateway commits `200 text/event-stream` and emits `: PROCESSING` comments until
@@ -249,7 +253,7 @@ provider origin and maps one or more public model IDs to provider model IDs.
     "provider": "tinfoil",
     "base_url": "https://inference.tinfoil.sh",
     "models": {
-      "confidential-chat": "kimi-k2-6"
+      "confidential-chat": "gpt-oss-120b"
     },
     "bearer_token": "<provider-api-key>"
   }
@@ -278,7 +282,7 @@ client-observed body and the provider-facing body.
 | `near-ai` | TEE | NEAR AI verifier through the Python bridge, external dstack verifier, and TLS-SPKI enforcement. |
 | `chutes` | TEE | Per-instance attestation and encrypted Chutes E2EE transport. |
 | `secret-ai` | TEE | SecretVM CPU, GPU, workload, and inference-SPKI verifier. |
-| `phala-direct` | TEE | Direct dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
+| `phala-direct` | TEE | Direct Phala Inference Guard or dstack-vllm-proxy verification through the Python bridge and TLS-SPKI enforcement. |
 | `privatemode` | TEE | Official Privatemode proxy co-deployed in the measured Compose; the proxy owns attestation and E2EE. Forbids `bearer_token` and `path`, and `base_url` must equal static `privatemode_proxy.base_url`. |
 | `armet-ai` | TEE | Per-model non-dstack Intel TDX endpoint: DCAP quote, report_data bound to nonce, TLS SPKI, GPU evidence and model, measurement pin, mandatory NRAS GPU check, and TLS-SPKI enforcement through the Python bridge. |
 | `0g-private-computer` | TEE | 0G router, private tier only: native verification of each provider broker (on-chain record, DCAP quote, boot chain, signer) and native 0G E2EE with signature-verified responses. `base_url` is the 0G router itself as a root HTTPS URL (`https://router-api-cloud.0g.ai`, not the hosted gateway at `router-api.0g.ai`); requires `bearer_token`, `zg_chain_rpc_url`, `zg_serving_contract` and `accepted_subjects` boot-chain pins; forbids `path`. See [0G Private Computer verification](providers/0g-private-computer/verification.md). |
@@ -286,6 +290,41 @@ client-observed body and the provider-facing body.
 TEE classification makes a route eligible for `provider.aci_verified`. A
 successful provider verifier and enforceable binding are still required at
 request time.
+
+### Cache partition derivation and rotation
+
+Middleware cache partitioning is automatic, with no new configuration option.
+See [Prefix-cache isolation](prefix-cache-isolation.md)
+for provider mapping and supported request paths.
+
+Let `lp(x) = u32_be(byte_length(x)) || x`, and let `HMAC` mean HMAC-SHA256.
+The gateway obtains a dedicated 32-byte key `K` from dstack KMS using path
+`aci/cache-salt-hmac-sha256/v1` and purpose `aci.cache-salt.hmac-sha256.v1`.
+This key is separate from the request-feature `prefixHash` key.
+
+```text
+user_secret = HMAC(K,
+  "private-ai-gateway/cache-salt/v1" || lp(decimal_ASCII(userId)) || [lp(caller_salt)])
+provider_salt = lowercase_hex(HMAC(user_secret,
+  "private-ai-gateway/cache-salt/provider/v1" || lp(provider_tag)))
+```
+
+`caller_salt` is included only for a non-empty JSON string in `cache_salt`;
+other values are ignored. `provider_tag` is the stable serialized provider
+name. The result is 64 hex characters.
+The control plane's authenticated `userId` is the isolation boundary; this
+assumes an honest control plane. No user ID is sent in the salt field.
+
+The key stays in the TEE and is requested only when middleware is enabled;
+KMS release errors fail startup. Stable KMS application identity/key preserves
+partitions across restarts and replicas. To rotate, bump both the path and
+purpose version constants in `src/dstack.rs` and deploy that reviewed version.
+Rotation invalidates every old partition and causes a global cache cold start;
+there is no dual-read of old caches. Changing the KMS application/key has the
+same cache-lifecycle effect.
+
+See [Prefix-cache isolation](prefix-cache-isolation.md)
+for privacy, provider limitations, and anonymous/direct-mode behavior.
 
 ### Upstream fields
 
@@ -299,7 +338,7 @@ request time.
 | `bearer_token` | string | unset | Provider credential. The gateway never returns its value from the admin API. For `anthropic`, this becomes `x-api-key`. |
 | `streaming_usage` | `"final"` or `"continuous"` | unset | Deployment-wide OpenAI streaming usage flags. `final` forces `include_usage`; `continuous` also forces `continuous_usage_stats`. Omission preserves existing behavior. Applies only to streamed chat/legacy completions before receipt hashing and upstream encryption. |
 | `basic_auth` | boolean | `false` | Send `Authorization: Basic <bearer_token>`. Allowed only for `openai-compatible` and `chutes`, and requires a token. |
-| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, or required `armet-ai` measurement pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
+| `accepted_subjects` | string array | unset | Accepted measured ACI-service subjects, optional SecretAI measured-workload pins, optional [Phala Direct compose pins](providers/phala-direct/verification.md#compose-pins), optional [Tinfoil release pins](providers/tinfoil/verification.md#release-pins) of the form `tinfoil-release:sha256:<64 lowercase hex>`, or required `armet-ai` and `0g-private-computer` pins. For ACI service, use `app-id:0x<hex>` values derived from RTMR3-verified evidence. For `armet-ai`, at least one `tdx-measurement:sha256:<64 lowercase hex>` value is required; an empty or unset list is rejected at load. For `0g-private-computer`, at least one `tdx-boot-chain:sha256:<64 lowercase hex>` boot-chain pin is required on the same terms; see [0G boot-chain pins](providers/0g-private-computer/verification.md#boot-chain-pins). See [ArmetAI verification](providers/armet-ai/verification.md#required-configuration). |
 | `accepted_image_digests` | string array | unset | ACI-service source image allowlist. |
 | `accepted_dstack_kms_root_public_keys` | string array | unset | ACI-service accepted dstack KMS root public keys. |
 | `pccs_url` | string | Phala PCCS from `dcap_qvl` | PCCS used by the native ACI-service and 0G DCAP verifiers. |
@@ -400,7 +439,7 @@ routes at another proxy or change the measured pins.
 | Field | Contract |
 | --- | --- |
 | `base_url` | Internal HTTP(S) origin of the co-deployed proxy. Paths, credentials, queries, and fragments are rejected. |
-| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. The latest complete entry is reported as unbound observation metadata. |
+| `manifest_log_path` | Absolute path to the proxy's manifest-history log, mounted read-only. Accepts the legacy timestamp/path and v1.64 timestamp/path/secret-ID formats. The latest complete entry, including `observed_secret_id` when available, is reported as unbound observation metadata. |
 | `credential_path` | Absolute path to the Compose secret mounted into both gateway and proxy. The gateway checks it at startup and never forwards it. |
 | `credential_sha256` | SHA-256 of that credential. The renderer derives it from `PRIVATEMODE_API_KEY`; a mismatch fails startup. |
 | `proxy_image_digest` | OCI digest of the proxy image pinned in the same Compose, as `sha256:<64-hex>`. |
@@ -409,8 +448,8 @@ For `privatemode`, dstack Compose owns the proxy process, image pin, shared
 manifest-history volume, restart policy, and private network. Mutable routes
 must match the static origin and cannot set `bearer_token` or `path`; all share
 the measured Compose credential. The gateway validates the credential digest, requires the proxy's
-`/readyz` readiness probe to succeed, reports the latest fetched manifest as explicitly
-unbound metadata, and forwards only to the encrypted v1.59 handlers. Separate
+`/readyz` readiness probe to succeed, reports the latest logged manifest and secret ID as explicitly
+unbound metadata, and forwards only to the encrypted v1.64 handlers. Separate
 credentials require separate measured deployments.
 See [Privatemode verification](providers/privatemode/verification.md).
 
@@ -432,7 +471,7 @@ The gateway process and provider-verifier children use:
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` | Optional runtime admin token overriding static `admin_token`. |
 | `PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE` | Optional path to a file holding the admin token, such as a Compose secret, read when `PRIVATE_AI_GATEWAY_ADMIN_TOKEN` is unset. Surrounding whitespace is trimmed; an empty or unreadable file fails startup. |
 | `RUST_LOG` | `tracing_subscriber` filter. Defaults to `info`. |
-| `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](getting-started.md#install-dependencies). |
+| `PRIVATE_AI_VERIFIER_DIR` | Optional Python verifier checkout override consumed by provider-verifier child processes. See [Install dependencies](local-development.md#install-dependencies). |
 | `DSTACK_VERIFIER_URL` | External verifier URL consumed by NEAR AI and PhalaDirect bridge code. Those adapters default to `http://localhost:8080` when unset. |
 
 The repository entrypoint and deployment manifest also use:
@@ -484,7 +523,7 @@ Middleware audio candidates must explicitly list `/v1/audio/transcriptions` in
 rejected for Chutes, 0G Private Computer, and
 Anthropic. Privatemode retains its existing encrypted-path allowlist: audio is
 blocked until multipart encryption/decryption is verified in the exact pinned
-v1.59.0 proxy image (`sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff`).
+v1.64.0 proxy image (`sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`).
 Public source refs did not establish that support; do not add an unencrypted
 fallback. NEAR's launch model is `openai/whisper-large-v3`. Its native `json`
 response contains only `text`, without the duration needed for billing. The
@@ -492,9 +531,13 @@ gateway therefore always requests `verbose_json` internally for NEAR audio
 and preserves the caller's requested output format. Other providers receive
 the requested format. No word timestamps are added unless requested.
 
-Transcription limits are process constants: 25 MiB file, 64 KiB text, a shared
-402 MiB upload byte budget (60-second read deadline), independent 16 inference
-slots, and 8 MiB upstream response. Upload bytes are charged chunk by chunk
+Transcription limits are process constants: 25 MiB file, 64 KiB text,
+16 inference slots shared with speech, and 8 MiB upstream response.
+Transcription and image-edit uploads share one process-wide 402 MiB byte budget
+(16 × (25 MiB + 64 KiB + 64 KiB)) and a 60-second read deadline; six full-size
+edit uploads use 384 MiB, leaving 18 MiB. See the
+[API reference](api-reference.md#image-edits) for edit limits.
+Upload bytes are charged chunk by chunk
 until handoff or drop; connections with no buffered data and declared
 `Content-Length` do not reserve upload capacity.
 Header-based audio/image refusals discard unread bytes without buffering up to

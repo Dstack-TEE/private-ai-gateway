@@ -26,11 +26,15 @@ use bytes::Bytes;
 use futures_util::{stream, Stream};
 
 use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::endpoint::Endpoint;
+pub use crate::sse_protocol::SseProtocol;
 
 mod body;
+mod cache_salt;
 mod chutes;
 mod openai;
 mod privatemode;
+pub mod request_id;
 mod router;
 mod streaming_usage;
 mod tls;
@@ -38,6 +42,7 @@ mod zero_g;
 
 pub use body::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES;
 pub(crate) use body::{collect_buffered_upstream_body, read_buffered_upstream_response};
+pub use cache_salt::CacheSaltField;
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
@@ -60,8 +65,10 @@ pub const DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS: u64 = 600;
 
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamRequest {
+    /// Internal user secret, consumed by model routing before forwarding.
+    pub cache_salt: Option<crate::middleware::cache_salt::CacheSalt>,
     /// Shared file bytes, encoded once after route selection and model rewrite.
-    pub form: Option<std::sync::Arc<crate::middleware::audio::AudioForm>>,
+    pub form: Option<std::sync::Arc<crate::middleware::media::MediaForm>>,
     /// Matches `body`; absent for JSON requests.
     pub content_type: Option<String>,
     pub body: Bytes,
@@ -86,11 +93,10 @@ pub struct PreparedUpstreamRequest {
 }
 
 impl PreparedUpstreamRequest {
-    pub(crate) async fn encode_audio(&mut self) -> Result<(), UpstreamError> {
+    pub(crate) async fn encode_media(&mut self) -> Result<(), UpstreamError> {
         if let Some(form) = self.request.form.take() {
-            let params = serde_json::from_slice(&self.request.body).map_err(|_| {
-                UpstreamError::InvalidRequest("invalid transcription metadata".into())
-            })?;
+            let params = serde_json::from_slice(&self.request.body)
+                .map_err(|_| UpstreamError::InvalidRequest("invalid media metadata".into()))?;
             let (body, content_type) = form.encode(&params).await?;
             self.request.body = body;
             self.request.content_type = Some(content_type);
@@ -122,14 +128,24 @@ pub struct UpstreamStreamResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpstreamError {
+    /// No route can serve the request: an unknown model, or a route the
+    /// gateway cannot resolve. Reported to the client as a 404 carrying this
+    /// text. A malformed request is [`Self::InvalidRequest`].
     #[error("upstream routing error: {0}")]
     Routing(String),
     /// The caller's request cannot be forwarded as sent; nothing reached the
-    /// upstream. Reported to the client as a 400.
+    /// upstream. Reported to the client as a 400 carrying this text, so it
+    /// says only what is wrong with the request.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
     #[error("upstream transport error: {0}")]
     Transport(String),
+    #[error("upstream transport error: sse line overflow")]
+    SseLineOverflow,
+    #[error("upstream transport error: provider ended mid-event")]
+    SseTruncated,
+    #[error("upstream transport error: provider SSE envelope ended mid-event")]
+    EnvelopeTruncated,
     /// The buffered HTTP body or decompressed Chutes response exceeded the
     /// gateway's size limit. Reported to the client as a 502.
     #[error("buffered upstream response exceeds the endpoint size limit")]
@@ -142,6 +158,10 @@ pub enum UpstreamError {
     Timeout(String),
     #[error("upstream channel binding mismatch: {0}")]
     ChannelBindingMismatch(String),
+    /// The provider's first response frame failed PSK authentication before
+    /// delivery. Reverify this instance at most once.
+    #[error("upstream response binding mismatch")]
+    ResponseBindingMismatch { instance_id: String },
     /// The upstream answered `status` and the adapter withheld the body, which
     /// is unverified. Carries the status alone: an error's `Display` reaches
     /// logs, where a response body has no place. The service forwards it as
@@ -185,6 +205,17 @@ pub trait UpstreamBackend: Send + Sync {
             is_tee: None,
         })
     }
+
+    /// Response wire protocol for the selected operation on this prepared
+    /// backend. This is a trusted backend declaration, independent of paths and
+    /// control-plane formats. Unknown backends publish receipts at clean EOF.
+    /// Wrappers must delegate to the backend that will serve the request;
+    /// implementations without protocol knowledge must explicitly return `None`.
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol>;
 
     /// Forward `req` to the upstream and return the response.
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError>;
@@ -285,3 +316,6 @@ pub trait UpstreamBackend: Send + Sync {
         )))
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

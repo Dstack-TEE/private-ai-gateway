@@ -86,7 +86,9 @@ for (const sidecar of sidecars) {
     const staged = path.join(scratch, executable);
     if (universal) {
       execFileSync("xcrun", ["lipo", "-create", ...sources, "-output", staged], { stdio: "inherit" });
-      execFileSync("xcrun", ["lipo", staged, "-verify_arch", "arm64", "x86_64"], { stdio: "inherit" });
+      // Xcode 27's lipo accepts one architecture per -verify_arch, so compare -archs.
+      const archs = execFileSync("xcrun", ["lipo", "-archs", staged], { encoding: "utf8" }).trim().split(/\s+/).sort().join(" ");
+      if (archs !== "arm64 x86_64") throw new Error(`${sidecar.name} is not a Universal macOS executable: ${archs}`);
       // tauri-build also needs each thin binary during its two Cargo builds.
       for (const [index, target] of targets.entries()) {
         const name = `${sidecar.name}-${target}`;

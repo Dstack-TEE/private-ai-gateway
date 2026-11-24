@@ -145,11 +145,10 @@ jobs:
           retention-days: 14
           path: npm-packages/*.tgz
 
-  # Trusted publishing (OIDC) only authorizes `npm publish`; `npm dist-tag` is
-  # not available to this job, so the wrapper moves the channel tag as it
-  # publishes, and it is published last, after every platform version, as
-  # Codex does. The registry is eventually consistent, so for a few minutes a
-  # packument can still list the wrapper before all platform versions
+  # Publish the wrapper after every platform version, as Codex does, then
+  # advance beta to a stable wrapper when it is newer. The registry is
+  # eventually consistent, so for a few minutes a packument can still list
+  # the wrapper before all platform versions
   # (apps/desktop/npm/README.md); the job does not wait for that propagation.
   publish:
     if: inputs.publish
@@ -215,4 +214,26 @@ jobs:
             echo "private-ai-proxy@${VERSION} already exists with matching contents; skipping"
           else
             npm publish "$tarball" --access public --tag "$DIST_TAG"
+          fi
+      - name: Advance beta to the stable wrapper when newer
+        if: needs.package.outputs.dist_tag == 'latest'
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          # OIDC dist-tag needs npm >=11.21.0 and Allow npm dist-tag enabled
+          # on the trusted publisher; Node 24 can bundle an older npm.
+          cli_prefix="$RUNNER_TEMP/private-ai-proxy-npm-cli"
+          npm install --prefix "$cli_prefix" --ignore-scripts --no-audit --no-fund \
+            npm@11.21.2 semver@7.8.6
+          export PATH="$cli_prefix/node_modules/.bin:$PATH"
+          test "$(npm --version)" = 11.21.2
+          current_beta="$(npm view private-ai-proxy dist-tags.beta)"
+          if [[ -n "$current_beta" ]]; then
+            semver "$current_beta" >/dev/null
+          fi
+          if [[ -z "$current_beta" ]] || semver "$VERSION" --range ">$current_beta" >/dev/null; then
+            npm dist-tag add "private-ai-proxy@$VERSION" beta
+          else
+            echo "beta already names $current_beta, which is not older than $VERSION; skipping"
           fi

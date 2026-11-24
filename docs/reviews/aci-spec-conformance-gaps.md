@@ -1,4 +1,4 @@
-# Known Gaps Between This Implementation and the ACI Spec
+# Known gaps between this implementation and the ACI spec
 
 This page lists the places where the gateway and its clients fall short of
 [the ACI spec](../../spec/aci.md) or behave differently from it. The spec is

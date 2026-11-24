@@ -7,17 +7,22 @@
 
 pub mod admission;
 pub mod audio;
+pub mod cache_salt;
 pub mod completion;
 pub mod config;
 pub mod control;
 pub mod errors;
+pub mod image_edits;
 pub mod images;
+pub mod media;
 pub mod pricing;
 pub mod reasoning;
 pub mod request_features;
 pub mod request_transform;
+pub mod rerank;
 pub mod response_transform;
-pub mod sse;
+pub mod speech;
+pub(crate) mod sse;
 pub mod stream_transform;
 pub mod types;
 
@@ -28,6 +33,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+pub use cache_salt::CacheSaltKey;
 pub use completion::CompletionInput;
 pub use config::MiddlewareConfig;
 pub use control::{hash_api_key, ControlClient};
@@ -38,14 +44,44 @@ use std::sync::Arc;
 use crate::aggregator::service::AciService;
 use errors::Surface;
 
-/// Stamp the native SDK header from the same gateway identity used for billing.
-pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {
-    if path == crate::aggregator::service::SYSTEMONE_PATH {
-        if let Ok(value) = HeaderValue::from_str(request_id) {
-            response
-                .headers_mut()
-                .insert("x-typesafe-request-id", value);
+/// Validate buffered JSON metadata and return its upstream allowlist, when applicable.
+pub(crate) fn validate_buffered(
+    endpoint: request_transform::Endpoint,
+    params: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, images::RequestError> {
+    use request_transform::Endpoint;
+    let body = match endpoint {
+        Endpoint::ImagesGenerations => {
+            images::validate_request(params)?;
+            images::upstream_body(params)
         }
+        Endpoint::AudioSpeech => {
+            speech::validate_request(params)?;
+            speech::upstream_body(params)
+        }
+        Endpoint::Rerank => {
+            rerank::validate_request(params)?;
+            rerank::upstream_body(params)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(body))
+}
+
+/// Stamp the gateway's request id under the header the surface's SDK reads.
+/// It is the id the gateway logs and bills under, so a caller can quote it
+/// when a request needs tracing.
+pub(crate) fn apply_request_id_header(response: &mut Response, path: &str, request_id: &str) {
+    let name = if path == crate::aggregator::service::SYSTEMONE_PATH {
+        "x-typesafe-request-id"
+    } else {
+        match errors::surface_for_path(path) {
+            Surface::Anthropic => "request-id",
+            Surface::Openai => "x-request-id",
+        }
+    };
+    if let Ok(value) = HeaderValue::from_str(request_id) {
+        response.headers_mut().insert(name, value);
     }
 }
 
@@ -57,17 +93,23 @@ pub struct Middleware {
     send_request_features: bool,
     /// Keys the consult `prefixHash`; see `request_features::PrefixHashKey`.
     prefix_hash_key: PrefixHashKey,
+    cache_salt_key: CacheSaltKey,
     /// Normalized (lowercased) TEE-only host set; see `MiddlewareConfig::tee_only_domains`.
     tee_only_domains: HashSet<String>,
 }
 
 impl Middleware {
-    pub fn new(prefix_hash_key: PrefixHashKey, config: &MiddlewareConfig) -> Result<Self, String> {
+    pub fn new(
+        prefix_hash_key: PrefixHashKey,
+        cache_salt_key: CacheSaltKey,
+        config: &MiddlewareConfig,
+    ) -> Result<Self, String> {
         Ok(Self {
             control: ControlClient::new(config)?,
             sse_keepalive_ms: config.sse_keepalive_ms,
             send_request_features: config.send_request_features.unwrap_or(true),
             prefix_hash_key,
+            cache_salt_key,
             tee_only_domains: config
                 .tee_only_domains
                 .iter()
@@ -92,10 +134,11 @@ impl Middleware {
 
     /// Relay a `/v1/...` catalog request to the control plane, which serves
     /// catalogs without the `/v1` prefix. The control body is returned verbatim
-    /// with its status and a forced JSON content type.
-    pub async fn handle_catalog(&self, v1_path: &str) -> Response {
+    /// with its status and a forced JSON content type. `api_key_hash` is the
+    /// hash of the caller's key, when the request carried one.
+    pub async fn handle_catalog(&self, v1_path: &str, api_key_hash: Option<&str>) -> Response {
         let control_path = v1_path.strip_prefix("/v1").unwrap_or(v1_path);
-        match self.control.catalog_get(control_path).await {
+        match self.control.catalog_get(control_path, api_key_hash).await {
             Ok(catalog) => {
                 let status =
                     StatusCode::from_u16(catalog.status).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -131,6 +174,7 @@ impl Middleware {
             self.sse_keepalive_ms,
             self.send_request_features,
             &self.prefix_hash_key,
+            &self.cache_salt_key,
             input,
         )
         .await;
@@ -147,7 +191,11 @@ mod tests {
     use tokio::net::TcpListener;
 
     fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-        Middleware::new(PrefixHashKey::new([7; 32]), config)
+        Middleware::new(
+            PrefixHashKey::new([7; 32]),
+            CacheSaltKey::new([8; 32]),
+            config,
+        )
     }
 
     // Spawn a minimal stub control plane and return its base URL.
@@ -178,7 +226,7 @@ mod tests {
         })
         .unwrap();
 
-        let response = middleware.handle_catalog("/v1/models").await;
+        let response = middleware.handle_catalog("/v1/models", None).await;
         assert_eq!(response.status().as_u16(), 200);
         assert_eq!(
             response
@@ -205,7 +253,7 @@ mod tests {
         })
         .unwrap();
 
-        let response = middleware.handle_catalog("/v1/models").await;
+        let response = middleware.handle_catalog("/v1/models", None).await;
         assert_eq!(response.status().as_u16(), 502);
     }
 

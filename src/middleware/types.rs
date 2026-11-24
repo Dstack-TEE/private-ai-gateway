@@ -374,11 +374,14 @@ impl From<&UpstreamError> for ErrorClass {
         match err {
             UpstreamError::Routing(_) => Self::InternalError,
             UpstreamError::InvalidRequest(_) => Self::RequestShapingFailed,
-            UpstreamError::Transport(_) | UpstreamError::ResponseTooLarge => {
-                Self::UpstreamTransport
-            }
+            UpstreamError::Transport(_)
+            | UpstreamError::SseLineOverflow
+            | UpstreamError::SseTruncated
+            | UpstreamError::EnvelopeTruncated
+            | UpstreamError::ResponseTooLarge => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
-            UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,
+            UpstreamError::ChannelBindingMismatch(_)
+            | UpstreamError::ResponseBindingMismatch { .. } => Self::UpstreamChannelBindingMismatch,
             UpstreamError::Upstream { .. } => Self::UpstreamHttpError,
         }
     }
@@ -442,7 +445,7 @@ pub struct PostReport {
     /// that carry a route.
     pub selected_route_id: Option<String>,
     pub request_model: String,
-    /// Raw upstream usage before any cost injection, or `null`.
+    /// Upstream usage before cost injection, gateway character usage for speech, or `null`.
     pub usage: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<super::images::ImageUsage>,
@@ -460,6 +463,12 @@ pub struct PostReport {
     /// Serialized as `errorMessage`: the class's fixed token, never free text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<ErrorClass>,
+    /// The upstream's own identifier for this attempt: its request-id response
+    /// header, or the `id` of a success body when it sent no such header. A
+    /// bounded plain identifier, never free text (see
+    /// `aci::upstream::request_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
     /// Echo of the pre-consult request features' session key, so billing can
     /// record which deployment actually served this session (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]

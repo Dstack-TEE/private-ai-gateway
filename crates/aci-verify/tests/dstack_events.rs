@@ -32,11 +32,12 @@ fn upstream_event_vectors_bind_fields_and_replay() {
 }
 
 #[test]
+#[ignore = "requires the private recording set by DSTACK_V1_ATTESTATION_FIXTURE"]
 fn recorded_quote_rejects_forged_compose_payload() {
-    let fixture: Value = serde_json::from_str(include_str!(
-        "../../../clients/verifier-ts/test/fixtures/dstack_v1_attestation.json"
-    ))
-    .unwrap();
+    let path = std::env::var_os("DSTACK_V1_ATTESTATION_FIXTURE")
+        .expect("set DSTACK_V1_ATTESTATION_FIXTURE to the recorded attestation");
+    let recording = std::fs::read(path).expect("read the recorded attestation");
+    let fixture: Value = serde_json::from_slice(&recording).unwrap();
     let mut evidence = fixture["report"]["attestation"]["evidence"].clone();
     // This crate accepts an already-verified RTMR3. The TS regression also
     // checks this recorded quote's signatures with its recorded collateral.

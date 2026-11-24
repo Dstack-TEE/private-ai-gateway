@@ -36,6 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let v2 = vector("v2", &[EventLogVersion::V2]);
     let mixed = vector("mixed-v1-v2", &[EventLogVersion::V1, EventLogVersion::V2]);
     let mut vectors = vec![v1.clone(), v2.clone(), mixed];
+    let mut legacy = v1.clone();
+    legacy["name"] = json!("v1-omitted-digests");
+    for event in legacy["events"].as_array_mut().unwrap() {
+        event["digest"] = json!("");
+    }
+    vectors.push(legacy);
     for (name, field, value) in [
         ("v1-forged-payload", "event_payload", json!("ff".repeat(32))),
         ("v1-forged-digest", "digest", json!("00".repeat(48))),

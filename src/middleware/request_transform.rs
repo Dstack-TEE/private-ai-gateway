@@ -16,10 +16,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::aggregator::service::{
-    AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH,
-    IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
-};
+use crate::aggregator::service::{RESPONSES_PATH, SYSTEMONE_PATH};
 
 use super::reasoning::validate_effective;
 use super::types::{
@@ -30,47 +27,9 @@ const PDF_MIME: &str = "application/pdf";
 const TXT_MIME: &str = "text/plain";
 const SYSTEM_MESSAGE_ROLES: [&str; 2] = ["system", "developer"];
 
-/// A request endpoint. Selects which per-format config table applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Endpoint {
-    ChatComplete,
-    Complete,
-    Embed,
-    Messages,
-    CreateModelResponse,
-    SystemOne,
-    ImagesGenerations,
-    AudioTranscriptions,
-}
-
-impl Endpoint {
-    /// The path this endpoint is served on downstream and forwarded to upstream.
-    pub fn path(self) -> &'static str {
-        match self {
-            Endpoint::ChatComplete => CHAT_COMPLETIONS_PATH,
-            Endpoint::Complete => COMPLETIONS_PATH,
-            Endpoint::Embed => EMBEDDINGS_PATH,
-            Endpoint::Messages => MESSAGES_PATH,
-            Endpoint::CreateModelResponse => RESPONSES_PATH,
-            Endpoint::SystemOne => SYSTEMONE_PATH,
-            Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
-            Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Endpoint::ChatComplete => "chatComplete",
-            Endpoint::Complete => "complete",
-            Endpoint::Embed => "embed",
-            Endpoint::Messages => "messages",
-            Endpoint::CreateModelResponse => "createModelResponse",
-            Endpoint::SystemOne => "systemOne",
-            Endpoint::ImagesGenerations => "imagesGenerations",
-            Endpoint::AudioTranscriptions => "audioTranscriptions",
-        }
-    }
-}
+#[cfg(test)]
+use crate::aggregator::service::IMAGES_GENERATIONS_PATH;
+pub use crate::endpoint::Endpoint;
 
 /// Error from shaping a request.
 #[derive(Debug, Clone)]
@@ -213,10 +172,16 @@ pub fn transform_to_provider_request(
     engine: Option<Engine>,
 ) -> Result<Value, TransformError> {
     match (format, endpoint) {
+        (ProviderFormat::Openai, Endpoint::AudioSpeech) => {
+            return Ok(super::speech::upstream_body(params));
+        }
+        (ProviderFormat::Openai, Endpoint::Rerank) => {
+            return Ok(super::rerank::upstream_body(params));
+        }
         (ProviderFormat::Openai, Endpoint::AudioTranscriptions) => {
             return Ok(super::audio::upstream_fields(params));
         }
-        (ProviderFormat::Openai, Endpoint::ImagesGenerations) => {
+        (ProviderFormat::Openai, Endpoint::ImagesEdits | Endpoint::ImagesGenerations) => {
             return Ok(super::images::upstream_body(params));
         }
         (ProviderFormat::Openai, Endpoint::Messages) => {
@@ -256,6 +221,17 @@ fn native_passthrough(params: &Value) -> Result<Value, TransformError> {
     Ok(Value::Object(body))
 }
 
+#[derive(Debug)]
+pub struct ShapedCandidate {
+    pub route_id: String,
+    pub body: Value,
+    /// Endpoint used by the response transforms.
+    pub endpoint: Endpoint,
+    /// Operation the shaped request sends to the backend.
+    pub wire_endpoint: Endpoint,
+    pub format: ProviderFormat,
+}
+
 /// Shape one body per candidate, preserving failover order, after dropping the
 /// candidates that cannot serve `endpoint` (a dedicated System One route serves
 /// only System One, which goes nowhere else). Each entry is the
@@ -277,7 +253,7 @@ pub fn build_candidates(
     candidates: &[RouteCandidate],
     requested_reasoning: Option<&ReasoningConfig>,
     responses: Option<ResponsesCandidateInput<'_>>,
-) -> Result<Vec<(String, Value, Endpoint)>, TransformError> {
+) -> Result<Vec<ShapedCandidate>, TransformError> {
     let mut shaped = Vec::new();
     let mut skipped = Vec::new();
     // Converted once; every Chat candidate of a Messages request shares it.
@@ -297,11 +273,7 @@ pub fn build_candidates(
             );
             continue;
         }
-        if matches!(
-            endpoint,
-            Endpoint::ImagesGenerations | Endpoint::AudioTranscriptions
-        ) && !candidate.supports_endpoint(endpoint.path())
-        {
+        if endpoint.is_buffered_native() && !candidate.supports_endpoint(endpoint.path()) {
             continue;
         }
         let bridge = match &messages_chat {
@@ -309,9 +281,13 @@ pub fn build_candidates(
             None => responses.map_or(Bridge::None, Bridge::Responses),
         };
         match shape_candidate(params, endpoint, candidate, requested_reasoning, bridge) {
-            Ok((upstream_endpoint, body)) => {
-                shaped.push((candidate.route_id.clone(), body, upstream_endpoint))
-            }
+            Ok((upstream_endpoint, body)) => shaped.push(ShapedCandidate {
+                route_id: candidate.route_id.clone(),
+                body,
+                endpoint: upstream_endpoint,
+                wire_endpoint: upstream_endpoint.wire(candidate.format),
+                format: candidate.format,
+            }),
             Err(err) => skipped.push((&candidate.route_id, err)),
         }
     }
@@ -647,8 +623,12 @@ fn resolve_effective_reasoning(
     }
 }
 
-/// Read a switched-off `chat_template_kwargs` thinking flag as a request to
-/// disable reasoning.
+/// Read a switched-off `chat_template_kwargs` thinking flag, or a top-level
+/// `thinking: {"type": "disabled"}`, as a request to disable reasoning.
+///
+/// The top-level switch is never forwarded as the caller wrote it (on the
+/// OpenAI wire the gateway owns that key), so unread it would be dropped and
+/// the model would keep thinking. It follows the same rules as the flag.
 ///
 /// The flag is the vLLM chat-template idiom, and for some callers it is the
 /// only way to say "no thinking" at all: a client whose model catalog exposes
@@ -687,23 +667,38 @@ fn chat_template_reasoning_intent(
     {
         return None;
     }
-    let kwargs = params.get("chat_template_kwargs")?.as_object()?;
-    let mut disabled = false;
-    for key in ["thinking", "enable_thinking"] {
-        match kwargs.get(key).and_then(Value::as_bool) {
-            // Any switch left on ends the derivation, which covers both rules
-            // above at once: a plain "on" is never translated, and a caller who
-            // sets the two aliases against each other has stated no intent to
-            // read, so the body is left alone rather than a side picked.
-            Some(true) => return None,
-            Some(false) => disabled = true,
-            None => {}
+    let mut disabled = chat_thinking_disabled(params);
+    if let Some(kwargs) = params
+        .get("chat_template_kwargs")
+        .and_then(Value::as_object)
+    {
+        for key in ["thinking", "enable_thinking"] {
+            match kwargs.get(key).and_then(Value::as_bool) {
+                // Any switch left on ends the derivation, which covers both
+                // rules above at once: a plain "on" is never translated, and a
+                // caller who sets the switches against each other has stated
+                // no intent to read, so the body is left alone rather than a
+                // side picked.
+                Some(true) => return None,
+                Some(false) => disabled = true,
+                None => {}
+            }
         }
     }
     disabled.then(|| ReasoningConfig {
         enabled: Some(false),
         ..Default::default()
     })
+}
+
+/// Whether a Chat body carries a top-level `thinking: {"type": "disabled"}`,
+/// the off switch some OpenAI-compatible APIs and SDKs use.
+pub(crate) fn chat_thinking_disabled(params: &Value) -> bool {
+    params
+        .get("thinking")
+        .and_then(|thinking| thinking.get("type"))
+        .and_then(Value::as_str)
+        == Some("disabled")
 }
 
 fn sync_chat_template_reasoning(object: &mut Map<String, Value>, reasoning: &ReasoningConfig) {
@@ -812,13 +807,19 @@ fn select_config(
         // not served by the format.
         (Openai, Messages)
         | (Openai, CreateModelResponse)
+        | (Openai, Rerank)
+        | (Openai, AudioSpeech)
         | (Openai, AudioTranscriptions)
+        | (Openai, ImagesEdits)
         | (Openai, ImagesGenerations)
         | (Anthropic, Messages)
+        | (Anthropic, Rerank)
         | (Anthropic, Embed)
         | (Anthropic, CreateModelResponse)
         | (Anthropic, SystemOne)
+        | (Anthropic, AudioSpeech)
         | (Anthropic, AudioTranscriptions)
+        | (Anthropic, ImagesEdits)
         | (Anthropic, ImagesGenerations) => {
             return Err(TransformError::Unsupported { format, endpoint })
         }
@@ -3012,7 +3013,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0].0, "openai:b");
+        assert_eq!(bodies[0].route_id, "openai:b");
 
         // Only when EVERY candidate fails does the error surface — the same
         // 400 the all-or-nothing version produced.
@@ -3051,7 +3052,7 @@ mod tests {
         assert_eq!(
             bodies
                 .iter()
-                .map(|(id, _, _)| id.as_str())
+                .map(|candidate| candidate.route_id.as_str())
                 .collect::<Vec<_>>(),
             ["undeclared", "responses"]
         );
@@ -3079,9 +3080,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(shaped.len(), 1);
-        assert_eq!(shaped[0].0, "images");
+        assert_eq!(shaped[0].route_id, "images");
         assert_eq!(
-            shaped[0].1,
+            shaped[0].body,
             json!({"model":"image","prompt":"hi","n":2,"response_format":"b64_json"})
         );
         assert!(build_candidates(
@@ -3133,7 +3134,7 @@ mod tests {
         assert_eq!(
             bodies
                 .iter()
-                .map(|(id, _, _)| id.as_str())
+                .map(|candidate| candidate.route_id.as_str())
                 .collect::<Vec<_>>(),
             ["systemone-a", "systemone-b"]
         );
@@ -3184,8 +3185,8 @@ mod tests {
         let prompt = json!({ "model": "m", "input": "hello", "prompt": { "id": "pmpt_1" } });
         let served = routes(&prompt);
         assert_eq!(served.len(), 1);
-        assert_eq!(served[0].0, "responses:m");
-        assert_eq!(served[0].1, prompt);
+        assert_eq!(served[0].route_id, "responses:m");
+        assert_eq!(served[0].body, prompt);
 
         // Controls Chat has no counterpart for are dropped, and routing keeps
         // its order.
@@ -3194,10 +3195,10 @@ mod tests {
             "include": ["file_search_call.results"], "text": { "format": { "type": "future" } }
         });
         let served = routes(&controls);
-        assert_eq!(served[0].0, "chat:m");
-        assert_eq!(served[1].0, "responses:m");
+        assert_eq!(served[0].route_id, "chat:m");
+        assert_eq!(served[1].route_id, "responses:m");
         assert_eq!(
-            served[0].1,
+            served[0].body,
             json!({ "model": "m", "messages": [{ "role": "user", "content": "hello" }] })
         );
     }
@@ -3358,7 +3359,7 @@ mod tests {
                     { "role": "system", "content": "# Environment\n[redacted]" }
                 ])
             };
-            assert_eq!(bodies[0].1["messages"], expected, "hoist={hoist}");
+            assert_eq!(bodies[0].body["messages"], expected, "hoist={hoist}");
         }
         // Accepting system turns does not admit malformed or tool roles.
         for role in [Value::Null, json!(1), json!("tool")] {
@@ -3565,10 +3566,10 @@ mod tests {
         .unwrap();
         let bodies =
             build_candidates(&request, Endpoint::Messages, &candidates, None, None).unwrap();
-        let routes: Vec<&str> = bodies.iter().map(|body| body.0.as_str()).collect();
+        let routes: Vec<&str> = bodies.iter().map(|body| body.route_id.as_str()).collect();
         assert_eq!(routes, ["openai:m", "anthropic:m"]);
-        assert!(bodies[0].1.get("mcp_servers").is_none());
-        assert_eq!(bodies[1].1["thinking"], request["thinking"]);
+        assert!(bodies[0].body.get("mcp_servers").is_none());
+        assert_eq!(bodies[1].body["thinking"], request["thinking"]);
     }
 
     #[test]
@@ -3646,13 +3647,16 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                bodies[0].1.get("reasoning_effort").and_then(Value::as_str),
+                bodies[0]
+                    .body
+                    .get("reasoning_effort")
+                    .and_then(Value::as_str),
                 expected,
                 "{request}"
             );
-            assert!(bodies[0].1.get("thinking").is_none());
-            assert!(bodies[0].1.get("output_config").is_none());
-            assert_eq!(bodies[1].1.get("thinking"), request.get("thinking"));
+            assert!(bodies[0].body.get("thinking").is_none());
+            assert!(bodies[0].body.get("output_config").is_none());
+            assert_eq!(bodies[1].body.get("thinking"), request.get("thinking"));
         }
     }
 
@@ -3710,13 +3714,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bodies.len(), 3);
-        assert_eq!(bodies[0].1["reasoning"]["effort"], "high");
-        assert!(bodies[0].1.get("reasoning_effort").is_none());
-        assert_eq!(bodies[1].1["reasoning_effort"], "minimal");
-        assert!(bodies[1].1.get("reasoning").is_none());
+        assert_eq!(bodies[0].body["reasoning"]["effort"], "high");
+        assert!(bodies[0].body.get("reasoning_effort").is_none());
+        assert_eq!(bodies[1].body["reasoning_effort"], "minimal");
+        assert!(bodies[1].body.get("reasoning").is_none());
         // Candidate c has no policy — falls back to caller's requested reasoning.
-        assert_eq!(bodies[2].1["reasoning"]["effort"], "medium");
-        assert!(bodies[2].1.get("reasoning_effort").is_none());
+        assert_eq!(bodies[2].body["reasoning"]["effort"], "medium");
+        assert!(bodies[2].body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -3750,7 +3754,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let body = &bodies[0].1;
+        let body = &bodies[0].body;
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(params["max_tokens"], 2000);
@@ -3768,7 +3772,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(bodies[0].1["max_tokens"], 2000);
+        assert_eq!(bodies[0].body["max_tokens"], 2000);
     }
 
     #[test]
@@ -3794,7 +3798,7 @@ mod tests {
                 None,
             )
             .unwrap()[0]
-                .1
+                .body
                 .clone()
         };
 
@@ -3874,7 +3878,7 @@ mod tests {
             None,
         )
         .unwrap();
-        bodies[0].1["messages"].clone()
+        bodies[0].body["messages"].clone()
     }
 
     #[test]
@@ -4023,9 +4027,9 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(bodies[0].2, Endpoint::ChatComplete);
+        assert_eq!(bodies[0].endpoint, Endpoint::ChatComplete);
         assert_eq!(
-            bodies[0].1["messages"],
+            bodies[0].body["messages"],
             json!([
                 { "role": "system", "content": "be brief\n\nuse tools" },
                 { "role": "user", "content": "hi" }
@@ -4087,7 +4091,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let kwargs = &bodies[0].1["chat_template_kwargs"];
+            let kwargs = &bodies[0].body["chat_template_kwargs"];
             assert_eq!(kwargs["thinking"], expected);
             assert_eq!(kwargs["enable_thinking"], expected);
             assert_eq!(kwargs["tokenize"], false);
@@ -4127,7 +4131,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let body = &bodies[0].1;
+            let body = &bodies[0].body;
             if reasoning_format == "reasoning_effort" {
                 assert_eq!(body["reasoning_effort"], "none");
             } else {
@@ -4184,7 +4188,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            let body = &bodies[0].1;
+            let body = &bodies[0].body;
             assert_eq!(
                 body["reasoning_effort"], "none",
                 "max_tokens {max_tokens}, tool_choice {tool_choice}"
@@ -4234,7 +4238,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(bodies[0].1["reasoning_effort"], "high");
+        assert_eq!(bodies[0].body["reasoning_effort"], "high");
 
         // Nothing is synthesized for a switch that is on, for a contradictory
         // pair, for a route that declares no dialect, or for the Anthropic
@@ -4266,7 +4270,7 @@ mod tests {
                 None,
             )
             .expect("a derived intent must never be the reason a request fails");
-            let body = &bodies[0].1;
+            let body = &bodies[0].body;
             assert!(
                 body.get("reasoning_effort").is_none() && body.get("reasoning").is_none(),
                 "{kwargs} on {format}/{dialect:?} should stay a passthrough, got {body}"
@@ -4305,7 +4309,7 @@ mod tests {
             let bodies =
                 build_candidates(&params, Endpoint::ChatComplete, &[candidate], None, None)
                     .unwrap();
-            let body = &bodies[0].1;
+            let body = &bodies[0].body;
             assert_eq!(body["chat_template_kwargs"][key], false);
             assert!(body.get("reasoning_effort").is_none());
             assert!(body.get("reasoning").is_none());
@@ -4333,7 +4337,7 @@ mod tests {
                 requested.as_ref(),
                 None,
             )
-            .map(|bodies| bodies[0].1.clone())
+            .map(|bodies| bodies[0].body.clone())
         };
         let base = json!({ "model": "m", "messages": [{ "role": "user", "content": "hi" }] });
         let with = |field: &str, value: Value| {
@@ -4385,10 +4389,26 @@ mod tests {
             assert!(body.get("reasoning").is_none(), "{request}");
         }
 
-        // With nothing to say the switch stays absent, and a caller-supplied
-        // `thinking` does not stand in for it: on the OpenAI wire the gateway
-        // owns that key. On the Anthropic wire it is the caller's own control
-        // and still passes through.
+        // A caller's own switched-off `thinking` is read as intent the same
+        // way. Set against a chat-template switch left on, it states nothing.
+        let off = with("thinking", json!({ "type": "disabled" }));
+        let body = shape(off.clone()).unwrap();
+        assert_eq!(body["thinking"], json!({ "type": "disabled" }));
+        let mut conflicting = off;
+        conflicting["chat_template_kwargs"] = json!({ "thinking": true });
+        assert!(shape(conflicting).unwrap().get("thinking").is_none());
+        // An explicit `reasoning` wins over it.
+        let mut explicit = with("thinking", json!({ "type": "disabled" }));
+        explicit["reasoning"] = json!({ "effort": "high" });
+        assert_eq!(
+            shape(explicit).unwrap()["thinking"],
+            json!({ "type": "enabled" })
+        );
+
+        // A switched-on caller `thinking` is not translated and does not stand
+        // in for ours: on the OpenAI wire the gateway owns that key. On the
+        // Anthropic wire it is the caller's own control and still passes
+        // through.
         let callers = with(
             "thinking",
             json!({ "type": "enabled", "budget_tokens": 1024 }),
@@ -4402,7 +4422,7 @@ mod tests {
         .unwrap();
         let bodies =
             build_candidates(&callers, Endpoint::ChatComplete, &[anthropic], None, None).unwrap();
-        assert_eq!(bodies[0].1["thinking"]["budget_tokens"], 1024);
+        assert_eq!(bodies[0].body["thinking"]["budget_tokens"], 1024);
     }
 
     #[test]
@@ -4430,8 +4450,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bodies[0].1["reasoning_effort"], "medium");
-        assert!(bodies[0].1.get("reasoning").is_none());
+        assert_eq!(bodies[0].body["reasoning_effort"], "medium");
+        assert!(bodies[0].body.get("reasoning").is_none());
     }
 
     #[test]
@@ -4458,9 +4478,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(bodies[0].1["reasoning"]["max_tokens"], 1000);
-        assert_eq!(bodies[0].1["reasoning"]["enabled"], true);
-        assert!(bodies[0].1.get("reasoning_effort").is_none());
+        assert_eq!(bodies[0].body["reasoning"]["max_tokens"], 1000);
+        assert_eq!(bodies[0].body["reasoning"]["enabled"], true);
+        assert!(bodies[0].body.get("reasoning_effort").is_none());
 
         // An effort-only route reads the budget as an effort, where it used
         // to be skipped. A route with only an on/off switch still cannot carry
@@ -4485,9 +4505,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0].0, "effort:m");
-        assert_eq!(bodies[0].1["reasoning_effort"], "low");
-        assert!(bodies[0].1.get("reasoning").is_none());
+        assert_eq!(bodies[0].route_id, "effort:m");
+        assert_eq!(bodies[0].body["reasoning_effort"], "low");
+        assert!(bodies[0].body.get("reasoning").is_none());
     }
 
     #[test]
@@ -4519,7 +4539,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(
-                    bodies[0].1["reasoning_effort"], effort,
+                    bodies[0].body["reasoning_effort"], effort,
                     "{dialect} {budget}"
                 );
             }
@@ -4563,12 +4583,12 @@ mod tests {
         let bodies =
             build_candidates(&params, Endpoint::ChatComplete, &candidates, None, None).unwrap();
         assert_eq!(bodies.len(), 2);
-        assert_eq!(bodies[0].0, "openai:m");
+        assert_eq!(bodies[0].route_id, "openai:m");
         // OpenAI passthrough keeps messages as-is.
-        assert_eq!(bodies[0].1["messages"], params["messages"]);
-        assert_eq!(bodies[1].0, "anthropic:m");
+        assert_eq!(bodies[0].body["messages"], params["messages"]);
+        assert_eq!(bodies[1].route_id, "anthropic:m");
         // Anthropic shaping converts to Anthropic messages and max_tokens stays.
-        assert_eq!(bodies[1].1["max_tokens"], json!(8));
-        assert_eq!(bodies[1].1["messages"][0]["role"], json!("user"));
+        assert_eq!(bodies[1].body["max_tokens"], json!(8));
+        assert_eq!(bodies[1].body["messages"][0]["role"], json!("user"));
     }
 }

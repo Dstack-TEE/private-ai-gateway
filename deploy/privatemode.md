@@ -1,6 +1,6 @@
 # Deploy with the Privatemode proxy
 
-`compose.privatemode.yaml` runs the gateway and the official v1.59.0, digest-pinned
+`compose.privatemode.yaml` runs the gateway and the official v1.64.0, digest-pinned
 [Privatemode](../docs/providers/privatemode/verification.md) proxy in one
 measured dstack workload. The proxy owns Privatemode attestation, secret
 exchange, and E2EE; the gateway pins the proxy image, credential digest, and
@@ -8,6 +8,12 @@ internal origin. Everything else follows the
 [git-launcher deployment](README.md).
 
 Clients call the gateway exactly as they would with any other provider.
+
+The proxy keeps its existing command flags. Its new timeout flags retain the
+v1.59.0 defaults and allow long buffered and streaming inference responses;
+see [Proxy timeouts](../docs/providers/privatemode/verification.md#proxy-timeouts)
+for source analysis and the [provider review](../docs/providers/privatemode/review.md)
+for the v1.64.0 verification.
 
 ## Testing and quota operations
 
@@ -67,11 +73,15 @@ API; `bearer_token` is forbidden for Privatemode. To rotate the API key,
 rerender with the new `PRIVATEMODE_API_KEY` and redeploy both services; a
 mismatched secret fails closed.
 
-The proxy command sets `--disable-prompt-cache=false`, sharing one prompt-cache
-namespace across all callers of each proxy replica until it restarts. A valid
-caller-supplied `cache_salt` takes precedence. See
-[Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache) for
-salt lifetime, shard affinity, and the change from per-request isolation.
+The proxy command sets `--disable-prompt-cache=false`. With gateway middleware,
+authenticated requests receive a provider-specific per-user `cache_salt`; a
+caller's non-empty salt string subdivides that user's partition. Stable salts
+survive gateway/proxy restarts when the gateway's dstack KMS application key
+is unchanged. Anonymous middleware traffic has no generated salt and uses the
+proxy's startup-random namespace. Direct mode retains caller-salt behavior.
+
+See [Prompt cache](../docs/providers/privatemode/verification.md#prompt-cache)
+for cache policy and privacy limitations.
 
 After deployment, the gateway listens on port `8086` and serves inference like
 any other deployment. The admin API uses the admin token.
@@ -219,7 +229,7 @@ jq -e '
 credential_sha256="$(
   printf %s "$PRIVATEMODE_API_KEY" | sha256sum | cut -d' ' -f1
 )"
-proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff"
+proxy_image="ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334"
 
 # Require the signed receipt's cited session to describe the measured
 # Privatemode deployment that handled this request.
@@ -233,6 +243,7 @@ jq -e \
     .claims.extra.manifest_mode == "dynamic" and
     .claims.extra.manifest_observation == "latest-proxy-fetch-log" and
     .claims.extra.manifest_bound_to_active_secret == false and
+    (.claims.extra.observed_secret_id | type == "string" and length > 0) and
     (.claims.extra.observed_manifest_sha256 | test("^[0-9a-f]{64}$"))
   ' "$artifact_dir/session.json"
 ```

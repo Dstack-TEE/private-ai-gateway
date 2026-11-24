@@ -36,6 +36,8 @@ const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
 const LEGACY_E2EE_PURPOSE: &str = "aci.e2ee.v1";
 const LEGACY_ED25519_PURPOSE: &str = "aci.legacy.ed25519.v1";
 const PREFIX_HASH_PURPOSE: &str = "aci.prefix-hash.hmac-sha256.v1";
+const CACHE_SALT_PATH: &str = "aci/cache-salt-hmac-sha256/v1";
+const CACHE_SALT_PURPOSE: &str = "aci.cache-salt.hmac-sha256.v1";
 
 #[derive(Debug, Clone)]
 pub struct DstackAciProviderConfig {
@@ -248,6 +250,19 @@ fn decode_hex_field(field: &str, value: &str) -> Result<Vec<u8>, KeyError> {
 }
 
 impl DstackAciProvider {
+    /// Release the middleware cache-isolation key, separate from prefixHash.
+    /// Bumping both versioned constants rotates all user cache partitions.
+    pub async fn cache_salt_key(&self) -> Result<[u8; 32], KeyError> {
+        let (key, _signature_chain) = load_kms_raw32_key(
+            &self.client,
+            "cache-salt",
+            CACHE_SALT_PATH,
+            CACHE_SALT_PURPOSE,
+        )
+        .await?;
+        Ok(key)
+    }
+
     /// Derive the middleware's prefix-hash HMAC key. It stays inside the TEE,
     /// so the control plane cannot test guessed prefixes against `prefixHash`.
     pub async fn prefix_hash_key(&self) -> Result<[u8; 32], KeyError> {
@@ -275,11 +290,11 @@ impl DstackAciProvider {
             .map_err(|e| KeyError::Quote(format!("invalid dstack quote hex: {e}")))?;
         let returned_report_data = decode_hex_field("dstack report_data", &response.report_data)?;
         if returned_report_data != report_data {
-            return Err(KeyError::Quote(format!(
-                "dstack quote report_data mismatch: expected {}, got {}",
-                hex::encode(report_data),
-                hex::encode(returned_report_data)
-            )));
+            // The values stay out: on the legacy report path the expected one
+            // is the caller's nonce, and this text is logged.
+            return Err(KeyError::Quote(
+                "dstack quote report_data mismatch".to_string(),
+            ));
         }
         let info = self
             .client

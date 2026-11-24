@@ -1,6 +1,7 @@
 //! Interop with 0G's Go library (`tests/fixtures/0g-private-computer`) and the
 //! backend against a mock router and broker that run the enclave side.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
@@ -11,13 +12,14 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hpke::aead::{AeadCtxS, ChaCha20Poly1305};
 use hpke::kdf::HkdfSha256;
-use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
+use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, PskBundle, Serializable};
 use k256::ecdsa::SigningKey;
 use serde_json::json;
 use sha3::Keccak256;
 
 use super::protocol::{
-    binding_hash, decode, envelope_aad, recover_signer, Kem, E2EE, RESP_INFO, SEAL_INFO,
+    binding_hash, decode, envelope_aad, recover_signer, Kem, BIND, E2EE, RESP_BIND_INFO, RESP_INFO,
+    SEAL_INFO,
 };
 use super::*;
 
@@ -91,9 +93,19 @@ struct ResponseSealer {
 
 impl ResponseSealer {
     fn new(client_key: &[u8], request_hash: [u8; 32]) -> Self {
+        Self::with_psk(client_key, request_hash, None)
+    }
+
+    fn with_psk(client_key: &[u8], request_hash: [u8; 32], psk: Option<&[u8]>) -> Self {
         let recipient = <Kem as hpke::Kem>::PublicKey::from_bytes(client_key).unwrap();
+        let mode = psk.map_or(OpModeS::Base, |psk| {
+            OpModeS::Psk(PskBundle {
+                psk,
+                psk_id: RESP_BIND_INFO,
+            })
+        });
         let (encapped, context) = hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
-            &OpModeS::Base,
+            &mode,
             &recipient,
             RESP_INFO,
             &mut rand::rngs::OsRng,
@@ -156,20 +168,20 @@ impl ResponseSealer {
     }
 }
 
-fn fixture_opener(f: &Value) -> ResponseOpener {
+fn fixture_opener(f: &Value, bound: bool) -> ResponseOpener {
     let secret =
         Secret::from_bytes(&decode(f["client_eph_private_key"].as_str().unwrap()).unwrap())
             .unwrap();
-    let mut request_hash = [0u8; 32];
-    hex::decode_to_slice(
-        f["request_binding_hash"].as_str().unwrap(),
-        &mut request_hash,
-    )
-    .unwrap();
+    let vector = if bound { &f["response_bound"] } else { f };
+    let request_hash = hex::decode(vector["request_binding_hash"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
     ResponseOpener::new(
         secret,
         request_hash,
-        Some(f["request_plain"]["model"].clone()),
+        Some(vector["request_plain"]["model"].clone()),
+        bound,
     )
 }
 
@@ -183,33 +195,55 @@ fn interoperates_with_the_0g_go_library() {
     let signer = f["signer_address"].as_str().unwrap();
     let enc_secret =
         Secret::from_bytes(&decode(f["enc_private_key"].as_str().unwrap()).unwrap()).unwrap();
-    let (request, _, request_hash) =
-        open_request(&enc_secret, &object(&f["request_sealed"])).unwrap();
-    assert_eq!(Value::Object(request), f["request_plain"]);
-    assert_eq!(hex::encode(request_hash), f["request_binding_hash"]);
 
-    let mut buffered = fixture_opener(&f);
-    let body = buffered.open_frame(object(&f["response_sealed"])).unwrap();
-    assert_eq!(Value::Object(body), f["response_plain"]);
-    let text = buffered.signed_text(false).unwrap();
-    verify_signature(&fixture_signature(&f["response_signature"]), &text, signer).unwrap();
+    for bound in [false, true] {
+        let vector = if bound { &f["response_bound"] } else { &f };
+        let sealed = object(&vector["request_sealed"]);
+        assert!(!sealed.contains_key(BIND));
+        let (request, _, request_hash) = open_request(&enc_secret, &sealed).unwrap();
+        assert_eq!(request.contains_key(BIND), bound);
+        assert_eq!(Value::Object(request), vector["request_plain"]);
+        assert_eq!(hex::encode(request_hash), vector["request_binding_hash"]);
 
-    let mut stream = fixture_opener(&f);
-    for (frame, plain) in f["stream_frames"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(f["stream_plain"].as_array().unwrap())
-    {
-        assert_eq!(
-            &Value::Object(stream.open_frame(object(frame)).unwrap()),
-            plain
-        );
+        let mut buffered = fixture_opener(&f, bound);
+        let body = buffered
+            .open_frame(object(&vector["response_sealed"]))
+            .unwrap();
+        assert_eq!(Value::Object(body), f["response_plain"]);
+        let text = buffered.signed_text(false).unwrap();
+        verify_signature(
+            &fixture_signature(&vector["response_signature"]),
+            &text,
+            signer,
+        )
+        .unwrap();
+
+        let mut stream = fixture_opener(&f, bound);
+        for (frame, plain) in vector["stream_frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(f["stream_plain"].as_array().unwrap())
+        {
+            assert_eq!(
+                &Value::Object(stream.open_frame(object(frame)).unwrap()),
+                plain
+            );
+        }
+        let text = stream.signed_text(true).unwrap();
+        verify_signature(
+            &fixture_signature(&vector["stream_signature"]),
+            &text,
+            signer,
+        )
+        .unwrap();
+        assert!(verify_signature(
+            &fixture_signature(&vector["response_signature"]),
+            &text,
+            signer
+        )
+        .is_err());
     }
-    let text = stream.signed_text(true).unwrap();
-    verify_signature(&fixture_signature(&f["stream_signature"]), &text, signer).unwrap();
-    // The other response's signature does not verify this one.
-    assert!(verify_signature(&fixture_signature(&f["response_signature"]), &text, signer).is_err());
 
     // KAT from 0g-pc-e2ee client/sig: the broker's go-ethereum signer, key 0x11 * 32.
     let kat = format!("zg-sig-v1/e2ee-ct:{}:{}", "a".repeat(64), "b".repeat(64));
@@ -231,20 +265,20 @@ fn opener_refuses_tampered_reordered_and_unsealed_frames() {
 
     let mut tampered = object(&f["response_sealed"]);
     tampered["usage"]["completion_tokens"] = 999.into();
-    assert!(fixture_opener(&f).open_frame(tampered).is_err());
+    assert!(fixture_opener(&f, false).open_frame(tampered).is_err());
 
-    let mut reordered = fixture_opener(&f);
+    let mut reordered = fixture_opener(&f, false);
     reordered.open_frame(frames[0].clone()).unwrap();
     assert!(reordered.open_frame(frames[2].clone()).is_err());
 
-    let mut truncated = fixture_opener(&f);
+    let mut truncated = fixture_opener(&f, false);
     truncated.open_frame(frames[0].clone()).unwrap();
     assert!(truncated.signed_text(true).is_err());
 
     let mut unbound_usage = object(&f["response_sealed"]);
     unbound_usage[E2EE]["unbound_fields"] = json!(["model", "usage"]);
-    assert!(fixture_opener(&f).open_frame(unbound_usage).is_err());
-    assert!(fixture_opener(&f)
+    assert!(fixture_opener(&f, false).open_frame(unbound_usage).is_err());
+    assert!(fixture_opener(&f, false)
         .open_frame(object(&f["response_plain"]))
         .is_err());
 }
@@ -261,12 +295,12 @@ fn opener_refuses_duplicate_sealed_field_declarations() {
         json!(["choices", "choices"]),
         true,
     );
-    let mut opener = ResponseOpener::new(secret, [0; 32], None);
+    let mut opener = ResponseOpener::new(secret, [0; 32], None, false);
     assert!(opener.open_frame(object(&frame)).is_err());
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode {
+pub(crate) enum Mode {
     Ok,
     WrongSigner,
     SignatureMissing,
@@ -274,9 +308,17 @@ enum Mode {
     OversizedResponse,
     Unsealed,
     RouterError,
+    Conflict(&'static str),
+    Bound,
+    BoundTampered,
     Truncated,
+    TruncatedLine,
     Reordered,
     Tampered,
+    ForgedFailure,
+    ForgedFailureFinal,
+    ForgedMessagesTerminal,
+    SignedFailure,
 }
 
 struct Broker {
@@ -285,12 +327,13 @@ struct Broker {
     signing_key: SigningKey,
     requests: Mutex<Vec<(HeaderMap, Value)>>,
     signed_text: Mutex<String>,
+    signature_calls: AtomicUsize,
 }
 
-struct Fixture {
+pub(crate) struct Fixture {
     broker: Arc<Broker>,
-    backend: ZeroGProviderBackend,
-    event: UpstreamVerifiedEvent,
+    pub(crate) backend: Arc<ZeroGProviderBackend>,
+    pub(crate) event: UpstreamVerifiedEvent,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -301,6 +344,22 @@ impl Drop for Fixture {
 }
 
 impl Fixture {
+    pub(crate) async fn failure(mode: Mode, model: &str) -> Self {
+        let mut fixture = Self::new(mode).await;
+        fixture.event.model_id = model.into();
+        fixture.event.provider_claims.as_mut().unwrap()["instances"][ADDRESS]["model"] =
+            model.into();
+        fixture
+    }
+
+    pub(crate) fn signature_calls(&self) -> usize {
+        self.broker.signature_calls.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_calls(&self) -> usize {
+        self.broker.requests.lock().unwrap().len()
+    }
+
     async fn new(mode: Mode) -> Self {
         let (secret, enc_pub) = Kem::derive_keypair(&[1; 32]);
         let enc_pub = enc_pub.to_bytes();
@@ -311,6 +370,7 @@ impl Fixture {
             signing_key,
             requests: Mutex::default(),
             signed_text: Mutex::default(),
+            signature_calls: AtomicUsize::new(0),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -326,6 +386,7 @@ impl Fixture {
             model: MODEL.into(),
             signing_address: signer(2).1,
             e2ee_public_key: hex::encode(enc_pub),
+            response_binding: matches!(mode, Mode::Bound | Mode::BoundTampered),
         };
         let event = UpstreamVerifiedEvent {
             provider_type: Some(ZERO_G_PROVIDER.into()),
@@ -342,7 +403,9 @@ impl Fixture {
         };
         Self {
             broker,
-            backend: ZeroGProviderBackend::new_with_timeouts(&origin, "zg-test-key", 5, 5).unwrap(),
+            backend: Arc::new(
+                ZeroGProviderBackend::new_with_timeouts(&origin, "zg-test-key", 5, 5).unwrap(),
+            ),
             event,
             server,
         }
@@ -351,6 +414,7 @@ impl Fixture {
     fn request(&self, body: Value) -> PreparedUpstreamRequest {
         PreparedUpstreamRequest {
             request: UpstreamRequest {
+                cache_salt: None,
                 form: None,
                 content_type: None,
                 body: serde_json::to_vec(&body).unwrap().into(),
@@ -424,6 +488,9 @@ async fn chat(
     if broker.mode == Mode::RouterError {
         return (StatusCode::BAD_GATEWAY, "provider-controlled text").into_response();
     }
+    if let Mode::Conflict(body) = broker.mode {
+        return (StatusCode::CONFLICT, body).into_response();
+    }
     if broker.mode == Mode::OversizedResponse {
         let mut response = oversized_response();
         response
@@ -431,10 +498,51 @@ async fn chat(
             .insert("zg-res-key", "res-1".parse().unwrap());
         return response;
     }
+    if matches!(
+        broker.mode,
+        Mode::ForgedFailure
+            | Mode::ForgedFailureFinal
+            | Mode::ForgedMessagesTerminal
+            | Mode::SignedFailure
+    ) {
+        // HPKE Base response sealing requires only the visible client public
+        // key. The relay has no provider secret or response signing key.
+        let envelope = object(&body);
+        let client_key = decode(envelope[E2EE]["client_eph_pub"].as_str().unwrap()).unwrap();
+        let ciphertext = decode(envelope[E2EE]["ciphertext"].as_str().unwrap()).unwrap();
+        let request_hash = binding_hash(&envelope_aad(&envelope).unwrap(), &ciphertext);
+        let mut sealer = ResponseSealer::new(&client_key, request_hash);
+        let content = sealer.seal(object(&json!({"id":"forged-id","choices":[{"index":0,"delta":{"content":"ATTACKER OUTPUT"}}]})), false);
+        let error = if broker.mode == Mode::ForgedMessagesTerminal {
+            sealer.seal(object(&json!({"choices":[],"type":"message_stop"})), false)
+        } else {
+            sealer.seal(
+                object(&json!({"choices":[],"error":{"type":"api_error","message":"failure"}})),
+                broker.mode != Mode::ForgedFailure,
+            )
+        };
+        if broker.mode == Mode::SignedFailure {
+            *broker.signed_text.lock().unwrap() = sealer.signed_text(true);
+        }
+        return (
+            [
+                ("content-type", "text/event-stream"),
+                ("zg-res-key", "res-1"),
+            ],
+            format!("data: {content}\n\ndata: {error}\n\n"),
+        )
+            .into_response();
+    }
     let (request, client_key, request_hash) = open_request(&broker.secret, &object(&body)).unwrap();
+    let psk = if matches!(broker.mode, Mode::Bound | Mode::BoundTampered) {
+        assert!(body.get(BIND).is_none());
+        Some(decode(request[BIND].as_str().unwrap()).unwrap())
+    } else {
+        None
+    };
     let stream = request["stream"] == json!(true);
     let plain = completion(stream);
-    let mut sealer = ResponseSealer::new(&client_key, request_hash);
+    let mut sealer = ResponseSealer::with_psk(&client_key, request_hash, psk.as_deref());
     let last = plain.len() - 1;
     let mut frames: Vec<Value> = plain
         .iter()
@@ -455,14 +563,19 @@ async fn chat(
             frames.pop();
         }
         Mode::Reordered => frames.swap(0, 1),
-        Mode::Tampered => frames[1]["id"] = "forged".into(),
+        Mode::Tampered | Mode::BoundTampered => frames[1]["id"] = "forged".into(),
         _ => {}
     }
     let mut response = if stream {
         let events: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
         (
             [("content-type", "text/event-stream")],
-            events + "data: [DONE]\n\n",
+            events
+                + if broker.mode == Mode::TruncatedLine {
+                    "data: {"
+                } else {
+                    "data: [DONE]\n\n"
+                },
         )
             .into_response()
     } else {
@@ -475,6 +588,13 @@ async fn chat(
 }
 
 async fn signature(State(broker): State<Arc<Broker>>) -> Response {
+    broker.signature_calls.fetch_add(1, Ordering::Release);
+    if matches!(
+        broker.mode,
+        Mode::ForgedFailure | Mode::ForgedFailureFinal | Mode::ForgedMessagesTerminal
+    ) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if broker.mode == Mode::SignatureMissing {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -561,6 +681,62 @@ async fn buffered_response_without_a_verified_signature_is_a_generic_error() {
 }
 
 #[tokio::test]
+async fn only_the_stale_key_conflict_triggers_reverification() {
+    let stale = Fixture::new(Mode::Conflict(concat!(
+        r#"{"error":""#,
+        "e2ee_key_mismatch",
+        r#": re-fetch the enc key and re-seal"}"#,
+    )))
+    .await;
+    assert!(matches!(
+        stale.buffered().await,
+        Err(UpstreamError::ChannelBindingMismatch(_))
+    ));
+    assert!(matches!(
+        stale
+            .backend
+            .forward_stream_verified_prepared(stale.chat(true), &stale.event)
+            .await,
+        Err(UpstreamError::ChannelBindingMismatch(_))
+    ));
+    assert_eq!(stale.signature_calls(), 0);
+
+    for body in [
+        r#"{"error":"unrelated conflict"}"#,
+        concat!(r#"{"error":"other: "#, "e2ee_key_mismatch", r#""}"#),
+        "e2ee_key_mismatch",
+    ] {
+        let fixture = Fixture::new(Mode::Conflict(body)).await;
+        assert!(matches!(
+            fixture.buffered().await,
+            Err(UpstreamError::Upstream { status: 409 })
+        ));
+    }
+}
+
+#[tokio::test]
+async fn advertised_response_binding_requires_psk_before_releasing_chunks() {
+    let bound = Fixture::new(Mode::Bound).await;
+    assert!(bound.buffered().await.is_ok());
+    let events = bound.stream().await;
+    assert_eq!(events.len(), 4);
+    assert_eq!(events.last().unwrap().as_deref(), Ok("data: [DONE]\n\n"));
+
+    let mut base = Fixture::new(Mode::Ok).await;
+    base.event.provider_claims.as_mut().unwrap()["instances"][ADDRESS]["response_binding"] =
+        true.into();
+    assert!(matches!(
+        base.buffered().await,
+        Err(UpstreamError::ResponseBindingMismatch { instance_id }) if instance_id == ADDRESS
+    ));
+    assert!(matches!(
+        base.backend.forward_stream_verified_prepared(base.chat(true), &base.event).await,
+        Err(UpstreamError::ResponseBindingMismatch { instance_id }) if instance_id == ADDRESS
+    ));
+    assert_eq!(base.signature_calls(), 0);
+}
+
+#[tokio::test]
 async fn stream_ends_in_done_only_after_the_signature_verifies() {
     let fixture = Fixture::new(Mode::Ok).await;
     let events: Vec<String> = fixture
@@ -599,7 +775,33 @@ async fn stream_ends_in_done_only_after_the_signature_verifies() {
 }
 
 #[tokio::test]
-async fn refuses_before_sending_without_a_binding_or_with_an_e2ee_field() {
+async fn incomplete_envelope_is_an_upstream_transport_failure() {
+    let fixture = Fixture::new(Mode::TruncatedLine).await;
+    let response = fixture
+        .backend
+        .forward_stream_verified_prepared(fixture.chat(true), &fixture.event)
+        .await
+        .unwrap();
+    let items: Vec<_> = response.body.collect().await;
+    assert!(items
+        .iter()
+        .flatten()
+        .all(|event| !event.windows(6).any(|part| part == b"[DONE]")));
+    let error = items.into_iter().last().unwrap().unwrap_err();
+    assert!(matches!(error, UpstreamError::EnvelopeTruncated));
+    let failure = crate::middleware::sse::StreamFailure::from_error(
+        &crate::aggregator::service::ServiceError::Upstream(error),
+    );
+    assert_eq!(failure.status, 502);
+    assert_eq!(failure.source, None);
+    assert_eq!(
+        failure.class,
+        Some(crate::middleware::types::ErrorClass::UpstreamTransport)
+    );
+}
+
+#[tokio::test]
+async fn refuses_before_sending_without_a_binding_or_with_a_reserved_field() {
     let fixture = Fixture::new(Mode::Ok).await;
     let mut unbound = fixture.event.clone();
     unbound.channel_bindings.clear();
@@ -610,13 +812,15 @@ async fn refuses_before_sending_without_a_binding_or_with_an_e2ee_field() {
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
 
-    let body = json!({"model": MODEL, "messages": [], E2EE: {"v": 1}});
-    let err = fixture
-        .backend
-        .forward_verified_prepared(fixture.request(body), &fixture.event)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{err}");
+    for field in [E2EE, BIND] {
+        let body = json!({"model": MODEL, "messages": [], field: {"v": 1}});
+        let err = fixture
+            .backend
+            .forward_verified_prepared(fixture.request(body), &fixture.event)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{err}");
+    }
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
 }
 
@@ -664,4 +868,14 @@ async fn fields_outside_the_cleartext_set_are_sealed() {
     let mut rewritten = sent;
     rewritten["max_tokens"] = 4096.into();
     assert!(open_request(&fixture.broker.secret, &rewritten).is_none());
+}
+
+pub(crate) async fn characterization_source() -> String {
+    Fixture::new(Mode::Ok)
+        .await
+        .stream()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect()
 }

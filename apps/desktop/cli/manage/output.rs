@@ -44,6 +44,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Service { command } => match command {
             Service::Start => "Backend started.".into(),
             Service::Stop => "Backend stopped.".into(),
+            Service::Restart => "Backend restarted.".into(),
             Service::Status => status(value),
         },
         Action::App {
@@ -118,6 +119,19 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             WebUiPassword::Rotate => "Web UI password rotated.".into(),
         },
         Action::Diagnostics { .. } => exported(value),
+        Action::Update => match value["version"].as_str() {
+            Some(version) => format!(
+                "Updated {} → {}.{}",
+                text(&value["currentVersion"]),
+                safe(version),
+                if value["protectionResumed"] == true {
+                    " Protection is on again."
+                } else {
+                    ""
+                }
+            ),
+            None => format!("Up to date ({}).", text(&value["currentVersion"])),
+        },
         Action::Cli { .. } | Action::Doctor | Action::Completions { .. } => details(value),
     }
 }
@@ -164,7 +178,7 @@ fn agents(value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: pap service start\nStart protection: pap start".into();
+        return "Backend not running. Agents connected through it cannot reach the Local API.\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
@@ -179,10 +193,10 @@ fn status(value: &Value) -> String {
                 "Not protected (verification failed)"
             }
         }
+        _ if state["endpointError"].is_string() => "Not protected (Local API unavailable)",
         _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",
-        Some("blocked") => "Not protected (blocked)",
         Some("error") => "Not protected (error)",
         _ => "Not protected",
     };

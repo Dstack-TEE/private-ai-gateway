@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rmdir } from "node:fs/promises";
+import { mkdtemp, readFile, rmdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as sleep } from "node:timers/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -25,6 +26,11 @@ try {
       tell application "Finder"
         open volumeFolder
         delay 1
+        -- Finder can list a fresh volume's items a moment after opening it.
+        repeat 20 times
+          if exists item appName of volumeFolder then exit repeat
+          delay 0.5
+        end repeat
         set appPoint to position of item appName of volumeFolder
         set folderPoint to position of item "Applications" of volumeFolder
         set windowBounds to bounds of container window of volumeFolder
@@ -44,6 +50,29 @@ try {
   assert.deepEqual(await readFile(background), await readFile(path.join(appRoot, "src-tauri", layout.background)));
   console.log(`Verified DMG app/Applications centers, window and icon size: ${coordinates}`);
 } finally {
-  if (mounted) execFileSync("hdiutil", ["detach", mount], { timeout: 30_000, stdio: "pipe" });
+  if (mounted) await detach(mount);
   await rmdir(mount).catch((error) => { if (error.code !== "ENOENT") throw error; });
+}
+
+// Finder can keep the volume busy for a moment after closing its window, so
+// retry the unmount and force only the last attempt.
+async function detach(mount) {
+  for (let attempt = 1; ; attempt += 1) {
+    const force = attempt === 5 ? ["-force"] : [];
+    try {
+      execFileSync("hdiutil", ["detach", mount, ...force], { timeout: 30_000, stdio: "pipe" });
+      return;
+    } catch (error) {
+      // A failed attempt can still finish the unmount.
+      if (!(await isMounted(mount))) return;
+      if (force.length) throw error;
+      await sleep(1_000 * attempt);
+    }
+  }
+}
+
+// A mount point is on a different device than the folder that contains it.
+async function isMounted(mount) {
+  const [inner, outer] = await Promise.all([stat(mount), stat(path.dirname(mount))]);
+  return inner.dev !== outer.dev;
 }

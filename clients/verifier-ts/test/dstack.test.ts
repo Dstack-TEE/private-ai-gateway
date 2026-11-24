@@ -21,9 +21,7 @@ interface Event {
   event: string;
   event_payload: string;
 }
-const recorded = JSON.parse(
-  readFileSync(new URL('../../test/fixtures/dstack_v1_attestation.json', import.meta.url), 'utf8'),
-) as {
+interface RecordedAttestation {
   nonce: string;
   captured_at: string;
   report: AttestationReport;
@@ -33,7 +31,7 @@ const recorded = JSON.parse(
     headers: Record<string, string>;
     body_base64: string;
   }[];
-};
+}
 const fixture = JSON.parse(
   readFileSync(new URL('../../test/fixtures/dstack_event_vectors.json', import.meta.url), 'utf8'),
 ) as {
@@ -65,6 +63,12 @@ for (const vector of fixture.vectors) {
 }
 
 test('vendor-valid recorded quote rejects forged compose payload without changing quote or digests', async (t) => {
+  const path = process.env.DSTACK_V1_ATTESTATION_FIXTURE;
+  if (!path) {
+    t.skip('Set DSTACK_V1_ATTESTATION_FIXTURE to the private recording');
+    return;
+  }
+  const recorded = JSON.parse(readFileSync(path, 'utf8')) as RecordedAttestation;
   // Verify real quote signatures, vendor roots and report_data offline using
   // the recorded collateral and its capture time.
   const now = Math.floor(Date.parse(recorded.captured_at) / 1000);

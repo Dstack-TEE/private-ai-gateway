@@ -9,11 +9,12 @@ use serde_json::Value;
 
 use super::tls::{pinned_spki_client, response_headers};
 use super::{
-    read_buffered_upstream_response, transport_error, PreparedUpstreamRequest, UpstreamBackend,
-    UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    read_buffered_upstream_response, transport_error, PreparedUpstreamRequest, SseProtocol,
+    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
     DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use crate::endpoint::Endpoint;
 
 /// Version header required by the native Anthropic API on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -44,6 +45,7 @@ pub struct OpenAICompatibleBackend {
     name: String,
     base_url: String,
     path: String,
+    messages_protocol: Option<SseProtocol>,
     auth: Option<UpstreamAuth>,
     client: reqwest::Client,
     pinned_client: PinnedClientCache,
@@ -115,6 +117,7 @@ impl OpenAICompatibleBackend {
             name: "openai-compatible".to_string(),
             base_url: base,
             path: "/v1/chat/completions".to_string(),
+            messages_protocol: None,
             auth: None,
             client,
             pinned_client: PinnedClientCache::default(),
@@ -149,6 +152,11 @@ impl OpenAICompatibleBackend {
 
     pub fn with_anthropic_api_key(mut self, key: impl Into<String>) -> Self {
         self.auth = Some(UpstreamAuth::AnthropicApiKey(key.into()));
+        self
+    }
+
+    pub(crate) fn with_anthropic_protocol(mut self) -> Self {
+        self.messages_protocol = Some(SseProtocol::AnthropicMessages);
         self
     }
 
@@ -195,9 +203,9 @@ pub(super) fn rewrite_request_model(
     upstream_model_id: &str,
 ) -> Result<Vec<u8>, UpstreamError> {
     let mut parsed: Value = serde_json::from_slice(body)
-        .map_err(|e| UpstreamError::Routing(format!("invalid JSON request body: {e}")))?;
+        .map_err(|e| UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}")))?;
     let Some(obj) = parsed.as_object_mut() else {
-        return Err(UpstreamError::Routing(
+        return Err(UpstreamError::InvalidRequest(
             "request body must be a JSON object".to_string(),
         ));
     };
@@ -206,7 +214,7 @@ pub(super) fn rewrite_request_model(
             *model = Value::String(upstream_model_id.to_string());
         }
         _ => {
-            return Err(UpstreamError::Routing(
+            return Err(UpstreamError::InvalidRequest(
                 "request body must contain a string model field".to_string(),
             ));
         }
@@ -222,6 +230,20 @@ impl UpstreamBackend for OpenAICompatibleBackend {
 
     fn url_origin(&self) -> Option<&str> {
         Some(&self.base_url)
+    }
+
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        match operation {
+            Endpoint::ChatComplete => Some(SseProtocol::OpenaiChat),
+            Endpoint::Messages => self.messages_protocol,
+            Endpoint::Complete => Some(SseProtocol::OpenaiChat),
+            Endpoint::CreateModelResponse => Some(SseProtocol::OpenaiResponses),
+            _ => None,
+        }
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
