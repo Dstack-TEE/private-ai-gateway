@@ -9,6 +9,9 @@ Date: 2026-11-23 PST (currency check). Original review: 2026-05-22 UTC.
 > `v0.0.26-beta.2` and is retained as history. See [verification.md](verification.md)
 > for the current adapter algorithm, claims, and limitations.
 
+On 2026-11-23 PST, the adapter added a warning for unpinned SecretAI upstreams.
+Verification still succeeds when all mandatory checks pass.
+
 ## Currency check (2026-11-23 PST)
 
 Reviewed the deployment at `secretai-jedi.scrtlabs.com:21434`, running SecretVM
