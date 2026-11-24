@@ -146,7 +146,7 @@ fn provider_attestation_scopes() {
 }
 
 #[test]
-fn parse_phala_direct_accepts_only_well_formed_optional_compose_pins() {
+fn parse_phala_direct_validates_only_compose_subjects() {
     let mut config = serde_json::json!({
         "name": "phala",
         "provider": "phala-direct",
@@ -158,15 +158,21 @@ fn parse_phala_direct_accepts_only_well_formed_optional_compose_pins() {
     config["accepted_subjects"] = serde_json::json!([]);
     assert!(parse_config_text(&format!("[{config}]")).is_ok());
 
-    let pin = format!("dstack-compose:sha256:{}", "ab".repeat(32));
-    config["accepted_subjects"] = serde_json::json!([pin]);
+    let foreign_subject = format!("app-id:0x{}", "ab".repeat(20));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject]);
     assert!(parse_config_text(&format!("[{config}]")).is_ok());
 
-    config["accepted_subjects"] = serde_json::json!([pin, "dstack-compose:sha256:bad"]);
-    let error = parse_config_text(&format!("[{config}]")).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("dstack-compose:sha256:<64 lowercase hex>"));
+    let pin = format!("dstack-compose:sha256:{}", "ab".repeat(32));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject, pin]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    for malformed in ["dstack-compose:sha256:bad", "dstack-compose:"] {
+        config["accepted_subjects"] = serde_json::json!([foreign_subject, pin, malformed]);
+        let error = parse_config_text(&format!("[{config}]")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("dstack-compose:sha256:<64 lowercase hex>"));
+    }
 }
 
 #[test]

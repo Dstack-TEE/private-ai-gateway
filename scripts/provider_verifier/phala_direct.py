@@ -22,6 +22,7 @@ from .common import (
 )
 
 ACCEPTED_SUBJECT_OPTION = "phala_direct_accepted_subject:"
+COMPOSE_SUBJECT_PREFIX = "dstack-compose:"
 
 
 def _phala_direct_compose_hash_ok(
@@ -232,13 +233,13 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     dstack_details = dstack_result["details"]
     app_info = dstack_details["app_info"]
     compose_hash = app_info["compose_hash"]
-    accepted_subjects = {
+    compose_pins = {
         key[len(ACCEPTED_SUBJECT_OPTION):]
         for key, value in options.items()
-        if key.startswith(ACCEPTED_SUBJECT_OPTION) and value == "true"
+        if key.startswith(ACCEPTED_SUBJECT_OPTION + COMPOSE_SUBJECT_PREFIX) and value == "true"
     }
-    subject = f"dstack-compose:sha256:{str(compose_hash).lower()}"
-    if accepted_subjects and subject not in accepted_subjects:
+    subject = f"{COMPOSE_SUBJECT_PREFIX}sha256:{str(compose_hash).lower()}"
+    if compose_pins and subject not in compose_pins:
         failed(
             provider,
             "PhalaDirect measured compose hash is not in accepted_subjects",

@@ -243,18 +243,23 @@ def check() -> list[str]:
     if out.get("result") != "failed" or "compose hash" not in (out.get("reason") or ""):
         f.append(f"no-measured-compose: expected failure, got {out!r}")
 
-    # --- a matching measured compose pin permits verification ---
+    foreign_subject = "app-id:0x" + "ab" * 20
+    out = _run(report_builder=lambda n: _report(n), accepted_subjects=(foreign_subject,))
+    if out.get("result") != "verified":
+        f.append(f"foreign-subject: expected verification without a compose pin, got {out!r}")
+
+    # --- a matching measured compose pin permits verification in a mixed list ---
     out = _run(
         report_builder=lambda n: _report(n),
-        accepted_subjects=(f"dstack-compose:sha256:{MEASURED_COMPOSE_HASH}",),
+        accepted_subjects=(foreign_subject, f"dstack-compose:sha256:{MEASURED_COMPOSE_HASH}"),
     )
     if out.get("result") != "verified":
         f.append(f"compose-pin-match: expected verified, got {out!r}")
 
-    # --- measured compose integrity alone cannot satisfy a different pin ---
+    # --- a foreign subject cannot satisfy a mismatching compose pin ---
     out = _run(
         report_builder=lambda n: _report(n),
-        accepted_subjects=("dstack-compose:sha256:" + "ab" * 32,),
+        accepted_subjects=(foreign_subject, "dstack-compose:sha256:" + "ab" * 32),
     )
     if out.get("result") != "failed" or out.get("failure") != "provenance_not_accepted":
         f.append(f"compose-pin-mismatch: expected provenance rejection, got {out!r}")

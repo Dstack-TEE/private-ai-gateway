@@ -256,12 +256,13 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         if upstream.provider == UpstreamProvider::PhalaDirect {
             let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
             if let Some(bad) = subjects.iter().find(|subject| {
-                !subject
-                    .strip_prefix("dstack-compose:sha256:")
-                    .is_some_and(|hex| {
-                        hex.len() == 64
-                            && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-                    })
+                subject.starts_with("dstack-compose:")
+                    && !subject
+                        .strip_prefix("dstack-compose:sha256:")
+                        .is_some_and(|hex| {
+                            hex.len() == 64
+                                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                        })
             }) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
                     "upstream {:?} provider phala-direct accepted_subjects entry {bad:?} must be dstack-compose:sha256:<64 lowercase hex>",

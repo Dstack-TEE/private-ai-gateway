@@ -47,11 +47,13 @@ Use one upstream entry per distinct origin. Several public aliases can share an 
 
 ## Compose pins
 
-Set the upstream's `accepted_subjects` to reviewed hashes in the form
-`dstack-compose:sha256:<64 lowercase hex>`. When the list has entries, the
-RTMR3-verified compose hash must match one of them. An unset or empty list
-uses the default compose integrity check. Invalid pin syntax fails config
-validation at load. The adapter emits the verified hash as `compose_hash`.
+Add reviewed hashes to the upstream's `accepted_subjects` in the form
+`dstack-compose:sha256:<64 lowercase hex>`. Entries beginning with
+`dstack-compose:` must use this syntax or config validation fails at load.
+Phala Direct ignores other entries, such as `app-id:0x<hex>`. A list with no
+compose pins uses the default compose integrity check. When compose pins are
+present, the RTMR3-verified compose hash must match one of them. The adapter
+emits the verified hash as `compose_hash`.
 
 ## Provider claims recorded
 
@@ -139,8 +141,9 @@ It runs `scripts/soundness_phala_direct.py`, which stubs the HTTP fetch, dstack 
 | dstack verifier returns `is_valid: false` | Rejected. |
 | `app_compose` that differs from the measured `compose-hash` event, even with a matching `info.compose_hash` | Rejected. |
 | dstack verifier result without a measured compose hash | Rejected. |
-| Measured compose hash matches a configured pin | Verified. |
-| Measured compose hash misses every configured pin | Rejected. |
+| `accepted_subjects` contains only an `app-id:` entry | Verified without Compose pinning. |
+| Mixed list and the measured compose hash matches a compose pin | Verified. |
+| Mixed list and the measured compose hash misses every compose pin | Rejected. |
 | GPU nonce mismatch | Verified with `gpu_evidence_nonce_matched: false` and `gpu_verified: false`. |
 | NRAS failure | Verified with `gpu_verified: false`. |
 | Unresolvable OS image | Verified with `production_os_image: null`. |
