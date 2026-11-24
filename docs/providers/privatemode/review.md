@@ -1,12 +1,35 @@
 # Privatemode provider review
 
-Audit date: 2026-05-26 UTC. Provider behavior was rechecked against
-Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
-changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
-manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
-traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-reference deployment pins v1.64.0, with source checked on 2026-11-14 PST;
-production rollout remains pending.
+The current reviewed version is Privatemode v1.64.0, checked on 2026-11-23 PST.
+The reference deployment pins proxy OCI index digest
+`sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`.
+The original audit was on 2026-05-26 UTC.
+
+Provider behavior was rechecked against Privatemode v1.48 and the live manifest
+on 2026-07-09. The gateway adapter changed to the measured co-deployment
+boundary on 2026-07-13 and to dynamic manifest mode on 2026-07-31. The pinned
+v1.48 image was retested against live traffic on 2026-09-23, and upstream source
+through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
+
+> **Currency check (2026-11-23 PST).** [Privatemode v1.64.0][v164-release],
+> released on 2026-11-14 at tag commit `3c98e0ab`, remains the latest upstream
+> release. The GHCR `v1.64.0` and `latest` tags both resolve to the pinned
+> digest above.
+>
+> The production replica reached through `tee.redpill.ai` passed `pap verify`
+> checks `id-1` through `id-4` and `id-6` with a fresh nonce and TDX TCB status
+> `UpToDate`. The verifier skipped `id-5` because the command supplied no
+> custody policy. The attested gateway commit was `3147f871` and the measured
+> Compose hash was
+> `261760d004c92eab0b6bed59a55cf3214c65d2cb543a1bed6dff371cd2650a7a`.
+> The production Compose pins the v1.64.0 proxy digest with
+> `--api-key-fallback=always`, `--disable-prompt-cache=false`,
+> `--nvidia-ocsp-allow-unknown=false`, and
+> `--nvidia-ocsp-revoked-grace-period=0`.
+>
+> The session still binds the measured proxy image and credential digests.
+> The 2026-11-14 run below provides per-session receipt evidence. This check
+> covered gateway attestation. The verdict remains **acceptable with conditions**.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
@@ -127,7 +150,9 @@ production rollout remains pending.
 > test key: startup attestation, buffered and streaming `glm-5.3` calls, receipt
 > audit with zero failures, and a secret rotation picked up by the gateway.
 > Proxy responses carry no secret-ID header, so manifest binding stays false.
-> Production rollout remains pending.
+> Production rollout was pending at the time. See the 2026-11-23 currency check.
+
+[v164-release]: https://github.com/edgelesssys/privatemode-public/releases/tag/v1.64.0
 [v162-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.59.0...v1.62.0
 
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
@@ -161,9 +186,9 @@ Deployment conditions:
 - Bind the accepted credential digest in measured static policy and require a
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
-- Expose only the gateway listener from the workload network. Version 1.62 of
-  the official proxy supports `--listen-address` and defaults to `0.0.0.0`;
-  the Compose keeps that default within its private network.
+- Expose only the gateway listener from the workload network. The official
+  proxy has supported `--listen-address` since v1.58, including in v1.64. The
+  Compose keeps the `0.0.0.0` default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
   unknown status and use no revoked-certificate grace period.
 - Use the proxy's dynamic manifest mode so provider updates do not require a
@@ -226,10 +251,10 @@ Open or conditional:
 - Privatemode does not expose a per-worker TLS SPKI or public E2EE key for the
   gateway to pin directly. Its binding is transitive through the manifest,
   attested Coordinator/Mesh CA, and secret-release protocol.
-- Version 1.62 does not expose which manifest produced the active inference
-  secret. Its manifest history is written before attestation and secret
-  exchange complete. The gateway therefore reports the latest fetched digest
-  but does not use it for manifest-specific claims.
+- Version 1.64 logs the secret ID for each successful exchange alongside its
+  manifest. That log supports reporting the latest observed manifest digest
+  and secret ID. A proxy response would need to identify the secret selected
+  for the request before the gateway could make manifest-specific claims.
 - The exact served worker is not named in a per-request signed receipt. ACI
   records the selected model and measured proxy session.
 
