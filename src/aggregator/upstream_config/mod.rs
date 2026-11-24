@@ -25,6 +25,8 @@ use crate::aci::upstream::{
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
 mod builders;
+#[cfg(test)]
+mod check;
 mod dynamic;
 mod pull;
 #[cfg(test)]
@@ -299,6 +301,30 @@ pub struct UpstreamRuntimeOptions {
     /// Statically measured Privatemode sidecar policy. Dynamic upstream config
     /// may select this deployment but cannot replace its endpoint or pins.
     pub privatemode_proxy: Option<Arc<PrivatemodeProxyDeployment>>,
+}
+
+impl Default for UpstreamRuntimeOptions {
+    fn default() -> Self {
+        use crate::aci::upstream::{
+            DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+        };
+        use crate::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
+
+        Self {
+            max_buffered_response_bytes: MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_subjects: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+            read_timeout_seconds: DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+            verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+            privatemode_proxy: None,
+        }
+    }
 }
 
 /// Connection details for fetching a model's attestation report from its

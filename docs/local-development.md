@@ -109,6 +109,28 @@ npm --prefix clients run lint:packages
 bash clients/package-smoke.sh
 ```
 
+## Replay an upstream config offline
+
+From the candidate checkout, run the ignored test with a local copy of the
+control-plane response's `upstreams` array. Once Cargo's dependencies are
+cached, run it with network access disabled for Cargo.
+
+```bash
+UPSTREAM_CONFIG_CHECK_FILE=/path/to/upstreams.json \
+  cargo test --locked --offline --lib aggregator::upstream_config::check::replay_from_file \
+  -- --exact --ignored --nocapture
+```
+
+For Privatemode routes, also set `UPSTREAM_CONFIG_CHECK_PRIVATEMODE_POLICY` to
+a local JSON file containing the static gateway config's
+[`privatemode_proxy` object](configuration-reference.md#privatemode-proxy).
+The policy's absolute `credential_path` must be readable on the replay host.
+
+The test runs config validation and constructs the gateway backends and
+verifiers offline. It prints provider counts, model IDs, subject-kind counts,
+and field labels for failures. Compare the exact IDs on flagged NEAR AI routes
+against the provider's canonical catalog.
+
 ## Start the gateway without inference routes
 
 Create a writable state directory and a static config:

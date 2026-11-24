@@ -3689,6 +3689,7 @@ dependencies = [
  "serde-human-bytes",
  "serde_json",
  "serde_json_canonicalizer",
+ "serde_path_to_error",
  "sha2 0.10.9",
  "sha3 0.10.9",
  "sse-stream",

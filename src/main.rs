@@ -30,11 +30,7 @@ use std::time::Duration;
 use aci_verify::decode_hex_32;
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
-use private_ai_gateway::aci::upstream::{
-    PrivatemodeProxyDeployment, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
-};
-use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
+use private_ai_gateway::aci::upstream::PrivatemodeProxyDeployment;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
     DEFAULT_ATTESTED_SESSION_TTL_SECONDS, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
@@ -42,7 +38,7 @@ use private_ai_gateway::aggregator::service::{
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
     parse_config_text, PullRefreshOutcome, UpstreamConfigManager, UpstreamConfigPuller,
-    UpstreamPullConfig, UpstreamRuntimeOptions, UpstreamVerifierMode,
+    UpstreamPullConfig, UpstreamRuntimeOptions,
 };
 use private_ai_gateway::dstack::{DstackAciProvider, DstackAciProviderConfig};
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
@@ -522,16 +518,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         upstream_config_path.clone(),
         UpstreamRuntimeOptions {
             max_buffered_response_bytes: gateway_config.max_buffered_response_bytes,
-            verifier_mode: UpstreamVerifierMode::None,
-            accepted_subjects: Vec::new(),
-            accepted_image_digests: Vec::new(),
-            accepted_dstack_kms_root_public_keys: Vec::new(),
-            pccs_url: None,
-            verifier_cache_seconds: 300,
-            connect_timeout_seconds: DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-            read_timeout_seconds: DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
-            verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
             privatemode_proxy,
+            ..UpstreamRuntimeOptions::default()
         },
     )?);
     let upstream_puller = match upstream_pull_config {

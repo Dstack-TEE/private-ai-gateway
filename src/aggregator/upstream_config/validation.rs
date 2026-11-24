@@ -170,25 +170,36 @@ pub fn parse_config_text(text: &str) -> Result<Vec<UpstreamConfig>, UpstreamConf
 }
 
 pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamConfigError> {
+    validate_config_with(config, |_, _, error| Err(error))
+}
+
+pub(super) fn validate_config_with(
+    config: &[UpstreamConfig],
+    mut report: impl FnMut(
+        &UpstreamConfig,
+        &'static str,
+        UpstreamConfigError,
+    ) -> Result<(), UpstreamConfigError>,
+) -> Result<(), UpstreamConfigError> {
     let mut names = HashSet::new();
     let mut route_ids = HashSet::new();
     for upstream in config {
+        let mut invalid =
+            |field, message| report(upstream, field, UpstreamConfigError::InvalidConfig(message));
         if upstream.name.trim().is_empty() {
-            return Err(UpstreamConfigError::InvalidConfig(
-                "upstream name must not be empty".to_string(),
-            ));
+            invalid("name", "upstream name must not be empty".to_string())?;
         }
         if !names.insert(upstream.name.as_str()) {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream name {:?} is duplicated",
-                upstream.name
-            )));
+            invalid(
+                "name",
+                format!("upstream name {:?} is duplicated", upstream.name),
+            )?;
         }
         if upstream.base_url.trim().is_empty() {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} base_url must not be empty",
-                upstream.name
-            )));
+            invalid(
+                "base_url",
+                format!("upstream {:?} base_url must not be empty", upstream.name),
+            )?;
         }
         if upstream
             .path
@@ -201,9 +212,10 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                     | UpstreamProvider::Anthropic
             )
         {
-            return Err(UpstreamConfigError::InvalidConfig(
+            invalid(
+                "path",
                 "this provider does not support audio transcriptions".into(),
-            ));
+            )?;
         }
         if upstream.streaming_usage.is_some()
             && upstream
@@ -211,24 +223,30 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 .as_deref()
                 .is_some_and(|path| !crate::aci::upstream::supports_streaming_usage(path))
         {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} streaming_usage requires an OpenAI chat/completions path",
-                upstream.name
-            )));
+            invalid(
+                "streaming_usage",
+                format!(
+                    "upstream {:?} streaming_usage requires an OpenAI chat/completions path",
+                    upstream.name
+                ),
+            )?;
         }
         if upstream.models.is_empty() {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} must route at least one public model",
-                upstream.name
-            )));
+            invalid(
+                "models",
+                format!(
+                    "upstream {:?} must route at least one public model",
+                    upstream.name
+                ),
+            )?;
         }
         if upstream.provider == UpstreamProvider::SecretAi
             && !valid_root_https_origin(&upstream.base_url)
         {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
+            invalid("base_url", format!(
                 "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
-            )));
+            ))?;
         }
         if upstream.provider == UpstreamProvider::Tinfoil {
             let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
@@ -238,32 +256,32 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 if !pin.strip_prefix("sha256:").is_some_and(|hex| {
                     hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
                 }) {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                    invalid("accepted_subjects", format!(
                         "upstream {:?} provider tinfoil accepted_subjects release pins must be tinfoil-release:sha256:<64 lowercase hex>",
                         upstream.name
-                    )));
+                    ))?;
                 }
             }
         }
         if upstream.provider == UpstreamProvider::ArmetAi {
             if !valid_root_https_origin(&upstream.base_url) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
+                invalid("base_url", format!(
                     "upstream {:?} provider armet-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                     upstream.name
-                )));
+                ))?;
             }
             let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
             if subjects.is_empty() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
+                invalid("accepted_subjects", format!(
                     "upstream {:?} provider armet-ai requires at least one accepted_subjects measurement pin",
                     upstream.name
-                )));
+                ))?;
             }
             if let Some(bad) = subjects.iter().find(|s| !valid_tdx_measurement_subject(s)) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
+                invalid("accepted_subjects", format!(
                     "upstream {:?} provider armet-ai accepted_subjects entry {bad:?} must be tdx-measurement:sha256:<64 lowercase hex>",
                     upstream.name
-                )));
+                ))?;
             }
         }
         if upstream.provider == UpstreamProvider::PhalaDirect {
@@ -277,27 +295,30 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                                 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
                         })
             }) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
+                invalid("accepted_subjects", format!(
                     "upstream {:?} provider phala-direct accepted_subjects entry {bad:?} must be dstack-compose:sha256:<64 lowercase hex>",
                     upstream.name
-                )));
+                ))?;
             }
         }
         if upstream.basic_auth {
             if upstream.bearer_token.is_none() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} basic_auth requires bearer_token",
-                    upstream.name
-                )));
+                invalid(
+                    "bearer_token",
+                    format!(
+                        "upstream {:?} basic_auth requires bearer_token",
+                        upstream.name
+                    ),
+                )?;
             }
             if !matches!(
                 upstream.provider,
                 UpstreamProvider::OpenAiCompatible | UpstreamProvider::Chutes
             ) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
+                invalid("basic_auth", format!(
                     "upstream {:?} basic_auth is supported only for openai-compatible or chutes providers",
                     upstream.name
-                )));
+                ))?;
             }
         }
         for (field, value) in [
@@ -310,34 +331,46 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             ("verifier_cache_seconds", upstream.verifier_cache_seconds),
         ] {
             if value == Some(0) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} {field} must be greater than zero",
-                    upstream.name
-                )));
+                invalid(
+                    field,
+                    format!(
+                        "upstream {:?} {field} must be greater than zero",
+                        upstream.name
+                    ),
+                )?;
             }
         }
         if let Some(rounds) = upstream.chutes_e2ee_discovery_rounds {
             if rounds == 0 || rounds > 10 {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} chutes_e2ee_discovery_rounds must be between 1 and 10",
-                    upstream.name
-                )));
+                invalid(
+                    "chutes_e2ee_discovery_rounds",
+                    format!(
+                        "upstream {:?} chutes_e2ee_discovery_rounds must be between 1 and 10",
+                        upstream.name
+                    ),
+                )?;
             }
         }
         if let Some(base) = upstream.chutes_e2ee_api_base.as_ref() {
             if base.trim().is_empty() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} chutes_e2ee_api_base must not be empty",
-                    upstream.name
-                )));
+                invalid(
+                    "chutes_e2ee_api_base",
+                    format!(
+                        "upstream {:?} chutes_e2ee_api_base must not be empty",
+                        upstream.name
+                    ),
+                )?;
             }
         }
         if let Some(chute_ids) = upstream.chutes_chute_ids.as_ref() {
             if chute_ids.is_empty() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} chutes_chute_ids must not be empty when configured",
-                    upstream.name
-                )));
+                invalid(
+                    "chutes_chute_ids",
+                    format!(
+                        "upstream {:?} chutes_chute_ids must not be empty when configured",
+                        upstream.name
+                    ),
+                )?;
             }
             let configured_upstream_models = upstream
                 .models
@@ -346,35 +379,57 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 .collect::<HashSet<_>>();
             for (model_id, chute_id) in chute_ids {
                 if model_id.trim().is_empty() {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
-                        "upstream {:?} chutes_chute_ids has an empty model id",
-                        upstream.name
-                    )));
+                    invalid(
+                        "chutes_chute_ids",
+                        format!(
+                            "upstream {:?} chutes_chute_ids has an empty model id",
+                            upstream.name
+                        ),
+                    )?;
                 }
                 if !configured_upstream_models.contains(model_id.as_str()) {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                    invalid("chutes_chute_ids", format!(
                         "upstream {:?} chutes_chute_ids key {model_id:?} is not one of its upstream model ids",
                         upstream.name
-                    )));
+                    ))?;
                 }
                 if !looks_like_uuid(chute_id) {
-                    return Err(UpstreamConfigError::InvalidConfig(format!(
-                        "upstream {:?} chutes_chute_ids[{model_id:?}] must be a chute_id UUID",
-                        upstream.name
-                    )));
+                    invalid(
+                        "chutes_chute_ids",
+                        format!(
+                            "upstream {:?} chutes_chute_ids[{model_id:?}] must be a chute_id UUID",
+                            upstream.name
+                        ),
+                    )?;
                 }
             }
         }
-        if upstream.provider != UpstreamProvider::Chutes
-            && (upstream.chutes_e2ee_api_base.is_some()
-                || upstream.chutes_chute_ids.is_some()
-                || upstream.chutes_e2ee_discovery_rounds.is_some()
-                || upstream.chutes_e2ee_discovery_interval_seconds.is_some())
-        {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} has Chutes E2EE fields but provider is not chutes",
-                upstream.name
-            )));
+        if upstream.provider != UpstreamProvider::Chutes {
+            for (field, is_set) in [
+                (
+                    "chutes_e2ee_api_base",
+                    upstream.chutes_e2ee_api_base.is_some(),
+                ),
+                ("chutes_chute_ids", upstream.chutes_chute_ids.is_some()),
+                (
+                    "chutes_e2ee_discovery_rounds",
+                    upstream.chutes_e2ee_discovery_rounds.is_some(),
+                ),
+                (
+                    "chutes_e2ee_discovery_interval_seconds",
+                    upstream.chutes_e2ee_discovery_interval_seconds.is_some(),
+                ),
+            ] {
+                if is_set {
+                    invalid(
+                        field,
+                        format!(
+                            "upstream {:?} has Chutes E2EE fields but provider is not chutes",
+                            upstream.name
+                        ),
+                    )?;
+                }
+            }
         }
         // The private trust tier and the TargetSeparated rule are code, not config.
         if upstream.provider == UpstreamProvider::ZeroGPrivateComputer {
@@ -387,39 +442,61 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 v.len() == 42 && v.starts_with("0x") && hex::decode(&v[2..]).is_ok()
             });
             let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
-            if !valid_root_https_origin(&upstream.base_url)
-                || subjects.is_empty()
-                || !subjects.iter().all(|s| valid_tdx_boot_chain_subject(s))
-                || upstream
-                    .bearer_token
-                    .as_deref()
-                    .is_none_or(|token| token.trim().is_empty())
-                || upstream.path.is_some()
-                || !rpc_is_https
-                || !contract_is_address
-            {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} provider 0g-private-computer requires the 0G router as a root HTTPS base_url, bearer_token, an HTTPS zg_chain_rpc_url, zg_serving_contract (0x + 40 hex) and accepted_subjects pins (tdx-boot-chain:sha256:<64 lowercase hex>), and forbids path",
-                    upstream.name
-                )));
+            for (field, valid) in [
+                ("base_url", valid_root_https_origin(&upstream.base_url)),
+                (
+                    "accepted_subjects",
+                    !subjects.is_empty()
+                        && subjects.iter().all(|s| valid_tdx_boot_chain_subject(s)),
+                ),
+                (
+                    "bearer_token",
+                    upstream
+                        .bearer_token
+                        .as_deref()
+                        .is_some_and(|token| !token.trim().is_empty()),
+                ),
+                ("path", upstream.path.is_none()),
+                ("zg_chain_rpc_url", rpc_is_https),
+                ("zg_serving_contract", contract_is_address),
+            ] {
+                if !valid {
+                    invalid(field, format!(
+                        "upstream {:?} provider 0g-private-computer requires the 0G router as a root HTTPS base_url, bearer_token, an HTTPS zg_chain_rpc_url, zg_serving_contract (0x + 40 hex) and accepted_subjects pins (tdx-boot-chain:sha256:<64 lowercase hex>), and forbids path",
+                        upstream.name
+                    ))?;
+                }
             }
-        } else if upstream.zg_chain_rpc_url.is_some() || upstream.zg_serving_contract.is_some() {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} has 0G fields but provider is not 0g-private-computer",
-                upstream.name
-            )));
+        } else {
+            for (field, is_set) in [
+                ("zg_chain_rpc_url", upstream.zg_chain_rpc_url.is_some()),
+                (
+                    "zg_serving_contract",
+                    upstream.zg_serving_contract.is_some(),
+                ),
+            ] {
+                if is_set {
+                    invalid(
+                        field,
+                        format!(
+                            "upstream {:?} has 0G fields but provider is not 0g-private-computer",
+                            upstream.name
+                        ),
+                    )?;
+                }
+            }
         }
         if upstream.provider == UpstreamProvider::Privatemode && upstream.bearer_token.is_some() {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
+            invalid("bearer_token", format!(
                 "upstream {:?} provider privatemode forbids bearer_token; the measured proxy reads its credential from the shared Compose secret",
                 upstream.name
-            )));
+            ))?;
         }
         if upstream.provider == UpstreamProvider::Privatemode && upstream.path.is_some() {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
+            invalid("path", format!(
                 "upstream {:?} provider privatemode forbids path; the measured proxy backend pins encrypted handler paths",
                 upstream.name
-            )));
+            ))?;
         }
         // The native Anthropic API only serves /v1/messages; without an
         // explicit path the router falls back to /v1/chat/completions and
@@ -427,29 +504,33 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         if upstream.provider == UpstreamProvider::Anthropic
             && upstream.path.as_deref().is_none_or(str::is_empty)
         {
-            return Err(UpstreamConfigError::InvalidConfig(format!(
-                "upstream {:?} provider anthropic requires path (e.g. \"/v1/messages\")",
-                upstream.name
-            )));
+            invalid(
+                "path",
+                format!(
+                    "upstream {:?} provider anthropic requires path (e.g. \"/v1/messages\")",
+                    upstream.name
+                ),
+            )?;
         }
         for (public_model, upstream_model) in &upstream.models {
             if public_model.trim().is_empty() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} has an empty public model id",
-                    upstream.name
-                )));
+                invalid(
+                    "models",
+                    format!("upstream {:?} has an empty public model id", upstream.name),
+                )?;
             }
             if upstream_model.trim().is_empty() {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "upstream {:?} route {:?} has an empty upstream model id",
-                    upstream.name, public_model
-                )));
+                invalid(
+                    "models",
+                    format!(
+                        "upstream {:?} route {:?} has an empty upstream model id",
+                        upstream.name, public_model
+                    ),
+                )?;
             }
             let route_id = format!("{}:{public_model}", upstream.name);
             if !route_ids.insert(route_id.clone()) {
-                return Err(UpstreamConfigError::InvalidConfig(format!(
-                    "route id {route_id:?} is duplicated"
-                )));
+                invalid("models", format!("route id {route_id:?} is duplicated"))?;
             }
         }
     }
