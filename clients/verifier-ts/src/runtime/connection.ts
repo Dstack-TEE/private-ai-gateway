@@ -298,7 +298,9 @@ class RuntimeAciConnection implements AciConnection {
     if (this.closed || !this.transport) {
       throw new AciConnectionError('closed', 'ACI connection is closed');
     }
-    await this.ensureFreshIdentity();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    signal?.throwIfAborted();
+    await this.ensureFreshIdentity(signal);
     const transport = this.transport;
     if (!transport) throw new AciConnectionError('closed', 'ACI connection is closed');
     const identity = this.identity;
@@ -330,13 +332,17 @@ class RuntimeAciConnection implements AciConnection {
     return response;
   }
 
-  private async ensureFreshIdentity(): Promise<void> {
+  private async ensureFreshIdentity(signal?: AbortSignal | null): Promise<void> {
     const expired = ![...this.members.values()].some((member) => Date.now() < member.expiresAt);
     if (!this.pendingDigest && !expired) return;
     let rotated: boolean;
     try {
-      rotated = await this.refreshIdentity();
+      rotated = await raceAbortSignal(this.refreshIdentity(), signal);
     } catch (error) {
+      // A caller-side abort must surface as-is so cancellable callers (e.g.
+      // streaming clients) can unwind promptly instead of waiting out the
+      // full inline re-verification.
+      if (isAbortError(error)) throw error;
       throw new AciConnectionError(
         expired ? 'identity_expired' : 'attestation_verification',
         expired
@@ -375,6 +381,8 @@ class RuntimeAciConnection implements AciConnection {
     identity: VerifiedAciIdentity,
     members: ReadonlyMap<string, VerifiedAciIdentity>,
   ): void {
+    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
+    if (cap === 0) return;
     const entry: InternalExchange = {
       receiptId,
       method: prepared.request.method,
@@ -398,7 +406,6 @@ class RuntimeAciConnection implements AciConnection {
       entry.responseComplete = true;
     });
     this.exchanges.push(entry);
-    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
     if (this.exchanges.length > cap) this.exchanges.splice(0, this.exchanges.length - cap);
   }
 
@@ -500,6 +507,51 @@ function digestBytes(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * Await a shared in-flight operation while staying responsive to a caller's
+ * AbortSignal. The underlying operation keeps running (other callers may
+ * still benefit from it), but this waiter rejects as soon as the signal
+ * aborts.
+ */
+async function raceAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+  // The promise is typically the deduplicated connection refresh; keep it
+  // handled even when the caller aborts before it settles.
+  void promise.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 function publicExchange(exchange: InternalExchange): RecordedAciExchange {
   return {
     receiptId: exchange.receiptId,
@@ -527,10 +579,10 @@ function citedSessionId(receipt: ReceiptEnvelope): string | undefined {
 
 function validateOptions(options: ConnectAciOptions): void {
   const cap = options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
-  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1_000) {
+  if (!Number.isSafeInteger(cap) || cap < 0 || cap > 1_000) {
     throw new AciConnectionError(
       'invalid_policy',
-      'receiptHistorySize must be an integer between 1 and 1000',
+      'receiptHistorySize must be an integer between 0 and 1000',
     );
   }
   for (const [name, value] of [

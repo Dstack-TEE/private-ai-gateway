@@ -19,6 +19,7 @@ pub const PROVIDER_ACI_SESSION_IDS: &str = "aci_session_ids";
 /// Multipart serving-constraint carrier (§5.3); consumed by the aggregator.
 pub const MULTIPART_PROVIDER_HEADER: &str = "x-aci-provider";
 pub const MAX_MULTIPART_PROVIDER_BYTES: usize = 8 * 1024;
+pub const IMAGES_EDITS_PATH: &str = "/v1/images/edits";
 pub const AUDIO_TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
 
 // ---------- §3.1 Workload keyset ----------

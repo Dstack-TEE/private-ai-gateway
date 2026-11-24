@@ -3,53 +3,41 @@
 //! exclude it from clipboard monitoring, history and the cloud clipboard; on
 //! macOS `org.nspasteboard.ConcealedType`, which clipboard managers honor; on
 //! Linux, which has no standard, KDE's `x-kde-passwordManagerHint`, the most
-//! widely honored convention. The clipboard plugin's arboard cannot mark data,
-//! so secrets use one of their own with the same crate.
+//! widely honored convention.
 
 use std::sync::{Mutex, PoisonError};
 
-use tauri::AppHandle;
-use tauri_plugin_clipboard_manager::ClipboardExt;
+/// The app's clipboard: on X11 the app serves what it copied while it holds
+/// one, and `release` drops it on exit.
+static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 
-const UNAVAILABLE: &str = "The clipboard is unavailable";
-
-/// The clipboard for secrets, kept like the plugin's: on X11 the app serves
-/// what it copied while it holds one, and `release` drops it on exit.
-static SECRET_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
-
-pub fn write_text(app: &AppHandle, text: String, secret: bool) -> Result<(), String> {
-    if !secret {
-        return app
-            .clipboard()
-            .write_text(text)
-            .map_err(|_| UNAVAILABLE.into());
-    }
-    write_secret(text).map_err(|error| {
-        tracing::warn!("Cannot copy a secret: {error}");
-        UNAVAILABLE.into()
+pub fn write_text(text: String, secret: bool) -> Result<(), String> {
+    write(text, secret).map_err(|error| {
+        tracing::warn!("Cannot copy text: {error}");
+        "The clipboard is unavailable".into()
     })
 }
 
-/// Drops the clipboard for secrets as the app exits, as the plugin drops its
-/// own: on X11 the last arboard clipboard dropped hands what the app copied
-/// to the clipboard manager, or, for a secret, gives up its ownership so no
-/// manager keeps it.
+/// Drops the clipboard as the app exits: on X11 the last arboard clipboard
+/// dropped hands what the app copied to the clipboard manager, or, for a
+/// secret, gives up its ownership so no manager keeps it.
 pub fn release() {
-    SECRET_CLIPBOARD
+    CLIPBOARD
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .take();
 }
 
-fn write_secret(text: String) -> Result<(), arboard::Error> {
-    let mut clipboard = SECRET_CLIPBOARD
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+fn write(text: String, secret: bool) -> Result<(), arboard::Error> {
+    let mut clipboard = CLIPBOARD.lock().unwrap_or_else(PoisonError::into_inner);
     let clipboard = match &mut *clipboard {
         Some(clipboard) => clipboard,
         none => none.insert(arboard::Clipboard::new()?),
     };
     let set = clipboard.set();
+    if !secret {
+        return set.text(text);
+    }
     #[cfg(target_os = "windows")]
     let set = {
         use arboard::SetExtWindows;

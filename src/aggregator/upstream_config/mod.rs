@@ -221,11 +221,15 @@ impl UpstreamProvider {
             | UpstreamProvider::AciService => AttestationScope::PerModel,
         }
     }
+
+    pub(super) fn shares_verification_across_models(self) -> bool {
+        self.attestation_scope().is_per_router() && self != Self::NearAi
+    }
 }
 
 /// The channel boundary a provider's attestation proves, and thus what identifies
-/// its attested session: one shared channel for a router (model dropped from the
-/// verifier cache key) or a distinct channel per model / per serving instance.
+/// its attested session: one shared channel for a router or a distinct channel
+/// per model or serving instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestationScope {
     PerRouter,
@@ -497,6 +501,7 @@ impl UpstreamConfigManager {
                     return Vec::new();
                 };
                 let Ok(prepared) = state.backend.prepare(UpstreamRequest {
+                    cache_salt: None,
                     form: None,
                     content_type: None,
                     body: body.into(),
@@ -528,7 +533,7 @@ impl UpstreamConfigManager {
                     .into_iter()
                     .filter(move |target| {
                         model.is_none_or(|model| {
-                            if cfg.provider.attestation_scope().is_per_router() {
+                            if cfg.provider.shares_verification_across_models() {
                                 cfg.models.contains_key(model)
                             } else {
                                 cfg.models.get(model) == Some(&target.model_id)
@@ -666,7 +671,7 @@ impl UpstreamConfigManager {
                         model_id,
                         result: "failed".to_string(),
                         refreshed_nonces: 0,
-                        reason: event.reason,
+                        reason: event.diagnostic,
                     });
                     continue;
                 }
@@ -699,7 +704,7 @@ impl UpstreamConfigManager {
                                 model_id,
                                 result: "failed".to_string(),
                                 refreshed_nonces: 0,
-                                reason: refreshed_event.reason,
+                                reason: refreshed_event.diagnostic,
                             });
                             continue;
                         }
@@ -824,7 +829,7 @@ async fn refresh_upstream(
             state.not_before =
                 remaining.map_or(refresh_started + period, |remaining| completed + remaining);
         }
-        if let Some(reason) = &event.reason {
+        if let Some(reason) = &event.diagnostic {
             tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), reason = %reason, "upstream verification refresh finished");
         } else {
             tracing::info!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), "upstream verification refresh finished");

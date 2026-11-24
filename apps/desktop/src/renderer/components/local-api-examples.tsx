@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, ImageIcon, ListChecks, Mic, Type, type LucideIcon } from "lucide-react";
 import { exampleModels, localApiExample, type ExampleKind, type ExampleLanguage } from "../lib/local-api-example";
 import { useCopy } from "../hooks/use-copy";
 import { AppDialog, DoneFooter, type DialogControl } from "./app-dialog";
@@ -12,13 +12,23 @@ import { errorMessage } from "../lib/error-message";
 import { localEndpoint, maskClientKey } from "../lib/format";
 import { useShell } from "../lib/shell";
 
+// The icons match the model modality icons on redpill.ai. They hide on narrow
+// windows, where the four labels need the room.
+const kinds: { value: ExampleKind; label: string; icon: LucideIcon }[] = [
+  { value: "chat", label: "Chat", icon: Type },
+  { value: "images", label: "Images", icon: ImageIcon },
+  { value: "transcription", label: "Transcription", icon: Mic },
+  { value: "decisions", label: "Decisions", icon: ListChecks },
+];
+
 export function LocalApiExamplesDialog(control: DialogControl) {
   const { state, clientKey: apiKey, clientKeyVisible } = useShell();
   const endpoint = state.proxyUrl ?? localEndpoint(state.localApi);
   const catalog = state.catalog?.models ?? [];
-  const decisionsAvailable = exampleModels("decisions", catalog).length > 0;
+  // Chat is always offered; the other kinds only when the catalog has a model for them.
+  const available = (entry: ExampleKind) => entry === "chat" || exampleModels(entry, catalog).length > 0;
   const [tab, setTab] = useState<ExampleKind>("chat");
-  const kind = decisionsAvailable ? tab : "chat";
+  const kind = available(tab) ? tab : "chat";
   const models = exampleModels(kind, catalog);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
@@ -48,8 +58,8 @@ export function LocalApiExamplesDialog(control: DialogControl) {
   }, [examples, highlight, language]);
   const { copy, copying, error, isCopied, status } = useCopy();
   return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
-    <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { if (value === "chat" || value === "decisions") setTab(value); }}>
-      <TabsList aria-label="Example" className="w-full"><TabsTrigger value="chat">Chat</TabsTrigger><TabsTrigger value="decisions" disabled={!decisionsAvailable}>Decisions</TabsTrigger></TabsList>
+    <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { const entry = kinds.find((entry) => entry.value === value); if (entry) setTab(entry.value); }}>
+      <TabsList aria-label="Example" className="w-full">{kinds.map((entry) => <TabsTrigger key={entry.value} value={entry.value} disabled={!available(entry.value)}><entry.icon className="max-sm:hidden" aria-hidden />{entry.label}</TabsTrigger>)}</TabsList>
       <TabsContent value={kind} className="flex min-h-0 flex-col gap-4">
         <Field>
           <FieldLabel htmlFor="example-model">Model</FieldLabel>

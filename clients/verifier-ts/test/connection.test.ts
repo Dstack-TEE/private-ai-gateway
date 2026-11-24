@@ -564,3 +564,169 @@ test('pinned probes and receipt/session bodies share the configured deadline', {
     }
   }
 });
+
+
+test('caller abort signal cancels a pending inline identity refresh', async () => {
+  const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => { resolve = r; });
+    return { promise, resolve };
+  };
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  for (const trigger of ['expired', 'digest'] as const) {
+    const entered = deferred();
+    const release = deferred();
+    let identityCalls = 0;
+    const provider = async () => {
+      identityCalls += 1;
+      if (identityCalls > 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST);
+    };
+    const factory: PinnedTransportFactory = () => ({
+      observedSpkiSha256: () => 'c0'.repeat(32),
+      close: async () => {},
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+        if (path.endsWith('/attestation')) return Response.json({});
+        const headers = trigger === 'digest'
+          ? { 'x-aci-keyset-digest': `sha256:${'d'.repeat(64)}` }
+          : {};
+        return new Response('{}', { headers });
+      },
+    });
+    const connection = await connectAciWithTransport({
+      baseURL: 'https://api.example.com/v1',
+      serving: { requireReceipt: false, requireVerified: false },
+    }, factory, provider);
+    try {
+      if (trigger === 'expired') {
+        (connection.identity as { expiresAt: number }).expiresAt = 0;
+      } else {
+        await connection.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+      }
+      const controller = new AbortController();
+      let settled = false;
+      let failure: unknown;
+      const request = connection.fetch('https://api.example.com/v1/chat/completions', {
+        method: 'POST',
+        body: '{}',
+        signal: controller.signal,
+      }).then(() => { settled = true; }, (error: unknown) => { settled = true; failure = error; });
+      await entered.promise;
+      controller.abort();
+      await turn();
+      assert.equal(settled, true, `abort must settle the request while the inline refresh is pending (trigger=${trigger})`);
+      assert.ok(failure instanceof Error, `request must reject (trigger=${trigger})`);
+      assert.equal(failure.name, 'AbortError', `caller abort must surface as AbortError (trigger=${trigger})`);
+      release.resolve();
+      await request;
+      // The backgrounded refresh still lands, so the connection recovers.
+      const response = await connection.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+      assert.equal(response.status, 200);
+    } finally {
+      release.resolve();
+      await connection.close();
+    }
+  }
+});
+
+test('request deadline covers the response body, not just the headers', async () => {
+  const hangingBody = () => new Response(
+    new ReadableStream<Uint8Array>({ start() { /* never enqueues */ } }),
+    { status: 200, headers: { 'content-type': 'application/json' } },
+  );
+  const deadline = 50;
+  const assertDeadline = async (promise: Promise<unknown>, label: string) => {
+    const start = Date.now();
+    await assert.rejects(promise, (error: unknown) => {
+      assert.ok(error instanceof AciConnectionError, `${label} must reject with AciConnectionError`);
+      return true;
+    });
+    assert.ok(Date.now() - start < 2_000, `${label} must reject at the deadline, not hang indefinitely`);
+  };
+
+  // Bootstrap attestation fetch: headers resolve, JSON body stalls forever.
+  await assertDeadline(connectAciWithTransport({
+    baseURL: 'https://api.example.com/v1',
+    timeoutMs: deadline,
+    bootstrapFetch: async () => hangingBody(),
+  }, () => ({
+    observedSpkiSha256: () => 'c0'.repeat(32),
+    close: async () => {},
+    fetch: async () => Response.json({}),
+  })), 'bootstrap attestation fetch');
+
+  // Pinned-channel probe: headers resolve, attestation JSON body stalls forever.
+  await assertDeadline(connectAciWithTransport({
+    baseURL: 'https://api.example.com/v1',
+    timeoutMs: deadline,
+  }, () => ({
+    observedSpkiSha256: () => 'c0'.repeat(32),
+    close: async () => {},
+    fetch: async (input) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+      return path.endsWith('/attestation') ? hangingBody() : new Response('{}');
+    },
+  }), async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST)), 'pinned channel probe');
+});
+
+test('receiptHistorySize 0 disables receipt recording and its response clone', async () => {
+  const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+  const makeConnection = (historySize: number) => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const factory: PinnedTransportFactory = () => ({
+      observedSpkiSha256: () => 'c0'.repeat(32),
+      close: async () => {},
+      fetch: async (input) => {
+        const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+        if (path.endsWith('/attestation')) return Response.json({});
+        return new Response(new ReadableStream<Uint8Array>({ start(c) { source = c; } }), {
+          headers: { 'x-receipt-id': 'receipt-test' },
+        });
+      },
+    });
+    const opened = connectAciWithTransport({
+      baseURL: 'https://api.example.com/v1',
+      receiptHistorySize: historySize,
+      serving: { requireReceipt: false, requireVerified: false },
+    }, factory, async () => identity(fx.REPORT, fx.KEYSET, fx.KEYSET_DIGEST));
+    return { opened, getSource: () => source };
+  };
+
+  // Disabled: nothing is retained and cancelling the caller's body is not
+  // blocked by a recorder-side clone reader.
+  const disabled = makeConnection(0);
+  const off = await disabled.opened;
+  try {
+    const response = await off.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+    assert.equal(off.receipts().length, 0);
+    let settled = false;
+    const cancelled = response.body!.cancel().then(() => { settled = true; });
+    await turn();
+    await turn();
+    assert.equal(settled, true, 'body cancel must settle promptly when recording is disabled');
+  } finally {
+    await off.close();
+  }
+
+  // Enabled (default cap): the exchange is retained and the recorder's clone
+  // keeps consuming the stream until the source closes.
+  const enabled = makeConnection(32);
+  const on = await enabled.opened;
+  try {
+    const response = await on.fetch('https://api.example.com/v1/chat/completions', { method: 'POST', body: '{}' });
+    assert.equal(on.receipts().length, 1);
+    let settled = false;
+    const cancelled = response.body!.cancel().then(() => { settled = true; });
+    await turn();
+    await turn();
+    assert.equal(settled, false, 'recorder clone keeps the body open until the source closes');
+    enabled.getSource().close();
+    await cancelled;
+  } finally {
+    await on.close();
+  }
+});

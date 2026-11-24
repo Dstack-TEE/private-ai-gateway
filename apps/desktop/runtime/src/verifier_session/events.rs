@@ -24,12 +24,15 @@ impl SessionManager {
                 runtime.identify(&identity);
                 load_catalog = true;
             }
+            // A retired or ended verifier no longer speaks for the session.
+            VerifierEvent::IdentityUpdated { .. } | VerifierEvent::IdentityRenewed { .. }
+                if runtime.service.is_none() => {}
             VerifierEvent::IdentityUpdated { identity } => {
                 runtime.identify(&identity);
                 load_catalog = true;
             }
             VerifierEvent::IdentityRenewed { identity } => {
-                // A failed verify or replaced delivery gate needs a fresh catalog epoch.
+                // A renewal during the first catalog read needs a fresh catalog epoch.
                 if runtime.state.status == VerificationStatus::Verified {
                     runtime.show_identity(&identity);
                 } else {
@@ -39,16 +42,13 @@ impl SessionManager {
             }
             // Verification lost: one atomic barrier (`lose_verification`).
             // The session goes on, also across a restart, until the user
-            // stops it: agents stay pointed at the refusing Local API. A key
-            // set change retires the verifier for a fresh verification.
-            VerifierEvent::Blocked { code, reason } => {
-                let rotating = code.as_deref() == Some("keyset_changed")
-                    && runtime.state.status != VerificationStatus::Blocked;
-                if rotating {
-                    retired_task = runtime.task.take();
-                } else {
-                    runtime.state.status = VerificationStatus::Blocked;
-                }
+            // stops it: agents stay pointed at the refusing Local API, and
+            // the verifier is retired for the fresh verification recovery
+            // retries. Agents cannot reach a blocked verifier to make it
+            // verify again.
+            VerifierEvent::Blocked { reason, .. } => {
+                retired_task = runtime.task.take();
+                runtime.service = None;
                 runtime.lose_verification();
                 runtime.state.error = Some(reason);
                 runtime.failure = None;
@@ -75,7 +75,10 @@ impl SessionManager {
             self.proxy.publish(Session {
                 generation,
                 epoch,
-                session_id: Some(runtime.session_id.clone()),
+                session_id: runtime
+                    .state
+                    .session_active
+                    .then(|| runtime.session_id.clone()),
                 service: runtime.service.clone(),
                 ..Session::default()
             });

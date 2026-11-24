@@ -1,4 +1,4 @@
-# Private AI Proxy CLI Distribution
+# Private AI Proxy CLI distribution
 
 Private AI Proxy has one CLI, `pap`; [CLI](cli.md) lists its commands and
 aliases. The desktop app packages and the standalone CLI packages contain the

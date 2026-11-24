@@ -12,6 +12,28 @@ run the same executable with the same commands. On an interactive terminal
 outside `--json` and `--json-events`, `aci` prints a one-line note pointing to
 `pap`. Use `pap` or `private-ai-proxy` in new scripts and documentation.
 
+## First Run
+
+```sh
+pap profiles login work        # sign in to RedPill or Phala in the browser
+pap start                      # verify the service and start protection
+pap agents list                # the coding agents found on this machine
+pap agents connect codex       # route one through the Local API
+```
+
+Connect an agent after `pap start`: with protection off the connection is only
+saved, and the command exits `1` saying the agent still uses its own provider.
+
+With an API key instead of an account, replace the first step with
+`pap profiles add --id work --name Work --url <service URL>`, which asks for
+the key at a hidden prompt. `pap status` shows what protection is doing and why
+at any time.
+
+After a restart of the machine, `pap service start` starts the backend and
+resumes protection that was on; until then connected agents cannot reach the
+Local API. The Linux packages ship a systemd user unit that does this at login
+([Standalone CLI](cli-distribution.md#standalone-cli)).
+
 ## Discover Commands
 
 Start with `pap --help` and `<command> --help`.
@@ -40,8 +62,8 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
-Attestation, receipt, and session responses are size-bounded: 4 MiB for
-attestation documents, 16 MiB for session listings, 32 MiB for session records,
+Attestation, receipt, and session responses are size-bounded: 64 MiB for
+attestation documents, 64 MiB for session listings, 64 MiB for session records,
 and 64 KiB for receipts. Each attestation, session, and receipt response must
 arrive within 30 seconds, including headers and body. Session audits may take
 longer in total when there are many sessions; `send`'s session fetch uses the
@@ -111,7 +133,7 @@ configuration with an independent dstack verifier.
 ### Offline audit
 
 Report, receipt, and session files use the same size limits as live artifact
-fetches: 4 MiB, 64 KiB, and 32 MiB respectively. Oversized files are rejected
+fetches: 64 MiB, 64 KiB, and 64 MiB respectively. Oversized files are rejected
 before JSON parsing.
 
 `pap audit` receipt-only options (`--request-body`, `--response-body`,
@@ -288,6 +310,9 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+`service restart` restarts the backend without ending the protection session:
+agents stay pointed at the Local API, which answers again once the new backend
+has verified the service.
 When no backend is running, `service stop` restores nothing, and agents may
 still point at the Local API: after an update that was not relaunched, a crash,
 or a Windows sign-out. `stop --offline` does what `stop` does, without a
@@ -500,11 +525,11 @@ it asks `Web UI is off. Enable it on <address>:<port>? [y/N]`; `--yes` enables i
 `--yes` fails with a hint to run `pap settings set web-ui.enabled true`.
 
 Signing in sets a session cookie, so reloading and other tabs of the same
-browser share the session until it ends. Sessions end
-after an hour without requests or an open page, 12 hours after sign-in even
-while a page stays open, when the page signs out (Settings > Connections > Sign
+browser share the session until it ends. As in code-server, sessions do not
+time out. They end when the page signs out (Settings > Connections > Sign
 Out), when the password changes, when the web UI is turned off or its listener
-moves, when settings are reset, and when the service restarts. The page then
+moves, when settings are reset, when the service restarts, and, for the least
+recently used of 16 open sessions, when another browser signs in. The page then
 returns to the sign-in page. Browsers cannot read or change the password; as
 with code-server and Jupyter, it is managed outside the browser.
 
@@ -518,7 +543,7 @@ Security model:
   version is verified with Argon2id until replaced.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
-  12-hour `Max-Age`; the service stores only its SHA-256 digest, so page
+  400-day `Max-Age`, the longest browsers keep; the service stores only its SHA-256 digest, so page
   scripts never see it. The cookie cannot be `Secure` because the listener
   speaks plain HTTP, even on loopback. Cookies are not scoped to a port, so the
   name carries the port: a local web UI and a tunneled one on another port keep
@@ -642,9 +667,17 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe. The service is verified with
-the credential before anything is saved: when verification fails, nothing is
-saved and the command exits `1` with the reason, as `start` reports it. Credentials use a hidden prompt
+restart protection; it is not a read-only probe. `profiles verify` on the
+profile that is protecting, without a new key, attests the service again where
+it runs and, for an unchanged service, keeps its requests and streams; with a new key or another profile it says that
+protection restarts before it asks, and reports the session once it has
+resumed. The service is verified before anything is saved: when verification
+fails, nothing is saved and the command exits `1` with the reason, as `start`
+reports it. Verification attests the service and reads its model list; a
+service that lists models without authentication does not reject a wrong key
+there, so a bad key first shows as `service_key_rejected` on a request.
+Replace a saved key with `pap profiles verify <id> --replace-key` (hidden
+prompt) or `--key-stdin`. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
@@ -762,6 +795,13 @@ reports that no receipt is saved, as it does before the audit finishes.
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop app or the OS installer. `doctor` also reports whether the saved update
 channel (`settings set update-channel beta|stable`) has a newer release and the
-exact upgrade steps for this installation; see
+exact upgrade steps for this installation. `pap update` runs those steps, printing each
+one, for the installations a package manager owns
+(CLI-only DEB, RPM and Arch packages, the Arch desktop package, and npm, except
+on Windows). The backend stops as for a restart: connected agents stay pointed
+at the Local API, which does not listen during the installation, and the
+installed release resumes protection that was on. If the installation fails,
+the previous release does. For a desktop app or a portable archive it says where to update
+instead; see
 [Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
 through `settings`; they do not grant OS notification permission.

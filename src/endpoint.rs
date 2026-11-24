@@ -1,0 +1,98 @@
+//! Typed operation selected while shaping a gateway request.
+
+use crate::aggregator::service::{
+    AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH,
+    EMBEDDINGS_PATH, IMAGES_EDITS_PATH, IMAGES_GENERATIONS_PATH, MESSAGES_PATH, RERANK_PATH,
+    RESPONSES_PATH, SYSTEMONE_PATH,
+};
+
+/// A request endpoint. Selects which per-format config table applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endpoint {
+    ChatComplete,
+    Complete,
+    Embed,
+    Rerank,
+    Messages,
+    CreateModelResponse,
+    SystemOne,
+    ImagesGenerations,
+    ImagesEdits,
+    AudioTranscriptions,
+    AudioSpeech,
+}
+
+impl Endpoint {
+    /// Resolve the HTTP boundary to the typed endpoint used inside the pipeline.
+    pub(crate) fn from_path(path: &str) -> Self {
+        match path {
+            COMPLETIONS_PATH => Self::Complete,
+            EMBEDDINGS_PATH => Self::Embed,
+            RERANK_PATH => Self::Rerank,
+            MESSAGES_PATH => Self::Messages,
+            RESPONSES_PATH => Self::CreateModelResponse,
+            SYSTEMONE_PATH => Self::SystemOne,
+            IMAGES_GENERATIONS_PATH => Self::ImagesGenerations,
+            IMAGES_EDITS_PATH => Self::ImagesEdits,
+            AUDIO_TRANSCRIPTIONS_PATH => Self::AudioTranscriptions,
+            AUDIO_SPEECH_PATH => Self::AudioSpeech,
+            _ => Self::ChatComplete,
+        }
+    }
+
+    /// The operation sent after shaping Chat/Messages into the route's format.
+    pub(crate) fn wire(self, format: crate::middleware::types::ProviderFormat) -> Self {
+        use crate::middleware::types::ProviderFormat;
+        match (self, format) {
+            (Self::ChatComplete, ProviderFormat::Anthropic) => Self::Messages,
+            (Self::Messages, ProviderFormat::Openai) => Self::ChatComplete,
+            _ => self,
+        }
+    }
+
+    /// The path this endpoint is served on downstream and forwarded to upstream.
+    pub fn path(self) -> &'static str {
+        match self {
+            Endpoint::ChatComplete => CHAT_COMPLETIONS_PATH,
+            Endpoint::Complete => COMPLETIONS_PATH,
+            Endpoint::Embed => EMBEDDINGS_PATH,
+            Endpoint::Rerank => RERANK_PATH,
+            Endpoint::Messages => MESSAGES_PATH,
+            Endpoint::CreateModelResponse => RESPONSES_PATH,
+            Endpoint::SystemOne => SYSTEMONE_PATH,
+            Endpoint::ImagesGenerations => IMAGES_GENERATIONS_PATH,
+            Endpoint::ImagesEdits => IMAGES_EDITS_PATH,
+            Endpoint::AudioTranscriptions => AUDIO_TRANSCRIPTIONS_PATH,
+            Endpoint::AudioSpeech => AUDIO_SPEECH_PATH,
+        }
+    }
+
+    pub(crate) fn is_image(self) -> bool {
+        matches!(self, Self::ImagesGenerations | Self::ImagesEdits)
+    }
+
+    pub(crate) fn is_media(self) -> bool {
+        self.is_image() || matches!(self, Self::AudioTranscriptions | Self::AudioSpeech)
+    }
+
+    /// Native buffered endpoints require explicit candidate opt-in.
+    pub(crate) fn is_buffered_native(self) -> bool {
+        self.is_media() || self == Self::Rerank
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Endpoint::ChatComplete => "chatComplete",
+            Endpoint::Complete => "complete",
+            Endpoint::Embed => "embed",
+            Endpoint::Rerank => "rerank",
+            Endpoint::Messages => "messages",
+            Endpoint::CreateModelResponse => "createModelResponse",
+            Endpoint::SystemOne => "systemOne",
+            Endpoint::ImagesGenerations => "imagesGenerations",
+            Endpoint::ImagesEdits => "imagesEdits",
+            Endpoint::AudioTranscriptions => "audioTranscriptions",
+            Endpoint::AudioSpeech => "audioSpeech",
+        }
+    }
+}

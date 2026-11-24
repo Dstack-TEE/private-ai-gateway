@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import re
 import socket
 import ssl
@@ -43,6 +44,8 @@ from .common import (
     verifier_id_for,
 )
 
+_logger = logging.getLogger(__name__)
+
 _MAX_EVIDENCE_BYTES = {
     "cpu": 64 * 1024,
     "gpu": 2 * 1024 * 1024,
@@ -62,7 +65,8 @@ _HEX_48_RE = re.compile(r"^[0-9a-f]{96}$")
 _HEX_64_RE = re.compile(r"^[0-9a-f]{128}$")
 _ACCEPTED_WORKLOAD_PREFIX = "secret_ai_accepted_workload_id:"
 _SEV_TCB_FIELDS = ("boot_loader", "tee", "snp", "microcode")
-# Reviewed against the live JEDI SEV-SNP deployment on 2026-07-21.
+# The live JEDI SEV-SNP report still matched this gateway policy floor on
+# 2026-11-23 PST. AMD firmware freshness requires a separate assessment.
 _MINIMUM_SEV_TCB = {"boot_loader": 10, "tee": 0, "snp": 23, "microcode": 88}
 _SEV_MIGRATE_MA = 1 << 18
 
@@ -347,6 +351,8 @@ async def verify_secret_ai(request: dict[str, Any]) -> None:
         endpoint = _parse_origin(request.get("url_origin"))
         options = provider_options(request)
         accepted_workloads = _accepted_workload_ids(options)
+        if not accepted_workloads:
+            _logger.warning("SecretAI has no accepted_subjects workload pin configured")
         timeout = request_timeout_seconds(request, 60)
 
         fetched = await asyncio.gather(

@@ -47,7 +47,7 @@ fn privatemode_deployment_contract_is_pinned() {
             "proxy service",
             proxy,
             &[
-                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
+                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334",
                 r#"    command:
       - --workspace
       - /var/lib/privatemode
@@ -73,6 +73,7 @@ fn privatemode_deployment_contract_is_pinned() {
             &[
                 r#""base_url": "http://privatemode-proxy:8080""#,
                 r#""manifest_log_path": "/run/privatemode-manifests/log.txt""#,
+                r#""proxy_image_digest": "sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334""#,
                 r#""credential_path": "/run/secrets/privatemode-api-key""#,
                 "PRIVATEMODE_CREDENTIAL_SHA256:?",
                 "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
@@ -492,7 +493,7 @@ fn deploy_readme_documents_one_command_deploy_and_seed_config() {
 fn docs_include_config_and_env_reference() {
     let reference = repo_text("docs/configuration-reference.md");
     for needle in [
-        "Configuration Reference",
+        "# Configuration reference",
         "Config Fields",
         "Environment Variables",
         "`state_dir`",

@@ -99,6 +99,14 @@ struct FixtureBackend(&'static str, Mutex<Vec<String>>);
 
 #[async_trait]
 impl UpstreamBackend for FixtureBackend {
+    fn response_protocol(
+        &self,
+        _req: &crate::aci::upstream::PreparedUpstreamRequest,
+        _operation: crate::middleware::request_transform::Endpoint,
+    ) -> Option<crate::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         self.0
     }
@@ -325,6 +333,7 @@ async fn session_listing_matches_pin_gate_across_routes() {
     let middleware = Arc::new(
         Middleware::new(
             PrefixHashKey::new([7; 32]),
+            crate::middleware::CacheSaltKey::new([8; 32]),
             &MiddlewareConfig {
                 control_url: format!("http://{address}"),
                 control_token: None,

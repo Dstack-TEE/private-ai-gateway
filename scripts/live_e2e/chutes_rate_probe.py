@@ -65,7 +65,7 @@ def main() -> None:
     parser.add_argument(
         "--providers-file",
         type=Path,
-        default=ROOT / "scripts/live_e2e/providers.glm51.json",
+        default=ROOT / "scripts/live_e2e/providers.glm.json",
     )
     parser.add_argument("--provider", default="chutes")
     parser.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)

@@ -1,9 +1,9 @@
 {
   "provider": "tinfoil",
-  "reviewed_at": "2026-05-16",
+  "reviewed_at": "2026-11-23",
   "mode": "provider-current",
   "accepted_models": {
-    "kimi-k2-6": {
+    "gpt-oss-120b": {
       "expected_binding": "tls_spki_sha256"
     }
   }

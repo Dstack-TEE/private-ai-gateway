@@ -1,4 +1,4 @@
-# Attested Sessions: Implementation Notes
+# Attested sessions: implementation notes
 
 Attested sessions are immutable, content-addressed records of verified upstream
 TEE channels. [spec/aci.md](../spec/aci.md) §8 specifies the record shape,

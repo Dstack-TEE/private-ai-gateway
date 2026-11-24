@@ -6,6 +6,8 @@ from ..types import AttestationReport
 
 
 class NearaiProvider(ServiceProvider):
+    HTTP_TIMEOUT = (3, 10)
+
     def __init__(self, include_tls_fingerprint: bool = False, api_key: Optional[str] = None):
         self.api_base = "https://cloud-api.near.ai/v1"
         self.include_tls_fingerprint = include_tls_fingerprint
@@ -46,15 +48,22 @@ class NearaiProvider(ServiceProvider):
             print(f"[Near] TLS fingerprint binding enabled")
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = requests.get(url, params=params, headers=headers)
+        response = requests.get(
+            url, params=params, headers=headers, timeout=self.HTTP_TIMEOUT
+        )
         response.raise_for_status()
         data = response.json()
 
         attestations = data.get("model_attestations", [])
-        if not attestations or not isinstance(attestations, list):
-            raise Exception("Near report missing model_attestations")
+        if not isinstance(attestations, list) or not attestations:
+            raise ValueError("NEAR AI report missing model_attestations")
 
         first = attestations[0]
+        intel_quote = first.get("intel_quote") if isinstance(first, dict) else None
+        if not isinstance(intel_quote, str) or not intel_quote:
+            raise ValueError(
+                "NEAR AI model has no NEAR-hosted attestation (missing intel_quote)"
+            )
         nvidia_payload = first.get("nvidia_payload")
         if isinstance(nvidia_payload, str):
             try:
@@ -70,7 +79,7 @@ class NearaiProvider(ServiceProvider):
         return AttestationReport(
             provider="nearai",
             model_id=model_id,
-            intel_quote=first["intel_quote"],
+            intel_quote=intel_quote,
             request_nonce=nonce,
             nvidia_payload=nvidia_payload,
             raw=data,
@@ -79,7 +88,7 @@ class NearaiProvider(ServiceProvider):
     def list_models(self) -> List[str]:
         url = f"{self.api_base}/model/list"
         print(f"[Near] Fetching models from {url}")
-        response = requests.get(url)
+        response = requests.get(url, timeout=self.HTTP_TIMEOUT)
         response.raise_for_status()
         data = response.json()
 

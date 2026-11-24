@@ -18,7 +18,7 @@ import {
 import { createDesktopApi, type Backend, type UiParams, type UiPlatform, type UiTransport, type WebSession } from "./create-api";
 import { AuthoredError, SessionEndedError } from "../lib/error-message";
 
-const sessionEnded = "Your web UI session ended or expired. Sign in again.";
+const sessionEnded = "Your web UI session ended. Sign in again.";
 const signedOut = "You signed out. Sign in again to continue.";
 /** Dispatches each event of the stream as a `MessageEvent` of its name. */
 const listeners = new EventTarget();

@@ -82,10 +82,7 @@ impl Observer {
     ) -> Vec<(&'static str, &'static str)> {
         let faults = [
             !state.reconnecting
-                && (matches!(
-                    state.status,
-                    VerificationStatus::Blocked | VerificationStatus::Error
-                ) || state.error.is_some()),
+                && (state.status == VerificationStatus::Error || state.error.is_some()),
             state.endpoint_error.is_some(),
         ];
         let failed_proof = state.session_usage.failed_proof;

@@ -7,17 +7,26 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::ConfiguredUpstreams;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::endpoint::Endpoint;
 
 pub(super) struct EmptyUpstreamBackend;
 
 #[async_trait]
 impl UpstreamBackend for EmptyUpstreamBackend {
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        _operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "unconfigured"
     }
@@ -74,6 +83,14 @@ impl DynamicUpstreamBackend {
 
 #[async_trait]
 impl UpstreamBackend for DynamicUpstreamBackend {
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        self.backend().response_protocol(req, operation)
+    }
+
     fn name(&self) -> &str {
         "dynamic-upstream-config"
     }
@@ -167,7 +184,7 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }
@@ -210,10 +227,27 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }
+    }
+
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        let verifier = self
+            .state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .clone()?;
+        verifier
+            .reverify_instance(request, previous, instance_id)
+            .await
     }
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {

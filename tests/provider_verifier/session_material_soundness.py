@@ -10,22 +10,32 @@ import asyncio
 import base64
 import copy
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import socket
 import struct
 import sys
+from threading import Event, Thread
+import time
 from types import SimpleNamespace
 import unittest
-from contextlib import redirect_stdout
-from unittest.mock import AsyncMock, patch
+from contextlib import contextmanager, nullcontext, redirect_stdout
+from unittest.mock import AsyncMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import dcap_qvl
+import jwt
+import requests
+from confidential_verifier.providers.nearai import NearaiProvider
+from confidential_verifier.verifiers.nearai import NearAICloudVerifier
+from cryptography.hazmat.primitives.asymmetric import ec
 from provider_verifier.common import tdx_session_material
-from provider_verifier import nearai, chutes
+from provider_verifier import chutes
+import private_ai_provider_verifier as bridge
 import soundness_phala_direct as phala
 
 # Serialized fixture layout from the pinned dcap-qvl TD report definitions.
@@ -54,21 +64,49 @@ def quote_fixture(*, td15=False, report_data=bytes(64), changes=None):
     return header + (struct.pack("<HI", 3, len(body)) if td15 else b"") + body + struct.pack("<I", len(auth)) + auth
 
 
-def near_output(*, measured="aa" * 32, supplied="bb" * 32, signing="0x" + "11" * 20, nonce="33" * 32, changes=None, valid=True):
+def run_near_bridge(model_id):
+    request = {
+        "provider": "near-ai",
+        "model_id": model_id,
+        "url_origin": "https://near.example",
+    }
+    output = io.StringIO()
+    with patch("sys.stdin", io.StringIO(json.dumps(request))), redirect_stdout(output):
+        asyncio.run(bridge.main())
+    return json.loads(output.getvalue())
+
+
+def near_output(
+    *,
+    measured="aa" * 32,
+    supplied="bb" * 32,
+    signing="0x" + "11" * 20,
+    nonce="33" * 32,
+    changes=None,
+    valid=True,
+    attestations=None,
+    tcb_status="UpToDate",
+):
     gateway = {
         "intel_quote": quote_fixture(report_data=bytes.fromhex(nonce) * 2, changes=changes).hex(),
         "signing_address": signing, "tls_cert_fingerprint": "ab" * 32,
         "info": {"compose_hash": supplied},
     }
-    report = SimpleNamespace(raw={"gateway_attestation": gateway}, request_nonce=nonce, model_dump=lambda **_: {})
+    if attestations is None:
+        attestations = [{"model_name": "model-a", "intel_quote": "ab"}]
+    report = {"gateway_attestation": gateway, "model_attestations": attestations}
+    response = SimpleNamespace(json=lambda: report, raise_for_status=lambda: None)
     result = {"is_valid": valid, "details": {"dstack": {"details": {
-        "tcb_status": "UpToDate", "app_info": {"compose_hash": measured},
+        "tcb_status": tcb_status, "app_info": {"compose_hash": measured},
     }}}}
-    with patch("confidential_verifier.providers.nearai.NearaiProvider.fetch_report", return_value=report), patch("confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component", new=AsyncMock(return_value=result)):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            asyncio.run(nearai.verify_nearai({"model_id": "model-a", "url_origin": "https://near.example"}))
-        return json.loads(output.getvalue())
+    with (
+        patch("requests.get", return_value=response),
+        patch(
+            "confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component",
+            new=AsyncMock(return_value=result),
+        ),
+    ):
+        return run_near_bridge("model-a")
 
 
 def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
@@ -82,15 +120,94 @@ def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
 
 def chutes_instance(*, nonce="nonce-a", changes=None):
     key = base64.b64encode(b"key").decode()
-    rd = hashlib.sha256((nonce + key).encode()).digest() + bytes(32)
-    quote = quote_fixture(report_data=rd, changes=changes)
+    binding = hashlib.sha256((nonce + key).encode()).digest()
+    quote = quote_fixture(report_data=binding + bytes(32), changes=changes)
     material = tdx_session_material(quote)["tdx_report"]
     report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({"status": "UpToDate", "report": {"TD10": material}}))
     profile = {"name": "profile", "mrtd": material["mr_td"], "runtime_rtmrs": {f"RTMR{i}": material[f"rt_mr{i}"] for i in range(4)}}
     with patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify:
-        result = asyncio.run(chutes.chutes_verify_instance({"instance_id": "instance-a", "quote": base64.b64encode(quote).decode()}, nonce, key, [profile], 5))
+        result, _ = asyncio.run(chutes.chutes_verify_instance(
+            {"instance_id": "instance-a", "quote": base64.b64encode(quote).decode()}, nonce, key, [profile],
+        ))
         verify.assert_awaited_once_with(quote)
         return result
+
+
+def chutes_output(instances, *, timeout_seconds=60):
+    key = base64.b64encode(b"key").decode()
+    material = tdx_session_material(quote_fixture())
+    report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
+        "status": "UpToDate", "report": {"TD10": material["tdx_report"]},
+    }))
+    profile = {
+        "name": "profile",
+        "mrtd": material["tdx_report"]["mr_td"],
+        **{f"rtmr{i}": material["tdx_report"][f"rt_mr{i}"] for i in range(4)},
+    }
+
+    def fetch(url, params=None, **_kwargs):
+        if url.endswith("/servers/tdx/measurements"):
+            data = [profile]
+        elif url.endswith("/evidence"):
+            binding = hashlib.sha256((params["nonce"] + key).encode()).digest()
+            quote = base64.b64encode(quote_fixture(report_data=binding + bytes(32))).decode()
+            data = {"evidence": [dict(instance, quote=quote) for instance in instances]}
+        elif "/e2e/instances/" in url:
+            data = {"instances": [
+                {"instance_id": instance["instance_id"], "e2e_pubkey": key, "nonces": ["discovery"]}
+                for instance in instances
+            ]}
+        else:
+            raise AssertionError(f"unexpected network boundary: {url}")
+        return SimpleNamespace(status_code=200, content=json.dumps(data).encode(), headers={}, raise_for_status=lambda: None)
+
+    with (
+        patch("requests.get", side_effect=fetch),
+        patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify,
+    ):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(chutes.verify_chutes({
+                "model_id": "00000000-0000-0000-0000-000000000000",
+                "timeout_seconds": timeout_seconds,
+                "provider_options": {
+                    "chutes_api_key": "fixture", "chutes_e2ee_discovery_rounds": "1",
+                },
+            }))
+        return json.loads(output.getvalue()), verify.await_count
+
+
+def nras_jwk(key):
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(key.public_key(), as_dict=True)
+    jwk["kid"] = "nvidia-key"
+    return jwk
+
+
+@contextmanager
+def silent_http_endpoint():
+    accepted = Event()
+    release = Event()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(2)
+
+        def hold_connection():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                return
+            with connection:
+                accepted.set()
+                release.wait(8)
+
+        server = Thread(target=hold_connection)
+        server.start()
+        try:
+            yield f"http://127.0.0.1:{listener.getsockname()[1]}", accepted
+        finally:
+            release.set()
+            server.join()
 
 
 def profile_fixtures():
@@ -140,6 +257,90 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertNotIn("session_material_version", near_output(measured=None)["provider_claims"])
         self.assertEqual(near_output(valid=False)["result"], "failed")
         self.assertNotIn("canonical_model_id", base)
+        stale = near_output(tcb_status="OutOfDate")
+        self.assertEqual(stale["result"], "verified")
+        self.assertEqual(stale["provider_claims"]["tcb_status"], "OutOfDate")
+
+    def test_near_requires_every_attested_model_name_to_match(self):
+        canonical = {"model_name": "model-a", "intel_quote": "ab"}
+        second = {"model_name": "model-a", "intel_quote": "cd"}
+        self.assertEqual(near_output(attestations=[canonical, second])["result"], "verified")
+        reports = [
+            [{**canonical, "model_name": "model-b"}],
+            [canonical, {**second, "model_name": "Model-a"}],
+            [{"intel_quote": "ab"}],
+        ]
+        for entries in reports:
+            with self.subTest(entries=entries):
+                output = near_output(attestations=entries)
+                self.assertEqual(output["result"], "failed")
+                self.assertEqual(output["failure"], "binding_mismatch")
+                self.assertIn("model_name does not match", output["reason"])
+
+    def test_near_requires_a_near_hosted_quote(self):
+        for entry in (
+            {"model_name": "model-a", "quote_b64": "qw=="},
+            {"model_name": "model-a", "intel_quote": ""},
+        ):
+            with self.subTest(entry=entry):
+                output = near_output(attestations=[entry])
+                self.assertEqual(output["result"], "failed")
+                self.assertIn("no NEAR-hosted attestation (missing intel_quote)", output["reason"])
+
+    def test_near_stalled_report_times_out(self):
+        release = Event()
+        reached = Event()
+
+        class StalledReport(BaseHTTPRequestHandler):
+            def do_GET(self):
+                reached.set()
+                release.wait(20)
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), StalledReport) as server:
+            thread = Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                provider = NearaiProvider(include_tls_fingerprint=True)
+                provider.api_base = f"http://127.0.0.1:{server.server_port}/v1"
+                started = time.monotonic()
+                with patch(
+                    "confidential_verifier.providers.nearai.NearaiProvider",
+                    return_value=provider,
+                ):
+                    output = run_near_bridge("stalled")
+                elapsed = time.monotonic() - started
+                self.assertTrue(reached.is_set())
+                self.assertEqual(output["result"], "failed")
+                self.assertEqual(output["failure"], "evidence_unavailable")
+                self.assertIn("Read timed out", output["reason"])
+                self.assertLess(elapsed, 15)
+            finally:
+                release.set()
+                server.shutdown()
+                thread.join()
+
+    def test_near_gateway_dstack_uses_process_deadline(self):
+        address = bytes.fromhex("11" * 20)
+        fingerprint = bytes.fromhex("ab" * 32)
+        nonce = bytes.fromhex("33" * 32)
+        report_data = hashlib.sha256(address + fingerprint).digest() + nonce
+        report = {
+            "gateway_attestation": {
+                "intel_quote": quote_fixture(report_data=report_data).hex(),
+                "signing_address": "0x" + address.hex(),
+                "tls_cert_fingerprint": fingerprint.hex(),
+            },
+        }
+        response = SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {"is_valid": True}
+        )
+        with patch("requests.post", return_value=response) as post:
+            result = asyncio.run(
+                NearAICloudVerifier().verify_gateway_component(report, nonce.hex())
+            )
+        self.assertTrue(result["is_valid"], result["errors"])
+        post.assert_called_once()
+        self.assertIsNone(post.call_args.kwargs.get("timeout"))
 
     def test_phala_compose_and_quote(self):
         base = phala_output()["provider_claims"]
@@ -155,41 +356,146 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertNotEqual(base["tdx_report_sha256"], chutes_instance(changes={"rt_mr3": b"z" * 48})["tdx_report_sha256"])
         self.assertIn("gpu_evidence_nonce_matched", base["gpu"])
 
-    def test_chutes_emits_per_instance_projection_maps(self):
-        key = base64.b64encode(b"key").decode()
-        material = tdx_session_material(quote_fixture())
-        report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
-            "status": "UpToDate", "report": {"TD10": material["tdx_report"]},
-        }))
-        profile = {"name": "profile", "mrtd": material["tdx_report"]["mr_td"],
-                   "runtime_rtmrs": {f"RTMR{i}": material["tdx_report"][f"rt_mr{i}"] for i in range(4)}}
-        def fetch(url, params=None, **_kwargs):
-            if url.endswith("/measurements"):
-                data = [profile]
-            elif url.endswith("/evidence"):
-                nonce = params["nonce"]
-                rd = hashlib.sha256((nonce + key).encode()).digest() + bytes(32)
-                data = {"evidence": [{"instance_id": "instance-a", "quote": base64.b64encode(quote_fixture(report_data=rd)).decode()}]}
-            elif "/e2e/instances/" in url:
-                data = {"instances": [{"instance_id": "instance-a", "e2e_pubkey": key, "nonces": ["discovery"]}]}
-            else:
-                raise AssertionError(f"unexpected network boundary: {url}")
-            return SimpleNamespace(content=json.dumps(data).encode(), headers={}, raise_for_status=lambda: None)
-        with patch("requests.get", side_effect=fetch), patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify:
-            output = io.StringIO()
-            with redirect_stdout(output):
-                asyncio.run(chutes.verify_chutes({"model_id": "00000000-0000-0000-0000-000000000000", "provider_options": {
-                    "chutes_api_key": "fixture", "chutes_e2ee_discovery_rounds": "1",
-                }}))
-            result = json.loads(output.getvalue())
-            verify.assert_awaited_once()
+    def assert_chutes_gpu_unknown(self, result, instance_id):
         self.assertEqual(result["result"], "verified")
+        self.assertIn(instance_id, [binding["key_id"] for binding in result["channel_bindings"]])
+        gpu = result["provider_claims"]["instance_gpu"][instance_id]
+        self.assertTrue(gpu["gpu_evidence_present"])
+        self.assertFalse(gpu["gpu_verified"])
+        self.assertIsNone(gpu["gpu_evidence_nonce_matched"])
+
+    def test_chutes_emits_per_instance_projection_maps(self):
+        material = tdx_session_material(quote_fixture())
+        gpu = {"gpu_evidence": [{"arch": "HOPPER"}]}
+        instances = [
+            dict(gpu, tee_type="TDX", instance_id="instance-a"),
+            dict(gpu, tee_type="sNp", instance_id="instance-b"),
+            dict(gpu, tee_type=None, instance_id="instance-c"),
+            {"instance_id": "instance-d", "gpu_evidence": {"unexpected": "shape"}},
+        ]
+        jwks = {"keys": [nras_jwk(ec.generate_private_key(ec.SECP384R1()))]}
+        with (
+            patch.object(jwt.PyJWKClient, "fetch_data", return_value=jwks) as fetch,
+            patch("requests.post", return_value=SimpleNamespace(status_code=503)) as attest,
+        ):
+            result, quotes_checked = chutes_output(instances)
+        fetch.assert_called_once()
+        self.assertEqual(attest.call_count, 2)
+        self.assertEqual(quotes_checked, 3)
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+        self.assert_chutes_gpu_unknown(result, "instance-c")
+        self.assert_chutes_gpu_unknown(result, "instance-d")
+        accepted = ["instance-a", "instance-c", "instance-d"]
+        self.assertEqual([binding["key_id"] for binding in result["channel_bindings"]], accepted)
         claims = result["provider_claims"]
         self.assertEqual(claims["session_material_version"], "chutes/1")
-        self.assertEqual(claims["instance_tdx_reports"], {"instance-a": material["tdx_report"]})
-        self.assertEqual(claims["instance_tdx_report_sha256"], {"instance-a": material["tdx_report_sha256"]})
-        self.assertEqual(claims["instance_advisory_ids"], {"instance-a": ["SA-A", "SA-B"]})
-        self.assertIn("gpu_evidence_nonce_matched", claims["instance_gpu"]["instance-a"])
+        for instance_id in accepted:
+            self.assertEqual(claims["instance_tdx_reports"][instance_id], material["tdx_report"])
+            self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
+            self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
+
+    def test_chutes_keeps_cpu_binding_when_jwks_fetch_fails(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        with (
+            patch.object(jwt.PyJWKClient, "fetch_data", side_effect=jwt.PyJWKClientConnectionError("offline")) as fetch,
+            patch("requests.post") as attest,
+        ):
+            result, _ = chutes_output(instances)
+        fetch.assert_called_once()
+        attest.assert_not_called()
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+
+    def test_chutes_skips_gpu_checks_without_process_deadline_headroom(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        with patch.object(jwt.PyJWKClient, "fetch_data") as fetch:
+            result, _ = chutes_output(instances, timeout_seconds=2)
+        fetch.assert_not_called()
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+
+    def test_chutes_gpu_budget_does_not_wait_for_a_silent_socket(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        jwks = {"keys": [nras_jwk(ec.generate_private_key(ec.SECP384R1()))]}
+        for endpoint in ("NRAS_JWKS_URL", "NRAS_ATTEST_URL"):
+            with self.subTest(endpoint=endpoint), silent_http_endpoint() as (url, accepted):
+                fetch = (
+                    patch.object(jwt.PyJWKClient, "fetch_data", return_value=jwks)
+                    if endpoint == "NRAS_ATTEST_URL" else nullcontext()
+                )
+                with (
+                    fetch,
+                    patch.object(chutes, endpoint, url),
+                    patch.object(chutes, "NRAS_GPU_BUDGET_SECONDS", 0.5),
+                ):
+                    started_at = time.monotonic()
+                    result, _ = chutes_output(instances)
+                    elapsed = time.monotonic() - started_at
+                self.assertTrue(accepted.is_set())
+                self.assertLess(elapsed, 2)
+                self.assert_chutes_gpu_unknown(result, "instance-a")
+
+    def test_chutes_measurements_fallback_only_when_tdx_endpoint_is_unavailable(self):
+        base = "https://chutes.example"
+        legacy = requests.Response()
+        legacy.status_code = 200
+        modern = requests.Response()
+        modern.status_code = 404
+        with patch("requests.get", side_effect=[modern, legacy]) as get:
+            self.assertEqual(chutes.chutes_fetch_measurements(base, 10), (f"{base}/servers/tee/measurements", legacy))
+            self.assertEqual(get.call_args_list, [
+                call(f"{base}/servers/tdx/measurements", timeout=10),
+                call(f"{base}/servers/tee/measurements", timeout=10),
+            ])
+
+        modern.status_code = 503
+        with patch("requests.get", return_value=modern) as get:
+            with self.assertRaises(requests.HTTPError):
+                chutes.chutes_fetch_measurements(base, 10)
+            get.assert_called_once_with(f"{base}/servers/tdx/measurements", timeout=10)
+
+    def test_chutes_flat_profile_rejects_missing_or_mismatched_rtmr(self):
+        report = tdx_session_material(quote_fixture())["tdx_report"]
+        profile = {"mrtd": report["mr_td"], **{f"rtmr{i}": report[f"rt_mr{i}"] for i in range(4)}}
+        for rtmr3 in (None, "ff" * 48):
+            with self.subTest(rtmr3=rtmr3):
+                self.assertIsNone(chutes.chutes_measurement_name(
+                    {"report": {"TD10": report}}, [dict(profile, rtmr3=rtmr3)],
+                ))
+
+    def test_chutes_gpu_requires_a_signed_fresh_nras_platform_verdict(self):
+        trusted = ec.generate_private_key(ec.SECP384R1())
+        untrusted = ec.generate_private_key(ec.SECP384R1())
+        jwk = nras_jwk(trusted)
+        signing_keys = {jwk["kid"]: jwt.PyJWK.from_dict(jwk)}
+        nonce = "aa" * 32
+        claims = {
+            "iss": "https://nras.attestation.nvidia.com",
+            "sub": "NVIDIA-PLATFORM-ATTESTATION",
+            "exp": int(time.time()) + 600,
+            "eat_nonce": nonce,
+            "x-nvidia-overall-att-result": True,
+        }
+
+        def token(key=trusted, kid="nvidia-key", algorithm="ES384", **overrides):
+            return jwt.encode(claims | overrides, key, algorithm=algorithm, headers={"kid": kid})
+
+        cases = [
+            ("verified", token(), True, True),
+            ("wrong nonce", token(eat_nonce="bb" * 32), False, False),
+            ("negative verdict", token(**{"x-nvidia-overall-att-result": False}), False, True),
+            ("unsigned", token(None, algorithm="none"), False, None),
+            ("bad signature", token(untrusted), False, None),
+            ("unknown signing key", token(kid="unknown"), False, None),
+            ("wrong issuer", token(iss="https://other.example"), False, None),
+            ("wrong subject", token(sub="GPU"), False, None),
+            ("expired", token(exp=0), False, None),
+        ]
+        for name, platform_jwt, verified, nonce_matched in cases:
+            with self.subTest(name=name):
+                response = SimpleNamespace(status_code=200, json=lambda: [["JWT", platform_jwt]])
+                with patch("requests.post", return_value=response):
+                    result = chutes.chutes_verify_gpu([{"arch": "HOPPER"}], nonce, signing_keys)
+                self.assertIs(result["gpu_verified"], verified)
+                self.assertIs(result["gpu_evidence_nonce_matched"], nonce_matched)
 
     def test_cross_language_fixtures_match_real_producers(self):
         self.assertEqual(profile_fixtures(), json.loads((ROOT / "tests/fixtures/session_material.json").read_text()))

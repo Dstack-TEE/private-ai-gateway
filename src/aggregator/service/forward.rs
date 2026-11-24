@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::aci::digest;
 use crate::aci::receipt::{
     ChannelBinding, ReceiptBuilder, ReceiptError, SignedReceipt, UpstreamVerifiedEvent,
-    VerificationResult, VerificationRound,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
@@ -18,6 +18,7 @@ use crate::aggregator::session::{
     SESSION_API_VERSION,
 };
 use crate::aggregator::session_store::SessionLease;
+use crate::endpoint::Endpoint;
 
 use super::claims::{
     instance_id, is_multi_instance, per_instance_session_claims, session_claims_for_event,
@@ -27,7 +28,7 @@ use super::e2ee_crypto::is_sse_content_type;
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
-use super::streaming::{E2eeSseTransformer, ReceiptFinalizingStream};
+use super::streaming::{direct_response, ResponseContext};
 use super::{
     reviewed_session_material, AciService, ChatCompletionRequest, E2eeError, E2eeResponseInfo,
     ForwardResult, GatewayRequestContext, MiddlewareReceiptJournal, ReceiptOwner, ServiceError,
@@ -35,6 +36,8 @@ use super::{
     UpstreamVerificationError, UpstreamVerificationRequest, CHANNEL_BINDING_REVERIFY_ATTEMPTS,
     CHAT_COMPLETIONS_PATH,
 };
+
+const MAX_TINFOIL_ENCLAVE_HEADER_BYTES: usize = 256;
 
 /// Outcome of [`AciService::forward_with_binding_reverify`]. The caller maps
 /// each non-success variant to its own policy — abort (single forward) or fail
@@ -90,10 +93,12 @@ pub(super) struct SessionGroup {
 fn canonical_bindings(bindings: &[ChannelBinding]) -> Result<Vec<ChannelBinding>, ServiceError> {
     let mut canonical = BTreeMap::new();
     for binding in bindings {
-        let value =
-            serde_json::to_value(binding).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
-        let bytes =
-            digest::jcs_bytes(&value).map_err(|e| ServiceError::SessionStore(e.to_string()))?;
+        // Fixed text, as for the fingerprint below: a binding's members come
+        // from a verifier.
+        let canonicalization_failed =
+            || ServiceError::SessionStore("channel binding canonicalization failed".to_string());
+        let value = serde_json::to_value(binding).map_err(|_| canonicalization_failed())?;
+        let bytes = digest::jcs_bytes(&value).map_err(|_| canonicalization_failed())?;
         canonical.insert(bytes, binding.clone());
     }
     Ok(canonical.into_values().collect())
@@ -122,9 +127,7 @@ impl AdmittedUpstream {
             self.requires_instance = false;
             self.event.channel_bindings.clear();
             self.event.result = VerificationResult::Failed;
-            self.event.reason = Some(
-                "upstream withheld an unverified response without a serving instance".to_string(),
-            );
+            self.event.failure = VerificationFailure::UnattributedResponse;
         }
         self
     }
@@ -199,28 +202,56 @@ impl ChannelMaterial<'_> {
 }
 
 impl AciService {
-    fn sanitize_media_success(
+    pub(super) fn append_speech_usage(
+        builder: &mut ReceiptBuilder,
+        usage: Value,
+    ) -> Result<(), ServiceError> {
+        builder.add_extension_event(
+            crate::aci::receipt::EVENT_USAGE_REPORTED,
+            serde_json::Map::from_iter([("usage".into(), usage)]),
+        )?;
+        Ok(())
+    }
+
+    fn sanitize_buffered_success(
         &self,
-        endpoint_path: &str,
-        response: &[u8],
-        request: &[u8],
-        audio_metadata: Option<&Value>,
-    ) -> Result<Vec<u8>, &'static str> {
-        if endpoint_path == super::IMAGES_GENERATIONS_PATH {
-            return crate::middleware::images::response_body(response, request)
-                .ok_or("upstream returned a malformed success body");
-        }
-        let message = "upstream returned a malformed transcription response";
-        let body = serde_json::from_slice::<Value>(response).map_err(|_| message)?;
-        let (body, _) = crate::middleware::audio::sanitize_response(
-            body,
-            audio_metadata.unwrap_or(&Value::Null),
-        )
-        .map_err(|_| {
-            self.metrics.record_audio_failure("malformed_duration");
-            message
-        })?;
-        serde_json::to_vec(&body).map_err(|_| message)
+        endpoint: Endpoint,
+        response: Vec<u8>,
+        request_metadata: &Value,
+        headers: &std::collections::HashMap<String, String>,
+    ) -> Result<(Vec<u8>, String), &'static str> {
+        let body = match endpoint {
+            Endpoint::AudioSpeech => {
+                let content_type =
+                    crate::middleware::speech::response_content_type(headers, &response)
+                        .ok_or("upstream returned a non-audio speech response")?;
+                return Ok((response, content_type));
+            }
+            Endpoint::Rerank => {
+                crate::middleware::rerank::response_body(&response, request_metadata)
+            }
+            Endpoint::ImagesEdits | Endpoint::ImagesGenerations => {
+                crate::middleware::images::response_body(
+                    &response,
+                    crate::middleware::images::requested_count(request_metadata),
+                )
+            }
+            Endpoint::AudioTranscriptions => {
+                let message = "upstream returned a malformed transcription response";
+                let body = serde_json::from_slice::<Value>(&response).map_err(|_| message)?;
+                let (body, _) = crate::middleware::audio::sanitize_response(body, request_metadata)
+                    .map_err(|_| {
+                        self.metrics.record_audio_failure("malformed_duration");
+                        message
+                    })?;
+                return serde_json::to_vec(&body)
+                    .map(|body| (body, "application/json".into()))
+                    .map_err(|_| message);
+            }
+            _ => None,
+        };
+        body.map(|body| (body, "application/json".into()))
+            .ok_or("upstream returned a malformed success body")
     }
 
     pub async fn forward_chat_completion(
@@ -231,7 +262,7 @@ impl AciService {
         upstream_verification_event: Option<UpstreamVerifiedEvent>,
     ) -> Result<ForwardResult, ServiceError> {
         self.forward_chat_completion_request(ChatCompletionRequest {
-            audio_form: None,
+            form: None,
             context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body,
@@ -258,6 +289,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let endpoint = Endpoint::from_path(endpoint_path);
         self.metrics.record_request(
             endpoint_path,
             RequestMode::Buffered,
@@ -267,16 +299,18 @@ impl AciService {
         let backend_input_body = req.forwarded_body.unwrap_or_else(|| received_body.to_vec());
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
-        let audio_metadata = (endpoint_path == super::AUDIO_TRANSCRIPTIONS_PATH)
+        let request_metadata = endpoint
+            .is_buffered_native()
             .then(|| serde_json::from_slice::<Value>(&backend_input_body).unwrap_or(Value::Null));
         let mut prepared = self.upstream.prepare(UpstreamRequest {
+            cache_salt: req.context.cache_salt.clone(),
             body: backend_input_body.into(),
-            form: req.audio_form,
+            form: req.form,
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
             ..Default::default()
         })?;
-        prepared.encode_audio().await?;
+        prepared.encode_media().await?;
         if aci_required && !attested_route_eligible(prepared.is_tee) {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(
@@ -311,6 +345,7 @@ impl AciService {
                 None,
                 // Single forward: only flush the cache for an event we own.
                 false,
+                &mut false,
                 |prepared, event| async move {
                     self.upstream
                         .forward_verified_prepared(prepared, &event)
@@ -326,13 +361,7 @@ impl AciService {
         let selected = (*admission).select(upstream_response.served_instance_id.as_deref())?;
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body)
-                .or_else(|| {
-                    (matches!(
-                        endpoint_path,
-                        super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
-                    ))
-                    .then(|| prepared.model_id.clone())
-                });
+                .or_else(|| endpoint.is_media().then(|| prepared.model_id.clone()));
         self.metrics.record_upstream_response(
             endpoint_path,
             RequestMode::Buffered,
@@ -349,27 +378,30 @@ impl AciService {
         // exactly the body/status the client receives.
         let mut upstream_headers = upstream_response.headers;
         let (client_status, client_body) = if (200..300).contains(&upstream_response.status_code) {
-            if matches!(
-                endpoint_path,
-                super::AUDIO_TRANSCRIPTIONS_PATH | super::IMAGES_GENERATIONS_PATH
-            ) {
-                upstream_headers.insert("content-type".into(), "application/json".into());
-                match self.sanitize_media_success(
-                    endpoint_path,
-                    &upstream_response.body,
-                    &forwarded_body,
-                    audio_metadata.as_ref(),
-                ) {
-                    Ok(body) => (upstream_response.status_code, body),
-                    Err(message) => (
-                        502,
-                        crate::middleware::errors::envelope_bytes(
-                            crate::middleware::errors::Surface::Openai,
-                            "upstream_error",
-                            message,
-                            None,
-                        ),
-                    ),
+            if endpoint.is_buffered_native() {
+                let sanitized = self.sanitize_buffered_success(
+                    endpoint,
+                    upstream_response.body,
+                    request_metadata.as_ref().unwrap_or(&Value::Null),
+                    &upstream_headers,
+                );
+                match sanitized {
+                    Ok((body, content_type)) => {
+                        upstream_headers.insert("content-type".into(), content_type);
+                        (upstream_response.status_code, body)
+                    }
+                    Err(message) => {
+                        upstream_headers.insert("content-type".into(), "application/json".into());
+                        (
+                            502,
+                            crate::middleware::errors::envelope_bytes(
+                                crate::middleware::errors::Surface::Openai,
+                                "upstream_error",
+                                message,
+                                None,
+                            ),
+                        )
+                    }
                 }
             } else {
                 (upstream_response.status_code, upstream_response.body)
@@ -427,13 +459,26 @@ impl AciService {
                 .lease
                 .as_ref()
                 .map(|lease| lease.session_id().to_string());
-            Self::append_upstream_verified(&mut builder, &selected.event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &selected.event,
+                recorded,
+                &upstream_headers,
+            )?;
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's event.
             builder.set_upstream_verified_model_id(response_model.clone());
         }
         // §7.4 wire bytes: whatever is actually served — after E2EE sealing
         // or an image-input 400 remap, when either applies.
+        if endpoint == Endpoint::AudioSpeech && (200..300).contains(&client_status) {
+            let usage =
+                crate::middleware::speech::usage(request_metadata.as_ref().unwrap_or(&Value::Null))
+                    .ok_or_else(|| {
+                        UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                    })?;
+            Self::append_speech_usage(&mut builder, usage)?;
+        }
         builder.add_response_returned(&wire_response_body)?;
 
         let receipt = builder.finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
@@ -487,6 +532,7 @@ impl AciService {
         let middleware_forwarded_body =
             target_route_id.as_ref().map(|_| backend_input_body.clone());
         let prepared = self.upstream.prepare(UpstreamRequest {
+            cache_salt: req.context.cache_salt.clone(),
             body: backend_input_body.into(),
             path: Some(endpoint_path.to_string()),
             target_route_id: target_route_id.clone(),
@@ -526,6 +572,7 @@ impl AciService {
                 None,
                 // Single forward: only flush the cache for an event we own.
                 false,
+                &mut false,
                 |prepared, event| async move {
                     self.upstream
                         .forward_stream_verified_prepared(prepared, &event)
@@ -595,7 +642,12 @@ impl AciService {
                 .lease
                 .as_ref()
                 .map(|lease| lease.session_id().to_string());
-            Self::append_upstream_verified(&mut builder, &selected.event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &selected.event,
+                recorded,
+                &upstream_response.headers,
+            )?;
         }
 
         // This is the streaming entry point, so a response with no declared
@@ -619,20 +671,18 @@ impl AciService {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let e2ee_transformer = req
-            .e2ee
-            .clone()
-            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-
-        let body = ReceiptFinalizingStream::new(
+        let body = direct_response(
             self,
             upstream_response.body,
             builder,
             selected.lease,
-            req.requester,
-            endpoint_path.to_string(),
-            e2ee_transformer,
-            Some(request_id),
+            ResponseContext {
+                requester: req.requester,
+                endpoint: endpoint_path.into(),
+                e2ee: req.e2ee.clone(),
+                request_id: Some(request_id),
+                identity: None,
+            },
             is_sse,
         );
 
@@ -642,7 +692,7 @@ impl AciService {
             upstream_status: upstream_response.status_code,
             upstream_headers: upstream_response.headers,
             e2ee: e2ee_response,
-            body: Box::pin(body),
+            body,
         }))
     }
 
@@ -682,7 +732,7 @@ impl AciService {
             verifier_id: "none".to_string(),
             result: VerificationResult::Failed,
             required: verification_required,
-            reason: Some("no upstream verifier configured".to_string()),
+            failure: VerificationFailure::NoVerifier,
             ..Default::default()
         });
         self.metrics.record_upstream_verification(&event);
@@ -695,12 +745,11 @@ impl AciService {
                 ));
             }
             if event.result != VerificationResult::Verified {
-                let reason = event
-                    .reason
-                    .clone()
-                    .unwrap_or_else(|| "upstream verification failed".to_string());
+                // The verifier's own account stays here; the refusal and its
+                // receipt carry the cause from the closed set.
+                tracing::warn!(upstream = %event.upstream_name, model = %event.model_id, verifier = %event.verifier_id, failure = %event.failure, diagnostic = event.diagnostic.as_deref().unwrap_or_default(), "required upstream verification failed");
                 return Err(ServiceError::UpstreamVerification(
-                    UpstreamVerificationError::VerifierFailed(reason),
+                    UpstreamVerificationError::VerifierFailed(event.failure),
                 ));
             }
             // §1.2: verification must obtain an *enforceable* channel binding.
@@ -709,7 +758,7 @@ impl AciService {
             if event.channel_bindings.is_empty() {
                 return Err(ServiceError::UpstreamVerification(
                     UpstreamVerificationError::VerifierFailed(
-                        "no enforceable channel binding".to_string(),
+                        VerificationFailure::NoChannelBinding,
                     ),
                 ));
             }
@@ -723,7 +772,9 @@ impl AciService {
 
     /// Forward with an owned admission, refreshing and readmitting on a binding
     /// mismatch up to [`CHANNEL_BINDING_REVERIFY_ATTEMPTS`] times. Return the
-    /// admission belonging to the successful attempt.
+    /// admission belonging to the successful attempt. A first-frame PSK
+    /// mismatch consumes one retry and refreshes only its serving instance.
+    /// The caller shares that one retry across its failover candidates.
     ///
     /// `caller_supplied_event` (the gateway does not own the event) suppresses
     /// reverify entirely. On a *terminal* mismatch the gateway's verifier cache
@@ -740,6 +791,7 @@ impl AciService {
         aci_session_ids: &[String],
         receipt_journal: Option<&MiddlewareReceiptJournal>,
         always_invalidate_on_mismatch: bool,
+        response_binding_reverified: &mut bool,
         mut forward: Fwd,
     ) -> ReverifyOutcome<R>
     where
@@ -747,6 +799,11 @@ impl AciService {
         Fwd: FnMut(PreparedUpstreamRequest, UpstreamVerifiedEvent) -> Fut,
         Fut: std::future::Future<Output = Result<R, UpstreamError>>,
     {
+        let response_started = || {
+            receipt_journal
+                .and_then(MiddlewareReceiptJournal::early_response_keyset)
+                .is_some()
+        };
         let mut reverify_attempts = 0;
         loop {
             // The future owns its inputs; the admission keeps its leases until
@@ -766,16 +823,50 @@ impl AciService {
                     admission = admission.withheld_without_instance();
                     return ReverifyOutcome::Forwarded(R::withheld(status), Box::new(admission));
                 }
-                Err(UpstreamError::ChannelBindingMismatch(_))
+                Err(err)
                     if !caller_supplied_event
-                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS =>
+                        && reverify_attempts < CHANNEL_BINDING_REVERIFY_ATTEMPTS
+                        && (matches!(err, UpstreamError::ChannelBindingMismatch(_))
+                            || (!*response_binding_reverified
+                                && !response_started()
+                                && matches!(
+                                    err,
+                                    UpstreamError::ResponseBindingMismatch { .. }
+                                ))) =>
                 {
-                    drop(admission);
+                    let AdmittedUpstream {
+                        event: previous,
+                        sessions,
+                        ..
+                    } = admission;
+                    drop(sessions);
                     reverify_attempts += 1;
-                    match self
-                        .refresh_upstream_event(prepared, verification_required)
-                        .await
+                    let refreshed = if let UpstreamError::ResponseBindingMismatch { instance_id } =
+                        &err
                     {
+                        *response_binding_reverified = true;
+                        let Some(verifier) = &self.upstream_verifier else {
+                            return ReverifyOutcome::Failed(err);
+                        };
+                        let request =
+                            self.upstream_verification_request(prepared, verification_required);
+                        let Some(event) = verifier
+                            .reverify_instance(request, &previous, instance_id)
+                            .await
+                        else {
+                            return ReverifyOutcome::Failed(err);
+                        };
+                        // Middleware may have started its SSE heartbeat during the quote fetch.
+                        if response_started() {
+                            return ReverifyOutcome::Failed(err);
+                        }
+                        self.recorded_upstream_event(prepared, verification_required, Some(event))
+                            .await
+                    } else {
+                        self.refresh_upstream_event(prepared, verification_required)
+                            .await
+                    };
+                    match refreshed {
                         Ok(event) => {
                             admission = match self.admit_upstream(
                                 event,
@@ -1067,7 +1158,13 @@ impl AciService {
         };
         let fingerprint = material
             .fingerprint()
-            .map_err(|err| ServiceError::SessionStore(format!("channel fingerprint: {err}")))?;
+            // Fixed text: the error names the offending member, and the
+            // material carries provider-supplied claim names.
+            .map_err(|_| {
+                ServiceError::SessionStore(
+                    "channel fingerprint canonicalization failed".to_string(),
+                )
+            })?;
 
         let mut expires_at = now
             .checked_add(self.config.attested_session_ttl_seconds)
@@ -1147,17 +1244,35 @@ impl AciService {
         builder: &mut ReceiptBuilder,
         event: &UpstreamVerifiedEvent,
         recorded: Option<String>,
+        upstream_headers: &HashMap<String, String>,
     ) -> Result<(), ReceiptError> {
         // §8.3: the receipt cites the session; the claims live on the session
         // record, so a verified event carries an id and a failed one a reason.
         match recorded {
-            Some(session_id) => builder.add_upstream_verified_with_session(event, &session_id),
+            Some(session_id) => {
+                builder.add_upstream_verified_with_session(event, &session_id)?;
+                if let Some(enclave) = upstream_headers.get("tinfoil-enclave").filter(|value| {
+                    event.provider_type.as_deref() == Some("tinfoil")
+                        && (1..=MAX_TINFOIL_ENCLAVE_HEADER_BYTES).contains(&value.len())
+                }) {
+                    builder.add_extension_event(
+                        "upstream.tinfoil_enclave",
+                        serde_json::Map::from_iter([(
+                            "enclave".into(),
+                            Value::from(enclave.as_str()),
+                        )]),
+                    )?;
+                }
+                Ok(())
+            }
             None => builder.add_upstream_verified_failed(
                 &event.model_id,
-                event
-                    .reason
-                    .as_deref()
-                    .unwrap_or("no enforceable verified binding"),
+                // A verified result with no session pinned nothing (§1.2).
+                match event.result {
+                    VerificationResult::Verified => VerificationFailure::NoChannelBinding,
+                    VerificationResult::Failed => event.failure,
+                }
+                .as_str(),
                 event.required,
                 Some(&event.upstream_name),
             ),

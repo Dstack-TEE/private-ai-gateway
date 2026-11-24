@@ -16,15 +16,26 @@ describes the boundary.
 
 ## Documentation
 
-- [Install](../../docs/private-ai-proxy-install.md)
-- [Architecture](docs/client-architecture.md)
-- [CLI reference](docs/cli.md)
-- [Settings files](docs/configuration.md)
-- [CLI distribution](docs/cli-distribution.md)
-- [Account login](docs/account-login.md)
-- [Distribution architecture](docs/distribution.md)
+Using Private AI Proxy:
+
+- [Install](../../docs/private-ai-proxy-install.md): the CLI and the desktop app
+- [CLI reference](docs/cli.md): every `pap` command, including connecting agents
+- [Settings files](docs/configuration.md): profiles, credentials, and listeners
+- [Account login](docs/account-login.md): Phala and RedPill sign-in
+- [Changelog](CHANGELOG.md)
+
+Working on it:
+
+- [Architecture](docs/client-architecture.md): components, project boundary,
+  and verification ownership
+- [CLI distribution](docs/cli-distribution.md): package contents and the release
+  contract
+- [Distribution architecture](docs/distribution.md): release orchestration and
+  updates
+- [npm distribution](npm/README.md)
 - [Mac App Store preparation](docs/mac-app-store.md)
 - [Codex baseline and catalog refresh](docs/codex-catalog.md)
+- [Live end-to-end test](e2e/README.md)
 - [ACI specification](../../spec/aci.md)
 
 ## Repository Layout
@@ -33,16 +44,15 @@ describes the boundary.
 | --- | --- |
 | `src/renderer` | React UI and native-window content |
 | `src-tauri` | Tauri application, system integration, tray, menus, dialogs, updates |
-| `cli` | The `pap` CLI, the only command-line surface (arguments, output, completions), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
+| [`cli`](cli/README.md) | The `pap` CLI, the only command-line surface (arguments, output, completions), ACI relying-party verifier, local streaming proxy, and the `private-ai-proxy-service` entry point |
 | `core` | Client side shared by the app, CLI and backend: contracts, the management API and its client, the local endpoint, the `config.toml` model, paths |
 | `runtime` | Persistent backend: controller, settings files, the management API server, verifier sessions, usage, account login, web UI |
 | `agent-bridge` | Coding-agent bridge: Local API proxy, agent tokens, catalog, reversible agent configuration, and the `private-ai-proxy-helper` binary |
-| `gateway/src/endpoint-support.json` | Published model endpoint inventory; released apps fetch this path, so it stays put |
 | `../../crates/aci-protocol` | Shared ACI wire types and deterministic encoding rules |
 | `../../crates/aci-verify` | Shared policy-neutral ACI verification mechanisms: report binding, dstack event-log replay and KMS custody chain, declared TLS selection |
-| `brand` | Source branding and icon assets |
-| `npm` | npm packaging of the CLI |
-| `scripts` | Reproducible build, packaging, release, and endpoint-probe tooling |
+| [`brand`](brand/dstack/README.md) | Source branding and icon assets |
+| [`npm`](npm/README.md) | npm packaging of the CLI |
+| `scripts` | Reproducible build, packaging, and release tooling |
 
 Every package ships the same three sibling executables; see
 [CLI distribution](docs/cli-distribution.md).
@@ -82,8 +92,7 @@ text part. The catalog must explicitly advertise `transcription` in
 Models advertising `transcription` output are excluded from
 chat, Messages, and Responses. Models such as Gemini that accept audio and text
 and advertise only `text` output keep their chat endpoints.
-Like System One and images, this route bypasses the text endpoint compatibility
-inventory. Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
+Multipart inspection is bounded to 16 parts and 64 KiB of aggregate
 text within the existing 32 MiB body limit. File parts are drained without
 collecting another file buffer. Other Local API routes reject multipart.
 
@@ -101,8 +110,8 @@ a profile switch or a settings change keep linked agents pointed at the Local
 API, which refuses them until protection is verified again, so their requests
 never fall back to the original provider. A Local API address change during
 the session rewrites them to the new address from the last verified catalog;
-only when this backend has not verified a catalog yet are they restored until
-verification projects them again. If neither the new address nor the old
+when this backend has not verified a catalog yet, they keep the previous address,
+where the Local API no longer listens, until verification projects them again. If neither the new address nor the old
 one can be bound, agents stay pointed at an address with no listener, which
 refuses them. External edits are preserved and incomplete restoration is kept
 retryable.
@@ -164,7 +173,6 @@ Run the focused checks from `apps/desktop`:
 ```bash
 npm run check
 npm run test:release
-npm run test:probe
 
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -189,30 +197,24 @@ Phala and RedPill sign-in flows. The renderer, `config.toml`, agent
 configuration, command arguments, and diagnostics never receive the raw saved
 credential.
 
-## Model Compatibility Inventory
+## Model Catalog
 
-`gateway/src/endpoint-support.json` contains dated endpoint observations for the
-RedPill and Phala presets. The verified live catalog remains authoritative;
-inventory data only filters models that are known to match an agent's API
-surface.
+The verified live catalog (`GET /v1/models` through the ACI verifier) is the
+only model list. Every listed model is offered on the Chat Completions,
+Messages and Responses surfaces unless its `output_modalities` excludes text;
+image and transcription surfaces require an explicit `image` or
+`transcription` output modality. Models are listed newest first (the entry's
+`created` time), then by id, wherever the catalog is shown: `GET /v1/models`,
+the app, and connected agents' pickers.
 
-Probe a service explicitly:
-
-```bash
-node scripts/probe-model-endpoints.mjs \
-  --endpoint https://tee.redpill.ai \
-  --key-env REDPILL_AI_API_KEY \
-  --previous gateway/src/endpoint-support.json \
-  --json
-```
-
-Pass credentials through the named environment variable, never as command-line
-arguments. Temporary HTTP failures remain availability failures rather than
-proof of incompatibility. Network errors and malformed responses remain
-inconclusive. Review the complete report before updating the inventory.
-Models whose catalog `output_modalities` is an array without `text` are recorded
-as `unavailable` with reason `no_text_output`, including all capability checks,
-without inference requests. Models without output modality metadata are probed normally.
+The catalog is read when a session is verified and again every 10 minutes
+while it is protected (`pap models list --refresh` reads it at once). A request
+for a model it lacks also reads it again, at most once a minute, so a model the
+service just added works on its first request. A failed
+refresh keeps the catalog the session has. When the catalog changes, connected
+agents' configurations are rewritten from it; an agent that reads its models
+only at startup, such as Codex's app server, needs a restart to see them
+(see [Codex catalog](docs/codex-catalog.md)).
 
 ## Branding
 

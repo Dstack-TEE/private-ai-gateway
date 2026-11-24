@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import { SidebarMenu, SidebarMenuItem, SidebarMenuButton } from "./ui/sidebar";
 import { overlaidTitleBar, titleBarDragRegion } from "../lib/environment";
 import { useShell } from "../lib/shell";
+import { useDocumentTitle } from "../hooks/use-document-title";
 import { BrandMark } from "./brand";
 import { ProtectedControl, ProtectionStatus } from "./protection";
 import { toneTextClass } from "../lib/tone";
@@ -65,6 +66,7 @@ export function Sidebar({ navigationRef }: { navigationRef: RefObject<HTMLElemen
 export function PageHeader({ titleRef }: { titleRef: RefObject<HTMLHeadingElement | null> }): React.JSX.Element {
   const { state, protectionPending, toggleProtection } = useShell();
   const page = useMatches({ select: (matches) => matches.at(-1) });
+  useDocumentTitle(page?.staticData.title);
   const protection = state.protection;
   return (
     <header className="mx-6 flex flex-[0_0_56px] items-center justify-between gap-3 pt-2 max-[620px]:px-4 max-[440px]:mx-3 max-[440px]:basis-13 max-[440px]:gap-2 max-[440px]:pt-1.75" {...titleBarDragRegion}>

@@ -527,9 +527,7 @@ impl AppState {
                 || self.session_active
                 || matches!(
                     self.status,
-                    VerificationStatus::Verifying
-                        | VerificationStatus::Verified
-                        | VerificationStatus::Blocked
+                    VerificationStatus::Verifying | VerificationStatus::Verified
                 ))
     }
 }

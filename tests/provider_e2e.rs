@@ -640,7 +640,17 @@ async fn chutes_invoke_handler(
         (
             StatusCode::OK,
             [("content-type", "text/event-stream")],
-            encrypt_chutes_stream_response(response_pk),
+            encrypt_chutes_stream_response(
+                response_pk,
+                if headers
+                    .get("x-e2e-path")
+                    .is_some_and(|path| path == "/v1/responses")
+                {
+                    b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"provider-model\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}}\n\n"
+                } else {
+                    STREAM_CHAT_RESPONSE_EVENT
+                },
+            ),
         )
     } else {
         (
@@ -918,7 +928,7 @@ fn encrypt_chutes_response_blob(response_pk_b64: &str, body: &[u8]) -> Vec<u8> {
     out
 }
 
-fn encrypt_chutes_stream_response(response_pk_b64: &str) -> Vec<u8> {
+fn encrypt_chutes_stream_response(response_pk_b64: &str, source: &[u8]) -> Vec<u8> {
     let response_pk = BASE64.decode(response_pk_b64).unwrap();
     let response_pk = MlKemEncapsulationKey768::new_from_slice(&response_pk).unwrap();
     let (mlkem_ct, shared_secret) = response_pk.encapsulate();
@@ -927,7 +937,7 @@ fn encrypt_chutes_stream_response(response_pk_b64: &str) -> Vec<u8> {
         mlkem_ct.as_slice(),
         CHUTES_INFO_STREAM,
     );
-    let encrypted = encrypt_chutes_stream_chunk(&key, STREAM_CHAT_RESPONSE_EVENT);
+    let encrypted = encrypt_chutes_stream_chunk(&key, source);
     format!(
         "data: {{\"e2e_init\":\"{}\"}}\n\ndata: {{\"e2e\":\"{}\"}}\n\ndata: [DONE]\n\n",
         BASE64.encode(mlkem_ct.as_slice()),
@@ -1113,7 +1123,7 @@ async fn openai_compatible_provider_e2e_via_runtime_config() {
         assert_eq!(upstream_verified["required"], false);
         assert_eq!(
             upstream_verified["reason"],
-            "no enforceable verified binding"
+            "no enforceable channel binding"
         );
         assert!(upstream_verified.get("session_id").is_none());
 
@@ -1392,6 +1402,87 @@ async fn privatemode_verification_cache_and_refresh_follow_the_configured_lease(
 }
 
 #[tokio::test]
+async fn privatemode_observes_legacy_and_rotating_secret_ids_without_claiming_binding() {
+    let (base_url, _hits) = serve_counted_readiness_fixture().await;
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 0);
+    let mut log = "2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n".to_string();
+
+    for (timestamp, secret_id) in [
+        ("2026-07-31T00:00:00Z", None),
+        ("2026-11-14T01:00:00Z", Some(BASE64.encode([1; 32]))),
+        ("2026-11-14T02:00:00Z", Some(BASE64.encode([2; 32]))),
+    ] {
+        if let Some(secret_id) = &secret_id {
+            log.push_str(&format!(
+                "{timestamp} /var/lib/privatemode/manifests/1.json {secret_id}\n"
+            ));
+        }
+        std::fs::write(
+            &fixture.manifest_log_path,
+            format!("{log}2026-11-14T03:00:00Z /var/lib/privatemode/manifests/1.json torn"),
+        )
+        .unwrap();
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(
+            event.result,
+            VerificationResult::Verified,
+            "{:?}",
+            event.diagnostic
+        );
+        let evidence = event.evidence.unwrap();
+        let claims = event.provider_claims.unwrap();
+        assert_eq!(claims["observed_manifest_sha256"], fixture.manifest_digest);
+        assert_eq!(evidence["observed_at"], timestamp);
+        assert_eq!(claims["manifest_observed_at"], timestamp);
+        assert_eq!(evidence["secret_id"].as_str(), secret_id.as_deref());
+        assert_eq!(claims["observed_secret_id"].as_str(), secret_id.as_deref());
+        assert_eq!(evidence["bound_to_active_secret"], false);
+        assert_eq!(claims["manifest_bound_to_active_secret"], false);
+    }
+
+    log.push_str("2026-11-14T03:00:00Z /var/lib/privatemode/manifests/2.json pending-secret\n");
+    std::fs::write(&fixture.manifest_log_path, &log).unwrap();
+    for manifest_bytes in [None, Some(br#"{"Policies":{"#.as_slice())] {
+        if let Some(bytes) = manifest_bytes {
+            std::fs::write(fixture.manifest_dir.path().join("2.json"), bytes).unwrap();
+        }
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(event.result, VerificationResult::Verified);
+        assert_eq!(event.evidence.unwrap()["secret_id"], BASE64.encode([2; 32]));
+        assert_eq!(
+            event.provider_claims.unwrap()["observed_secret_id"],
+            BASE64.encode([2; 32])
+        );
+    }
+}
+
+#[tokio::test]
+async fn privatemode_rejects_malformed_complete_manifest_log_entries() {
+    let (base_url, _hits) = serve_counted_readiness_fixture().await;
+    let fixture = PrivatemodeTestDeployment::new(base_url);
+    let verifier = fixture.verifier(10, 0);
+
+    for malformed in [
+        "\n",
+        "2026-11-14T00:00:00Z\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.json id extra\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/one.json id\n",
+        "2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.txt id\n",
+    ] {
+        std::fs::write(
+            &fixture.manifest_log_path,
+            format!("2026-07-31T00:00:00Z /var/lib/privatemode/manifests/1.json\n{malformed}"),
+        )
+        .unwrap();
+        let event = verifier.verify(fixture.verification_request("m")).await;
+        assert_eq!(event.result, VerificationResult::Failed, "{malformed:?}");
+        assert!(event.evidence.is_none());
+        assert!(event.provider_claims.is_none());
+    }
+}
+
+#[tokio::test]
 async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_written() {
     let (base_url, _provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
@@ -1402,7 +1493,7 @@ async fn privatemode_reports_the_previous_manifest_while_the_logged_one_is_writt
             event.result,
             VerificationResult::Verified,
             "{:?}",
-            event.reason
+            event.diagnostic
         );
         event.provider_claims.as_ref().unwrap()["observed_manifest_sha256"].clone()
     };
@@ -1443,6 +1534,12 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
     let (base_url, provider_calls, _plaintext_path_hits) =
         serve_privatemode_provider_fixture().await;
     let fixture = PrivatemodeTestDeployment::new(base_url.clone());
+    let secret_id = BASE64.encode([3; 32]);
+    std::fs::write(
+        &fixture.manifest_log_path,
+        format!("2026-11-14T00:00:00Z /var/lib/privatemode/manifests/1.json {secret_id}\n"),
+    )
+    .unwrap();
 
     let (_config_path_dir, config_path) = temp_config_path();
     let mut options = runtime_options(UpstreamVerifierMode::None);
@@ -1477,6 +1574,7 @@ async fn privatemode_runtime_config_binds_the_measured_sidecar_in_the_receipt() 
         "contrast-attested-e2ee-secret"
     );
     assert_eq!(document["claims"]["extra"]["manifest_mode"], "dynamic");
+    assert_eq!(document["claims"]["extra"]["observed_secret_id"], secret_id);
     assert_eq!(
         document["claims"]["extra"]["manifest_bound_to_active_secret"],
         false
@@ -1555,7 +1653,7 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
         let result = service
             .forward_chat_completion_for_middleware(
                 ChatCompletionRequest {
-                    audio_form: None,
+                    form: None,
                     context: GatewayRequestContext {
                         user_model: Some("public-model".to_string()),
                         ..GatewayRequestContext::default()
@@ -1570,9 +1668,12 @@ async fn privatemode_middleware_capacity_retry_reverifies_the_bound_route() {
                     e2ee: None,
                 },
                 vec![ForwardCandidate {
+                    format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
                     route_id: "privatemode-provider:public-model".to_string(),
                     body: request_body.clone(),
-                    path: "/v1/chat/completions",
+                    endpoint:
+                        private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+                    wire_endpoint: private_ai_gateway::endpoint::Endpoint::ChatComplete,
                 }],
                 stream,
                 journal.clone(),
@@ -1731,7 +1832,7 @@ async fn openai_compatible_provider_routes_embeddings_via_runtime_config() {
     assert_eq!(upstream_verified["required"], false);
     assert_eq!(
         upstream_verified["reason"],
-        "no enforceable verified binding"
+        "no enforceable channel binding"
     );
     assert!(upstream_verified.get("session_id").is_none());
 }
@@ -1774,6 +1875,7 @@ async fn dynamic_runtime_config_delegates_verified_forwarding_to_selected_backen
     let prepared = backend
         .prepare(UpstreamRequest {
             content_type: None,
+            cache_salt: None,
             form: None,
             body: CHAT_REQUEST.to_vec().into(),
             headers: Default::default(),
@@ -1837,13 +1939,13 @@ async fn openai_compatible_provider_refuses_unenforceable_tls_binding() {
     let app = build_router(service);
 
     let (status, _, body) = call(app, "POST", "/v1/chat/completions", CHAT_REQUEST).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     let error: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("TLS channel binding requires an https upstream"));
+    assert_eq!(error["error"]["type"], "upstream_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The upstream provider returned an error"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
 }
 
@@ -2418,6 +2520,133 @@ async fn chutes_provider_decrypts_streaming_e2ee_response() {
 }
 
 #[tokio::test]
+async fn chutes_responses_route_decodes_and_bills_the_responses_protocol() {
+    use private_ai_gateway::endpoint::Endpoint;
+    use private_ai_gateway::middleware::errors::Surface;
+    use private_ai_gateway::middleware::{
+        CacheSaltKey, CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
+    };
+    let (base_url, calls, key, _) = serve_chutes_provider_fixture().await;
+    let backend = ChutesProviderBackend::new_with_timeouts(base_url.clone(), 10, 600)
+        .unwrap()
+        .with_name("chutes-provider")
+        .with_bearer_token("fixture-token")
+        .with_e2ee_api_base(base_url.clone());
+    let verifier = StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+        url_origin: Some(base_url),
+        verifier_id: "fixture-chutes-verifier/v1".into(),
+        evidence: Some(provider_evidence_fixture("chutes-attestation")),
+        channel_bindings: vec![chutes_key_binding(&key)],
+        ..verified_event("chutes-provider", "provider-model")
+    });
+    let mut router = ModelRouterBackend::new("router");
+    router
+        .add_route(
+            ModelRoute::new(
+                "provider-model",
+                "provider-model",
+                Arc::new(backend),
+                "route",
+            )
+            .unwrap()
+            .with_is_tee(Some(true)),
+        )
+        .unwrap();
+    let service = Arc::new(
+        AciService::new_with_upstream_verifier(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            Arc::new(router),
+            Arc::new(verifier),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let control = Router::new().route("/consult/pre", post(|| async { Json(json!({
+        "allow":true, "candidates":[{"routeId":"route", "format":"openai", "supportedEndpoints":["/v1/responses"]}],
+        "pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}
+    })) })).route("/consult/post", post(move |Json(report): Json<Value>| {
+        sent.send(report).unwrap(); async { StatusCode::OK }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let control = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    let middleware = Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        CacheSaltKey::new([8; 32]),
+        &MiddlewareConfig {
+            control_url: format!("http://{addr}"),
+            control_token: None,
+            control_timeout_ms: Some(2000),
+            control_post_timeout_ms: Some(2000),
+            sse_keepalive_ms: Some(0),
+            send_request_features: Some(false),
+            tee_only_domains: vec![],
+        },
+    )
+    .unwrap();
+    let params = json!({"model":"provider-model", "input":"hi", "stream":true});
+    let response = middleware
+        .handle_completion(
+            &service,
+            CompletionInput {
+                form: None,
+                upload_permit: None,
+                endpoint: Endpoint::CreateModelResponse,
+                endpoint_path: "/v1/responses",
+                surface: Surface::Openai,
+                received_body: serde_json::to_vec(&params).unwrap().into(),
+                params,
+                api_key_hash: Some("fixture-key".into()),
+                requester: None,
+                e2ee: None,
+                aci_required: false,
+                aci_session_ids: vec![],
+                request_id: "fixture-responses".into(),
+                user_model: Some("provider-model".into()),
+                stream: true,
+                tee_only: false,
+            },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let receipt_id = response.headers()["x-receipt-id"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let wire = String::from_utf8(
+        to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(wire.contains("event: response.completed"), "{wire}");
+    assert!(!wire.contains("[DONE]"), "{wire}");
+    let report = tokio::time::timeout(Duration::from_secs(3), reports.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["status"], 200, "{report}");
+    assert_eq!(report["usage"]["input_tokens"], 2, "{report}");
+    assert_eq!(report["usage"]["output_tokens"], 3, "{report}");
+    assert_eq!(
+        private_ai_gateway::middleware::pricing::compute_cost(&report["usage"], &report["pricing"]),
+        8.0
+    );
+    assert!(service.get_receipt_by_receipt_id(&receipt_id).is_some());
+    assert_eq!(
+        calls.lock().unwrap()[0].x_e2e_path.as_deref(),
+        Some("/v1/responses")
+    );
+    control.abort();
+    let _ = control.await;
+}
+
+#[tokio::test]
 async fn chutes_provider_refuses_unverified_e2ee_key() {
     let (base_url, provider_calls, _e2e_pubkey, _instance_requests) =
         serve_chutes_provider_fixture().await;
@@ -2455,12 +2684,12 @@ async fn chutes_provider_refuses_unverified_e2ee_key() {
     let app = build_router(service);
 
     let (status, _, body) = call(app, "POST", "/v1/chat/completions", PROVIDER_CHAT_REQUEST).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     let error: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["error"]["type"], "internal_error");
-    assert!(error["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("matching the verified binding"));
+    assert_eq!(error["error"]["type"], "upstream_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The upstream's verified channel binding could not be enforced"
+    );
     assert!(provider_calls.lock().unwrap().is_empty());
 }

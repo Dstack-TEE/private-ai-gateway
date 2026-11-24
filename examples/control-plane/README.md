@@ -1,4 +1,4 @@
-# Minimal Control Plane
+# Minimal control plane
 
 This directory contains a config-backed server for local middleware integration. It implements the smallest useful subset of the gateway's control-plane HTTP contract. It is not a production authorization, billing, catalog, or high-availability service.
 

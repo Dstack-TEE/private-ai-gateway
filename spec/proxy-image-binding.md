@@ -1,4 +1,4 @@
-# Co-deployed Proxy Image Channel Binding
+# Co-deployed proxy image channel binding
 
 > **Binding type:** `proxy_image_sha256`
 > **Status:** draft extension to `aci/1`

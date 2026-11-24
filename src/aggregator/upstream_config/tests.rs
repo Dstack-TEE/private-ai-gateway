@@ -45,30 +45,70 @@ fn test_upstream_config(
 }
 
 #[test]
-fn router_provider_verifies_once_per_channel() {
-    // A router (NEAR AI) with several models yields ONE verification target — the
-    // shared gateway channel — so it seals one session per channel, not one per
-    // model. A per-model provider keeps one target per model.
-    let mut router = test_upstream_config("near-router", UpstreamProvider::NearAi, "pub-a", "up-a");
-    router
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&router)).len(),
-        1,
-        "router collapses its models to one channel target"
-    );
+fn configured_backend_protocol_comes_from_provider_and_wire_operation() {
+    use crate::aci::upstream::{SseProtocol, UpstreamRequest};
+    use crate::middleware::request_transform::Endpoint;
 
-    let mut per_model =
-        test_upstream_config("phala", UpstreamProvider::PhalaDirect, "pub-a", "up-a");
-    per_model
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&per_model)).len(),
-        2,
-        "per-model provider verifies every model"
-    );
+    for (provider, messages_protocol) in [
+        (UpstreamProvider::OpenAiCompatible, None),
+        (UpstreamProvider::Chutes, None),
+        (
+            UpstreamProvider::Anthropic,
+            Some(SseProtocol::AnthropicMessages),
+        ),
+    ] {
+        for token in [None, Some("fixture-token".to_string())] {
+            let mut config = test_upstream_config("protocol", provider, "public", "upstream");
+            config.path = Some("/custom/infer".into());
+            config.bearer_token = token;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("upstreams.json");
+            std::fs::write(&path, serde_json::to_vec(&vec![config]).unwrap()).unwrap();
+            let manager =
+                UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None))
+                    .unwrap();
+            let backend = manager.backend();
+            for (operation, protocol) in [
+                (Endpoint::ChatComplete, Some(SseProtocol::OpenaiChat)),
+                (Endpoint::Messages, messages_protocol),
+                (Endpoint::Complete, Some(SseProtocol::OpenaiChat)),
+                (
+                    Endpoint::CreateModelResponse,
+                    Some(SseProtocol::OpenaiResponses),
+                ),
+                (Endpoint::Embed, None),
+            ] {
+                let prepared = backend
+                    .prepare(UpstreamRequest {
+                        body: bytes::Bytes::from_static(br#"{"model":"public"}"#),
+                        path: Some(operation.path().into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(backend.response_protocol(&prepared, operation), protocol);
+            }
+        }
+    }
+}
+
+#[test]
+fn verification_targets_follow_provider_model_checks() {
+    for (provider, expected_models) in [
+        (UpstreamProvider::Tinfoil, vec!["up-a"]),
+        (UpstreamProvider::NearAi, vec!["up-a", "up-b"]),
+        (UpstreamProvider::PhalaDirect, vec!["up-a", "up-b"]),
+    ] {
+        let mut config = test_upstream_config("upstream", provider, "pub-a", "up-a");
+        config
+            .models
+            .insert("pub-b".to_string(), "up-b".to_string());
+        let targets = verification_targets(std::slice::from_ref(&config));
+        let models: Vec<_> = targets
+            .iter()
+            .map(|target| target.model_id.as_str())
+            .collect();
+        assert_eq!(models, expected_models, "{provider:?}");
+    }
 }
 
 #[test]
@@ -96,6 +136,36 @@ fn provider_attestation_scopes() {
     assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
     assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
+}
+
+#[test]
+fn parse_phala_direct_validates_only_compose_subjects() {
+    let mut config = serde_json::json!({
+        "name": "phala",
+        "provider": "phala-direct",
+        "base_url": "https://model.example",
+        "models": {"public-model": "upstream-model"}
+    });
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    config["accepted_subjects"] = serde_json::json!([]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let foreign_subject = format!("app-id:0x{}", "ab".repeat(20));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let pin = format!("dstack-compose:sha256:{}", "ab".repeat(32));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject, pin]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    for malformed in ["dstack-compose:sha256:bad", "dstack-compose:"] {
+        config["accepted_subjects"] = serde_json::json!([foreign_subject, pin, malformed]);
+        let error = parse_config_text(&format!("[{config}]")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("dstack-compose:sha256:<64 lowercase hex>"));
+    }
 }
 
 #[test]
@@ -164,6 +234,119 @@ fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
             "{base_url:?}: {err}"
         );
     }
+}
+
+#[test]
+fn tinfoil_release_pins_are_opt_in_and_must_be_well_formed() {
+    let config_with = |subjects: serde_json::Value| {
+        serde_json::json!([{
+            "name": "tinfoil",
+            "provider": "tinfoil",
+            "base_url": "https://inference.tinfoil.sh",
+            "models": {"public-model": "upstream-model"},
+            "accepted_subjects": subjects,
+        }])
+        .to_string()
+    };
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    for subjects in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(["app-id:0xabc"]),
+        serde_json::json!(["app-id:0xabc", pin]),
+    ] {
+        parse_config_text(&config_with(subjects)).expect("valid Tinfoil configuration");
+    }
+    for bad in [
+        "tinfoil-release:sha256:ab".to_string(),
+        format!("tinfoil-release:sha256:{}", "AB".repeat(32)),
+        format!("tinfoil-release:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(serde_json::json!([pin, bad])))
+            .expect_err("a malformed Tinfoil release pin must be rejected");
+        assert!(err.to_string().contains("tinfoil-release:sha256:"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tinfoil_release_pin_reaches_bridge_from_config() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST_DIR: &str = "ACI_TINFOIL_PIN_TEST_DIR";
+    if let Some(directory) = std::env::var_os(TEST_DIR) {
+        let manager = UpstreamConfigManager::load(
+            PathBuf::from(directory).join("upstreams.json"),
+            runtime_options(UpstreamVerifierMode::None),
+        )
+        .unwrap();
+        let event = manager
+            .verifier()
+            .verify(UpstreamVerificationRequest {
+                upstream_name: "tinfoil".into(),
+                url_origin: Some("https://tinfoil.example".into()),
+                model_id: "upstream".into(),
+                forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+                required: true,
+            })
+            .await;
+        assert_eq!(
+            event.failure,
+            crate::aci::receipt::VerificationFailure::ProvenanceNotAccepted
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    let mut config =
+        test_upstream_config("tinfoil", UpstreamProvider::Tinfoil, "public", "upstream");
+    config.accepted_subjects = Some(vec!["app-id:0xabc".into(), pin.clone()]);
+    fs::write(
+        directory.path().join("upstreams.json"),
+        serde_json::to_vec(&[config]).unwrap(),
+    )
+    .unwrap();
+    let uv = directory.path().join("uv");
+    fs::write(
+        &uv,
+        r#"#!/bin/sh
+set -e
+/bin/cat > "$ACI_TINFOIL_PIN_TEST_DIR/bridge-request.json"
+printf '%s' '{"result":"failed","failure":"provenance_not_accepted"}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&uv, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Isolate PATH so parallel tests still use the real bridge command.
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .env(TEST_DIR, directory.path())
+        .env("PATH", directory.path())
+        .args([
+            "--exact",
+            "aggregator::upstream_config::tests::tinfoil_release_pin_reaches_bridge_from_config",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let request: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("bridge-request.json")).unwrap())
+            .unwrap();
+    assert_eq!(request["provider"], "tinfoil");
+    let option = format!("tinfoil_accepted_subject:{pin}");
+    assert_eq!(
+        request["provider_options"],
+        serde_json::json!({(option): "true"})
+    );
 }
 
 #[test]
@@ -1036,12 +1219,35 @@ fn audio_transcription_config_rejects_unsupported_adapters() {
 #[test]
 fn near_audio_always_requests_verbose_duration_without_affecting_json_requests() {
     use crate::aci::upstream::UpstreamRequest;
+    use crate::middleware::media::{ImageFile, ImageFormat, MediaForm};
     use bytes::Bytes;
-
-    for (provider, audio, expected_format) in [
-        (UpstreamProvider::NearAi, true, "verbose_json"),
-        (UpstreamProvider::NearAi, false, "json"),
-        (UpstreamProvider::OpenAiCompatible, true, "json"),
+    let transcription = MediaForm::Transcription {
+        file: Bytes::from_static(b"audio"),
+        extension: "wav".into(),
+    };
+    for (provider, form, expected_format) in [
+        (
+            UpstreamProvider::NearAi,
+            Some(transcription.clone()),
+            "verbose_json",
+        ),
+        (UpstreamProvider::NearAi, None, "json"),
+        (
+            UpstreamProvider::OpenAiCompatible,
+            Some(transcription),
+            "json",
+        ),
+        (
+            UpstreamProvider::NearAi,
+            Some(MediaForm::ImageEdit {
+                images: vec![ImageFile {
+                    data: Bytes::from_static(b"\xff\xd8\xffimage"),
+                    format: ImageFormat::Jpeg,
+                }],
+                overlay: None,
+            }),
+            "json",
+        ),
     ] {
         let config = test_upstream_config("audio", provider, "whisper", "upstream-whisper");
         let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
@@ -1049,17 +1255,46 @@ fn near_audio_always_requests_verbose_duration_without_affecting_json_requests()
             .backend
             .prepare(UpstreamRequest {
                 body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
-                path: Some("/v1/audio/transcriptions".into()),
-                form: audio.then(|| {
-                    Arc::new(crate::middleware::audio::AudioForm {
-                        file: Bytes::from_static(b"audio"),
-                        extension: "wav".into(),
-                    })
-                }),
+                path: Some(
+                    if matches!(form, Some(MediaForm::ImageEdit { .. })) {
+                        "/v1/images/edits"
+                    } else {
+                        "/v1/audio/transcriptions"
+                    }
+                    .into(),
+                ),
+                form: form.map(Arc::new),
                 ..Default::default()
             })
             .unwrap();
         let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
         assert_eq!(fields["response_format"], expected_format);
+    }
+}
+
+#[test]
+fn cache_salt_provider_mapping_uses_stable_serde_tags() {
+    use crate::aci::upstream::CacheSaltField;
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::Privatemode,
+        UpstreamProvider::Tinfoil,
+        UpstreamProvider::PhalaDirect,
+        UpstreamProvider::NearAi,
+        UpstreamProvider::ArmetAi,
+        UpstreamProvider::ZeroGPrivateComputer,
+    ] {
+        let tag = match builders::provider_cache_salt_field(provider).unwrap() {
+            CacheSaltField::CacheSalt(tag) | CacheSaltField::UserCacheSecret(tag) => tag,
+        };
+        assert_eq!(serde_json::to_value(provider).unwrap(), tag);
+    }
+    for provider in [
+        UpstreamProvider::OpenAiCompatible,
+        UpstreamProvider::Anthropic,
+        UpstreamProvider::AciService,
+        UpstreamProvider::SecretAi,
+    ] {
+        assert!(builders::provider_cache_salt_field(provider).is_none());
     }
 }
