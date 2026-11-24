@@ -1,16 +1,15 @@
 # 0G Private Computer fixtures
 
-- `interop.json`: generated once with 0G's own Go protocol library,
-  `github.com/0gfoundation/0g-pc-e2ee/protocol` at
-  `6d823311abcbf8ba41656f38395cc50f19360c1b` (release-2026.10.19.2). It holds a
-  chat request sealed by `wire.SealRequestFor`, with the enclave key to open it
-  and its §8 request binding hash. It also holds a buffered and a three-frame
-  streamed response sealed by `wire.ResponseSealer`, with the client key, the
-  opened plaintext and broker-style EIP-191 signatures over the
-  `proof.SignedTextE2EE[Stream]` texts. `src/aci/upstream/zero_g/tests.rs`
-  checks PAG's implementation against it byte for byte.
-- `quote-cn19.hex`: the TDX quote compute-network-19 served on 2026-10-20. The
-  verifier tests patch its report_data.
+- `interop.json` uses 0G's Go protocol library at
+  [`release-2026.11.20.3`](https://github.com/0gfoundation/0g-pc-e2ee/tree/37d697f2944f31aaaf10c5d1a1c81376ad364cf5/protocol).
+  The base-mode vector has a request from `wire.SealRequestFor`, a buffered
+  response and a three-frame stream. It uses synthetic keys and EIP-191
+  signatures over the library's §8 proof text. The Rust tests open the frames
+  and check each binding and signature.
+- `quote-dstack-0.6.5.hex` comes from a public 0G broker quote captured on
+  2026-11-23 PST. The encryption key and signer in `report_data` were zeroed.
+  The verifier tests stub DCAP and patch the report to exercise both
+  `mr_config_id` layouts using synthetic boot events.
 
-These are frozen snapshots. `tests/0g_private_computer_live.rs` covers interop
-with the current 0G deployment.
+`tests/0g_private_computer_live.rs` covers authenticated interop with a live
+0G deployment.

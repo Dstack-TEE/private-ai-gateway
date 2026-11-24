@@ -32,6 +32,8 @@ pub(crate) const TRUST_MODE_HEADER: &str = "x-0g-provider-trust-mode";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const SIGNATURE_FETCH_TIMEOUT_SECONDS: u64 = 15;
 const MAX_SSE_BUFFER_BYTES: usize = 4 << 20;
+const MAX_CONFLICT_BODY_BYTES: usize = 4096;
+const KEY_MISMATCH: &str = "e2ee_key_mismatch";
 
 /// A verified provider, recorded by the verifier under
 /// `provider_claims.instances[<address>]`.
@@ -112,9 +114,8 @@ impl ZeroGProviderBackend {
 
     /// Seal the request to the first provider `event` binds for its model and
     /// send it through the router pinned to that provider. Only a 200 response
-    /// naming its signature continues; any other status is returned as its
-    /// status alone, so provider-controlled bodies never reach the client
-    /// unverified.
+    /// naming its signature continues. A stale-key conflict asks the caller
+    /// to reverify. Other failures return only their status.
     async fn send(
         &self,
         req: PreparedUpstreamRequest,
@@ -161,6 +162,11 @@ impl ZeroGProviderBackend {
         let response = builder.send().await.map_err(transport_error)?;
         let status = response.status().as_u16();
         if status != 200 {
+            if status == 409 && is_stale_key_conflict(response).await {
+                return Err(UpstreamError::ChannelBindingMismatch(
+                    "0G broker rejected the verified encryption key as stale".into(),
+                ));
+            }
             return Err(UpstreamError::Upstream { status });
         }
         let key = response
@@ -183,6 +189,26 @@ impl ZeroGProviderBackend {
         };
         Ok((response, opener, check))
     }
+}
+
+/// The broker sends a top-level JSON error string with this token before any
+/// inference. Treat the body only as a signal to reverify, never as key material.
+async fn is_stale_key_conflict(response: reqwest::Response) -> bool {
+    #[derive(Deserialize)]
+    struct Conflict {
+        error: String,
+    }
+
+    read_buffered_upstream_response(response, MAX_CONFLICT_BODY_BYTES)
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_slice::<Conflict>(&body).ok())
+        .is_some_and(|body| {
+            body.error
+                .split_once(':')
+                .map_or(body.error.as_str(), |(code, _)| code)
+                == KEY_MISMATCH
+        })
 }
 
 /// The first provider, in preview order, whose recorded key hashes to a

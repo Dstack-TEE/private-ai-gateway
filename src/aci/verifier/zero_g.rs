@@ -30,6 +30,8 @@ use crate::aci::upstream::{
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
+mod mr_config;
+
 const MAX_CANDIDATES: usize = 8;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,11 +297,8 @@ impl ZeroGProviderVerifier {
         claims.insert("boot_chain".into(), boot_chain.into());
         claims.insert("onchain_verifiability".into(), verifiability.clone().into());
         claims.insert("plaintext_destination_verified".into(), false.into());
-        if td.mr_config_id[0] == 1 && td.mr_config_id[33..].iter().all(|b| *b == 0) {
-            claims.insert(
-                "compose_hash".into(),
-                hex::encode(&td.mr_config_id[1..33]).into(),
-            );
+        if let Some(compose_hash) = mr_config::compose_hash(&td.mr_config_id, &td.rt_mr3, &reply) {
+            claims.insert("compose_hash".into(), compose_hash.into());
         }
         let enc_pub: [u8; 32] = report_data[..32].try_into().expect("32 bytes");
         Ok(VerifiedCandidate {
