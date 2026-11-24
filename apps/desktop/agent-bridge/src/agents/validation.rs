@@ -162,7 +162,7 @@ impl Projector {
             }
         }
         if agent == Agent::OpenCode {
-            self.check_opencode_merge(doc, fields.iter().any(|field| field.path == ["model"]))
+            self.check_opencode_merge(doc)
                 .map_err(AgentError::ConfigurationConflict)?;
         }
         Ok(edit)
@@ -197,7 +197,14 @@ impl Projector {
                 let provider = |key| ["providers", "private-ai-proxy", key];
                 if doc.contains(scope) {
                     let owned = prior.is_some_and(|record| {
-                        let fields: Vec<_> = record.fields.iter().filter(|field| field.path.starts_with(&owned(scope))).collect();
+                        let fields: Vec<_> = record
+                            .fields
+                            .iter()
+                            .filter(|field| {
+                                field.path.starts_with(&owned(scope))
+                                    && !is_model_selection_field(agent, field)
+                            })
+                            .collect();
                         !fields.is_empty() && fields.iter().all(|field| doc.get_value(&refs(&field.path)) == field.value)
                     });
                     if !owned {
@@ -218,7 +225,7 @@ impl Projector {
                 if doc.contains(&["fallback_model"]) {
                     return Err(AgentError::ConfigurationConflict("Hermes fallback_model is outside this verified connection; disable it in Hermes before connecting. It will not be erased".to_string()));
                 }
-                let existing = doc.get_str(&["model", "default"]);
+                let existing = doc.get_str(model_selection_paths(Agent::Hermes)[0].path);
                 let selected = options.default_model.as_deref().map(str::trim).filter(|s| !s.is_empty())
                     .or(existing.as_deref());
                 if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !model.supports(agent.surface())))) {
@@ -255,16 +262,13 @@ impl Projector {
     /// OpenCode 1.18.29+ deep-merges these process-level sources in order.
     /// OpenCode 2 reads the same V1 files and normalizes them in memory, but
     /// its native `providers` entry overlays the V1 `provider` one we write,
-    /// so no source may define `providers.private-ai-proxy`.
+    /// so no source may define `providers.private-ai-proxy`. The projection
+    /// keeps writing V1 keys for OpenCode 1 compatibility.
     /// Keep the original write/restore path: selecting JSONC instead would
     /// strand old connection journals, and our JSON writer edits strict JSON only.
     /// Project/managed/remote sources need CLI context; references stay opaque
     /// here so inspection never reads an API key file or executes anything.
-    pub(super) fn check_opencode_merge(
-        &self,
-        doc: &ConfigDoc,
-        owns_model: bool,
-    ) -> Result<(), String> {
+    pub(super) fn check_opencode_merge(&self, doc: &ConfigDoc) -> Result<(), String> {
         let Some(projected) = doc.as_json() else {
             return Err("OpenCode requires a JSON projection".to_string());
         };
@@ -328,6 +332,30 @@ impl Projector {
                 merge_opencode_config(&mut merged, layer);
             }
         }
+        if let Some(policies) = merged.get("policies") {
+            let policies = policies.as_array().ok_or_else(|| {
+                "OpenCode's merged policies are invalid. Resolve them in OpenCode; they will not be overwritten".to_string()
+            })?;
+            let mut denied = false;
+            for policy in policies {
+                let object = policy.as_object().ok_or_else(|| {
+                    "OpenCode's merged policies are invalid. Resolve them in OpenCode; they will not be overwritten".to_string()
+                })?;
+                let matches = object.get("action").and_then(serde_json::Value::as_str)
+                    == Some("provider.use")
+                    && object
+                        .get("resource")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|resource| resource == "private-ai-proxy" || resource == "*");
+                if matches {
+                    denied =
+                        object.get("effect").and_then(serde_json::Value::as_str) == Some("deny");
+                }
+            }
+            if denied {
+                return Err("OpenCode's merged policies deny provider.use for private-ai-proxy. Resolve those policies in OpenCode; they will not be overwritten".to_string());
+            }
+        }
         if merged.get("disabled_providers").is_some_and(|values| {
             values.as_array().is_none_or(|values| {
                 values
@@ -350,11 +378,7 @@ impl Projector {
                 projected.pointer("/provider/private-ai-proxy"),
             ),
             ("/providers/private-ai-proxy", None),
-            ("/model", projected.pointer("/model")),
         ] {
-            if pointer == "/model" && !owns_model {
-                continue;
-            }
             if merged.pointer(pointer) != expected {
                 return Err(format!(
                     "OpenCode's merged config changes the gateway-owned field {pointer}. \
@@ -460,10 +484,10 @@ impl Projector {
             return status;
         }
         let managed = doc.as_ref().is_some_and(|doc| {
-            record.fields.iter().all(|field| {
-                (agent == Agent::Codex && field.path == ["model"])
-                    || field.holds(owned_value(doc, field).as_ref())
-            })
+            record
+                .fields
+                .iter()
+                .all(|field| holds_managed_field(agent, doc, field))
         });
         let token = self.tokens.read(agent.id()).ok().flatten().is_some();
         status.connected = managed && token;
@@ -526,8 +550,7 @@ impl Projector {
         if let (true, Some(doc)) = (status.authorized, &doc) {
             let (mut refusal, mut repair) = (None, None);
             if agent == Agent::OpenCode {
-                let owns_model = record.fields.iter().any(|field| field.path == ["model"]);
-                refusal = self.check_opencode_merge(doc, owns_model).err();
+                refusal = self.check_opencode_merge(doc).err();
             }
             if refusal.is_none() {
                 refusal = self

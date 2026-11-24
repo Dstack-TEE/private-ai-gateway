@@ -77,12 +77,12 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
         let field = match agent {
             Agent::Codex => &["model_provider"][..],
             Agent::ClaudeCode => &["apiKeyHelper"][..],
-            Agent::OpenCode => &["model"][..],
+            Agent::OpenCode => &["provider", "private-ai-proxy", "options", "baseURL"][..],
             Agent::Pi => &["providers", "private-ai-proxy", "apiKey"][..],
             Agent::Hermes => &["providers", "private-ai-proxy", "key_cmd"][..],
-            Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
+            Agent::OpenClaw => &["models", "providers", "private-ai-proxy", "baseUrl"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
-            Agent::Dsh => &["config", "model"][..],
+            Agent::Dsh => &["config", "provider"][..],
         };
         // dsh's fields live in keyed items of its patch list.
         let item = EntryKey {
@@ -105,6 +105,52 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             edited(&doc(&sandbox, agent)).get_str(field).as_deref(),
             Some("external-edit"),
         );
+    }
+}
+
+#[test]
+fn changing_a_connected_agents_model_keeps_access() {
+    let catalog = catalog();
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::OpenCode,
+        Agent::Hermes,
+        Agent::OpenClaw,
+        Agent::Dsh,
+    ] {
+        let sandbox = sandbox(&format!("model-selection-{}", agent.id()));
+        apply_connect(&sandbox, agent, &catalog, &claude_options());
+        let path = agent.config_path(&sandbox.home, false);
+        let mut config = doc(&sandbox, agent);
+        for selection in model_selection_paths(agent) {
+            let value = if matches!(agent, Agent::OpenCode | Agent::OpenClaw) {
+                "private-ai-proxy/phala/qwen"
+            } else {
+                "phala/qwen"
+            };
+            if let Some(entry) = selection.entry {
+                config
+                    .entry(&EntryKey::id(entry))
+                    .unwrap()
+                    .unwrap()
+                    .set_str(selection.path, value)
+                    .unwrap();
+            } else {
+                config.set_str(selection.path, value).unwrap();
+            }
+        }
+        write(&path, &config.render().unwrap());
+        let status = sandbox
+            .projector
+            .scan(Some(&catalog))
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|status| status.id == agent.id())
+            .unwrap();
+        assert!(status.connected, "{}: {:?}", agent.id(), status);
+        assert!(status.authorized, "{}: {:?}", agent.id(), status);
     }
 }
 

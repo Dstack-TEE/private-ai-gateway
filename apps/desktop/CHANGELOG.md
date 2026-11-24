@@ -19,6 +19,7 @@ Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, n
 
 ### Bug Fixes
 
+* **Agent model choices no longer revoke access.** Changing a connected agent's model stays authorized, and OpenCode 2 object-form models and provider-use policies are handled during merge validation.
 * **A session no longer stays stuck after a gateway key rotation.** After the service's key set changed, protection could stay in "verifying" until `pap stop` and `pap start`. Any lost verification now retires the verifier and is retried with a fresh verification on a backoff ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
 * **`pap profiles verify` no longer interrupts protection.** On the profile that is protecting it stopped and restarted the session, which cut requests in flight and returned `gateway_not_verified` meanwhile. It now attests the service again where it runs ([#596](https://github.com/Dstack-TEE/private-ai-gateway/pull/596)).
 * **A network address change no longer restarts the session.** Containers, VPNs and temporary IPv6 addresses changed the address list and each change restarted protection. The session is now rebuilt only when the service can no longer be reached ([#588](https://github.com/Dstack-TEE/private-ai-gateway/pull/588), [#593](https://github.com/Dstack-TEE/private-ai-gateway/pull/593), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).

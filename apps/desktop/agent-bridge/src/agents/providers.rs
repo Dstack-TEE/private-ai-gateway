@@ -88,7 +88,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 number(&provider(&["auth", "refresh_interval_ms"]), 0),
             ];
             if let Some(model) = default_model {
-                fields.push(set(&["model"], model));
+                fields.push(set(model_selection_paths(Agent::Codex)[0].path, model));
             }
             fields
         }
@@ -119,7 +119,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 absent(&["env", "ANTHROPIC_API_KEY"]),
             ];
             if let Some(model) = default_model {
-                fields.push(set(&["env", "ANTHROPIC_MODEL"], model));
+                fields.push(set(model_selection_paths(Agent::ClaudeCode)[0].path, model));
             }
             fields
         }
@@ -132,7 +132,10 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 catalog.models.len(),
             )];
             if let Some(model) = default_model {
-                fields.push(set(&["model"], format!("{provider}/{model}")));
+                fields.push(set(
+                    model_selection_paths(Agent::OpenCode)[0].path,
+                    format!("{provider}/{model}"),
+                ));
             }
             fields
         }
@@ -164,8 +167,8 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 set(&["model", "provider"], format!("custom:{provider}")),
             ];
             if let Some(model) = default_model {
-                fields.push(set(&["providers", provider, "default_model"], model));
-                fields.push(set(&["model", "default"], model));
+                fields.push(set(model_selection_paths(Agent::Hermes)[1].path, model));
+                fields.push(set(model_selection_paths(Agent::Hermes)[0].path, model));
             }
             fields
         }

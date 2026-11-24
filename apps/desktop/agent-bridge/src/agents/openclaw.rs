@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["models", "providers", PROVIDER];
 const SECRET_PATH: &[&str] = &["secrets", "providers", PROVIDER];
-const PRIMARY_PATH: &[&str] = &["agents", "defaults", "model", "primary"];
 
 pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let catalog = inputs
@@ -81,7 +80,10 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         },
     ];
     if let Some(id) = selected {
-        result.push(set(PRIMARY_PATH, format!("{PROVIDER}/{id}")));
+        result.push(set(
+            model_selection_paths(Agent::OpenClaw)[0].path,
+            format!("{PROVIDER}/{id}"),
+        ));
     }
     Ok(result)
 }
@@ -190,7 +192,7 @@ pub(super) fn validate_selection(doc: &ConfigDoc, options: &ConnectOptions) -> R
 }
 
 pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {
-    doc.get_str(PRIMARY_PATH)?
+    doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)?
         .strip_prefix(&format!("{PROVIDER}/"))
         .map(str::to_owned)
 }
@@ -655,18 +657,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            normal.get_str(PRIMARY_PATH).as_deref(),
+            normal
+                .get_str(model_selection_paths(Agent::OpenClaw)[0].path)
+                .as_deref(),
             Some("external/original")
         );
-        doc.set_value(PRIMARY_PATH, &ConfigValue::Str("external/new".into()))
-            .unwrap();
+        doc.set_value(
+            model_selection_paths(Agent::OpenClaw)[0].path,
+            &ConfigValue::Str("external/new".into()),
+        )
+        .unwrap();
         doc.set_value(
             &["agents", "defaults", "model", "fallbacks"],
             &ConfigValue::List(vec!["external/new-fallback".into()]),
         )
         .unwrap();
         restore(&mut doc, &record, &crate::secrets::MemoryStore::default()).unwrap();
-        assert_eq!(doc.get_str(PRIMARY_PATH).as_deref(), Some("external/new"));
+        assert_eq!(
+            doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)
+                .as_deref(),
+            Some("external/new")
+        );
         assert_eq!(
             doc.get_value(&["agents", "defaults", "model", "fallbacks"]),
             Some(ConfigValue::List(vec!["external/new-fallback".into()]))

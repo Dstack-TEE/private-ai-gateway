@@ -83,6 +83,107 @@ pub(super) fn owned(path: &[&str]) -> Vec<String> {
     path.iter().map(|key| key.to_string()).collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ModelSelectionPath {
+    pub(super) path: &'static [&'static str],
+    pub(super) entry: Option<&'static str>,
+}
+
+const CODEX_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["model"],
+    entry: None,
+};
+const CLAUDE_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["env", "ANTHROPIC_MODEL"],
+    entry: None,
+};
+const OPENCODE_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["model"],
+    entry: None,
+};
+const HERMES_MODELS: [ModelSelectionPath; 2] = [
+    ModelSelectionPath {
+        path: &["model", "default"],
+        entry: None,
+    },
+    ModelSelectionPath {
+        path: &["providers", "private-ai-proxy", "default_model"],
+        entry: None,
+    },
+];
+const OPENCLAW_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["agents", "defaults", "model", "primary"],
+    entry: None,
+};
+const DSH_MODELS: [ModelSelectionPath; 2] = [
+    ModelSelectionPath {
+        path: &["config", "model"],
+        entry: Some("agent-default-model"),
+    },
+    ModelSelectionPath {
+        path: &["config", "model"],
+        entry: Some("acp"),
+    },
+];
+
+pub(super) fn model_selection_paths(agent: Agent) -> &'static [ModelSelectionPath] {
+    match agent {
+        Agent::Codex => std::slice::from_ref(&CODEX_MODEL),
+        Agent::ClaudeCode => std::slice::from_ref(&CLAUDE_MODEL),
+        Agent::OpenCode => std::slice::from_ref(&OPENCODE_MODEL),
+        Agent::Hermes => &HERMES_MODELS,
+        Agent::OpenClaw => std::slice::from_ref(&OPENCLAW_MODEL),
+        Agent::Dsh => &DSH_MODELS,
+        Agent::Pi | Agent::OhMyPi => &[],
+    }
+}
+
+pub(super) fn is_model_selection_field(agent: Agent, field: &OwnedField) -> bool {
+    model_selection_paths(agent).iter().any(|selection| {
+        field.path == owned(selection.path)
+            && field.entry.as_ref().map(|entry| entry.key.id.as_str()) == selection.entry
+    })
+}
+
+pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedField) -> bool {
+    if is_model_selection_field(agent, field) {
+        return true;
+    }
+    if agent == Agent::Dsh
+        && field.path == owned(&["config"])
+        && field.entry.as_ref().is_some_and(|entry| entry.created)
+    {
+        let Some(selection) = model_selection_paths(agent).iter().find(|selection| {
+            field.entry.as_ref().map(|entry| entry.key.id.as_str()) == selection.entry
+        }) else {
+            return field.holds(owned_value(doc, field).as_ref());
+        };
+        let Some(ConfigValue::Json(mut expected)) = field.value.clone() else {
+            return field.holds(owned_value(doc, field).as_ref());
+        };
+        let Some(ConfigValue::Json(mut current)) = owned_value(doc, field) else {
+            return false;
+        };
+        let path = &selection.path[1..];
+        remove_json_path(&mut expected, path);
+        remove_json_path(&mut current, path);
+        return expected == current;
+    }
+    field.holds(owned_value(doc, field).as_ref())
+}
+
+fn remove_json_path(value: &mut serde_json::Value, path: &[&str]) {
+    if let Some((key, rest)) = path.split_first() {
+        if rest.is_empty() {
+            if let Some(object) = value.as_object_mut() {
+                object.remove(*key);
+            }
+        } else if let Some(next) = value.get_mut(*key) {
+            remove_json_path(next, rest);
+        }
+    }
+}
+
 /// POSIX command syntax. The quoting test validates `sh`, not the Windows
 /// Claude CLI's choice of shell; that compatibility remains unverified.
 pub(super) fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
@@ -917,6 +1018,7 @@ fn restore_exact(
 }
 
 pub(super) const MANAGED_CREDENTIAL: &str = "Managed local credential";
+pub(super) const PREFERRED_DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 
 /// A change to a credential: its values are never shown.
 pub(super) fn secret_change(
@@ -986,29 +1088,45 @@ pub(super) fn connection_options(
     } else {
         current.or(saved)
     };
+    let preferred_default = catalog.is_some_and(|catalog| {
+        catalog
+            .get(PREFERRED_DEFAULT_MODEL)
+            .is_some_and(|model| model.supports(agent.surface()))
+    });
     ConnectOptions {
-        default_model: preferred.or_else(|| {
-            catalog
-                .and_then(|catalog| {
-                    catalog
-                        .models
-                        .iter()
-                        .find(|model| model.supports(agent.surface()))
-                })
-                .map(|model| model.id().to_string())
-        }),
+        default_model: preferred
+            .or_else(|| preferred_default.then(|| PREFERRED_DEFAULT_MODEL.to_string()))
+            .or_else(|| {
+                catalog
+                    .and_then(|catalog| {
+                        catalog
+                            .models
+                            .iter()
+                            .find(|model| model.supports(agent.surface()))
+                    })
+                    .map(|model| model.id().to_string())
+            }),
     }
 }
 
 pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
     let doc = doc?;
     match agent {
-        Agent::Codex => doc.get_str(&["model"]),
-        Agent::ClaudeCode => doc.get_str(&["env", "ANTHROPIC_MODEL"]),
-        Agent::OpenCode => doc
-            .get_str(&["model"])
-            .and_then(|value| value.strip_prefix("private-ai-proxy/").map(str::to_string)),
-        Agent::Hermes => doc.get_str(&["model", "default"]),
+        Agent::Codex => doc.get_str(model_selection_paths(agent)[0].path),
+        Agent::ClaudeCode => doc.get_str(model_selection_paths(agent)[0].path),
+        Agent::OpenCode => match doc.get_value(model_selection_paths(agent)[0].path)? {
+            ConfigValue::Str(value) => value.strip_prefix("private-ai-proxy/").map(str::to_string),
+            ConfigValue::Json(value) => {
+                let object = value.as_object()?;
+                (object.get("providerID")?.as_str() == Some("private-ai-proxy"))
+                    .then(|| object.get("model")?.as_str().map(str::to_string))
+                    .flatten()
+            }
+            _ => None,
+        },
+        Agent::Hermes => doc
+            .get_str(model_selection_paths(agent)[0].path)
+            .or_else(|| doc.get_str(model_selection_paths(agent)[1].path)),
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::Pi | Agent::OhMyPi => None,
         Agent::Dsh => dsh::selected_model(doc),

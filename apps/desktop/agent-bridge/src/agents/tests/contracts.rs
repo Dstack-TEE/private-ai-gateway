@@ -285,19 +285,15 @@ fn opencode_process_overrides_follow_official_merge_order() {
                 "{\"model\":\"private-ai-proxy/test\",}",
             );
         }
-        let result = sandbox.projector.check_opencode_merge(&expected, true);
+        let result = sandbox.projector.check_opencode_merge(&expected);
         assert_eq!(
             result.is_ok(),
-            matches!(case.as_str(), "explicit" | "directory"),
+            matches!(
+                case.as_str(),
+                "global" | "explicit" | "directory" | "content"
+            ),
             "{case}: {result:?}"
         );
-        if case == "global" {
-            // A default model is not owned when the user did not select one.
-            assert!(sandbox
-                .projector
-                .check_opencode_merge(&expected, false)
-                .is_ok());
-        }
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -341,6 +337,32 @@ fn opencode_process_overrides_follow_official_merge_order() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn opencode_policies_use_the_last_matching_provider_rule() {
+    let sandbox = sandbox("opencode-policies");
+    let provider = serde_json::json!({
+        "private-ai-proxy": {"name": PRODUCT_NAME}
+    });
+    let config = |policies| {
+        ConfigDoc::Json(serde_json::json!({"provider": provider, "policies": policies}).to_string())
+    };
+    assert!(sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "*", "effect": "deny"},
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "allow"}
+        ])))
+        .is_ok());
+    let refusal = sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "*", "effect": "allow"},
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "deny"}
+        ])))
+        .unwrap_err();
+    assert!(refusal.contains("policies deny provider.use"));
 }
 
 #[test]

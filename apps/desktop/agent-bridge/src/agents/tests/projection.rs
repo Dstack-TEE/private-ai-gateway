@@ -72,3 +72,39 @@ fn equal_fields_keep_their_original_values_and_bytes_for_every_agent() {
         }
     }
 }
+
+#[test]
+fn opencode_v2_model_and_preferred_default_are_supported() {
+    let model = ConfigDoc::Json(
+        serde_json::json!({
+            "model": {"providerID": "private-ai-proxy", "model": "phala/qwen", "variant": "fast"}
+        })
+        .to_string(),
+    );
+    assert_eq!(
+        selected_model(Agent::OpenCode, Some(&model)).as_deref(),
+        Some("phala/qwen")
+    );
+
+    let catalog = Catalog::from_remote(
+        &serde_json::json!({
+            "data": [
+                {"id": "first/model"},
+                {"id": PREFERRED_DEFAULT_MODEL}
+            ]
+        }),
+        1,
+    )
+    .unwrap();
+    let options = connection_options(
+        Agent::OpenCode,
+        &ConfigDoc::Json("{}".into()),
+        None,
+        Some(&catalog),
+        &ConnectOptions::default(),
+    );
+    assert_eq!(
+        options.default_model.as_deref(),
+        Some(PREFERRED_DEFAULT_MODEL)
+    );
+}
