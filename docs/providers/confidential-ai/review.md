@@ -24,8 +24,11 @@ Its RTMR1 and RTMR2 differ from production. See the [v0.19.2 release](https://gi
 
 ### Admission verdict
 
-Still **not acceptable**. Host server enrollment remains a hard reject. The
-live allowlist closes the round-3 fake-worker path as documented. The operator
+Still **not acceptable**. Host server enrollment triggers the
+[hard reject condition](../audit-criteria.md#hard-reject-conditions) that
+plaintext user content can leave the accepted trust boundary, and gateway
+configuration cannot scope out enrollment in the provider's control plane.
+The live allowlist closes the round-3 fake-worker path as documented. The operator
 still controls internal routing Services, and the gateway and router lack
 workload identity checks on those connections.
 
