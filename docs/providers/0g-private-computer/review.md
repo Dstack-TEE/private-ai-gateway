@@ -23,9 +23,11 @@ and its two boot chains were absent from the live brokers checked.
 ### Verdict
 
 **Acceptable with conditions.** The broker's plaintext destination remains
-outside what the gateway adapter verifies. `TargetSeparated` is an on-chain
-provider declaration. A route using only the round-1 boot-chain pins rejects
-both current providers before sending a prompt.
+outside what the gateway adapter verifies. This bars strict inclusion under
+the [hard reject conditions](../audit-criteria.md#hard-reject-conditions) until
+a relying party can enforce the reviewed plaintext destination.
+`TargetSeparated` is an on-chain provider declaration. A route using only the
+round-1 boot-chain pins rejects both current providers before sending a prompt.
 
 ### Live check (2026-11-23 20:08–20:12 PST)
 
@@ -154,7 +156,6 @@ acceptance runs below):
 | Running broker | Signed release `v0.5.5` per RTMR3 replay |
 | Recorded upstream set | Absent on every provider |
 | `TargetSeparated` | `false` on one private-tier provider; `true` on the other private-tier provider and on the third-party relays |
-| Separated private-tier target | The second private-tier provider's `TargetTeeAddress` equals the signing address of RedPill's production gateway |
 | GPU evidence (local provider) | 8 Hopper GPUs; NVIDIA NRAS tokens valid; bound to the quote signer through `ZG-Quote-Signature`. Not enforced by the adapter |
 
 The router's `TeeTLS`/`TeeML` labels and the on-chain `verifiability` string
@@ -202,9 +203,8 @@ Acceptance runs of the native adapter on 2026-10-20:
 
 ### Not required
 
-A routing-loop guard is not needed. The second private-tier provider forwards
-to RedPill's gateway, but the adapter refuses separated providers before
-sending, so a gateway request never reaches it.
+The adapter rejects separated targets before forwarding, which prevents a
+routing loop through those providers.
 
 [pc]: https://github.com/0gfoundation/0g-pc-e2ee/tree/6d823311abcbf8ba41656f38395cc50f19360c1b
 [broker]: https://github.com/0gfoundation/0g-serving-broker/tree/962142b3552c921f1c32a911d3986328453d3fdb
