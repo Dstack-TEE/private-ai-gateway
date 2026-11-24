@@ -122,7 +122,7 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 | `tcb_up_to_date` | Hardware-proven from the provider's TCB status. |
 | `os_known_good`, `gpu_attested`, `serving_software_known_good`, `model_weights_provenance` | Unknown. |
 
-`claims.extra` records `boot_chain`, `onchain_verifiability` (informational) and `plaintext_destination_verified: false`. With `mr_config_id` v1, the adapter reads `compose_hash` directly from the register. With dstack 0.6's v3 layout, it replays the boot event log to the quote's RTMR3 and reconstructs the launch document. The hash is recorded only when the document reproduces the quote's `mr_config_id`. Incomplete or inconsistent evidence leaves the claim absent. The `mr_config_id` layout is independent of the `report_data` version.
+`claims.extra` records `boot_chain`, `onchain_verifiability` (informational) and `plaintext_destination_verified: false`. With `mr_config_id` v1, the adapter reads `compose_hash` directly from the register. With dstack 0.6's v3 layout, the adapter uses the shared dstack verifier to replay V1 and V2 runtime events to the quote's RTMR3, then reconstructs the launch document from the verified boot events. The hash is recorded only when the document reproduces the quote's `mr_config_id`. Incomplete or inconsistent evidence leaves the claim absent. The `mr_config_id` layout is independent of the `report_data` version.
 
 ## Limitations
 

@@ -33,7 +33,7 @@ fn compose_hash_v3(expected: &[u8], rtmr3: &[u8; 48], reply: &Value) -> Option<S
         (None, None, None, None, None);
     let mut init_script_hashes = Vec::new();
     for entry in log.boot_events()? {
-        let payload = entry.event_payload.as_str();
+        let payload = entry.event_payload.as_slice();
         let field = match entry.event.as_str() {
             "app-id" => &mut app_id,
             "compose-hash" => &mut compose_hash,
@@ -41,7 +41,7 @@ fn compose_hash_v3(expected: &[u8], rtmr3: &[u8; 48], reply: &Value) -> Option<S
             "instance-id" => &mut instance_id,
             "key-provider" => &mut key_provider,
             "init-script-hash" => {
-                init_script_hashes.push(hex::encode(aci_verify::decode_hex_32(payload).ok()?));
+                init_script_hashes.push(hex::encode(<&[u8; 32]>::try_from(payload).ok()?));
                 continue;
             }
             _ => continue,
@@ -51,9 +51,8 @@ fn compose_hash_v3(expected: &[u8], rtmr3: &[u8; 48], reply: &Value) -> Option<S
         }
     }
 
-    let compose_hash = hex::encode(aci_verify::decode_hex_32(compose_hash?).ok()?);
-    let key_provider: KeyProvider =
-        serde_json::from_slice(&hex::decode(key_provider?).ok()?).ok()?;
+    let compose_hash = hex::encode(<&[u8; 32]>::try_from(compose_hash?).ok()?);
+    let key_provider: KeyProvider = serde_json::from_slice(key_provider?).ok()?;
     let kind = match key_provider.name.as_str() {
         "local-sgx" => "local",
         kind @ ("none" | "kms" | "tpm") => kind,
@@ -64,17 +63,14 @@ fn compose_hash_v3(expected: &[u8], rtmr3: &[u8; 48], reply: &Value) -> Option<S
         "version": 3, "compose_hash": compose_hash, "key_provider": kind
     });
     if let Some(instance_id) = instance_id.filter(|value| !value.is_empty()) {
-        document["instance_id"] = hex::encode(hex::decode(instance_id).ok()?).into();
+        document["instance_id"] = hex::encode(instance_id).into();
     }
     let mut optional = vec![("init_script_hashes", json!(init_script_hashes))];
     if let Some(app_id) = app_id.filter(|value| !value.is_empty()) {
-        optional.push(("app_id", hex::encode(hex::decode(app_id).ok()?).into()));
+        optional.push(("app_id", hex::encode(app_id).into()));
     }
     if let Some(gpu_policy_hash) = gpu_policy_hash {
-        optional.push((
-            "gpu_policy_hash",
-            hex::encode(hex::decode(gpu_policy_hash).ok()?).into(),
-        ));
+        optional.push(("gpu_policy_hash", hex::encode(gpu_policy_hash).into()));
     }
     if !key_provider.id.is_empty() {
         optional.push((
