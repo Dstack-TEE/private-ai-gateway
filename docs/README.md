@@ -111,7 +111,9 @@ named in the living reference win.
 - `spec/aci.md` is normative for the protocol. Implementation docs describe the
   behavior of this repository.
 - Provider `verification.md` files track the current adapter. Provider
-  `review.md` files are dated admission records.
+  `review.md` files are dated admission records. Before citing a dated review
+  externally, perform a currency check if the review is more than three months
+  old or covers a release older than the one the provider currently deploys.
 - Examples use the canonical `/v1/aci/*` artifact endpoints. The
   `/v1/attestation/report` and `/v1/signature/{id}` routes exist for legacy
   dstack-vllm-proxy clients.

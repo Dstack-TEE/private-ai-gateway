@@ -24,9 +24,9 @@ are ignored. Anonymous requests receive no generated salt. Direct mode
 | Tinfoil | `user_cache_secret` | Requires the provider router's `CACHE_SALT_ENABLED` policy. The router combines this secret with the shared upstream credential to derive its own salt. |
 | Phala Direct | `cache_salt` | The production chain (PIG → vllm-router → SGLang or vLLM) forwards the field; the engine enforces isolation. With an SGLang storage tier (HiCache/Mooncake), require SGLang ≥ 0.5.20, whose storage keys include the salt; 0.5.19 partitions only GPU cache. |
 | NEAR AI | `cache_salt` | Honored by NEAR's TEE vLLM models. |
-| ArmetAI | `cache_salt` | Enforced by vLLM in the measured TD. |
-| 0G Private Computer | `cache_salt` | The adapter seals the field and the broker merges it into the served request; honored by the tested models. The engine is set by unmeasured broker config, so re-test when 0G providers change. |
-| Other providers | None | Secret AI uses Ollama, which has no partition field. Non-TEE providers receive no field. |
+| ArmetAI | `cache_salt` | Isolation was last verified on vLLM. Enforcement on the current SGLang deployment remains untested. |
+| 0G Private Computer | `cache_salt` | The adapter seals the field. Broker source for `v0.6.4` and `v0.6.5` omits it from the top-level allowlist for self-hosted engines, so the broker may drop it. Forwarding and isolation remain unverified live for those versions. |
+| Other providers | None | The gateway injects no partition field. |
 
 ## Which requests carry the field
 
