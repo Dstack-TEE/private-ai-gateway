@@ -52,7 +52,11 @@ The checked-in upstream seed is empty. Before deployment, either:
 - replace the `gateway-upstreams` content in `compose.yaml` with reviewed routes; or
 - keep it empty and use `PUT /v1/admin/upstreams` after the process starts.
 
-[`upstreams.example.json`](upstreams.example.json) demonstrates current Anthropic, Tinfoil, NEAR AI, Chutes, and Phala-direct entries. It contains placeholders, not production policy.
+[`upstreams.example.json`](upstreams.example.json) demonstrates Anthropic,
+Tinfoil, NEAR AI, and Chutes entries with placeholder credentials. For Phala
+Direct, supply the HTTPS origin and model ID of your own direct inference
+endpoint and run the [Phala Direct verifier](../docs/providers/phala-direct/verification.md#tests-and-reproduction)
+before adding the route.
 
 ## One-Command Deploy
 

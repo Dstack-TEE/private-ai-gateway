@@ -138,8 +138,10 @@ non-empty `data[]` whose first `embedding` is numeric and not all zero.
 Embeddings responses carry no `id`, so the case looks up the receipt with the
 `x-receipt-id` response header. It then runs the same audit, requires
 `receipt.endpoint == "/v1/embeddings"`, and checks the receipt events and cited
-sessions as the lifecycle case does. In the checked-in matrix, only the
-`chutes-live-embed` entry has the `embeddings` capability.
+sessions as the lifecycle case does. To run it, pass `--providers-file` with an
+entry for an embeddings model that your gateway can attest. For a Chutes TEE
+embedding deployment, [the standalone probe](../examples/live_chutes_embedding.rs)
+also exercises the encrypted transport.
 
 The suite does not run load tests, availability measurements, browser verification, or every auxiliary smoke script in `scripts/live_e2e/`.
 
@@ -305,7 +307,7 @@ Optional fields are:
 | --- | --- |
 | `capabilities` | Cases to enable, including `chat`, `embeddings`, `images`, `audio_transcriptions`, and `structured_outputs`. Other labels document provider features for auxiliary tests. |
 | `requires` | Additional environment variables preflight must find. |
-| `structured_output_max_tokens` | Token limit for the structured-output case; default `512`. Reasoning models need more: Tinfoil `kimi-k2-6` writes a long `message.reasoning` before `message.content`, and at 512 tokens it can stop before any content. |
+| `structured_output_max_tokens` | Token limit for the structured-output case, default `512`. Reasoning models can exhaust that budget before generating `message.content`. The Tinfoil and NEAR AI chat entries use `2048`. |
 | `verification_refresh_seconds` | Per-upstream verifier refresh interval. |
 | `session_refresh_seconds` | Provider session refresh interval. |
 | `chutes_e2ee_api_base` | Alternate Chutes E2EE discovery origin. |
@@ -400,7 +402,7 @@ The output is the `pap audit --json` transcript: a `checks` array with each chec
 
 ```sh
 uv run python scripts/live_e2e/bfcl_v4.py \
-  --providers-file scripts/live_e2e/providers.glm51.json \
+  --providers-file scripts/live_e2e/providers.glm.json \
   --test-category single_turn,multi_turn \
   --max-cases 20 \
   --no-build
@@ -417,7 +419,10 @@ The wrapper needs a BFCL checkout at `--bfcl-dir` (default `BFCL_DIR`, or `../go
 | `--max-cases` | Cap on total cases, keeping a spread of categories. |
 | `--provider`, `--port`, `--dstack-endpoint`, `--artifacts-dir`, `--env-file`, `--no-build` | Same meaning as for `run.py`. |
 
-`scripts/live_e2e/providers.glm51.json` maps the GLM 5.1 family across Tinfoil, NEAR AI, and Chutes, so one BFCL run compares three providers on the same model family, each through its own attestation and transport path.
+`scripts/live_e2e/providers.glm.json` compares three served GLM variants through
+their respective attestation and transport paths. It uses GLM 5.3 on Tinfoil,
+GLM 5.3 Flash on NEAR AI, and GLM 5.1 on Chutes. Scores reflect both the
+model variant and the provider.
 
 ## Failure diagnosis
 

@@ -72,7 +72,7 @@ pub struct UpstreamVerifiedEvent {
     /// Present only when equal evidence cannot establish equal platform state.
     pub verification_round: Option<VerificationRound>,
     /// The operator's per-endpoint upstream config `name` (e.g.
-    /// "tinfoil-glm51").
+    /// "tinfoil-glm53-live").
     pub upstream_name: String,
     /// The verifier adapter *type* the verification logic keys on (e.g.
     /// "tinfoil", "chutes"); maps provider evidence onto typed session claims.
