@@ -203,7 +203,7 @@ middleware mode, the gateway supplies a per-user, provider-separated
 bytes). A non-empty caller `cache_salt` string subdivides that user's partition;
 the caller's raw salt and `user_cache_secret` are removed. This replaces the
 shared namespace implied by the proxy's default startup-random salt. See
-[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation) for
+[Prefix-cache isolation](../../prefix-cache-isolation.md) for
 identity trust, provider limitations, and rotation.
 
 Without a generated or valid caller salt (including anonymous middleware
@@ -227,7 +227,7 @@ See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
 anonymous requests, streaming, failover, caller sub-partitions, and receipt
 hashes. A disposable-CVM run on 2026-11-12 confirmed per-user isolation
 with the pinned proxy; see
-[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+[Prefix-cache isolation](../../prefix-cache-isolation.md).
 Production rollout remains unverified.
 
 ## Session binding and claims

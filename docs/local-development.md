@@ -73,8 +73,8 @@ cargo build --all-targets
 ```
 
 `uv sync --locked` installs the Python packages used by the provider-verifier
-bridge. The bridge uses the vendored `scripts/confidential_verifier` package by
-default. Set `PRIVATE_AI_VERIFIER_DIR` only when testing an intentional external
+bridge. The bridge uses the [vendored](../scripts/confidential_verifier/VENDOR.md)
+`scripts/confidential_verifier` package by default. Set `PRIVATE_AI_VERIFIER_DIR` only when testing an intentional external
 verifier checkout.
 
 ## Run the repository checks
@@ -86,6 +86,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 python3 -m compileall scripts
+python3 scripts/check_docs.py
 ```
 
 The TypeScript workspace contains only `@phala/aci-verifier`. Use

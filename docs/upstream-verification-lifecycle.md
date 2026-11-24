@@ -1,4 +1,4 @@
-# Upstream Verification Lifecycle
+# Upstream verification lifecycle
 
 This page explains when the gateway verifies an upstream, how long a verified result is reused, and how channel-binding failures affect forwarding. It applies to the direct-upstream configuration managed by `UpstreamConfigManager`.
 

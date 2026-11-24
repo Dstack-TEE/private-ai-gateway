@@ -1,4 +1,4 @@
-# SecretAI Direct-Instance Review
+# SecretAI direct-instance review
 
 Date: 2026-05-22 UTC.
 

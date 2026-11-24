@@ -38,6 +38,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets
 
+      - name: Check documentation links
+        run: python3 scripts/check_docs.py
+
       - name: Compile Python helpers
         run: python3 -m compileall scripts
 

@@ -1,4 +1,4 @@
-# PhalaDirect Review
+# Phala direct review
 
 Date: 2026-06-10 UTC. Updated 2026-06-11 for OS-image classification.
 

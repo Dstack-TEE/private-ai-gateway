@@ -1,4 +1,4 @@
-# ArmetAI Per-Model TDX Review
+# ArmetAI per-model TDX review
 
 Date: 2026-09-29 UTC. Updated: 2026-10-15 UTC.
 

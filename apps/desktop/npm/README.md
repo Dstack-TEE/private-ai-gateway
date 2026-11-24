@@ -5,7 +5,8 @@ The npm release uses a single package name, `private-ai-proxy`, the way
 Private AI Proxy release publishes seven versions of it:
 
 - the wrapper `private-ai-proxy@<version>`, which provides the `pap`,
-  `private-ai-proxy` and `aci` commands
+  `private-ai-proxy` and `aci` commands; its [package README](private-ai-proxy/README.md)
+  is the npm page
 - one platform version per target, `private-ai-proxy@<version>-<os>-<cpu>` for
   `darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`, `win32-arm64` and
   `win32-x64`, each holding `private-ai-proxy`, `private-ai-proxy-service` and

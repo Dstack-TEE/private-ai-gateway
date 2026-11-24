@@ -1,4 +1,4 @@
-# SecretAI Verification
+# SecretAI verification
 
 This reference is for Private AI Gateway operators who configure a direct
 SecretAI SecretVM origin. The gateway verifies the CPU TEE, NVIDIA GPU,

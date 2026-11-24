@@ -1,4 +1,4 @@
-# Phala Direct Verification
+# Phala direct verification
 
 The `phala-direct` adapter connects to one dstack-vllm-proxy origin and verifies that origin's legacy version 2 attestation report. It is a per-model compatibility path for services that do not expose canonical ACI reports.
 
@@ -100,7 +100,7 @@ The adapter records the classification and does not enforce it. A relying party 
 
 ## Limitations
 
-- Middleware injects a per-user `cache_salt`: PIG/vllm-router pass it through to SGLang/vLLM for engine-enforced isolation; SGLang storage tiers (HiCache/Mooncake) require ≥ 0.5.20 so storage keys include the salt. See [Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+- Middleware injects a per-user `cache_salt`: PIG/vllm-router pass it through to SGLang/vLLM for engine-enforced isolation; SGLang storage tiers (HiCache/Mooncake) require ≥ 0.5.20 so storage keys include the salt. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 - A non-current TCB state is recorded rather than rejected by the bridge.
 - Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
 - The compose check proves the compose was measured. The adapter does not compare the compose or image digests with an operator allowlist.

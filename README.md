@@ -61,7 +61,9 @@ VERIFIED (5 pass, 1 skipped: no custody policy configured)
 
 The `provider.aci_verified` field covers the second hop. The gateway refuses
 the request unless the selected model backend passes its own attestation and
-channel-binding checks. See [Make a request fail closed](#make-a-request-fail-closed).
+channel-binding checks; [Verified providers](#verified-providers) says what
+those checks prove for each provider. See
+[Make a request fail closed](#make-a-request-fail-closed).
 
 `tee.redpill.ai` is a live deployment operated outside this repository, and
 this project does not issue its API keys. The [quickstart](docs/quickstart.md)
@@ -100,6 +102,17 @@ never receives prompt or response bodies.
 [Who receives what](docs/attested-confidential-inference.md#who-receives-what)
 lists every field that leaves the request path.
 
+## Verified providers
+
+Before forwarding a prompt, the gateway checks the provider's TEE evidence with
+a provider-specific adapter and sends the prompt only over a channel bound to
+that evidence. The [provider verification index](docs/providers/README.md)
+lists every supported provider with its attested boundary, the binding the
+gateway enforces, and the dated audit decision that admitted it. Each
+provider's verification page states what the adapter proves and what it does
+not. [Provider audit criteria](docs/providers/audit-criteria.md) is the rubric
+those audits apply.
+
 ## Make a request fail closed
 
 Private inference is opt-in per request: configuring a TEE provider does not
@@ -111,9 +124,9 @@ defines each constraint and what happens without one.
 ## Choose a client
 
 Use `pap curl`, `pap send`, or `pap serve` from the command line, the
-Private AI Proxy desktop app, or the TypeScript verifier. Use `pap` for coding
-agents and provider access. [ACI clients](clients/README.md) says which fits
-your host.
+[Private AI Proxy](apps/desktop/README.md) desktop app, or the TypeScript
+verifier. Use `pap` for coding agents and provider access.
+[ACI clients](clients/README.md) says which fits your host.
 
 ## Run your own gateway
 
@@ -121,14 +134,14 @@ Self-hosting needs a dstack SDK endpoint, gateway state, at least one upstream,
 and your own policy for authentication, networking, measurements, and provider
 credentials.
 
-- [Local development](docs/getting-started.md) runs the gateway against a
+- [Local development](docs/local-development.md) runs the gateway against a
   forwarded dstack socket.
 - [Configuration reference](docs/configuration-reference.md) defines every
   gateway and upstream field.
 - [Deployment guide](deploy/README.md) deploys the gateway with dstack
   git-launcher.
-- [Testing guide](docs/live-e2e-test-suite.md) covers local and live-provider
-  tests.
+- [Live end-to-end suite](docs/live-e2e-test-suite.md) runs the smoke tests
+  and the live-provider tests.
 
 The gateway has two routing modes. Direct mode maps a public model ID to a
 configured upstream. Middleware mode asks an external control plane for
@@ -138,32 +151,43 @@ inside the gateway process in both modes.
 ## API coverage
 
 The gateway serves OpenAI Chat Completions, Completions, Embeddings, Responses,
-buffered Image Generations, Audio Transcriptions, Anthropic Messages, and the
-ACI attestation, receipt, and session endpoints. The
-[HTTP API reference](docs/api-reference.md) covers every route.
+Image Generations and Edits, Audio Transcriptions and Speech, Anthropic
+Messages, reranking, System One, and the ACI attestation, receipt, and session
+endpoints. The [HTTP API reference](docs/api-reference.md) covers every route.
 
 ## Documentation
 
-Start at the [documentation index](docs/README.md). It lists each guide and
-reference by reader and task.
+The [documentation index](docs/README.md) lists every guide and reference by
+task. Start from the row that matches yours:
+
+| To | Start with |
+| --- | --- |
+| Verify a deployment and send a verified request | [ACI quickstart](docs/quickstart.md) |
+| Decide whether to trust a deployment | [Verification and security model](docs/attested-confidential-inference.md) |
+| Run coding agents through a verified local endpoint | [Private AI Proxy](apps/desktop/README.md) |
+| Look up a route | [HTTP API reference](docs/api-reference.md) |
+| Check what a provider's attestation proves | [Provider verification](docs/providers/README.md) |
+| Implement or audit the protocol | [ACI specification](spec/README.md) |
+| Deploy or develop the gateway | [Local development](docs/local-development.md), then the [deployment guide](deploy/README.md) |
+| Contribute a change | [Contributing](CONTRIBUTING.md) |
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
+| `src/aci/` | ACI types, receipts, E2EE, transports, and verifiers |
+| `src/aggregator/` | Routing, receipt, session, and metrics services |
+| `src/http/app/` | HTTP routes, handlers, and error envelopes |
+| `src/middleware/` | Control-plane client, transforms, failover, and pricing |
 | `crates/aci-protocol/` | Shared ACI wire types and deterministic encoding rules |
 | `crates/aci-verify/` | Policy-neutral ACI verification mechanisms shared by the gateway and `pap` |
-| `src/aci/` | ACI types, receipts, E2EE, transports, and verifiers |
-| `src/http/app/` | HTTP routes, handlers, and error envelopes |
-| `apps/desktop/` | Private AI Proxy: the `pap` CLI (ACI verification, curl, send, and local proxy), the desktop app, and the per-user backend service |
-| `src/aggregator/` | routing, receipt, session, and metrics services |
-| `src/middleware/` | control-plane client, transforms, failover, and pricing |
-| `clients/` | TypeScript verifier and pinned Node and Bun transports |
-| `deploy/` | dstack git-launcher deployment example |
-| `examples/control-plane/` | Reference control-plane server |
-| `docs/` | guides, references, security notes, and review records |
-| `scripts/` | provider verifier bridge and smoke suites |
-| `spec/` | ACI specification and test vectors |
+| [`apps/desktop/`](apps/desktop/README.md) | Private AI Proxy: the `pap` CLI, the desktop app, and the per-user backend service |
+| [`clients/`](clients/README.md) | TypeScript verifier and pinned Node and Bun transports |
+| [`spec/`](spec/README.md) | ACI specification and test vectors |
+| [`docs/`](docs/README.md) | Guides, references, security notes, and review records |
+| [`deploy/`](deploy/README.md) | dstack git-launcher deployment |
+| `examples/` | [Minimal control plane](examples/control-plane/README.md) and [audio-transcription upstream](examples/audio/README.md) |
+| `scripts/` | Provider-verifier bridge, smoke suites, and the live end-to-end suite |
 | `tests/` | Rust integration and provider-verifier tests |
 
 ## License

@@ -12,6 +12,8 @@ Proxy CLI, for coding agents and provider access.
 | Run a familiar curl request over an attested channel | [`pap curl`](../apps/desktop/docs/cli.md#one-pinned-curl-request) |
 | Verify one chat request, receipt, and cited session | [`pap send`](../docs/quickstart.md#5-verify-one-inference-end-to-end) |
 | Point a coding agent at a local verified endpoint | [`pap serve`](../docs/quickstart.md#4-use-it-as-a-local-endpoint) |
+| Route installed coding agents such as Codex through a verified service | [`pap agents connect`](../apps/desktop/docs/cli.md#first-run) |
+| Protect coding agents from a desktop app instead of a terminal | [Private AI Proxy desktop app](../apps/desktop/README.md) |
 | Verify artifacts in a browser, or add pinned `fetch` to a Node or Bun SDK | [`@phala/aci-verifier`](verifier-ts/README.md) |
 
 ## Retired packages
@@ -25,5 +27,4 @@ use `pap` instead. See the [CLI guide](../apps/desktop/docs/cli.md).
 
 - [Client architecture](architecture.md): component ownership, the shared
   trust contract, response verification, and release acceptance.
-- [Coding agents](coding-agents.md): the supported `pap` integration.
 - [Releasing](releasing.md): the verifier npm release process.

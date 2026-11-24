@@ -1,20 +1,36 @@
 # Private AI Gateway documentation
 
-Use this index to choose the document that matches your task. The ACI protocol
-itself lives under [`spec/`](../spec/README.md); this directory documents the
-reference gateway, its deployment, and its provider integrations.
+This index lists every guide and reference in the repository, grouped by what
+you are trying to do. It covers the gateway, the Private AI Proxy client, and
+the provider integrations; the ACI protocol itself has its own
+[specification index](../spec/README.md).
 
-## Use an ACI service
+New here? Run the [ACI quickstart](quickstart.md), then read the
+[verification and security model](attested-confidential-inference.md).
 
-For developers and evaluators who call a deployment or build on the clients.
+## Call an ACI service
+
+For developers and evaluators who send requests to a deployment.
 
 | Goal | Document | Type |
 | --- | --- | --- |
 | Verify a live deployment and send a verified request | [ACI quickstart](quickstart.md) | Tutorial |
-| Install the Private AI Proxy desktop app or `pap` CLI | [Private AI Proxy install](private-ai-proxy-install.md) | How-to |
-| Choose a client library, CLI command, or integration | [ACI clients](../clients/README.md) | Index |
-| Use private inference from Pi or OpenCode | [Coding-agent integrations](../clients/coding-agents.md) | How-to |
-| Call inference and artifact endpoints | [HTTP API reference](api-reference.md) | Reference |
+| Install the `pap` CLI or the desktop app | [Install Private AI Proxy](private-ai-proxy-install.md) | How-to |
+| Choose between `pap`, the desktop app, and the TypeScript verifier | [ACI clients](../clients/README.md) | Index |
+| Verify artifacts in a browser, or pin `fetch` in a Node or Bun SDK | [`@phala/aci-verifier`](../clients/verifier-ts/README.md) | Reference |
+| Look up a route, its streaming and E2EE support, and its errors | [HTTP API reference](api-reference.md) | Reference |
+
+## Use Private AI Proxy
+
+For people running coding agents through the local verifying client.
+
+| Goal | Document | Type |
+| --- | --- | --- |
+| Learn what the app and CLI do and how a request flows | [Private AI Proxy](../apps/desktop/README.md) | Overview |
+| Connect coding agents, run the local proxy, and script `pap` | [CLI reference](../apps/desktop/docs/cli.md) | Reference |
+| Find and edit settings, profiles, and stored credentials | [Settings files](../apps/desktop/docs/configuration.md) | Reference |
+| Sign in with a Phala or RedPill account | [Account login](../apps/desktop/docs/account-login.md) | Reference |
+| See what changed in each release | [Changelog](../apps/desktop/CHANGELOG.md) | Reference |
 
 ## Understand and audit the security claim
 
@@ -23,41 +39,72 @@ For anyone deciding whether to trust a deployment or reviewing a provider.
 | Goal | Document | Type |
 | --- | --- | --- |
 | Understand the privacy claim, what to verify, and its limits | [Verification and security model](attested-confidential-inference.md) | Explanation |
-| See what each provider verifier proves | [Provider verification index](providers/README.md) | Reference |
-| Understand attested-session records and claims | [Attested sessions](attested-session-system.md) | Explanation |
-| Understand verification caching and Chutes nonce sessions | [Upstream verification lifecycle](upstream-verification-lifecycle.md) | Explanation |
+| Read or implement the ACI protocol | [ACI specification index](../spec/README.md) | Index |
+| See what each provider verifier proves, and its audit decision | [Provider verification index](providers/README.md) | Index |
+| Understand attested-session records and their claims | [Attested sessions](attested-session-system.md) | Explanation |
+| Understand verification caching, refresh, and binding failures | [Upstream verification lifecycle](upstream-verification-lifecycle.md) | Explanation |
+| Check how prompt caches are partitioned per user | [Prefix-cache isolation](prefix-cache-isolation.md) | Explanation |
 | Admit a new provider | [Provider audit criteria](providers/audit-criteria.md) | Reference |
 
-## Run or change the gateway
+## Run the gateway
 
-For operators and contributors.
+For operators deploying and configuring a gateway.
 
 | Goal | Document | Type |
 | --- | --- | --- |
-| Build and run the gateway locally | [Local development](getting-started.md) | Tutorial |
-| Deploy the gateway in dstack | [git-launcher deployment](../deploy/README.md) | How-to |
-| Deploy the gateway with the Privatemode proxy | [Privatemode deployment](../deploy/privatemode.md) | How-to |
+| Build the gateway, run the repository checks, and start it locally | [Local development](local-development.md) | Tutorial |
 | Configure runtime policy and upstreams | [Configuration reference](configuration-reference.md) | Reference |
-| Implement a control plane | [Control-plane contract](control-plane-contract.md) | Reference |
-| Run unit, smoke, and live-provider tests | [Testing guide](live-e2e-test-suite.md) | How-to |
+| Deploy the gateway in dstack | [Deploy with git-launcher](../deploy/README.md) | How-to |
+| Deploy the gateway with the Privatemode proxy | [Deploy with the Privatemode proxy](../deploy/privatemode.md) | How-to |
+| Add a private Chutes route | [Configure a private Chutes route](providers/chutes/configuration.md) | How-to |
+| Add an audio-transcription upstream | [Audio transcription example](../examples/audio/README.md) | Example |
+| Implement a control plane for middleware mode | [Control-plane contract](control-plane-contract.md) | Reference |
+| Start from a working control plane | [Minimal control plane](../examples/control-plane/README.md) | Example |
+| Run the smoke tests and the live-provider suite | [Live end-to-end suite](live-e2e-test-suite.md) | How-to |
 | Test per-user cache salts on a disposable CVM | [Cache-salt CVM test](cache-salt-cvm-test.md) | How-to |
-| Prepare and validate a change | [Contributing](../CONTRIBUTING.md) | How-to and policy |
+
+## Change the code
+
+For contributors.
+
+| Goal | Document | Type |
+| --- | --- | --- |
+| Prepare and validate a change, and know which page to update | [Contributing](../CONTRIBUTING.md) | How-to and policy |
+| Understand the TypeScript verifier and its trust contract | [ACI client architecture](../clients/architecture.md) | Explanation |
+| Understand the Private AI Proxy components and their boundaries | [Private AI Proxy architecture](../apps/desktop/docs/client-architecture.md) | Explanation |
+| Find the `pap` crate and where its verification lives | [`private-ai-proxy` crate](../apps/desktop/cli/README.md) | Reference |
+| Keep streaming wire bytes unchanged during a refactor | [Streaming wire characterization](../tests/streaming/README.md) | Reference |
+
+## Release Private AI Proxy and the clients
+
+For maintainers shipping releases.
+
+| Goal | Document | Type |
+| --- | --- | --- |
+| Understand release orchestration and how each installation updates | [Distribution architecture](../apps/desktop/docs/distribution.md) | Explanation |
+| Know what each CLI package contains and the release contract | [CLI distribution](../apps/desktop/docs/cli-distribution.md) | Reference |
+| Publish the CLI to npm | [npm distribution](../apps/desktop/npm/README.md) | Reference |
+| Prepare and submit a Mac App Store build | [Mac App Store](../apps/desktop/docs/mac-app-store.md) | How-to |
+| Refresh the bundled Codex model catalog | [Codex catalog](../apps/desktop/docs/codex-catalog.md) | How-to |
+| Run the desktop live end-to-end test | [Desktop live E2E](../apps/desktop/e2e/README.md) | How-to |
+| Release `@phala/aci-verifier` to npm | [Verifier releases](../clients/releasing.md) | How-to |
 
 ## Maintainer records
 
-The following documents record plans or point-in-time reviews. They can explain
-why code exists, but they are not runtime references:
+These documents record plans or point-in-time reviews. They explain why code
+exists, but they are not runtime references:
 
 - [Project status and roadmap](roadmap.md)
+- [Known gaps against the ACI spec](reviews/aci-spec-conformance-gaps.md)
 - [System One endpoint design proposal](systemone-design.md)
-- [Router-mode provider review process](router-mode-provider-review.md)
-- [ACI implementation gap review](reviews/aci-spec-conformance-gaps.md)
-- [Router soundness review](reviews/router-mode-soundness.md)
-- [Router load-balancing and cache review](reviews/router-mode-load-balancing-cache.md)
-- each provider's dated `review.md` under [`providers/`](providers/README.md)
+- [Router-mode provider review process](reviews/router-mode-provider-review.md)
+- [Router-mode soundness review](reviews/router-mode-soundness.md)
+- [Router-mode load-balancing and cache review](reviews/router-mode-load-balancing-cache.md)
+- each provider's dated `review.md`, linked from the
+  [provider verification index](providers/README.md)
 
-Use the source files named in each living reference when a review record and the
-current implementation disagree.
+When a review record and the current implementation disagree, the source files
+named in the living reference win.
 
 ## Documentation conventions
 
@@ -71,3 +118,8 @@ current implementation disagree.
 - Security statements identify the policy or request constraint that makes the
   gateway fail closed. A provider name alone does not imply enforcement.
 - Each fact has one home page. Other pages link to it instead of restating it.
+- Every guide and reference has a row in this index. Notes about one fixture,
+  vendored package, or asset set live beside it and are linked from the page
+  that discusses that code.
+- `python3 scripts/check_docs.py` fails when a Markdown file cannot be reached
+  from the root README, or a relative link or heading anchor does not resolve.

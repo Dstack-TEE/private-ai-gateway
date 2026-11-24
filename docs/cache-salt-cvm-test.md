@@ -145,7 +145,7 @@ Exit status 0 is a pass, 1 means an isolation check hit another namespace,
 outranks request errors, so exit 1 wins when both occur. Rerun on
 2; resolve request errors before rerunning on 3. Investigate 1 before merging or
 deploying: check the provider row in
-[Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation)
+[Prefix-cache isolation](prefix-cache-isolation.md)
 and the field mapping in `src/aggregator/upstream_config/builders.rs`.
 
 Restart the CVM, wait for `/health`, and replay tenant A's buffered prompts:
@@ -196,7 +196,7 @@ rm -rf "$WORK"
 - NEAR's TEE vLLM models honor `cache_salt`.
 - ArmetAI enforces `cache_salt` in the measured vLLM TD.
 - Phala Direct forwards `cache_salt` to SGLang/vLLM; SGLang storage tiers need
-  ≥ 0.5.20. See [Prefix-cache isolation](providers/README.md#prefix-cache-isolation-observation).
+  ≥ 0.5.20. See [Prefix-cache isolation](prefix-cache-isolation.md).
 - The default compose has no 0G route because it needs a current reviewed
   `accepted_subjects` boot-chain pin. To cover 0G, add a `0g-private-computer`
   entry following [Configuration](providers/0g-private-computer/verification.md#configuration)

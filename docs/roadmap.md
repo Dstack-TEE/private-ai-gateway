@@ -1,4 +1,4 @@
-# Project Status and Roadmap
+# Project status and roadmap
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 

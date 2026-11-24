@@ -1,4 +1,4 @@
-# ACI Test Vectors
+# ACI test vectors
 
 Deterministic, byte-exact vectors for the digest and signature constructions in
 the [ACI Spec](aci.md). An implementation that reproduces every value below has

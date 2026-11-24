@@ -1,4 +1,4 @@
-# Tinfoil Router-Mode Review
+# Tinfoil router-mode review
 
 Date: 2026-05-18 UTC.
 

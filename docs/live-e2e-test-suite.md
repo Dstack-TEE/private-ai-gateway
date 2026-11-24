@@ -1,4 +1,4 @@
-# Run the Live End-to-End Suite
+# Run the live end-to-end suite
 
 The live suite starts a local gateway, calls real provider APIs, verifies
 returned artifacts, and preserves local artifacts for diagnosis. It is an
@@ -70,7 +70,7 @@ For each entry with the `chat` capability, the case:
 
 `audio_transcriptions` provider capability runs
 `cases/audio_transcriptions.py` against `/v1/audio/transcriptions` using the
-committed 94,958-byte synthetic spoken WAV in both `json` and `verbose_json`
+committed 94,958-byte [synthetic spoken WAV](../scripts/live_e2e/fixtures/README.md) in both `json` and `verbose_json`
 formats. It checks required field types, recognizable fixture
 words, positive integer billable seconds, response allowlists, null chat id,
 received/returned body hashes, the serving attested session, and offline
@@ -145,7 +145,7 @@ The suite does not run load tests, availability measurements, browser verificati
 
 ## Run the local multi-upstream smoke test
 
-The credential-free local smoke suite builds a smoke image and runs two mock ACI upstreams and one router gateway with Docker Compose. All three mount the [forwarded dstack socket](getting-started.md#connect-to-the-dstack-sdk). It does not call the live provider matrix.
+The credential-free local smoke suite builds a smoke image and runs two mock ACI upstreams and one router gateway with Docker Compose. All three mount the [forwarded dstack socket](local-development.md#connect-to-the-dstack-sdk). It does not call the live provider matrix.
 
 It needs Docker with the Compose plugin, `curl`, `jq`, `cargo`, `sha256sum`, `awk`, and `openssl`. `scripts/local_multi_upstream_smoke.sh --help` lists the ports and paths it uses.
 
@@ -171,7 +171,7 @@ It needs `docker buildx`, the `phala` CLI, `curl`, `jq`, `cargo`, `sha256sum`, a
 
 ## Prerequisites
 
-Install the [development prerequisites](getting-started.md#prerequisites) and
+Install the [development prerequisites](local-development.md#prerequisites) and
 build the gateway:
 
 ```sh
@@ -227,11 +227,11 @@ The temporary gateway needs a dstack key provider. By default the suite expects:
 unix:/tmp/aci-dstack-sock-dev.dstack.sock
 ```
 
-Start a local dstack simulator or [forward a trusted test CVM socket](getting-started.md#connect-to-the-dstack-sdk) to that path before running the suite. Use `--dstack-endpoint` to select another endpoint.
+Start a local dstack simulator or [forward a trusted test CVM socket](local-development.md#connect-to-the-dstack-sdk) to that path before running the suite. Use `--dstack-endpoint` to select another endpoint.
 
 Preflight and the gateway launcher set `DSTACK_VERIFIER_URL` to `http://localhost:18080` when it is not already set, so the NEAR AI and Phala direct verifiers use that dstack verifier during the run. NEAR AI entries declare this variable as a prerequisite.
 
-The run uses the vendored Python verifier unless `PRIVATE_AI_VERIFIER_DIR` overrides it; see [Install dependencies](getting-started.md#install-dependencies).
+The run uses the vendored Python verifier unless `PRIVATE_AI_VERIFIER_DIR` overrides it; see [Install dependencies](local-development.md#install-dependencies).
 
 ## Run a preflight check
 
@@ -433,4 +433,4 @@ Start with `summary.json`, then inspect `aggregator.log` and the failing provide
 | Receipt or session assertion failure | Compare the raw receipt, session artifact, and the [API reference](api-reference.md) before changing the test. |
 | Strict-reference failure | Confirm the model and policy really changed before updating `provider_refs/`. |
 
-For credential-free validation, use the [repository checks](getting-started.md#run-the-repository-checks) instead of the live suite.
+For credential-free validation, use the [repository checks](local-development.md#run-the-repository-checks) instead of the live suite.

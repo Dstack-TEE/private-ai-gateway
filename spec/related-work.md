@@ -1,4 +1,4 @@
-# ACI and Related Work
+# ACI and related work
 
 How the [ACI Spec](aci.md) relates to other confidential-inference
 systems and to the relevant standards, as of mid-2026. Two facts frame the
