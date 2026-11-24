@@ -27,13 +27,11 @@ pub(super) fn hermes_config_path(home: &Path, tool_env: bool) -> PathBuf {
     let Some(profile) = profile else {
         return root.join("config.yaml");
     };
+    let profile = profile.to_ascii_lowercase();
     if profile == "default" {
         return root.join("config.yaml");
     }
-    if !profile
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-    {
+    if !hermes_profile_id_valid(&profile) {
         return root.join("config.yaml");
     }
     root.join("profiles").join(profile).join("config.yaml")
@@ -44,12 +42,21 @@ pub(super) fn hermes_profile_valid(home: &Path, tool_env: bool) -> bool {
     let Ok(profile) = fs::read_to_string(root.join("active_profile")) else {
         return true;
     };
-    let profile = profile.trim();
-    profile.is_empty()
-        || profile == "default"
-        || (profile
+    let profile = profile.trim().to_ascii_lowercase();
+    profile.is_empty() || profile == "default" || hermes_profile_id_valid(&profile)
+}
+
+// Mirrors hermes_cli/profiles.py profile-name validation: normalize once,
+// reserve the default alias, and require a bounded identifier.
+fn hermes_profile_id_valid(profile: &str) -> bool {
+    profile.len() <= 64
+        && profile
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')))
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && profile
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
 }
 
 /// A path override that is not blank, trimmed as Hermes reads it.

@@ -157,18 +157,6 @@ impl Projector {
             options: &options,
         };
         let mut fields = fields(agent, &inputs)?;
-        if agent == Agent::OpenClaw {
-            for (id, model) in openclaw::entry_model_values(doc) {
-                fields.push(Field {
-                    path: owned(&["agents", "entries", id.as_str(), "model"]),
-                    value: Some(model),
-                    preview: None,
-                    entry: None,
-                    exact: false,
-                    container: false,
-                });
-            }
-        }
         if agent == Agent::OpenCode && self.opencode_v2_config(doc) {
             if let Some(field) = fields
                 .iter_mut()
@@ -933,11 +921,11 @@ fn legacy_claude_journal(record: &Connection, doc: Option<&ConfigDoc>) -> bool {
     ]
     .iter()
     .any(|key| doc.contains(&["env", key]));
-    has_switch
-        && !record
-            .fields
-            .iter()
-            .any(|field| field.path == owned(&["env", "CLAUDE_CODE_USE_BEDROCK"]))
+    let legacy_model = record
+        .fields
+        .iter()
+        .any(|field| field.path == owned(&["env", "ANTHROPIC_MODEL"]) && field.value.is_some());
+    has_switch || legacy_model
 }
 
 fn is_helper_field(agent: Agent, field: &OwnedField) -> bool {

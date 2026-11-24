@@ -200,7 +200,7 @@ fn openclaw_agent_entry_models_are_journaled_and_restored() {
         doc(&sandbox, Agent::OpenClaw)
             .get_str(&["agents", "entries", "main", "model"])
             .as_deref(),
-        Some("private-ai-proxy/openai/gpt-oss-20b")
+        Some("private-ai-proxy/phala/qwen")
     );
 }
 
@@ -318,6 +318,9 @@ fn legacy_claude_journal_migrates_provider_switch_flags() {
     config
         .set_str(&["env", "CLAUDE_CODE_USE_BEDROCK"], "1")
         .unwrap();
+    config
+        .set_str(&["env", "ANTHROPIC_MODEL"], "legacy-model")
+        .unwrap();
     write(&path, &config.render().unwrap());
     let mut store = sandbox.projector.load_store().unwrap();
     store
@@ -325,6 +328,15 @@ fn legacy_claude_journal_migrates_provider_switch_flags() {
         .unwrap()
         .fields
         .retain(|field| field.path != owned(&["env", "CLAUDE_CODE_USE_BEDROCK"]));
+    store
+        .get_mut(Agent::ClaudeCode.id())
+        .unwrap()
+        .fields
+        .push(OwnedField {
+            path: owned(&["env", "ANTHROPIC_MODEL"]),
+            value: Some(ConfigValue::Str("legacy-model".into())),
+            ..OwnedField::default()
+        });
     sandbox.projector.save_store(&store).unwrap();
     let status = sandbox
         .projector

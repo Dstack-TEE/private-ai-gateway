@@ -848,13 +848,31 @@ fn appended_intact(item: &ConfigDoc, key: &EntryKey, fields: &[&OwnedField]) -> 
     expected.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
     for field in fields {
         match (&field.entry, &field.value) {
-            (Some(entry), Some(value)) if entry.created && field.path.len() == 1 => {
+            (Some(entry), Some(value))
+                if entry.created
+                    && field.path.len() == 1
+                    && !is_any_model_selection_field(field) =>
+            {
                 expected.insert(field.path[0].clone(), value.to_json());
+            }
+            (Some(entry), Some(value)) if entry.created && is_any_model_selection_field(field) => {
+                let _ = (entry, value);
             }
             _ => return false,
         }
     }
-    item.get_value(&[]) == Some(ConfigValue::Json(serde_json::Value::Object(expected)))
+    let Some(ConfigValue::Json(mut actual)) = item.get_value(&[]) else {
+        return false;
+    };
+    for field in fields {
+        if is_any_model_selection_field(field) {
+            remove_json_path(
+                &mut actual,
+                &field.path.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+        }
+    }
+    actual == serde_json::Value::Object(expected)
 }
 
 /// Exact fields only add keys or replace scalars. In an item the connection

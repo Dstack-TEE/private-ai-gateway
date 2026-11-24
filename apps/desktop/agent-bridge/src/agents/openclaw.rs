@@ -230,23 +230,6 @@ pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<(String, String)> {
         .collect()
 }
 
-pub(super) fn entry_model_values(doc: &ConfigDoc) -> Vec<(String, ConfigValue)> {
-    let Some(ConfigValue::Json(root)) = doc.get_value(&[]) else {
-        return Vec::new();
-    };
-    root.pointer("/agents/entries")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|entries| entries.iter())
-        .filter_map(|(id, entry)| {
-            entry
-                .get("model")
-                .and_then(ConfigValue::from_json)
-                .map(|model| (id.clone(), model))
-        })
-        .collect()
-}
-
 pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
     let override_path = |key| tool_env.then(|| env_path(key)).flatten();
     override_path("OPENCLAW_CONFIG_PATH").unwrap_or_else(|| {
