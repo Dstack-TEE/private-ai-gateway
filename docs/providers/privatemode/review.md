@@ -27,9 +27,10 @@ through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
 > `--nvidia-ocsp-allow-unknown=false`, and
 > `--nvidia-ocsp-revoked-grace-period=0`.
 >
-> The session still binds the measured proxy image and credential digests.
-> The 2026-11-14 run below provides per-session receipt evidence. This check
-> covered gateway attestation. The verdict remains **acceptable with conditions**.
+> The check found no change to the deployed trust boundary, session binding,
+> or adapter. It covered gateway attestation on one replica only. The latest
+> per-session Privatemode receipt evidence is from the 2026-11-14 run below.
+> The verdict remains **acceptable with conditions**.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
@@ -187,7 +188,7 @@ Deployment conditions:
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
 - Expose only the gateway listener from the workload network. The official
-  proxy has supported `--listen-address` since v1.58, including in v1.64. The
+  proxy has supported `--listen-address` since v1.56, including in v1.64. The
   Compose keeps the `0.0.0.0` default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
   unknown status and use no revoked-certificate grace period.

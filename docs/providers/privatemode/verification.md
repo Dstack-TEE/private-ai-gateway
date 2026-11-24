@@ -221,7 +221,7 @@ provider rate-limit responses. It guarantees neither a cache hit nor a
 particular worker. Obtain appropriate provider quota; do not add quota
 workarounds. The provider must honor the salt for isolation to hold.
 
-See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
+See the tagged v1.64.0 [CLI][cli-source], [handler][handler-source], and
 [shard-key implementation][shard-source]. Hermetic gateway coverage:
 `cargo test --test middleware_completion cache_salt` checks authenticated and
 anonymous requests, streaming, failover, caller sub-partitions, and receipt
