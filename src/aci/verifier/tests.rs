@@ -877,6 +877,110 @@ printf '%s' '{output}'"#
 }
 
 #[tokio::test]
+async fn near_ai_temporarily_caches_model_mismatches() {
+    let directory = tempfile::tempdir().unwrap();
+    let calls = directory.path().join("calls");
+    let verified = json!({
+        "result": "verified",
+        "attested_scope": "router",
+        "evidence": {
+            "digest": crate::aci::digest::sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://router.example",
+            "spki_sha256": "ab".repeat(32),
+        }],
+    });
+    let script = r#"payload="$(cat)"
+case "$payload" in
+  *'"upstream_name":"primary"'*'"model_id":"alias"'*)
+    printf '%s\n' alias >> "$1"
+    printf '%s' '{"result":"failed","failure":"binding_mismatch"}'
+    ;;
+  *'"model_id":"unavailable"'*)
+    printf '%s\n' unavailable >> "$1"
+    printf '%s' '{"result":"failed","failure":"evidence_unavailable"}'
+    ;;
+  *)
+    printf '%s\n' verified >> "$1"
+    printf '%s' "$2"
+    ;;
+esac"#;
+    let verifier = ExternalProviderVerifier::with_command_and_cache(
+        "near-ai",
+        AttestationScope::PerRouter,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            "near-ai-negative-cache-test".to_string(),
+            calls.display().to_string(),
+            verified.to_string(),
+        ],
+        5,
+        300,
+    )
+    .unwrap();
+    let request = |upstream_name: &str, model_id: &str| UpstreamVerificationRequest {
+        upstream_name: upstream_name.to_string(),
+        url_origin: Some("https://router.example".to_string()),
+        model_id: model_id.to_string(),
+        forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+        required: true,
+    };
+    let alias = request("primary", "alias");
+    let healthy = request("primary", "canonical");
+    assert_eq!(
+        verifier.verify(alias.clone()).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert!(verifier.cached(&alias).is_none());
+    assert!(verifier.cache_remaining(&alias).is_none());
+    for sibling in [healthy.clone(), request("secondary", "alias")] {
+        assert_eq!(
+            verifier.verify(sibling).await.result,
+            VerificationResult::Verified
+        );
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            verifier
+                .verify(request("primary", "unavailable"))
+                .await
+                .failure,
+            VerificationFailure::EvidenceUnavailable
+        );
+    }
+
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    assert_eq!(
+        verifier.verify(alias.clone()).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert_eq!(
+        verifier.verify(healthy).await.result,
+        VerificationResult::Verified
+    );
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap(),
+        "alias\nverified\nverified\nunavailable\nunavailable\n"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert_eq!(
+        verifier.verify(alias).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert!(std::fs::read_to_string(calls)
+        .unwrap()
+        .ends_with("unavailable\nalias\n"));
+}
+
+#[tokio::test]
 async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     // The fail-closed seam: a Verified result must attest the scope its provider
     // is declared to use. A router that comes back model-scoped, undeclared, or

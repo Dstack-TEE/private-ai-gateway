@@ -47,6 +47,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         report = await asyncio.to_thread(near_provider.fetch_report, model_id)
     raw = report.raw or {}
     attestations = raw.get("model_attestations")
+    # An external verifier checkout can supply a different fetch implementation.
     if not isinstance(attestations, list) or not attestations:
         failed(provider, "NEAR AI report missing model_attestations", failure="evidence_invalid")
         return

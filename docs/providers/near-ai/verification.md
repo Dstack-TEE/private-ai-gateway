@@ -43,9 +43,10 @@ The bridge then requires a `gateway_attestation`, a `tls_cert_fingerprint`, and 
 The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest through `report_data`. The gateway pins that digest against the live NEAR AI HTTPS certificate before sending the request.
 
 The verifier caches and refreshes verification by upstream model ID so each
-model passes the name check. A mismatch during refresh invalidates the
-cached verification for that model. The receipt records the selected model,
-and the session records the shared router channel evidence.
+model passes the name check. A model name mismatch replaces any cached
+verification for that model. Repeated requests reuse the failed result for
+up to 60 seconds. The receipt records the selected model, and the session records
+the shared router channel evidence.
 
 Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
