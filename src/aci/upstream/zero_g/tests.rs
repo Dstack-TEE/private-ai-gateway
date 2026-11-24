@@ -12,13 +12,14 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use hpke::aead::{AeadCtxS, ChaCha20Poly1305};
 use hpke::kdf::HkdfSha256;
-use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
+use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, PskBundle, Serializable};
 use k256::ecdsa::SigningKey;
 use serde_json::json;
 use sha3::Keccak256;
 
 use super::protocol::{
-    binding_hash, decode, envelope_aad, recover_signer, Kem, E2EE, RESP_INFO, SEAL_INFO,
+    binding_hash, decode, envelope_aad, recover_signer, Kem, BIND, E2EE, RESP_BIND_INFO, RESP_INFO,
+    SEAL_INFO,
 };
 use super::*;
 
@@ -92,9 +93,19 @@ struct ResponseSealer {
 
 impl ResponseSealer {
     fn new(client_key: &[u8], request_hash: [u8; 32]) -> Self {
+        Self::with_psk(client_key, request_hash, None)
+    }
+
+    fn with_psk(client_key: &[u8], request_hash: [u8; 32], psk: Option<&[u8]>) -> Self {
         let recipient = <Kem as hpke::Kem>::PublicKey::from_bytes(client_key).unwrap();
+        let mode = psk.map_or(OpModeS::Base, |psk| {
+            OpModeS::Psk(PskBundle {
+                psk,
+                psk_id: RESP_BIND_INFO,
+            })
+        });
         let (encapped, context) = hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
-            &OpModeS::Base,
+            &mode,
             &recipient,
             RESP_INFO,
             &mut rand::rngs::OsRng,
@@ -157,20 +168,20 @@ impl ResponseSealer {
     }
 }
 
-fn fixture_opener(f: &Value) -> ResponseOpener {
+fn fixture_opener(f: &Value, bound: bool) -> ResponseOpener {
     let secret =
         Secret::from_bytes(&decode(f["client_eph_private_key"].as_str().unwrap()).unwrap())
             .unwrap();
-    let mut request_hash = [0u8; 32];
-    hex::decode_to_slice(
-        f["request_binding_hash"].as_str().unwrap(),
-        &mut request_hash,
-    )
-    .unwrap();
+    let vector = if bound { &f["response_bound"] } else { f };
+    let request_hash = hex::decode(vector["request_binding_hash"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
     ResponseOpener::new(
         secret,
         request_hash,
-        Some(f["request_plain"]["model"].clone()),
+        Some(vector["request_plain"]["model"].clone()),
+        bound,
     )
 }
 
@@ -184,33 +195,55 @@ fn interoperates_with_the_0g_go_library() {
     let signer = f["signer_address"].as_str().unwrap();
     let enc_secret =
         Secret::from_bytes(&decode(f["enc_private_key"].as_str().unwrap()).unwrap()).unwrap();
-    let (request, _, request_hash) =
-        open_request(&enc_secret, &object(&f["request_sealed"])).unwrap();
-    assert_eq!(Value::Object(request), f["request_plain"]);
-    assert_eq!(hex::encode(request_hash), f["request_binding_hash"]);
 
-    let mut buffered = fixture_opener(&f);
-    let body = buffered.open_frame(object(&f["response_sealed"])).unwrap();
-    assert_eq!(Value::Object(body), f["response_plain"]);
-    let text = buffered.signed_text(false).unwrap();
-    verify_signature(&fixture_signature(&f["response_signature"]), &text, signer).unwrap();
+    for bound in [false, true] {
+        let vector = if bound { &f["response_bound"] } else { &f };
+        let sealed = object(&vector["request_sealed"]);
+        assert!(!sealed.contains_key(BIND));
+        let (request, _, request_hash) = open_request(&enc_secret, &sealed).unwrap();
+        assert_eq!(request.contains_key(BIND), bound);
+        assert_eq!(Value::Object(request), vector["request_plain"]);
+        assert_eq!(hex::encode(request_hash), vector["request_binding_hash"]);
 
-    let mut stream = fixture_opener(&f);
-    for (frame, plain) in f["stream_frames"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(f["stream_plain"].as_array().unwrap())
-    {
-        assert_eq!(
-            &Value::Object(stream.open_frame(object(frame)).unwrap()),
-            plain
-        );
+        let mut buffered = fixture_opener(&f, bound);
+        let body = buffered
+            .open_frame(object(&vector["response_sealed"]))
+            .unwrap();
+        assert_eq!(Value::Object(body), f["response_plain"]);
+        let text = buffered.signed_text(false).unwrap();
+        verify_signature(
+            &fixture_signature(&vector["response_signature"]),
+            &text,
+            signer,
+        )
+        .unwrap();
+
+        let mut stream = fixture_opener(&f, bound);
+        for (frame, plain) in vector["stream_frames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(f["stream_plain"].as_array().unwrap())
+        {
+            assert_eq!(
+                &Value::Object(stream.open_frame(object(frame)).unwrap()),
+                plain
+            );
+        }
+        let text = stream.signed_text(true).unwrap();
+        verify_signature(
+            &fixture_signature(&vector["stream_signature"]),
+            &text,
+            signer,
+        )
+        .unwrap();
+        assert!(verify_signature(
+            &fixture_signature(&vector["response_signature"]),
+            &text,
+            signer
+        )
+        .is_err());
     }
-    let text = stream.signed_text(true).unwrap();
-    verify_signature(&fixture_signature(&f["stream_signature"]), &text, signer).unwrap();
-    // The other response's signature does not verify this one.
-    assert!(verify_signature(&fixture_signature(&f["response_signature"]), &text, signer).is_err());
 
     // KAT from 0g-pc-e2ee client/sig: the broker's go-ethereum signer, key 0x11 * 32.
     let kat = format!("zg-sig-v1/e2ee-ct:{}:{}", "a".repeat(64), "b".repeat(64));
@@ -232,20 +265,20 @@ fn opener_refuses_tampered_reordered_and_unsealed_frames() {
 
     let mut tampered = object(&f["response_sealed"]);
     tampered["usage"]["completion_tokens"] = 999.into();
-    assert!(fixture_opener(&f).open_frame(tampered).is_err());
+    assert!(fixture_opener(&f, false).open_frame(tampered).is_err());
 
-    let mut reordered = fixture_opener(&f);
+    let mut reordered = fixture_opener(&f, false);
     reordered.open_frame(frames[0].clone()).unwrap();
     assert!(reordered.open_frame(frames[2].clone()).is_err());
 
-    let mut truncated = fixture_opener(&f);
+    let mut truncated = fixture_opener(&f, false);
     truncated.open_frame(frames[0].clone()).unwrap();
     assert!(truncated.signed_text(true).is_err());
 
     let mut unbound_usage = object(&f["response_sealed"]);
     unbound_usage[E2EE]["unbound_fields"] = json!(["model", "usage"]);
-    assert!(fixture_opener(&f).open_frame(unbound_usage).is_err());
-    assert!(fixture_opener(&f)
+    assert!(fixture_opener(&f, false).open_frame(unbound_usage).is_err());
+    assert!(fixture_opener(&f, false)
         .open_frame(object(&f["response_plain"]))
         .is_err());
 }
@@ -262,7 +295,7 @@ fn opener_refuses_duplicate_sealed_field_declarations() {
         json!(["choices", "choices"]),
         true,
     );
-    let mut opener = ResponseOpener::new(secret, [0; 32], None);
+    let mut opener = ResponseOpener::new(secret, [0; 32], None, false);
     assert!(opener.open_frame(object(&frame)).is_err());
 }
 
@@ -276,6 +309,7 @@ pub(crate) enum Mode {
     Unsealed,
     RouterError,
     Conflict(&'static str),
+    Bound,
     Truncated,
     TruncatedLine,
     Reordered,
@@ -351,6 +385,7 @@ impl Fixture {
             model: MODEL.into(),
             signing_address: signer(2).1,
             e2ee_public_key: hex::encode(enc_pub),
+            response_binding: mode == Mode::Bound,
         };
         let event = UpstreamVerifiedEvent {
             provider_type: Some(ZERO_G_PROVIDER.into()),
@@ -498,9 +533,15 @@ async fn chat(
             .into_response();
     }
     let (request, client_key, request_hash) = open_request(&broker.secret, &object(&body)).unwrap();
+    let psk = if broker.mode == Mode::Bound {
+        assert!(body.get(BIND).is_none());
+        Some(decode(request[BIND].as_str().unwrap()).unwrap())
+    } else {
+        None
+    };
     let stream = request["stream"] == json!(true);
     let plain = completion(stream);
-    let mut sealer = ResponseSealer::new(&client_key, request_hash);
+    let mut sealer = ResponseSealer::with_psk(&client_key, request_hash, psk.as_deref());
     let last = plain.len() - 1;
     let mut frames: Vec<Value> = plain
         .iter()
@@ -673,6 +714,23 @@ async fn only_the_stale_key_conflict_triggers_reverification() {
 }
 
 #[tokio::test]
+async fn advertised_response_binding_requires_psk_before_releasing_chunks() {
+    let bound = Fixture::new(Mode::Bound).await;
+    assert!(bound.buffered().await.is_ok());
+    let events = bound.stream().await;
+    assert_eq!(events.len(), 4);
+    assert_eq!(events.last().unwrap().as_deref(), Ok("data: [DONE]\n\n"));
+
+    let mut base = Fixture::new(Mode::Ok).await;
+    base.event.provider_claims.as_mut().unwrap()["instances"][ADDRESS]["response_binding"] =
+        true.into();
+    let events = base.stream().await;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].is_err());
+    assert_eq!(base.signature_calls(), 0);
+}
+
+#[tokio::test]
 async fn stream_ends_in_done_only_after_the_signature_verifies() {
     let fixture = Fixture::new(Mode::Ok).await;
     let events: Vec<String> = fixture
@@ -737,7 +795,7 @@ async fn incomplete_envelope_is_an_upstream_transport_failure() {
 }
 
 #[tokio::test]
-async fn refuses_before_sending_without_a_binding_or_with_an_e2ee_field() {
+async fn refuses_before_sending_without_a_binding_or_with_a_reserved_field() {
     let fixture = Fixture::new(Mode::Ok).await;
     let mut unbound = fixture.event.clone();
     unbound.channel_bindings.clear();
@@ -748,13 +806,15 @@ async fn refuses_before_sending_without_a_binding_or_with_an_e2ee_field() {
         .unwrap_err();
     assert!(matches!(err, UpstreamError::ChannelBindingMismatch(_)));
 
-    let body = json!({"model": MODEL, "messages": [], E2EE: {"v": 1}});
-    let err = fixture
-        .backend
-        .forward_verified_prepared(fixture.request(body), &fixture.event)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{err}");
+    for field in [E2EE, BIND] {
+        let body = json!({"model": MODEL, "messages": [], field: {"v": 1}});
+        let err = fixture
+            .backend
+            .forward_verified_prepared(fixture.request(body), &fixture.event)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, UpstreamError::InvalidRequest(_)), "{err}");
+    }
     assert!(fixture.broker.requests.lock().unwrap().is_empty());
 }
 

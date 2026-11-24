@@ -14,9 +14,11 @@ Adapter: native `0g-private-computer` provider. See [Verification](verification.
 
 A stale encryption-key conflict now triggers the gateway's existing
 reverification path. The adapter records the Compose hash on dstack 0.6 when
-the verified quote's RTMR3 and launch-document commitment agree. The Go
-interop vectors were refreshed. The authenticated live completion remains
-unverified.
+the verified quote's RTMR3 and launch-document commitment agree. It uses
+§7.6 response binding for providers that advertise `resp-bind`, so the first
+stream frame must authenticate before delivery. The §8 signature still
+determines whether a stream completed. The Go interop vectors cover both
+response modes. The authenticated live completion remains unverified.
 See [Verification](verification.md).
 
 ## Round 2 (2026-11-23 PST)
