@@ -3,7 +3,10 @@
 //! resolve-config-value.ts runs `!command` values through `/bin/sh -c`, and
 //! model-registry.ts gives them precedence over stored auth.
 
-use super::*;
+use super::{
+    registry::{OMP_PROFILE, PI_CODING_AGENT_DIR, PI_CONFIG_DIR, PI_PROFILE},
+    *,
+};
 use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
@@ -11,12 +14,12 @@ const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
 
 fn agent_dir(home: &Path, tool_env: bool) -> PathBuf {
     if tool_env {
-        if let Some(path) = env_path("PI_CODING_AGENT_DIR") {
+        if let Some(path) = env_path(PI_CODING_AGENT_DIR) {
             return path;
         }
     }
     let root = tool_env
-        .then(|| env_path("PI_CONFIG_DIR"))
+        .then(|| env_path(PI_CONFIG_DIR))
         .flatten()
         .unwrap_or_else(|| PathBuf::from(".omp"));
     home.join(root).join("agent")
@@ -36,7 +39,7 @@ pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
 pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
     if tool_env {
         // A named profile ignores the ordinary agent-dir override. Do not guess.
-        for key in ["OMP_PROFILE", "PI_PROFILE"] {
+        for key in [OMP_PROFILE, PI_PROFILE] {
             if env::var(key)
                 .ok()
                 .is_some_and(|value| !value.trim().is_empty() && value.trim() != "default")
@@ -44,10 +47,10 @@ pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
                 return Err("Oh My Pi integration supports the native default profile only; clear named-profile overrides before connecting".into());
             }
         }
-        if env_path("PI_CODING_AGENT_DIR").is_some_and(|path| !path.is_absolute()) {
+        if env_path(PI_CODING_AGENT_DIR).is_some_and(|path| !path.is_absolute()) {
             return Err("Set PI_CODING_AGENT_DIR to an absolute Oh My Pi directory; relative paths depend on the CLI working directory".into());
         }
-        if env_path("PI_CONFIG_DIR").is_some_and(|path| {
+        if env_path(PI_CONFIG_DIR).is_some_and(|path| {
             path.is_absolute()
                 || path
                     .components()
@@ -317,16 +320,16 @@ mod tests {
             let home = &sandbox.home;
             match case.as_str() {
                 "root" => {
-                    env::set_var("PI_CONFIG_DIR", "custom");
+                    env::set_var(PI_CONFIG_DIR, "custom");
                 }
                 "absolute" => {
-                    env::set_var("PI_CODING_AGENT_DIR", home.join("custom"));
+                    env::set_var(PI_CODING_AGENT_DIR, home.join("custom"));
                 }
                 "relative" => {
-                    env::set_var("PI_CODING_AGENT_DIR", "relative");
+                    env::set_var(PI_CODING_AGENT_DIR, "relative");
                 }
                 "profile" => {
-                    env::set_var("OMP_PROFILE", "work");
+                    env::set_var(OMP_PROFILE, "work");
                 }
                 _ => {}
             }
@@ -347,12 +350,7 @@ mod tests {
             let mut command = Command::new(env::current_exe().unwrap());
             command.args(["--exact", "agents::oh_my_pi::tests::native_directory_overrides_are_checked_in_isolated_processes"])
                 .env(CASE, case);
-            for key in [
-                "PI_CONFIG_DIR",
-                "PI_CODING_AGENT_DIR",
-                "OMP_PROFILE",
-                "PI_PROFILE",
-            ] {
+            for key in [PI_CONFIG_DIR, PI_CODING_AGENT_DIR, OMP_PROFILE, PI_PROFILE] {
                 command.env_remove(key);
             }
             let output = command.output().unwrap();

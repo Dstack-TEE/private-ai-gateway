@@ -25,6 +25,7 @@ pub mod relocation;
 #[cfg(feature = "server")]
 pub mod serve;
 pub mod sse;
+pub mod supervisor;
 pub mod transport;
 pub mod ui_api;
 mod ui_methods;

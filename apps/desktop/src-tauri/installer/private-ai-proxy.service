@@ -1,7 +1,8 @@
-# Optional user service for CLI-only Linux packages, like Syncthing's
-# syncthing.service. Nothing enables it; run
-#   systemctl --user enable --now private-ai-proxy
-# to start the backend at login instead of on the first command.
+# User service for CLI-only Linux packages, like Syncthing's
+# syncthing.service. `pap start` enables it, so that the backend starts at
+# login and after a crash. The login service keeps an active protection
+# session across a shutdown signal. `pap service disable` stops protection
+# and turns off supervision.
 [Unit]
 Description=Private AI Proxy backend
 Documentation=https://github.com/Dstack-TEE/private-ai-gateway/blob/main/apps/desktop/docs/cli-distribution.md
@@ -9,7 +10,7 @@ StartLimitIntervalSec=60
 StartLimitBurst=4
 
 [Service]
-ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service
+ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service --supervised
 Restart=on-failure
 RestartSec=1
 # 75 (EX_TEMPFAIL): another backend of this user already runs; retrying cannot help.

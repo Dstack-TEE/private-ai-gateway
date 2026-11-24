@@ -163,7 +163,12 @@ impl Client {
             return Ok(());
         }
         let data = crate::paths::app_data_dir()?;
-        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup_shared)?;
+        Self::ensure_service_locked(false)
+    }
+
+    fn ensure_service_locked(require_supervision: bool) -> Result<(), String> {
+        let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         match block_on(open())? {
             Ok(connection) if current(&connection.version) => return Ok(()),
             Ok(connection) => {
@@ -182,13 +187,24 @@ impl Client {
             }
             Err(error) => return Err(connection_error(error)),
         }
-        let mut child = Some(crate::launch::spawn_background()?);
+        // Under the service manager a crashed backend is started again.
+        let child = if crate::supervisor::start()? {
+            None
+        } else if require_supervision {
+            return Err("The backend's login service became unavailable during handoff".into());
+        } else {
+            Some(crate::launch::spawn_background()?)
+        };
+        Self::wait_for_service(child)
+    }
+
+    fn wait_for_service(mut child: Option<crate::launch::BackgroundService>) -> Result<(), String> {
         // A backend that exits is reported immediately below; this only bounds a
         // live but slow start.
         let deadline = Instant::now() + BACKEND_START_TIMEOUT;
         loop {
             match block_on(open())? {
-                Ok(connection) if current(&connection.version) => {
+                Ok(connection) if connection.version.version == protocol::BUILD_VERSION => {
                     reap(child);
                     return Ok(());
                 }
@@ -426,6 +442,11 @@ impl Client {
         self.shutdown_owned(None, ShutdownMode::Quit)
     }
 
+    /// Stops this installation's backend and ends its protection session.
+    pub fn shutdown_installed(&self) -> Result<(), String> {
+        self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::Quit)
+    }
+
     /// Stops this installation's backend as a restart does: the protection
     /// session stays for the next backend to resume, and connected agents
     /// stay pointed at the Local API.
@@ -441,16 +462,96 @@ impl Client {
         Self::ensure_service()
     }
 
+    /// Moves a detached backend to its enabled login service. Checking the
+    /// manager and replacing the process share the startup gate so another
+    /// PAP command cannot make the same handoff a second time.
+    pub fn handoff_to_supervisor(&self) -> Result<bool, String> {
+        let data = crate::paths::app_data_dir()?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup)?;
+        let instance = match block_on(open())? {
+            Ok(connection) => Some(connection.version),
+            Err(error) if absent(&error) => {
+                if !block_on(legacy::is_running())? {
+                    return Ok(false);
+                }
+                None
+            }
+            Err(error) => return Err(connection_error(error)),
+        };
+        let Some(supervisor_pid) = crate::supervisor::running_pid()? else {
+            return Ok(false);
+        };
+        if instance
+            .as_ref()
+            .is_some_and(|version| version.process_id == supervisor_pid)
+        {
+            return Ok(false);
+        }
+        self.shutdown_matching(
+            Some(&installed_backend()?),
+            ShutdownMode::UpdateRestart,
+            instance
+                .as_ref()
+                .map(|version| version.instance_id.as_str()),
+        )?;
+        match Self::ensure_service_locked(true) {
+            Ok(()) => Ok(true),
+            Err(manager_error) => match Self::recover_detached(&data) {
+                Ok(()) => Err(manager_error),
+                Err(recovery_error) => Err(format!(
+                    "{manager_error} Cannot restart the detached backend: {recovery_error}"
+                )),
+            },
+        }
+    }
+
+    /// Runs under the exclusive startup gate. The supervisor can still start a
+    /// backend itself, so also check IPC and the backend's own instance lock.
+    fn recover_detached(data: &Path) -> Result<(), String> {
+        match block_on(open())? {
+            Ok(_) => return Ok(()),
+            Err(error) if absent(&error) || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(connection_error(error)),
+        }
+        if block_on(legacy::is_running())? {
+            return Ok(());
+        }
+        // A replacement may still be starting with no management socket.
+        let Some(instance) = crate::lock::instance(data)
+            .map_err(|error| format!("Cannot inspect backend ownership: {error}"))?
+        else {
+            return Ok(());
+        };
+        drop(instance);
+        // Bypass the supervisor that just failed. If a backend starts in this
+        // gap, the instance lock lets only one process initialize the service.
+        Self::wait_for_service(Some(crate::launch::spawn_background()?))
+    }
+
     /// Stops the running backend, of this build or another, and waits for it
     /// to exit. With `expected`, only a backend of that installation.
     fn shutdown_owned(&self, expected: Option<&Path>, mode: ShutdownMode) -> Result<(), String> {
+        self.shutdown_matching(expected, mode, None)
+    }
+
+    fn shutdown_matching(
+        &self,
+        expected: Option<&Path>,
+        mode: ShutdownMode,
+        instance: Option<&str>,
+    ) -> Result<(), String> {
         let process = block_on(async {
             let mut connection = match open().await {
                 Ok(connection) => connection,
-                Err(error) if absent(&error) => return legacy::shutdown(expected, mode).await,
+                Err(error) if absent(&error) && instance.is_none() => {
+                    return legacy::shutdown(expected, mode).await
+                }
                 Err(error) => return Err(connection_error(error)),
             };
             let before = connection.version.clone();
+            if instance.is_some_and(|instance| instance != before.instance_id) {
+                return Err("The backend instance changed before handoff".into());
+            }
             if let Some(expected) = expected {
                 if !executable_matches(&before.executable, expected)? {
                     return Err(OTHER_INSTALLATION.into());
@@ -532,12 +633,15 @@ impl Client {
     }
 }
 
-/// Take the startup gate to start the backend. Other clients share it; an
-/// installer or updater holding it is reported after `gate_wait`.
-fn acquire_startup(data: &Path, gate_wait: Duration) -> Result<crate::lock::StartupLock, String> {
+/// Wait for the shared startup gate or take it exclusively to replace a backend.
+fn acquire_startup(
+    data: &Path,
+    gate_wait: Duration,
+    try_lock: fn(&Path) -> io::Result<Option<crate::lock::StartupLock>>,
+) -> Result<crate::lock::StartupLock, String> {
     let deadline = Instant::now() + gate_wait;
     loop {
-        if let Some(startup) = crate::lock::startup_shared(data)
+        if let Some(startup) = try_lock(data)
             .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
         {
             return Ok(startup);
@@ -873,7 +977,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gate = crate::lock::startup(dir.path()).unwrap().unwrap();
         let started = Instant::now();
-        let result = acquire_startup(dir.path(), Duration::from_millis(200));
+        let result = acquire_startup(
+            dir.path(),
+            Duration::from_millis(200),
+            crate::lock::startup_shared,
+        );
         assert_eq!(result.err().as_deref(), Some(STARTUP_IN_PROGRESS));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(gate);
@@ -882,9 +990,25 @@ mod tests {
     #[test]
     fn clients_start_the_backend_without_waiting_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
-        let first = acquire_startup(dir.path(), Duration::ZERO).unwrap();
-        let second = acquire_startup(dir.path(), Duration::ZERO).unwrap();
+        let first =
+            acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup_shared).unwrap();
+        let second =
+            acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup_shared).unwrap();
         drop((first, second));
+    }
+
+    #[test]
+    fn replacing_a_backend_excludes_other_starts_and_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let _handoff = acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup).unwrap();
+        for try_lock in [crate::lock::startup_shared, crate::lock::startup] {
+            assert_eq!(
+                acquire_startup(dir.path(), Duration::ZERO, try_lock)
+                    .err()
+                    .as_deref(),
+                Some(STARTUP_IN_PROGRESS)
+            );
+        }
     }
 
     #[test]

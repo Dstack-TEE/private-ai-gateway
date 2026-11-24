@@ -219,9 +219,9 @@ impl DesktopRuntime {
         let restored = self.stop_with_reconnect(preserve_session);
         // Outside the Mac App Store, a client's shutdown that ends the session
         // never leaves agents pointing at a stopped Local API: a failed
-        // restore keeps the backend running. An update restart keeps them
-        // pointed at it for the updated backend to resume. A signal or the
-        // owning app's exit stops it regardless.
+        // restore keeps the backend running. An update restart or a supervised
+        // shutdown keeps agents pointed at the Local API for the next backend.
+        // A signal or the owning app's exit stops it regardless.
         if refusable && !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
             restored.as_ref().map_err(Clone::clone)?;
         }

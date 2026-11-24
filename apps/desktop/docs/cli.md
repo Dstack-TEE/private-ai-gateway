@@ -21,18 +21,26 @@ pap agents list                # the coding agents found on this machine
 pap agents connect codex       # route one through the Local API
 ```
 
-Connect an agent after `pap start`: with protection off the connection is only
-saved, and the command exits `1` saying the agent still uses its own provider.
+`pap agents connect` starts protection first when it is off, so the agent is
+routed when the command succeeds; if protection cannot start, it exits `1` with
+the reason before saving the connection. `--dry-run` previews against the
+running backend without starting the backend or protection.
 
 With an API key instead of an account, replace the first step with
 `pap profiles add --id work --name Work --url <service URL>`, which asks for
 the key at a hidden prompt. `pap status` shows what protection is doing and why
 at any time.
 
-After a restart of the machine, `pap service start` starts the backend and
-resumes protection that was on; until then connected agents cannot reach the
-Local API. The Linux packages ship a systemd user unit that does this at login
-([Standalone CLI](cli-distribution.md#standalone-cli)).
+On supported Linux and macOS CLI installations, `pap start` registers the
+backend with systemd or launchd. Protection resumes after login and crashes.
+Automatic registration skips shells with agent configuration or proxy
+overrides. `pap service enable` uses the service manager's environment.
+If the backend started directly while the manager was unavailable, `pap start`
+or `pap service enable` can move it under its already enabled login service.
+`pap service disable` stops protection, restores agents, and turns off
+supervision. The desktop app has its own Open at Login. On Windows or without
+a user service manager, run `pap service start` after restarting the machine
+to bring back the Local API. See [Standalone CLI](cli-distribution.md#standalone-cli).
 
 ## Discover Commands
 
@@ -313,29 +321,31 @@ but keeps management available.
 `service restart` restarts the backend without ending the protection session:
 agents stay pointed at the Local API, which answers again once the new backend
 has verified the service.
-When no backend is running, `service stop` restores nothing, and agents may
-still point at the Local API: after an update that was not relaunched, a crash,
-or a Windows sign-out. `stop --offline` does what `stop` does, without a
-backend: it ends the saved protection session, so the next backend start does
-not resume it, and restores the agents through the same restoration journal
-under the same lock, keeping each connection until protection is started again.
+When the backend has exited, `service stop` uses the same offline restoration
+as `stop --offline`. Both end the saved session and restore agents through the
+same journal and instance lock, including after a crash, supervised shutdown,
+or Windows sign-out. Each connection is kept for the next time you start
+protection.
 Running it again changes nothing. It holds the backend's instance lock while it
 works and is refused while a backend runs; use `stop` or `service stop` then.
 The Windows uninstaller runs it after `service stop`; if it fails, the
 uninstaller shows why and asks whether to uninstall anyway, keeping the restore
 data (a silent uninstall continues and logs why). If the app data was also
-to be deleted, it cancels instead, since the app data holds the restore data. On macOS (moving the app to the Trash) and Linux (the
-packages run no removal scripts) nothing does, so run `pap --yes service stop`
-and then `pap stop --offline` before removing the app. Mac App Store builds
-restore agents only through the app's Stop All and Quit.
+to be deleted, it cancels instead, since the app data holds the restore data.
+On macOS and Linux, run `pap service disable` before removing a supervised CLI
+installation. For other installations run `pap --yes service stop` before
+removing the app. Mac App Store builds restore
+agents through the app's Stop All and Quit.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it
 reports that the backend keeps running, and the service log has the reason. Mac
-App Store builds stop anyway. A signal (SIGTERM or SIGINT, as systemd, launchd
-and `kill` send) always stops the backend, since a service manager would kill it
-next; a restore that failed is logged and retried when the backend next starts.
-A signal during a `service stop` waits for it, and stops the backend itself only
-if that stop was refused. On Windows, signing out or shutting down ends the
+App Store builds stop anyway. SIGTERM and SIGINT always stop the backend.
+A supervised backend preserves its active protection session and agent
+routing so they resume after verification on the next launch. A standalone
+backend ends protection and restores agents on a signal. A failed restore is
+logged and retried when it next starts. A signal during `service stop` waits
+for that request and handles shutdown itself only if the request was refused.
+On Windows, signing out or shutting down ends the
 windowless backend without this sequence; the next start resumes the
 protection session it left, and until then agents stay pointed at the Local API.
 Shutdown is bounded: running commands get 10 seconds, then open connections and
@@ -725,6 +735,8 @@ until protection resumes.
 
 Use the returned revision with the same agent, direction and options. A changed
 configuration is rejected rather than silently re-previewed and approved.
+When reviewing a connection while protection is off, run `pap start` before
+previewing so the revision includes the verified model catalog.
 Do not automatically retry mutations after a timeout or lost connection: they
 may have completed. Query state before deciding what to do next.
 

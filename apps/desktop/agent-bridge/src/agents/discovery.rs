@@ -1,14 +1,17 @@
-use super::*;
+use super::{
+    registry::{HERMES_HOME, LOCALAPPDATA},
+    *,
+};
 
 pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
     if tool_env {
-        if let Some(path) = env_path("HERMES_HOME").and_then(nonblank) {
+        if let Some(path) = env_path(HERMES_HOME).and_then(nonblank) {
             return path;
         }
     }
     if cfg!(windows) {
         tool_env
-            .then(|| env_path("LOCALAPPDATA"))
+            .then(|| env_path(LOCALAPPDATA))
             .flatten()
             .and_then(nonblank)
             .unwrap_or_else(|| home.join("AppData").join("Local"))

@@ -6,10 +6,14 @@ use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 #[derive(Parser)]
 #[command(name = "private-ai-proxy-service", version = desktop_core::protocol::BUILD_VERSION, about = "Run the per-user Private AI Proxy backend in the foreground")]
-struct Arguments {}
+struct Arguments {
+    /// The login manager starts the next backend after a signal shutdown.
+    #[arg(long, hide = true)]
+    supervised: bool,
+}
 
 fn main() {
-    Arguments::parse();
+    let arguments = Arguments::parse();
     init_logging();
     tracing::info!(
         "Private AI Proxy backend {} starting (process {})",
@@ -28,7 +32,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let result = executor.block_on(run());
+    let result = executor.block_on(run(arguments.supervised));
     // A blocking task (a command waiting on the network) cannot be cancelled;
     // stop waiting for it after the bound instead of hanging the exit.
     executor.shutdown_timeout(desktop_runtime::server::EXIT_DRAIN_TIMEOUT);
@@ -71,7 +75,7 @@ fn init_logging() {
     }
 }
 
-async fn run() -> Result<(), String> {
+async fn run(supervised: bool) -> Result<(), String> {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let service_access = desktop_core::agent_access::acquire_for_service();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -139,7 +143,7 @@ async fn run() -> Result<(), String> {
             None
         }
     };
-    let result = desktop_runtime::server::serve(runtime).await;
+    let result = desktop_runtime::server::serve(runtime, supervised).await;
     drop(power_monitor);
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     drop(agent_home_access);

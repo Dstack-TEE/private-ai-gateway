@@ -69,7 +69,7 @@ impl Default for Admission {
     }
 }
 
-pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
+pub async fn serve(runtime: Arc<DesktopRuntime>, supervised: bool) -> Result<(), String> {
     let listener = transport::Listener::bind(runtime.instance_lock()?)
         .map_err(|error| format!("Cannot bind the private management endpoint: {error}"))?;
     let admission = runtime.admission();
@@ -113,26 +113,26 @@ pub async fn serve(runtime: Arc<DesktopRuntime>) -> Result<(), String> {
     });
     let owner = owner_exited();
     let signal = shutdown_signal();
-    // A signal (systemd, launchd, `docker stop`) or the owning app's exit
-    // always ends the service; only a client's `shutdown` can be refused. A
-    // step that fails, such as restoring an agent configuration, is logged
-    // and retried on the next launch.
+    // A signal or the owning app's exit always stops the backend. A login
+    // service is expected to start again, so keep its protection session
+    // across a signal from the service manager.
     let reason = tokio::select! {
         () = stopped.cancelled() => None,
-        () = owner => Some("The owning app exited"),
+        () = owner => Some(("The owning app exited", ShutdownMode::Quit)),
         result = signal => {
             result?;
-            Some("Received a shutdown signal")
+            let mode = if supervised { ShutdownMode::UpdateRestart } else { ShutdownMode::Quit };
+            Some(("Received a shutdown signal", mode))
         }
     };
-    if let Some(reason) = reason {
+    if let Some((reason, mode)) = reason {
         tracing::info!("{reason}");
         loop {
             // Registered before trying, so a refusal in between is not missed.
             let refused = admission.refused.notified();
             let (worker, gate, executor) = (runtime.clone(), admission.clone(), handle.clone());
             match tokio::task::spawn_blocking(move || {
-                shutdown(&worker, &gate, &executor, ShutdownMode::Quit, false)
+                shutdown(&worker, &gate, &executor, mode, false)
             })
             .await
             {

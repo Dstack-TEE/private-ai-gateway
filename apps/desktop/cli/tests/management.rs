@@ -17,6 +17,348 @@ fn sandbox_teardown_watchdog() {
     support::watchdog();
 }
 
+#[test]
+fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
+    let backend = Backend::start();
+    let backup = backend.directory.path().join("profiles-connect.json");
+    fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
+    backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
+    backend.run(&["agents", "connect", "codex", "--dry-run"]);
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
+    backend.run(&["service", "stop", "--yes"]);
+
+    for args in [&["--dry-run", "--yes"][..], &["--non-interactive"][..]] {
+        let refused = backend
+            .command(&["agents", "connect", "codex", "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(refused.status.code(), Some(1));
+        assert_eq!(backend.run(&["status"])["status"], "not_running");
+    }
+
+    let failed = backend
+        .command(&["agents", "connect", "codex", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&failed.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has no API key"));
+    assert!(backend
+        .run(&["agents", "list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|agent| agent["recorded"] == false));
+}
+
+#[cfg(unix)]
+#[test]
+fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
+    assert_supervised_stop(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn service_stop_after_supervised_sigterm_restores_agents_offline() {
+    assert_supervised_stop(true);
+}
+
+#[cfg(unix)]
+fn assert_supervised_stop(offline_stop: bool) {
+    use agent_bridge::{agents::Projector, catalog::Catalog};
+    use desktop_core::agents::{Agent, ConnectOptions};
+    use desktop_runtime::{local_state::LocalState, usage::UsageStore};
+    use std::sync::Arc;
+
+    let backend = Backend::start_with_credentials("[profiles.test]\napi-key = \"test-key\"\n");
+    backend.run(&["service", "stop", "--yes"]);
+    let home = backend.directory.path().join("home");
+    let data = home.join(".private-ai-proxy");
+    let config = data.join("Config/config.toml");
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("https://{}", gateway.local_addr().unwrap());
+    fs::write(
+        &config,
+        format!(
+            "active-profile = \"test\"\n{}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"{url}\"\n",
+            fs::read_to_string(&config).unwrap(),
+        ),
+    )
+    .unwrap();
+    // A previous verified run left a session and an agent projection. The
+    // loopback listener observes re-verification without contacting a gateway.
+    let usage = UsageStore::open(data.join("usage.sqlite3")).unwrap();
+    usage.save_active_session("saved-session", 1).unwrap();
+    let agent = home.join(".claude/settings.json");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    let original = json!({"env": {"ANTHROPIC_API_KEY": "original-key"}});
+    fs::write(&agent, original.to_string()).unwrap();
+    let projector = Projector::new_for_home(
+        home,
+        data.clone(),
+        backend.directory.path().join("private-ai-proxy-helper"),
+        "http://127.0.0.1:4180",
+        Arc::new(LocalState::open(&data)),
+    )
+    .unwrap();
+    let catalog = Catalog::from_remote(&json!({"data":[{"id":"test/model"}]}), 1).unwrap();
+    let options = ConnectOptions::default();
+    let kind = Agent::ClaudeCode;
+    let preview = projector
+        .preview(kind, true, Some(&catalog), &options)
+        .unwrap();
+    projector
+        .apply(kind, true, &preview.revision, Some(&catalog), &options)
+        .unwrap();
+    let projected = fs::read(&agent).unwrap();
+    gateway.set_nonblocking(true).unwrap();
+
+    let start = || {
+        // Discard any retry queued by the previous backend before it exited.
+        while gateway.accept().is_ok() {}
+        let mut child = backend
+            .command(&["service", "run"])
+            .env("NO_PROXY", "*")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let expires = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok((connection, _)) = gateway.accept() {
+                let state = backend.run(&["status"]);
+                assert_eq!(state["gateway"]["sessionId"], "saved-session");
+                assert_eq!(state["gateway"]["sessionActive"], true);
+                drop(connection);
+                return child;
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(
+                Instant::now() < expires,
+                "The backend did not resume verification"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let terminate = |child: &mut std::process::Child| {
+        let pid = rustix::process::Pid::from_child(child);
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        desktop_core::launch::wait_for_exit(child.id(), Duration::from_secs(35)).unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    terminate(&mut start());
+    assert_eq!(
+        usage.active_session().unwrap(),
+        Some(("saved-session".into(), 1))
+    );
+    assert_eq!(fs::read(&agent).unwrap(), projected);
+
+    let mut child = start();
+    if offline_stop {
+        terminate(&mut child);
+        assert_eq!(backend.run(&["status"])["status"], "not_running");
+        assert!(usage.active_session().unwrap().is_some());
+        assert_eq!(fs::read(&agent).unwrap(), projected);
+    }
+    backend.run(&["service", "stop", "--yes"]);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(usage.active_session().unwrap(), None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&agent).unwrap()).unwrap(),
+        original
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_already_enabled_user_unit_takes_over_a_detached_backend_once() {
+    assert_user_unit_handoff(None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rejected_handoff_restores_the_detached_backend_and_session() {
+    assert_user_unit_handoff(Some((
+        "reject-start",
+        "Cannot start the backend through its login service",
+    )));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "exercises the production 60-second readiness deadline"]
+fn a_timed_out_handoff_restores_the_detached_backend_and_session() {
+    assert_user_unit_handoff(Some(("no-replacement", "Backend readiness timed out")));
+}
+
+#[cfg(target_os = "linux")]
+fn assert_user_unit_handoff(failure: Option<(&str, &str)>) {
+    use desktop_runtime::usage::UsageStore;
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let sandbox = support::Sandbox::new();
+    let root = sandbox.path();
+    let home = root.join("home");
+    let bin = root.join("bin");
+    let runtime = root.join("runtime");
+    let cli = root.join("private-ai-proxy");
+    let backend = root.join("private-ai-proxy-service");
+    let config = home.join(".config/private-ai-proxy");
+    let data = home
+        .join(".local/share")
+        .join(desktop_core::brand::APP_IDENTIFIER);
+    for directory in [&bin, &runtime, &config, &data] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    gateway.set_nonblocking(true).unwrap();
+    let gateway_addr = gateway.local_addr().unwrap();
+    fs::write(
+        config.join("config.toml"),
+        format!("active-profile = \"test\"\n[local-api]\nport = {port}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"https://{gateway_addr}\"\n"),
+    )
+    .unwrap();
+    desktop_core::private_fs::write_private(
+        &config.join("credentials.toml"),
+        "[profiles.test]\napi-key = \"test-key\"\n",
+    )
+    .unwrap();
+    let usage = UsageStore::open(data.join("usage.sqlite3")).unwrap();
+    usage.save_active_session("handoff-session", 1).unwrap();
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
+
+    // PATH contains only these sandbox commands, even when the user's real
+    // user manager is running under the same UID as the test.
+    let systemctl = r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+[ ! -e "$HOME/no-bus" ] || exit 1
+unit="$HOME/.config/systemd/user/private-ai-proxy.service"
+shift
+case "$1" in
+  show)
+    if [ -f "$unit" ]; then
+      unit_state=disabled
+      [ ! -e "$HOME/enabled" ] || unit_state=enabled
+      pid=0
+      if [ -f "$HOME/managed-pid" ]; then read -r pid <"$HOME/managed-pid"; fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$pid"
+    else
+      printf 'LoadState=not-found\nDropInPaths=\n'
+    fi ;;
+  daemon-reload) ;;
+  enable) : > "$HOME/enabled" ;;
+  start)
+    [ ! -e "$HOME/reject-start" ] || exit 1
+    [ ! -e "$HOME/no-replacement" ] || exit 0
+    "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
+    printf '%s\n' "$!" >"$HOME/managed-pid" ;;
+  *) exit 2 ;;
+esac
+"#;
+    let busctl = r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+restart=on-failure
+[ ! -e "$HOME/unsafe-restart" ] || restart=always
+printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n' "$restart"
+"#;
+    for (name, script) in [("systemctl", systemctl), ("busctl", busctl)] {
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let launch = |args: &[&str]| {
+        Command::new(&cli)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PAP_FIXTURE_BACKEND", &backend)
+            .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
+            .env("NO_PROXY", "*")
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run = |args: &[&str]| {
+        let output = launch(args);
+        assert_success(&output);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let wait_for_verification = || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match gateway.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("Cannot observe verification: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "The backend did not resume verification"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+
+    run(&["service", "enable"]);
+    fs::write(home.join("no-bus"), "").unwrap();
+    let detached = run(&["service", "start"])["processId"].clone();
+    let verifying = wait_for_verification();
+    fs::remove_file(home.join("no-bus")).unwrap();
+
+    if let Some((flag, error)) = failure {
+        fs::write(home.join(flag), "").unwrap();
+        let output = launch(&["service", "enable"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        let status = run(&["status"]);
+        assert!(status["backend"]["processId"].is_number(), "{status}");
+        assert_ne!(status["backend"]["processId"], detached);
+        assert_eq!(status["gateway"]["sessionId"], "handoff-session");
+        assert_eq!(status["gateway"]["sessionActive"], true);
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        assert!(!home.join("managed-pid").exists());
+        let _reverifying = wait_for_verification();
+        run(&["service", "stop", "--yes"]);
+        return;
+    }
+    drop(verifying);
+
+    fs::write(home.join("unsafe-restart"), "").unwrap();
+    let output = launch(&["service", "enable"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected restart policy"));
+    assert_eq!(run(&["status"])["backend"]["processId"], detached);
+    fs::remove_file(home.join("unsafe-restart")).unwrap();
+
+    run(&["service", "enable"]);
+    let managed = run(&["status"])["backend"]["processId"].clone();
+    assert_ne!(managed, detached);
+    assert_eq!(
+        managed.as_u64().unwrap().to_string(),
+        fs::read_to_string(home.join("managed-pid")).unwrap().trim()
+    );
+    run(&["service", "enable"]);
+    assert_eq!(run(&["status"])["backend"]["processId"], managed);
+    run(&["service", "stop", "--yes"]);
+}
+
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
 /// streams; the legacy alias must stay byte-for-byte the canonical command.
 #[cfg(unix)]
@@ -625,17 +967,6 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    // Protection is off: the connection is saved, and the command says the
-    // agent is not routed yet instead of reporting success.
-    let saved = backend
-        .command(&["agents", "connect", "codex", "--yes", "--json"])
-        .output()
-        .unwrap();
-    assert!(!saved.status.success());
-    assert!(
-        String::from_utf8_lossy(&[saved.stdout, saved.stderr].concat())
-            .contains("Saved, but not applied")
-    );
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);
     let before = backend.run(&["settings", "show"]);

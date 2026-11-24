@@ -76,7 +76,29 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             command: Service::Status,
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
-        Action::Start { profile, timeout } => start(&client, profile.as_deref(), *timeout)?,
+        Action::Start { profile, timeout } => {
+            let state = start(&client, profile.as_deref(), *timeout)?;
+            // Protection the user turned on goes on across logins and crashes
+            // until they stop it: the backend moves under the service manager
+            // and resumes the session there.
+            let registration =
+                desktop_core::supervisor::automatic(agent_bridge::agents::environment_overridden())
+                    .then(|| desktop_core::supervisor::enable().ok())
+                    .flatten();
+            if let Some(newly_enabled) = registration {
+                let moved = client.handoff_to_supervisor()?;
+                if !global.json && (newly_enabled || moved) {
+                    eprintln!("Protection now resumes at login and after a crash using the service manager's environment (pap service disable turns that off).");
+                }
+                if moved {
+                    start(&client, profile.as_deref(), *timeout)?
+                } else {
+                    state
+                }
+            } else {
+                state
+            }
+        }
         Action::Stop { offline: false } => {
             if !client.is_running()? {
                 return Err(
@@ -257,12 +279,58 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                     "Stop the backend and restore managed agent configurations?",
                 )?;
                 client.shutdown()?;
+            } else if !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+                confirm(
+                    global,
+                    "End the saved protection session and restore managed agent configurations?",
+                )?;
+                restore_agents_offline(client)?;
             }
             Ok(json!({"status": "stopped"}))
         }
         Service::Restart => {
             client.restart_service()?;
             value(client.version()?)
+        }
+        Service::Enable => {
+            // The backend that runs now moves under the service manager.
+            desktop_core::supervisor::enable()?;
+            client.handoff_to_supervisor()?;
+            Ok(json!({"startAtLogin": true}))
+        }
+        Service::Disable => {
+            // Quit through IPC before booting out a launch agent, which would
+            // otherwise preserve the session when it receives the signal.
+            if desktop_core::supervisor::enabled() && client.is_running()? {
+                client.shutdown_installed()?;
+                desktop_core::supervisor::disable()?;
+            } else {
+                desktop_core::supervisor::disable()?;
+                if client.is_running()? {
+                    client.shutdown_installed()?;
+                } else {
+                    restore_agents_offline(client)?;
+                }
+            }
+            Ok(json!({"startAtLogin": false}))
+        }
+        Service::Run => {
+            // The service manager's command. A backend a command already
+            // started is left to run: exiting cleanly is not restarted.
+            if client.is_running()? {
+                return Ok(Value::Null);
+            }
+            let backend = desktop_core::launch::service_executable()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let error = desktop_core::launch::child_command(&backend)
+                    .arg("--supervised")
+                    .exec();
+                Err(format!("Cannot run {}: {error}", backend.display()).into())
+            }
+            #[cfg(not(unix))]
+            Err(format!("Run {} directly", backend.display()).into())
         }
         Service::Status => status(client),
     }
@@ -591,6 +659,19 @@ fn agent_change(
     let options = ConnectOptions {
         default_model: model,
     };
+    if dry_run {
+        return value(client.call(rpc::PreviewAgent {
+            agent_id: id.into(),
+            connect,
+            options,
+        })?);
+    }
+    // The preview needs the verified catalog. Get consent to start it before
+    // presenting or applying any agent configuration changes.
+    if connect && (!client.is_running()? || !client.state()?.is_protected()) {
+        confirm(global, "Start protection before connecting this agent?")?;
+        start(client, None, 90)?;
+    }
     let revision = match revision {
         Some(revision) => {
             confirm(
@@ -605,9 +686,6 @@ fn agent_change(
                 connect,
                 options: options.clone(),
             })?;
-            if dry_run {
-                return value(preview);
-            }
             if !global.yes && global.interactive() {
                 eprintln!("{}", output::details(&value(&preview)?));
             }

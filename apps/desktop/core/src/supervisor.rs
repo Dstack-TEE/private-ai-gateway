@@ -1,0 +1,940 @@
+//! Keeps the backend running without a command. The user's service manager
+//! (systemd on Linux, launchd on macOS) starts it at login and again after a
+//! crash, and the backend resumes the protection session it left.
+//!
+//! The service manager is used only through a registration that starts this
+//! installation's backend: a Linux package's unit, or one written here. A
+//! registration of the same name that the user or another installation wrote
+//! is neither used nor changed. Where no user service manager runs
+//! (containers, WSL without systemd) enabling fails and commands start the
+//! backend as before.
+
+use std::path::PathBuf;
+
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", not(feature = "mac-app-store"))
+))]
+mod registration;
+
+use crate::updates::{installation, Installation};
+
+const UNSUPPORTED: &str = "Starting the backend at login is not available for this installation";
+
+/// Records that the user turned this off, so `pap start` does not turn it on
+/// again.
+fn declined() -> Option<PathBuf> {
+    Some(crate::paths::app_data_dir().ok()?.join("login-service-off"))
+}
+
+/// A backend with its data elsewhere is not the one a login would start.
+fn relocated() -> bool {
+    [
+        crate::paths::HOME_OVERRIDE_ENV,
+        crate::paths::APP_DATA_OVERRIDE_ENV,
+        crate::paths::CONFIG_OVERRIDE_ENV,
+    ]
+    .iter()
+    .any(|name| std::env::var_os(name).is_some())
+}
+
+fn supported() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "mac-app-store"))
+    )) && !relocated()
+}
+
+/// This command by a path that survives an upgrade: the entry on `PATH` that
+/// links to it, as install scripts and Homebrew create, or else its own path,
+/// which a package manager keeps.
+fn command() -> Result<(PathBuf, bool), String> {
+    let current = std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .map_err(|error| format!("Cannot locate this command: {error}"))?;
+    let name = current.file_name().ok_or("This command has no name")?;
+    let link = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(name))
+            .find(|entry| {
+                *entry != current && std::fs::canonicalize(entry).is_ok_and(|to| to == current)
+            })
+    });
+    Ok(match link {
+        Some(link) => (link, true),
+        None => (current, false),
+    })
+}
+
+/// Whether `pap start` turns this on by itself: installations whose command
+/// keeps a path across upgrades. A desktop app owns its backend's lifetime.
+pub fn automatic(agent_environment_overridden: bool) -> bool {
+    supported()
+        && !agent_environment_overridden
+        && !crate::paths::xdg_home_overridden(crate::paths::XDG_DATA_HOME)
+        && ![
+            // Reqwest's default system proxy matcher uses these variables.
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some())
+        && !declined().is_some_and(|marker| marker.exists())
+        && match installation() {
+            Installation::Deb
+            | Installation::Rpm
+            | Installation::Pacman
+            | Installation::SystemPackage
+            | Installation::Npm => true,
+            Installation::Portable => command().is_ok_and(|(_, linked)| linked),
+            Installation::DesktopApp | Installation::DesktopPacman => false,
+        }
+}
+
+/// Has the service manager start the backend at login and after a crash.
+/// True when this call turned that on.
+pub fn enable() -> Result<bool, String> {
+    if !supported() {
+        return Err(UNSUPPORTED.into());
+    }
+    let enabled = platform::enable()?;
+    if let Some(marker) = declined() {
+        let _ = std::fs::remove_file(marker);
+    }
+    Ok(enabled)
+}
+
+/// Removes the login registration. The caller quits a running backend first
+/// so that launchd's signal does not preserve a session the user ended.
+pub fn disable() -> Result<(), String> {
+    if !supported() {
+        return Err(UNSUPPORTED.into());
+    }
+    platform::disable()?;
+    if let Some(marker) = declined() {
+        crate::private_fs::write_private_atomic(&marker, "", None)
+            .map_err(|error| format!("Cannot write {}: {error}", marker.display()))?;
+    }
+    Ok(())
+}
+
+/// Whether the service manager starts this installation's backend.
+pub fn enabled() -> bool {
+    running_pid().is_ok_and(|pid| pid.is_some())
+}
+
+/// PID of the enabled, owned login service. Zero means it is idle.
+pub(crate) fn running_pid() -> Result<Option<u32>, String> {
+    if supported() {
+        platform::running_pid()
+    } else {
+        Ok(None)
+    }
+}
+
+/// Starts the backend under the service manager, if it is enabled there.
+/// False leaves the caller to start it itself.
+pub fn start() -> Result<bool, String> {
+    if !enabled() {
+        return Ok(false);
+    }
+    if !platform::start() {
+        return Err("Cannot start the backend through its login service. Run pap doctor.".into());
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+mod platform {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::{Command, Output, Stdio},
+    };
+
+    use super::{command, registration};
+
+    const UNIT: &str = "private-ai-proxy.service";
+    const UNIT_OBJECT: &str = "/org/freedesktop/systemd1/unit/private_2dai_2dproxy_2eservice";
+    const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/private-ai-proxy.service";
+    const PACKAGED_BACKEND: &str = "/usr/libexec/private-ai-proxy/private-ai-proxy-service";
+    const PACKAGED_CONTENTS: &str =
+        include_str!("../../src-tauri/installer/private-ai-proxy.service");
+    const MARKER: &str = "# Written by `pap service enable`; `pap service disable` removes it.";
+
+    fn systemctl(arguments: &[&str]) -> Result<Output, String> {
+        let output = Command::new("systemctl")
+            .arg("--user")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("Cannot run systemctl --user: {error}"))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "systemctl --user {} failed ({}): {}",
+                arguments[0],
+                output.status,
+                error.trim()
+            ));
+        }
+        Ok(output)
+    }
+
+    fn properties(interface: &str, names: &[&str]) -> Option<Vec<serde_json::Value>> {
+        #[derive(serde::Deserialize)]
+        struct Property {
+            data: serde_json::Value,
+        }
+        let output = Command::new("busctl")
+            .args([
+                "--user",
+                "--json=short",
+                "get-property",
+                "org.freedesktop.systemd1",
+                UNIT_OBJECT,
+                interface,
+            ])
+            .args(names)
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<Property>()
+            .map(|property| property.ok().map(|property| property.data))
+            .collect()
+    }
+
+    /// The D-Bus string array preserves paths containing spaces.
+    fn safe_drop_ins() -> bool {
+        let Some(properties) = properties("org.freedesktop.systemd1.Unit", &["DropInPaths"]) else {
+            return false;
+        };
+        let [paths] = properties.as_slice() else {
+            return false;
+        };
+        serde_json::from_value::<Vec<PathBuf>>(paths.clone()).is_ok_and(|paths| {
+            paths.iter().all(|path| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name != "private-ai-proxy.service.d")
+                    && fs::read_to_string(path).is_ok_and(|text| !overrides_execution(&text))
+            })
+        })
+    }
+
+    fn safe_restart_policy() -> bool {
+        properties(
+            "org.freedesktop.systemd1.Service",
+            &[
+                "Restart",
+                "RestartPreventExitStatus",
+                "RestartForceExitStatus",
+                "SuccessExitStatus",
+            ],
+        )
+        .is_some_and(|values| matches_restart_policy(&values))
+    }
+
+    fn matches_restart_policy(values: &[serde_json::Value]) -> bool {
+        use serde_json::json;
+        values
+            == [
+                json!("on-failure"),
+                json!([[crate::launch::EXIT_ALREADY_RUNNING], []]),
+                json!([[], []]),
+                json!([[], []]),
+            ]
+    }
+
+    fn overrides_execution(text: &str) -> bool {
+        let mut service = false;
+        text.lines().map(str::trim).any(|line| {
+            if line.starts_with('[') {
+                service = line == "[Service]";
+            }
+            if !service {
+                return false;
+            }
+            line.split_once('=').is_some_and(|(key, _)| {
+                let key = key.trim();
+                [
+                    "Exec",
+                    "Environment",
+                    "Root",
+                    "Bind",
+                    "Extension",
+                    "Mount",
+                    "Credential",
+                    "LoadCredential",
+                    "SetCredential",
+                    "ImportCredential",
+                ]
+                .into_iter()
+                .any(|prefix| key.starts_with(prefix))
+                    || matches!(
+                        key,
+                        "User"
+                            | "Group"
+                            | "SupplementaryGroups"
+                            | "DynamicUser"
+                            | "PrivateUsers"
+                            | "PAMName"
+                            | "WorkingDirectory"
+                            | "SetLoginEnvironment"
+                            | "PassEnvironment"
+                            | "UnsetEnvironment"
+                            | "TemporaryFileSystem"
+                            | "ProtectHome"
+                            | "ReadOnlyPaths"
+                            | "ReadWritePaths"
+                            | "InaccessiblePaths"
+                            | "Type"
+                    )
+            })
+        })
+    }
+
+    /// The package's unit, when it starts this installation's backend.
+    fn packaged() -> bool {
+        Path::new(PACKAGED_UNIT).is_file()
+            && crate::launch::service_executable()
+                .is_ok_and(|backend| backend == Path::new(PACKAGED_BACKEND))
+    }
+
+    /// The unit a user may write, as systemd.unit(5) places it.
+    fn user_unit() -> Result<PathBuf, String> {
+        let config = crate::paths::env_path(crate::paths::XDG_CONFIG_HOME)
+            .filter(|path| path.is_absolute())
+            .or_else(|| std::env::home_dir().map(|home| home.join(".config")))
+            .ok_or("Cannot locate the user's configuration directory")?;
+        Ok(config.join("systemd/user").join(UNIT))
+    }
+
+    /// The packaged unit's settings, running `command`.
+    fn unit(command: &Path) -> Result<String, String> {
+        // Quote the path, escape specifiers, and disable variable expansion.
+        let path = command
+            .to_str()
+            .filter(|path| !path.chars().any(char::is_control))
+            .ok_or("The command path cannot be represented in a systemd unit")?
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%");
+        Ok(format!(
+            "{MARKER}\n\
+             [Unit]\n\
+             Description=Private AI Proxy backend\n\
+             StartLimitIntervalSec=60\n\
+             StartLimitBurst=4\n\
+             \n\
+             [Service]\n\
+             ExecStart=:\"{path}\" service run\n\
+             Restart=on-failure\n\
+             RestartSec=1\n\
+             RestartPreventExitStatus=75\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n",
+        ))
+    }
+
+    struct Registration {
+        path: PathBuf,
+        contents: String,
+        packaged: bool,
+    }
+
+    impl Registration {
+        fn for_installation() -> Result<Self, String> {
+            let packaged = packaged();
+            let (path, contents) = if packaged {
+                (PathBuf::from(PACKAGED_UNIT), PACKAGED_CONTENTS.into())
+            } else {
+                (user_unit()?, unit(&command()?.0)?)
+            };
+            Ok(Self {
+                path,
+                contents,
+                packaged,
+            })
+        }
+
+        fn exists(&self) -> Result<bool, String> {
+            if !self.packaged {
+                return registration::exists(
+                    &registration::record_path()?,
+                    &self.path,
+                    &self.contents,
+                );
+            }
+            let user = user_unit()?;
+            match fs::symlink_metadata(&user) {
+                Ok(_) => return Err(registration::foreign(&user)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Cannot inspect {}: {error}", user.display())),
+            }
+            // Package versions may differ in comments. Check the directives.
+            let current = fs::read_to_string(&self.path)
+                .map_err(|error| format!("Cannot read {}: {error}", self.path.display()))?;
+            let directives = |line: &&str| !line.is_empty() && !line.starts_with('#');
+            if current
+                .lines()
+                .filter(directives)
+                .eq(self.contents.lines().filter(directives))
+            {
+                Ok(true)
+            } else {
+                Err(registration::foreign(&self.path))
+            }
+        }
+
+        /// Inspect the effective unit. A user mask, an overlay in another
+        /// search directory or an execution override takes precedence over
+        /// our file. Distribution-wide timeout settings can still apply.
+        fn state(&self) -> Result<Option<Loaded>, String> {
+            let mut state = self.loaded_state()?;
+            if matches!(state, State::Reload) {
+                systemctl(&["daemon-reload"])?;
+                state = self.loaded_state()?;
+            }
+            match state {
+                State::Missing => Ok(None),
+                State::Loaded(state) => Ok(Some(state)),
+                State::Reload => Err(format!(
+                    "The systemd user unit {UNIT} still has pending changes"
+                )),
+            }
+        }
+
+        fn loaded_state(&self) -> Result<State, String> {
+            let output = systemctl(&[
+                "show",
+                "--all",
+                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState,MainPID",
+                UNIT,
+            ])?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let property = |key: &str| {
+                text.lines()
+                    .filter_map(|line| line.split_once('='))
+                    .find_map(|(name, value)| (name == key).then_some(value))
+            };
+            if property("LoadState") == Some("masked") {
+                return Err(format!("The systemd user unit {UNIT} is masked"));
+            }
+            if property("DropInPaths") != Some("") && !safe_drop_ins() {
+                return Err(format!("The systemd user unit {UNIT} has overrides"));
+            }
+            match property("LoadState") {
+                Some("not-found") => {
+                    self.exists()?;
+                    Ok(State::Missing)
+                }
+                Some("loaded") if property("FragmentPath").is_some_and(|path| Path::new(path) == self.path) && self.exists()? => {
+                    if property("NeedDaemonReload") != Some("no") {
+                        return Ok(State::Reload);
+                    }
+                    if !safe_restart_policy() {
+                        return Err(format!("The systemd user unit {UNIT} has an unexpected restart policy"));
+                    }
+                    let file_state = property("UnitFileState").ok_or("systemd did not report the unit file state")?.to_owned();
+                    let pid = property("MainPID").and_then(|pid| pid.parse().ok()).ok_or("systemd did not report the backend PID")?;
+                    Ok(State::Loaded(Loaded { file_state, pid }))
+                }
+                _ => Err(format!("The effective systemd user unit {UNIT} belongs to another installation or was customized")),
+            }
+        }
+    }
+
+    enum State {
+        Missing,
+        Loaded(Loaded),
+        Reload,
+    }
+
+    struct Loaded {
+        file_state: String,
+        pid: u32,
+    }
+
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        Ok(Registration::for_installation()?
+            .state()?
+            .and_then(|loaded| {
+                matches!(loaded.file_state.as_str(), "enabled" | "enabled-runtime")
+                    .then_some(loaded.pid)
+            }))
+    }
+
+    pub(super) fn enable() -> Result<bool, String> {
+        let registration = Registration::for_installation()?;
+        let state = registration.state()?;
+        if state
+            .as_ref()
+            .is_some_and(|state| state.file_state == "enabled")
+        {
+            return Ok(false);
+        }
+        let created = state.is_none() && !registration.packaged && !registration.exists()?;
+        if created {
+            super::registration::create(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
+        }
+        let result = (|| {
+            if state.is_none() {
+                systemctl(&["daemon-reload"])?;
+                if registration.state()?.is_none() {
+                    return Err(format!(
+                        "systemd could not load {}",
+                        registration.path.display()
+                    ));
+                }
+            }
+            systemctl(&["enable", UNIT])?;
+            Ok(true)
+        })();
+        if result.is_err() && created {
+            super::registration::remove(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
+            let _ = systemctl(&["daemon-reload"]);
+        }
+        result
+    }
+
+    pub(super) fn disable() -> Result<(), String> {
+        let registration = Registration::for_installation()?;
+        let state = registration.state()?;
+        match state.as_ref().map(|state| state.file_state.as_str()) {
+            Some("enabled") => {
+                systemctl(&["disable", UNIT])?;
+            }
+            Some("enabled-runtime") => {
+                systemctl(&["disable", "--runtime", UNIT])?;
+            }
+            _ => {}
+        }
+        if !registration.packaged && registration.exists()? {
+            super::registration::remove(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
+            systemctl(&["daemon-reload"])?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn start() -> bool {
+        systemctl(&["start", UNIT]).is_ok()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn effective_restart_policy_keeps_deliberate_quits_stopped() {
+            use serde_json::json;
+            let safe = [
+                json!("on-failure"),
+                json!([[75], []]),
+                json!([[], []]),
+                json!([[], []]),
+            ];
+            assert!(super::matches_restart_policy(&safe));
+            for (index, override_value) in [
+                (0, json!("always")),
+                (1, json!([[], []])),
+                (2, json!([[0], []])),
+                (3, json!([[1], []])),
+            ] {
+                let mut changed = safe.clone();
+                changed[index] = override_value;
+                assert!(!super::matches_restart_policy(&changed));
+            }
+        }
+        #[test]
+        fn a_written_unit_quotes_the_command_path() {
+            let unit = super::unit(std::path::Path::new("/opt/my apps/$100%/pap")).unwrap();
+            assert!(unit.contains("ExecStart=:\"/opt/my apps/$100%%/pap\" service run\n"));
+            assert!(unit.contains("Restart=on-failure\n"));
+        }
+
+        #[test]
+        fn global_timeout_settings_do_not_override_execution() {
+            assert!(!super::overrides_execution(
+                "# Fedora\n[Service]\nTimeoutStopFailureMode=abort\n"
+            ));
+            for key in [
+                "ExecStart",
+                "ExecStartPre",
+                "EnvironmentFile",
+                "UnsetEnvironment",
+                "User",
+                "WorkingDirectory",
+            ] {
+                assert!(
+                    super::overrides_execution(&format!("[Service]\n{key} = replacement\n")),
+                    "{key}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
+mod platform {
+    use std::{
+        path::{Path, PathBuf},
+        process::{Command, Stdio},
+    };
+
+    use super::{command, registration};
+
+    const MARKER: &str =
+        "<!-- Written by `pap service enable`; `pap service disable` removes it. -->";
+
+    fn launchctl(arguments: &[&str]) -> bool {
+        Command::new("launchctl")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    /// A launchd user agent: its label, and the property list that defines it.
+    pub(super) struct Agent {
+        pub label: String,
+        pub plist: PathBuf,
+        arguments: Vec<String>,
+    }
+
+    impl Agent {
+        /// The agent for this user's backend, in `~/Library/LaunchAgents`,
+        /// which launchd loads at login (launchd.plist(5)).
+        fn backend() -> Result<Self, String> {
+            let label = format!("{}.backend", crate::brand::APP_IDENTIFIER);
+            let home = std::env::home_dir().ok_or("Cannot locate the home directory")?;
+            let plist = home
+                .join("Library/LaunchAgents")
+                .join(format!("{label}.plist"));
+            let command = command()?.0;
+            let command = command
+                .to_str()
+                .filter(|path| !path.chars().any(char::is_control))
+                .ok_or("The command path cannot be represented in a launch agent")?;
+            Ok(Self {
+                label,
+                plist,
+                arguments: vec![command.into(), "service".into(), "run".into()],
+            })
+        }
+
+        /// The user's GUI domain (launchctl(1)).
+        fn domain() -> String {
+            format!("gui/{}", unsafe { libc::getuid() })
+        }
+
+        fn target(&self) -> String {
+            format!("{}/{}", Self::domain(), self.label)
+        }
+
+        fn loaded_pid(&self) -> Result<Option<u32>, String> {
+            let output = Command::new("launchctl")
+                .args(["print", &self.target()])
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| format!("Cannot inspect launchd agent {}: {error}", self.label))?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.code() == Some(113)
+                || stderr
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("Could not find service "))
+            {
+                return Ok(None);
+            }
+            if !output.status.success() {
+                return Err(format!(
+                    "Cannot inspect launchd agent {}: {}",
+                    self.label,
+                    stderr.trim()
+                ));
+            }
+            let pid = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(|text| loaded_pid(text, &self.plist, &self.arguments))
+                .ok_or_else(|| {
+                    format!(
+                        "Cannot verify the loaded launchd agent {} belongs to this installation",
+                        self.label
+                    )
+                })?;
+            Ok(Some(pid))
+        }
+
+        pub fn load(&self) -> bool {
+            self.plist
+                .to_str()
+                .is_some_and(|plist| launchctl(&["bootstrap", &Self::domain(), plist]))
+        }
+
+        fn unload(&self) -> Result<(), String> {
+            if self.loaded_pid()?.is_some() && !launchctl(&["bootout", &self.target()]) {
+                return Err("Cannot remove the backend's login item".into());
+            }
+            Ok(())
+        }
+
+        fn start(&self) -> bool {
+            self.loaded_pid().is_ok_and(|pid| pid.is_some())
+                && launchctl(&["kickstart", &self.target()])
+        }
+    }
+
+    /// `launchctl print` is diagnostic output, so require the complete identity
+    /// to match before using a label, and fail closed on an unfamiliar format.
+    fn loaded_pid(text: &str, plist: &Path, expected: &[String]) -> Option<u32> {
+        let mut lines = text.lines();
+        let opening = lines.next()?.strip_suffix(" = {")?;
+        if !opening.starts_with("gui/") {
+            return None;
+        }
+        let mut path = None;
+        let mut program = None;
+        let mut arguments = None;
+        let mut pid = 0;
+        while let Some(line) = lines.next() {
+            if let Some(value) = line.strip_prefix("\tpath = ") {
+                path = Some(Path::new(value));
+            } else if let Some(value) = line.strip_prefix("\tprogram = ") {
+                program = Some(value);
+            } else if let Some(value) = line.strip_prefix("\tpid = ") {
+                pid = value.parse().ok()?;
+            } else if line == "\targuments = {" {
+                let mut entries = Vec::new();
+                loop {
+                    let entry = lines.next()?;
+                    if entry == "\t}" {
+                        break;
+                    }
+                    entries.push(entry.strip_prefix("\t\t")?);
+                }
+                arguments = Some(entries);
+            }
+        }
+        let source = path?;
+        let same_source = source == plist
+            || std::fs::canonicalize(source)
+                .ok()
+                .zip(std::fs::canonicalize(plist).ok())
+                .is_some_and(|(source, plist)| source == plist);
+        (same_source
+            && program? == expected.first()?
+            && arguments?
+                .iter()
+                .copied()
+                .eq(expected.iter().map(String::as_str)))
+        .then_some(pid)
+    }
+
+    /// Runs `arguments` at login and again whenever it exits with a failure;
+    /// a clean exit, as `pap service stop` causes, is left alone.
+    pub(super) fn plist(label: &str, arguments: &[&str]) -> String {
+        let escape = |text: &str| {
+            text.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
+        let arguments: String = arguments
+            .iter()
+            .map(|argument| format!("\t\t<string>{}</string>\n", escape(argument)))
+            .collect();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             {MARKER}\n\
+             <plist version=\"1.0\">\n\
+             <dict>\n\
+             \t<key>Label</key>\n\
+             \t<string>{}</string>\n\
+             \t<key>ProgramArguments</key>\n\
+             \t<array>\n\
+             {arguments}\
+             \t</array>\n\
+             \t<key>RunAtLoad</key>\n\
+             \t<true/>\n\
+             \t<key>KeepAlive</key>\n\
+             \t<dict>\n\
+             \t\t<key>SuccessfulExit</key>\n\
+             \t\t<false/>\n\
+             \t</dict>\n\
+             \t<key>ProcessType</key>\n\
+             \t<string>Background</string>\n\
+             </dict>\n\
+             </plist>\n",
+            escape(label)
+        )
+    }
+
+    fn written() -> Result<(Agent, String), String> {
+        let agent = Agent::backend()?;
+        let arguments = agent
+            .arguments
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let text = plist(&agent.label, &arguments);
+        Ok((agent, text))
+    }
+
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        let (agent, text) = written()?;
+        if registration::exists(&registration::record_path()?, &agent.plist, &text)? {
+            agent.loaded_pid()
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(super) fn enable() -> Result<bool, String> {
+        let (agent, text) = written()?;
+        let record = registration::record_path()?;
+        let exists = registration::exists(&record, &agent.plist, &text)?;
+        if agent.loaded_pid()?.is_some() {
+            return if exists {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "The launchd agent {} belongs to another installation",
+                    agent.label
+                ))
+            };
+        }
+        if !exists {
+            registration::create(&record, &agent.plist, &text)?;
+        }
+        if agent.load() {
+            Ok(true)
+        } else {
+            if !exists {
+                registration::remove(&record, &agent.plist, &text)?;
+            }
+            Err("launchd did not accept the backend's login item".into())
+        }
+    }
+
+    pub(super) fn disable() -> Result<(), String> {
+        let (agent, text) = written()?;
+        let record = registration::record_path()?;
+        if !registration::exists(&record, &agent.plist, &text)? {
+            if agent.loaded_pid()?.is_some() {
+                return Err(registration::foreign(&agent.plist));
+            }
+            return Ok(());
+        }
+        agent.unload()?;
+        registration::remove(&record, &agent.plist, &text)
+    }
+
+    pub(super) fn start() -> bool {
+        Agent::backend().is_ok_and(|agent| agent.start())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::fs;
+
+        #[test]
+        fn a_plist_escapes_its_arguments() {
+            let text = plist(
+                "org.example.backend",
+                &["/Apps/R&D <1>/pap", "service", "run"],
+            );
+            assert!(text.contains("<string>/Apps/R&amp;D &lt;1&gt;/pap</string>"));
+            assert!(text.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
+        }
+
+        /// Loads, starts and removes a throwaway agent in the real launchd.
+        /// It loads a unique temporary job, so only macOS CI runs it.
+        #[test]
+        #[ignore]
+        fn launchd_round_trip() {
+            let directory = tempfile::tempdir().unwrap();
+            let label = format!("org.dstack.private-ai-proxy.test-{}", std::process::id());
+            let agent = Agent {
+                plist: directory.path().join(format!("{label}.plist")),
+                label,
+                arguments: vec!["/bin/sleep".into(), "600".into()],
+            };
+            fs::write(&agent.plist, plist(&agent.label, &["/bin/sleep", "600"])).unwrap();
+            assert_eq!(agent.loaded_pid().unwrap(), None);
+            assert!(agent.load());
+            struct UnloadOnDrop<'a>(&'a Agent);
+            impl Drop for UnloadOnDrop<'_> {
+                fn drop(&mut self) {
+                    launchctl(&["bootout", &self.0.target()]);
+                }
+            }
+            let _unload = UnloadOnDrop(&agent);
+            assert!(agent.loaded_pid().unwrap().is_some());
+            assert!(agent.start());
+            let other_file = Agent {
+                label: agent.label.clone(),
+                plist: directory.path().join("other.plist"),
+                arguments: agent.arguments.clone(),
+            };
+            let other_args = Agent {
+                label: agent.label.clone(),
+                plist: agent.plist.clone(),
+                arguments: vec!["/bin/sleep".into(), "42".into()],
+            };
+            for foreign in [other_file, other_args] {
+                assert!(!foreign.start());
+                assert!(foreign.unload().is_err());
+                assert!(agent.loaded_pid().unwrap().is_some());
+            }
+            agent.unload().unwrap();
+            assert_eq!(agent.loaded_pid().unwrap(), None);
+        }
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    all(target_os = "macos", not(feature = "mac-app-store"))
+)))]
+mod platform {
+    use super::UNSUPPORTED;
+
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        Ok(None)
+    }
+    pub(super) fn enable() -> Result<bool, String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub(super) fn disable() -> Result<(), String> {
+        Err(UNSUPPORTED.into())
+    }
+    pub(super) fn start() -> bool {
+        false
+    }
+}

@@ -24,6 +24,7 @@ use discovery::*;
 pub use error::AgentError;
 use projection::*;
 use providers::*;
+pub use registry::environment_overridden;
 pub(crate) use registry::AgentIntegration;
 
 use std::{
