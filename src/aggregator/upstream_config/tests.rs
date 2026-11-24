@@ -139,6 +139,36 @@ fn provider_attestation_scopes() {
 }
 
 #[test]
+fn parse_phala_direct_validates_only_compose_subjects() {
+    let mut config = serde_json::json!({
+        "name": "phala",
+        "provider": "phala-direct",
+        "base_url": "https://model.example",
+        "models": {"public-model": "upstream-model"}
+    });
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    config["accepted_subjects"] = serde_json::json!([]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let foreign_subject = format!("app-id:0x{}", "ab".repeat(20));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let pin = format!("dstack-compose:sha256:{}", "ab".repeat(32));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject, pin]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    for malformed in ["dstack-compose:sha256:bad", "dstack-compose:"] {
+        config["accepted_subjects"] = serde_json::json!([foreign_subject, pin, malformed]);
+        let error = parse_config_text(&format!("[{config}]")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("dstack-compose:sha256:<64 lowercase hex>"));
+    }
+}
+
+#[test]
 fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
     let pin = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
     let config_with = |subjects: &str, base_url: &str| {
@@ -204,6 +234,119 @@ fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
             "{base_url:?}: {err}"
         );
     }
+}
+
+#[test]
+fn tinfoil_release_pins_are_opt_in_and_must_be_well_formed() {
+    let config_with = |subjects: serde_json::Value| {
+        serde_json::json!([{
+            "name": "tinfoil",
+            "provider": "tinfoil",
+            "base_url": "https://inference.tinfoil.sh",
+            "models": {"public-model": "upstream-model"},
+            "accepted_subjects": subjects,
+        }])
+        .to_string()
+    };
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    for subjects in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(["app-id:0xabc"]),
+        serde_json::json!(["app-id:0xabc", pin]),
+    ] {
+        parse_config_text(&config_with(subjects)).expect("valid Tinfoil configuration");
+    }
+    for bad in [
+        "tinfoil-release:sha256:ab".to_string(),
+        format!("tinfoil-release:sha256:{}", "AB".repeat(32)),
+        format!("tinfoil-release:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(serde_json::json!([pin, bad])))
+            .expect_err("a malformed Tinfoil release pin must be rejected");
+        assert!(err.to_string().contains("tinfoil-release:sha256:"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tinfoil_release_pin_reaches_bridge_from_config() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST_DIR: &str = "ACI_TINFOIL_PIN_TEST_DIR";
+    if let Some(directory) = std::env::var_os(TEST_DIR) {
+        let manager = UpstreamConfigManager::load(
+            PathBuf::from(directory).join("upstreams.json"),
+            runtime_options(UpstreamVerifierMode::None),
+        )
+        .unwrap();
+        let event = manager
+            .verifier()
+            .verify(UpstreamVerificationRequest {
+                upstream_name: "tinfoil".into(),
+                url_origin: Some("https://tinfoil.example".into()),
+                model_id: "upstream".into(),
+                forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+                required: true,
+            })
+            .await;
+        assert_eq!(
+            event.failure,
+            crate::aci::receipt::VerificationFailure::ProvenanceNotAccepted
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    let mut config =
+        test_upstream_config("tinfoil", UpstreamProvider::Tinfoil, "public", "upstream");
+    config.accepted_subjects = Some(vec!["app-id:0xabc".into(), pin.clone()]);
+    fs::write(
+        directory.path().join("upstreams.json"),
+        serde_json::to_vec(&[config]).unwrap(),
+    )
+    .unwrap();
+    let uv = directory.path().join("uv");
+    fs::write(
+        &uv,
+        r#"#!/bin/sh
+set -e
+/bin/cat > "$ACI_TINFOIL_PIN_TEST_DIR/bridge-request.json"
+printf '%s' '{"result":"failed","failure":"provenance_not_accepted"}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&uv, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Isolate PATH so parallel tests still use the real bridge command.
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .env(TEST_DIR, directory.path())
+        .env("PATH", directory.path())
+        .args([
+            "--exact",
+            "aggregator::upstream_config::tests::tinfoil_release_pin_reaches_bridge_from_config",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let request: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("bridge-request.json")).unwrap())
+            .unwrap();
+    assert_eq!(request["provider"], "tinfoil");
+    let option = format!("tinfoil_accepted_subject:{pin}");
+    assert_eq!(
+        request["provider_options"],
+        serde_json::json!({(option): "true"})
+    );
 }
 
 #[test]

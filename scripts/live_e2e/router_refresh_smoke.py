@@ -42,8 +42,8 @@ from live_e2e.common import (  # noqa: E402
 PORT = 18086
 BASE = f"http://127.0.0.1:{PORT}"
 PRESETS = {
-    "near-ai": ("https://cloud-api.near.ai", "NEARAI_API_KEY", "google/gemma-4-31B-it"),
-    "tinfoil": ("https://inference.tinfoil.sh", "TINFOIL_API_KEY", "kimi-k2-6"),
+    "near-ai": ("https://cloud-api.near.ai", "NEARAI_API_KEY", "Qwen/Qwen3.8-27B"),
+    "tinfoil": ("https://inference.tinfoil.sh", "TINFOIL_API_KEY", "gpt-oss-120b"),
 }
 
 

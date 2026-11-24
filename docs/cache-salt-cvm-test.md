@@ -43,12 +43,16 @@ trials after the warm-up has proved the prompt is cached.
   `ARMET_AI_API_KEY`, `PHALA_DIRECT_QWEN_TOKEN`, and `PHALA_DIRECT_GLM_TOKEN`.
   Load them from your secret store; never paste them into a shell history or a
   file you commit.
+- Two Phala Direct HTTPS origins authorized for this test, one serving
+  `qwen/qwen3.8-27b` and one serving `z-ai/glm-5.3`. Use the origins without a
+  `/v1` suffix. Run the [Phala Direct verifier](providers/phala-direct/verification.md#tests-and-reproduction)
+  against each origin before deploying the test CVM.
 - A gateway commit pushed to `Dstack-TEE/private-ai-gateway`; the launcher
   clones it inside the CVM.
 
 The compose is [`scripts/cache_salt_cvm/compose.yaml`](../scripts/cache_salt_cvm/compose.yaml).
-It mirrors the production no-ingress launcher compose, includes the official
-Privatemode proxy and dstack-verifier sidecars, and seeds seven upstreams:
+It includes the Privatemode proxy and dstack-verifier sidecars and seeds seven
+upstreams serving nine public model aliases.
 
 | Public model | Route | Provider field |
 | --- | --- | --- |
@@ -61,9 +65,6 @@ Privatemode proxy and dstack-verifier sidecars, and seeds seven upstreams:
 | `a-glm` | ArmetAI `GLM-5.3-Flash` | `cache_salt` |
 | `pd-qwen` | Phala Direct `qwen/qwen3.8-27b` | `cache_salt` |
 | `pd-glm` | Phala Direct `z-ai/glm-5.3` | `cache_salt` |
-
-Node URLs, model IDs, and the ArmetAI measurement pin mirror the production
-upstream config at the time of writing and must be refreshed from it.
 
 Its mock control plane maps the SHA-256 of `TEST_USER_A_KEY` to `userId`
 1001 and of `TEST_USER_B_KEY` to 1002, and allows anonymous requests without
@@ -86,8 +87,9 @@ sed "s/COMMIT_SHA_PLACEHOLDER/$COMMIT/" scripts/cache_salt_cvm/compose.yaml > "$
 cp scripts/cache_salt_cvm/smoke.py "$WORK/"
 ```
 
-Write the secrets file. Replace the `read_secret` calls with your secret
-store's command:
+Set `PHALA_DIRECT_QWEN_BASE_URL` and `PHALA_DIRECT_GLM_BASE_URL` in your shell
+to the corresponding test origins. Write the secrets file and replace
+`read_secret` with your secret store's command.
 
 ```bash
 privatemode_api_key=$(read_secret PRIVATEMODE_API_KEY)
@@ -98,6 +100,8 @@ privatemode_api_key=$(read_secret PRIVATEMODE_API_KEY)
   echo "CHUTES_API_KEY=$(read_secret CHUTES_API_KEY)"
   echo "NEAR_AI_API_KEY=$(read_secret NEAR_AI_API_KEY)"
   echo "ARMET_AI_API_KEY=$(read_secret ARMET_AI_API_KEY)"
+  echo "PHALA_DIRECT_QWEN_BASE_URL=${PHALA_DIRECT_QWEN_BASE_URL:?set the Qwen test origin}"
+  echo "PHALA_DIRECT_GLM_BASE_URL=${PHALA_DIRECT_GLM_BASE_URL:?set the GLM test origin}"
   echo "PHALA_DIRECT_QWEN_TOKEN=$(read_secret PHALA_DIRECT_QWEN_TOKEN)"
   echo "PHALA_DIRECT_GLM_TOKEN=$(read_secret PHALA_DIRECT_GLM_TOKEN)"
   echo "PRIVATE_AI_GATEWAY_ADMIN_TOKEN=$(openssl rand -hex 32)"

@@ -45,6 +45,7 @@ pub struct Backend {
     pub events: Mutex<Vec<UpstreamVerifiedEvent>>,
     pub instance: Mutex<Option<String>>,
     pub tls_key: Mutex<Option<String>>,
+    pub response_headers: Mutex<HashMap<String, String>>,
 }
 impl Backend {
     async fn respond(
@@ -80,7 +81,7 @@ impl Backend {
                 Ok(UpstreamResponse {
                     status_code: status,
                     body: RESPONSE.to_vec(),
-                    headers: HashMap::new(),
+                    headers: self.response_headers.lock().unwrap().clone(),
                     served_instance_id: self.instance.lock().unwrap().clone(),
                 })
             }
@@ -171,6 +172,7 @@ impl Harness {
             events: Mutex::new(Vec::new()),
             instance: Mutex::new(None),
             tls_key: Mutex::new(None),
+            response_headers: Mutex::new(HashMap::new()),
         });
         let verifier = Arc::new(CachedVerifier(Mutex::new(verified_event(
             "admission-test",

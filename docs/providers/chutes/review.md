@@ -16,6 +16,12 @@ Provider endpoint: `https://api.chutes.ai`.
 Trust boundary: verified Chutes model instance reached through Chutes E2EE
 transport.
 
+**Adapter update, 2026-11-23 PST.** The adapter prefers the TDX measurement
+feed, skips evidence explicitly tagged as another TEE type, and verifies the
+NVIDIA NRAS platform JWT for the supplemental GPU result. Both measurement
+feeds and both GPU checks agreed on the live public evidence sampled for this
+update. [Current verification algorithm](verification.md#verification-algorithm)
+
 ## Round 2 (2026-11-23 PST)
 
 The deployed TDX fleet runs sek8s guest images 1.4.0, 1.4.1, and 1.5.0.

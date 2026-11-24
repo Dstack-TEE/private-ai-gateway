@@ -12,6 +12,15 @@ Date: 2026-11-23 PST (round 2).
 Provider endpoint: `https://inference.tinfoil.sh`.
 Router source: `tinfoilsh/confidential-model-router`.
 
+## Adapter status (2026-11-23 PST)
+
+The adapter now uses Tinfoil SDK `0.15.0` and records the verified release tag.
+Operators can pin reviewed release digests through `accepted_subjects`.
+Receipts include the final response's `Tinfoil-Enclave` header when the
+admitted router supplies it. The public SEV-SNP router at `v0.0.179`
+verified with SDK `0.12.1` and `0.15.0` and returned the same TLS binding.
+See [verification](verification.md) for the pin and receipt semantics.
+
 ## Round 2 (2026-11-23 PST)
 
 Reviewed deployed router `v0.0.179` (commit

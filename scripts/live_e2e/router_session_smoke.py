@@ -39,12 +39,12 @@ PRESETS = {
     "near-ai": {
         "base_url": "https://cloud-api.near.ai",
         "api_key_env": "NEARAI_API_KEY",
-        "models": ["google/gemma-4-31B-it", "deepseek-ai/DeepSeek-V4-Flash"],
+        "models": ["Qwen/Qwen3.8-27B", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
     },
     "tinfoil": {
         "base_url": "https://inference.tinfoil.sh",
         "api_key_env": "TINFOIL_API_KEY",
-        "models": ["kimi-k2-6", "llama3-3-70b"],
+        "models": ["gpt-oss-120b", "llama3-3-70b"],
     },
 }
 

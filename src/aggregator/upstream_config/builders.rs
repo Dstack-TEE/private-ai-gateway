@@ -304,10 +304,10 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            UpstreamProvider::Tinfoil => Arc::new(TinfoilProviderVerifier::new_with_cache(
-                request_timeout_seconds,
-                cache_seconds,
-            )),
+            UpstreamProvider::Tinfoil => Arc::new(
+                TinfoilProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                    .with_accepted_subjects(cfg.accepted_subjects.as_deref().unwrap_or_default()),
+            ),
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
@@ -322,11 +322,15 @@ pub(super) fn build_verifier(
                 Arc::new(verifier)
             }
             UpstreamProvider::SecretAi => {
+                let accepted_subjects = cfg.accepted_subjects.as_deref().unwrap_or_default();
+                if accepted_subjects.is_empty() {
+                    tracing::warn!(upstream = %cfg.name, "SecretAI has no accepted_subjects workload pin configured");
+                }
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
+                .with_accepted_subjects(accepted_subjects.iter().cloned());
                 Arc::new(verifier)
             }
             UpstreamProvider::Privatemode => Arc::new(
@@ -343,7 +347,8 @@ pub(super) fn build_verifier(
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
-                );
+                )
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
                 }
