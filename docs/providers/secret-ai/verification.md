@@ -14,7 +14,10 @@ exact SHA-256 digest of `/docker-compose`:
 secretvm:<cpu-type>:<environment>:<template>:<artifacts-version>:sha256:<compose-sha256>
 ```
 
-The following unpinned JEDI configuration was verified live on 2026-07-21:
+JEDI's workload and TLS binding were verified live without a workload pin on
+2026-11-23 PST. This example maps gateway aliases to the model names declared
+in the measured compose. Inference and the authenticated model list remain
+unverified.
 
 ```json
 [
@@ -23,7 +26,8 @@ The following unpinned JEDI configuration was verified live on 2026-07-21:
     "provider": "secret-ai",
     "base_url": "https://secretai-jedi.scrtlabs.com:21434",
     "models": {
-      "secret-ai/gpt-oss-120b": "gpt-oss:120b"
+      "secret-ai/qwen3-coder-30b": "qwen3-coder:30b",
+      "secret-ai/qwen3-vl-30b": "qwen3-vl:30b"
     },
     "bearer_token": "<secret-ai-api-key>"
   }
@@ -34,11 +38,12 @@ To pin that exact measured workload, add:
 
 ```json
 "accepted_subjects": [
-  "secretvm:sev-snp:gpu_prod:4xlarge:v0.0.33:sha256:ea08d2b8a03bea1d3206286e50da41e437b3fd4a9e6e3415a0d6169f05bb7cf2"
+  "secretvm:sev-snp:gpu_prod:4xlarge:v0.0.33:sha256:d8ba9343eeaf43d6fd94458bd6d754d74f04363f4999b84959af80a4c604eae3"
 ]
 ```
 
-The following RYTN workload was also verified live on 2026-07-21:
+The following RYTN workload was verified live on 2026-07-21. RYTN was
+unreachable during the 2026-11-23 PST check, so its current workload is unknown.
 
 ```text
 secretvm:tdx:prod:4xlarge_256gb_gpu:v0.0.33:sha256:3a013b14abfacd03515ca3c6ae2d9d45d489ce8692c7fa3dff7f73837e3c8b1a
@@ -47,8 +52,8 @@ secretvm:tdx:prod:4xlarge_256gb_gpu:v0.0.33:sha256:3a013b14abfacd03515ca3c6ae2d9
 A SecretAI rollout that changes the VM artifacts or compose bytes produces a
 different workload ID. An unpinned configuration reports the new ID and
 continues after all mandatory checks pass. A pinned configuration rejects it
-until an operator updates the allowlist. The embedded AMD TCB minimum was
-verified against JEDI on 2026-07-21.
+until an operator updates the allowlist. JEDI's reported AMD TCB matched the
+embedded minimum on both 2026-07-21 and 2026-11-23 PST.
 
 ## Verification algorithm
 
@@ -131,6 +136,9 @@ behind the same attested workload and SPKI.
 - An accepted workload ID is an optional operator policy decision. Review the
   full compose, image digests, SecretVM artifact release, endpoint exposure, and
   provider logging behavior before adding a pin.
+- The reviewed JEDI compose injects an unmeasured `usr/.env` into Caddy and both
+  vLLM containers. The workload ID covers the compose bytes, while the contents
+  of that file can change independently.
 - The SEV-SNP minimum is release policy embedded in the verifier. Raise it in a
   reviewed gateway release when the AMD security baseline changes; a lower
   signed report fails closed.
