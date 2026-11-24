@@ -734,3 +734,49 @@ fn dsh_disconnect_keeps_an_appended_entry_with_unrelated_user_edits() {
         expected
     );
 }
+
+#[test]
+fn openclaw_disconnect_prunes_only_empty_selector_containers_created_by_pap() {
+    let agent = Agent::OpenClaw;
+    let catalog = catalog();
+    for (original, after, edit) in [
+        (json!({}), None, false),
+        (
+            json!({"agents":{"entries":{"main":{}}}}),
+            Some(json!({"entries":{"main":{}}})),
+            false,
+        ),
+        (
+            json!({"agents":{"defaults":{"model":{}}}}),
+            Some(json!({"defaults":{"model":{}}})),
+            false,
+        ),
+        (
+            json!({}),
+            Some(json!({"defaults":{"model":{"fallbacks":["other/model"]}}})),
+            true,
+        ),
+    ] {
+        let sandbox = sandbox("openclaw-owned-selector-containers");
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, &original.to_string());
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        if edit {
+            let mut config = doc(&sandbox, agent);
+            config
+                .set_value(
+                    &["agents", "defaults", "model", "fallbacks"],
+                    &ConfigValue::List(vec!["other/model".into()]),
+                )
+                .unwrap();
+            write(&path, &config.render().unwrap());
+        }
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        disconnect(&sandbox, agent);
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["agents"]),
+            after.map(ConfigValue::Json),
+            "{original}"
+        );
+    }
+}

@@ -1,5 +1,12 @@
 use super::*;
 
+pub(super) const CLAUDE_PROVIDER_SWITCHES: &[&str] = &[
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE",
+];
+
 /// Everything a projection is computed from.
 pub(super) struct Inputs<'a> {
     pub(super) file_credentials: bool,
@@ -118,11 +125,12 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
                 absent(&["env", "ANTHROPIC_API_KEY"]),
                 absent(&["env", "ANTHROPIC_MODEL"]),
-                absent(&["env", "CLAUDE_CODE_USE_BEDROCK"]),
-                absent(&["env", "CLAUDE_CODE_USE_VERTEX"]),
-                absent(&["env", "CLAUDE_CODE_USE_FOUNDRY"]),
-                absent(&["env", "CLAUDE_CODE_USE_MANTLE"]),
             ];
+            fields.extend(
+                CLAUDE_PROVIDER_SWITCHES
+                    .iter()
+                    .map(|key| absent(&["env", key])),
+            );
             if let Some(model) = default_model {
                 fields.push(set(model_selection_paths(Agent::ClaudeCode)[0].path, model));
             }

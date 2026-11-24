@@ -139,6 +139,11 @@ impl Projector {
                     self.cleanup(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
                 } else if catalog.is_none() {
+                    if status.attention.as_deref() == Some(validation::CLAUDE_SWITCH_DRIFT) {
+                        if let Some(record) = store.get_mut(agent.id()) {
+                            record.attention = status.attention.clone();
+                        }
+                    }
                     self.suspend(agent, &mut store)
                         .map_err(ConnectFailure::Unavailable)
                 } else if !record.suspended
@@ -146,7 +151,9 @@ impl Projector {
                     && status.attention.as_deref().is_some_and(|attention| {
                         attention.contains("outdated credential helper")
                             || attention.contains("OpenClaw helper changed")
-                            || attention.contains("Legacy Claude Code provider-switch")
+                            || (agent == Agent::ClaudeCode
+                                && validation::legacy_claude_journal(&record)
+                                && attention.contains("Legacy Claude Code provider-switch"))
                     })
                 {
                     self.reproject(agent, &mut store, catalog)
@@ -221,6 +228,15 @@ impl Projector {
                     continue;
                 };
                 if record.disconnected() || record.suspended || record.cleanup_pending {
+                    continue;
+                }
+                if agent == Agent::ClaudeCode
+                    && self
+                        .status(agent, &store, Some(catalog))
+                        .attention
+                        .as_deref()
+                        == Some(validation::CLAUDE_SWITCH_DRIFT)
+                {
                     continue;
                 }
                 if let Err(error) = self.reproject(agent, &mut store, Some(catalog)) {

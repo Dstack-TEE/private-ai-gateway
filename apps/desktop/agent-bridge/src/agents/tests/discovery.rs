@@ -328,20 +328,19 @@ fn legacy_claude_journal_migrates_provider_switch_flags() {
         .unwrap();
     write(&path, &config.render().unwrap());
     let mut store = sandbox.projector.load_store().unwrap();
-    store
-        .get_mut(Agent::ClaudeCode.id())
-        .unwrap()
-        .fields
-        .retain(|field| field.path != owned(&["env", "CLAUDE_CODE_USE_BEDROCK"]));
-    store
-        .get_mut(Agent::ClaudeCode.id())
-        .unwrap()
-        .fields
-        .push(OwnedField {
-            path: owned(&["env", "ANTHROPIC_MODEL"]),
-            value: Some(ConfigValue::Str("legacy-model".into())),
-            ..OwnedField::default()
-        });
+    let fields = &mut store.get_mut(Agent::ClaudeCode.id()).unwrap().fields;
+    fields.retain(|field| {
+        field.path != ["model"]
+            && field.path != ["env", "ANTHROPIC_MODEL"]
+            && !CLAUDE_PROVIDER_SWITCHES
+                .iter()
+                .any(|key| field.path == ["env", *key])
+    });
+    fields.push(OwnedField {
+        path: owned(&["env", "ANTHROPIC_MODEL"]),
+        value: Some(ConfigValue::Str("legacy-model".into())),
+        ..OwnedField::default()
+    });
     sandbox.projector.save_store(&store).unwrap();
     let status = sandbox
         .projector
@@ -872,19 +871,6 @@ fn omp_enabled_models_keep_the_selected_pap_model_authorized() {
             );
         }
     }
-    let sandbox = sandbox("omp-enabled-excludes-pap");
-    let agent = Agent::OhMyPi;
-    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
-    write(
-        &agent
-            .config_path(&sandbox.home, false)
-            .with_file_name("config.yml"),
-        "enabledModels: [other/model]
-",
-    );
-    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
-    let status = agent_status(&statuses, agent);
-    assert!(!status.authorized && tokens.is_empty(), "{status:?}");
 }
 
 #[test]
@@ -1070,6 +1056,179 @@ fn fresh_claude_model_journal_needs_no_migration() {
     let catalog = catalog();
     let agent = Agent::ClaudeCode;
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(
+        status.authorized && status.attention.is_none(),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn claude_current_provider_switch_drift_survives_reconcile_until_reconnect() {
+    let sandbox = sandbox("claude-current-provider-switch-drift");
+    let catalog = catalog();
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["env", "CLAUDE_CODE_USE_VERTEX"], "1")
+        .unwrap();
+    let drifted = config.render().unwrap();
+    write(&path, &drifted);
+
+    assert!(sandbox.projector.retarget(&catalog).unwrap().is_empty());
+    assert_eq!(fs::read_to_string(&path).unwrap(), drifted);
+    for _ in 0..2 {
+        let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+        let status = agent_status(&statuses, agent);
+        assert!(!status.authorized && tokens.is_empty(), "{status:?}");
+        assert!(status.attention.is_some(), "{status:?}");
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), drifted);
+    }
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    assert!(!doc(&sandbox, agent).contains(&["env", "CLAUDE_CODE_USE_VERTEX"]));
+
+    // Stop immediately after the next edit, before regular reconcile persists attention.
+    write(&path, &drifted);
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(sandbox
+        .projector
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        doc(&sandbox, agent)
+            .get_str(&["env", "CLAUDE_CODE_USE_VERTEX"])
+            .as_deref(),
+        Some("1")
+    );
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(!agent_status(&statuses, agent).authorized && tokens.is_empty());
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+}
+
+#[test]
+fn omp_mixed_disabled_providers_still_block_unscoped_pap() {
+    let sandbox = sandbox("omp-mixed-global-provider-deny");
+    let catalog = catalog();
+    let agent = Agent::OhMyPi;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent
+        .config_path(&sandbox.home, false)
+        .with_file_name("config.yml");
+    write(
+        &path,
+        "disabledProviders:\n  - path: ~/work\n    providers: [openai]\n  - private-ai-proxy\n",
+    );
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(!status.authorized && tokens.is_empty(), "{status:?}");
+    assert!(status
+        .attention
+        .as_deref()
+        .is_some_and(|s| s.contains("disabledProviders")));
+}
+
+#[test]
+fn omp_path_scoped_filters_raise_attention_without_revoking_access() {
+    for (setting, yaml) in [
+        ("disabledProviders", "disabledProviders:\n  - openai\n  - pathPrefixes: [~/work]\n    providers: [private-ai-proxy]\n"),
+        ("enabledModels", "enabledModels:\n  - paths: [~/work]\n    models: [other/model]\n"),
+    ] {
+        let sandbox = sandbox("omp-scoped-filter-attention");
+        let agent = Agent::OhMyPi;
+        let catalog = catalog();
+        let path = agent.config_path(&sandbox.home, false).with_file_name("config.yml");
+        write(&path, yaml);
+        let status = apply_connect(&sandbox, agent, &catalog, &claude_options());
+        assert!(status.authorized, "{status:?}");
+        assert!(status.attention.as_deref().is_some_and(|s| s.contains(setting) && s.contains("path")), "{status:?}");
+    }
+}
+
+#[test]
+fn omp_enabled_models_accept_thinking_suffixes_and_keep_filters_advisory() {
+    const TEST_MODELS: &[(&str, bool)] = &[
+        ("private-ai-proxy/**/gpt-oss-*:high", false),
+        ("openai/gpt-oss-20b:low", false),
+        ("phala/qwen:auto", false),
+        ("qwen", false),
+        ("other/model", true),
+        ("private-ai-proxy/{phala,openai}/*", true),
+        ("!other/*", true),
+    ];
+    let agent = Agent::OhMyPi;
+    let catalog = catalog();
+    for &(pattern, attention) in TEST_MODELS {
+        let sandbox = sandbox("omp-advisory-selector");
+        let path = agent
+            .config_path(&sandbox.home, false)
+            .with_file_name("config.yml");
+        write(&path, &format!("enabledModels: ['{pattern}']\n"));
+        let applied = apply_connect(&sandbox, agent, &catalog, &claude_options());
+        assert!(applied.authorized, "{pattern}: {applied:?}");
+        for catalog in [Some(&catalog), None] {
+            let (statuses, tokens) = sandbox.projector.scan(catalog).unwrap();
+            let status = agent_status(&statuses, agent);
+            assert!(
+                status.authorized && !tokens.is_empty(),
+                "{pattern}: {status:?}"
+            );
+            assert_eq!(
+                status.attention.is_some(),
+                attention,
+                "{pattern}: {status:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn omp_enabled_models_treat_non_chat_matches_as_advisory() {
+    let sandbox = sandbox("omp-enabled-models-chat-only");
+    let catalog = Catalog::from_remote(
+        &json!({
+            "data": [
+                {"id": "phala/qwen"},
+                {"id": "vendor/image", "output_modalities": ["image"]},
+                {"id": "vendor/model:max"}
+            ]
+        }),
+        1,
+    )
+    .unwrap();
+    let agent = Agent::OhMyPi;
+    let path = agent
+        .config_path(&sandbox.home, false)
+        .with_file_name("config.yml");
+    write(&path, "enabledModels: [vendor/image]\n");
+    let status = apply_connect(
+        &sandbox,
+        agent,
+        &catalog,
+        &ConnectOptions {
+            default_model: Some("phala/qwen".into()),
+        },
+    );
+    assert!(
+        status.authorized && status.attention.is_some(),
+        "{status:?}"
+    );
+    let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(
+        status.authorized && status.attention.is_some() && !tokens.is_empty(),
+        "{status:?}"
+    );
+
+    write(&path, "enabledModels: ['vendor/model:max']\n");
     let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
     let status = agent_status(&statuses, agent);
     assert!(

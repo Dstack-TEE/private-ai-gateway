@@ -1,5 +1,8 @@
 use super::*;
 
+pub(super) const CLAUDE_SWITCH_DRIFT: &str =
+    "Claude Code's provider switch changed outside the app. Access is paused. Reconnect to restore Private AI Proxy routing.";
+
 impl Projector {
     fn active_helper(&self) -> &Path {
         if cfg!(windows) {
@@ -225,16 +228,14 @@ impl Projector {
         prior: Option<&Connection>,
         options: &ConnectOptions,
         catalog: Option<&Catalog>,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Option<String>, AgentError> {
+        if agent == Agent::OhMyPi {
+            let path = agent.config_path(&self.home, self.tool_env);
+            return oh_my_pi::validate_config(doc, prior)
+                .and_then(|()| oh_my_pi::validate_settings(&path, doc, catalog))
+                .map_err(AgentError::ConfigurationConflict);
+        }
         match agent {
-            Agent::OhMyPi => {
-                oh_my_pi::validate_config(doc, prior)
-                    .and_then(|()| {
-                        let path = Agent::OhMyPi.config_path(&self.home, self.tool_env);
-                        oh_my_pi::validate_settings(&path, doc, catalog)
-                    })
-                    .map_err(AgentError::ConfigurationConflict)
-            }
             Agent::Dsh => dsh::validate_config(&dsh::home_dir(&self.home, self.tool_env), doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
@@ -319,6 +320,7 @@ impl Projector {
             }
             _ => Ok(()),
         }
+        .map(|()| None)
     }
 
     /// OpenCode 1.18.29+ deep-merges these process-level sources in order.
@@ -687,9 +689,16 @@ impl Projector {
                         || holds_managed_field(agent, doc.as_ref().unwrap(), field)
                 });
         let legacy_claude =
-            agent == Agent::ClaudeCode && legacy_claude_journal(record, doc.as_ref());
-        status.connected = managed && token;
-        status.authorized = !record.disabled && managed && token && !legacy_claude;
+            agent == Agent::ClaudeCode && doc.is_some() && legacy_claude_journal(record);
+        let claude_switch_drift = agent == Agent::ClaudeCode
+            && !legacy_claude
+            && doc.as_ref().is_some_and(|doc| {
+                CLAUDE_PROVIDER_SWITCHES
+                    .iter()
+                    .any(|key| doc.get_value(&["env", key]).is_some())
+            });
+        status.connected = managed && token && !claude_switch_drift;
+        status.authorized = !record.disabled && status.connected && !legacy_claude;
         if record.cleanup_pending {
             status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention = Some(
@@ -701,6 +710,9 @@ impl Projector {
             status.repair_action = Some(AgentRepairAction::Disconnect);
             status.attention =
                 Some("This connection is disabled; Disconnect to restore your config".to_string());
+        } else if claude_switch_drift {
+            status.repair_action = Some(AgentRepairAction::Reconnect);
+            status.attention = Some(CLAUDE_SWITCH_DRIFT.into());
         } else if helper_stale {
             status.repair_action = Some(AgentRepairAction::Reconnect);
             status.connected = false;
@@ -781,16 +793,17 @@ impl Projector {
                 refusal = self.check_opencode_merge(doc).err();
             }
             if refusal.is_none() {
-                refusal = self
-                    .validate_native_config(
-                        agent,
-                        doc,
-                        Some(record),
-                        &record.options,
-                        catalog.filter(|_| agent == Agent::OhMyPi),
-                    )
-                    .err()
-                    .map(|error| error.to_string());
+                match self.validate_native_config(
+                    agent,
+                    doc,
+                    Some(record),
+                    &record.options,
+                    catalog.filter(|_| agent == Agent::OhMyPi),
+                ) {
+                    Ok(Some(attention)) => status.attention = Some(attention),
+                    Ok(None) => {}
+                    Err(error) => refusal = Some(error.to_string()),
+                }
             }
             let dsh_home = dsh::home_dir(&self.home, self.tool_env);
             if refusal.is_none()
@@ -909,21 +922,19 @@ pub(super) fn opencode_system_config_dir(os: &str) -> Option<PathBuf> {
     }
 }
 
-fn legacy_claude_journal(record: &Connection, doc: Option<&ConfigDoc>) -> bool {
-    let Some(doc) = doc else { return false };
-    let has_switch = [
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_MANTLE",
-    ]
-    .iter()
-    .any(|key| doc.contains(&["env", key]));
-    let legacy_model = record
+pub(super) fn legacy_claude_journal(record: &Connection) -> bool {
+    // providers.rs@desktop-v0.9.0 owned the env model and omitted the provider
+    // switches. A live switch alone is drift in a current journal.
+    record
         .fields
         .iter()
-        .any(|field| field.path == owned(&["env", "ANTHROPIC_MODEL"]) && field.value.is_some());
-    has_switch || legacy_model
+        .any(|field| field.path == ["env", "ANTHROPIC_MODEL"] && field.value.is_some())
+        && !record.fields.iter().any(|field| {
+            field.value.is_none()
+                && CLAUDE_PROVIDER_SWITCHES
+                    .iter()
+                    .any(|key| field.path == ["env", *key])
+        })
 }
 
 fn is_helper_field(agent: Agent, field: &OwnedField) -> bool {

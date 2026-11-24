@@ -682,6 +682,24 @@ pub(super) fn project(
     }
     for field in fields.iter().filter(|field| !field.exact) {
         let path = refs(&field.path);
+        if agent == Agent::OpenClaw && path == model_selection_paths(agent)[0].path {
+            // Record newly created JSON5 parents without taking over existing
+            // mappings. The shared restore pass removes them when empty.
+            for depth in 1..path.len() {
+                let parent = &field.path[..depth];
+                if !doc.contains(&path[..depth])
+                    || prior
+                        .iter()
+                        .any(|field| field.container && field.path == parent)
+                {
+                    owned_fields(&mut edit).push(OwnedField {
+                        path: parent.to_vec(),
+                        container: true,
+                        ..OwnedField::default()
+                    });
+                }
+            }
+        }
         let sensitive = is_sensitive(&field.path);
         let current = doc.get_value(&path);
         let still_ours = prior

@@ -4,9 +4,9 @@
 
 ### Bug Fixes
 
-* Keep Oh My Pi authorized when its settings allow a Private AI Proxy model and honor provider filters in `config.yaml`.
-* Restore the generated Claude Code model picker and dsh default-model entry when stopping protection so both can reconnect.
-* Report OpenCode model selections on Windows without `ProgramData` and detect OpenClaw entries that override only fallback models.
+* Keep Oh My Pi model filters and path-scoped provider filters advisory, and honor global provider disables in `config.yml` and `config.yaml`.
+* Preserve user-added Claude Code provider switches until Reconnect, and restore the generated Claude Code model picker and dsh default-model entry when stopping protection.
+* Report OpenCode model selections on Windows without `ProgramData`, detect OpenClaw fallback-only model overrides, and clean up empty OpenClaw model selector containers on disconnect.
 
 ## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
 

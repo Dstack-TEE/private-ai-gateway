@@ -265,8 +265,12 @@ unlocked OS keychain for a process running as you.
   and Disconnect or stopping protection restores the saved configuration.
   OpenCode 2 configurations use the native `providers` provider shape when
   their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
-  shape. Oh My Pi honors the model and provider filters in its companion
-  `config.yml` or `config.yaml`.
+  shape. In Oh My Pi's companion `config.yml` or `config.yaml`, a global
+  `disabledProviders` entry for Private AI Proxy pauses access. Path-scoped
+  provider filters and `enabledModels` restrictions can show a notice while
+  the connection stays authorized.
+  Adding a Claude Code provider switch pauses access. Reconnect to restore
+  Private AI Proxy routing.
 - **Agent integration limits.** Claude Code project `.claude/settings.json` and
   `.claude/settings.local.json` can override `ANTHROPIC_BASE_URL`. Codex's
   `managed_config.toml` is outside this integration. Oh My Pi project config

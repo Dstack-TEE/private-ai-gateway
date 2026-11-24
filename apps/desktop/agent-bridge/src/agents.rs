@@ -186,8 +186,8 @@ struct OwnedField {
     /// credential the connection writes is never kept in the record.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hashed: bool,
-    /// An empty mapping an exact field needed as its parent: kept while it
-    /// is a mapping, and removed on restore only while it is still empty.
+    /// A mapping the projection created as a parent. It is removed on
+    /// restore only while empty.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     container: bool,
 }
