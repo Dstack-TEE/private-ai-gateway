@@ -14,7 +14,9 @@ The Tinfoil adapter uses Tinfoil's official Python SDK to verify its confidentia
 
 The bridge constructs `SecureClient(enclave=<origin host>, repo=<repository>)`, calls `verify()`, and reads the verification document. The SDK owns the hardware and provenance verification chain:
 
-1. Resolve the repository's latest release artifact digest.
+1. Resolve the repository's latest release artifact digest through Tinfoil's
+   GitHub proxy. The pinned SDK (`0.12.1`) checks the repository's release
+   workflow identity without binding the signature to the resolved release tag.
 2. Verify the Sigstore bundle, Rekor transparency-log inclusion, and a GitHub Actions certificate identity for the repository's release workflow. This yields the release measurement.
 3. Fetch the hardware report from `<host>/.well-known/tinfoil-attestation` and verify it. For SEV-SNP, the SDK verifies the report signature with the VCEK, the VCEK to ASK to ARK certificate chain to AMD's root, and the guest policy, which requires `Debug=false`, `MigrateMA=false`, and a minimum TCB. For TDX, it verifies DCAP collateral and rejects debug TDs.
 4. Extract the TLS public-key fingerprint from `report_data[0:32]`.
@@ -52,7 +54,7 @@ for existing pins and rollback.
 | Claim | Mapping |
 | --- | --- |
 | `tee_attested` | Asserted as hardware-proven from the official hardware verifier and bound TLS channel. |
-| `tcb_up_to_date` | Asserted as verifier-derived because Tinfoil's overall verifier gates TCB policy but does not expose a separable raw status. |
+| `tcb_up_to_date` | Asserted as verifier-derived. The TCB gate is the SDK's static minimum. The SDK exposes no separate vendor TCB status. |
 | `serving_software_known_good` | Asserted as verifier-derived from the Sigstore-proven release measurement. |
 | `gpu_attested` | Unknown. |
 | `os_known_good` | Unknown. The verifier does not classify the OS image. |
@@ -71,8 +73,8 @@ AMD signature covers the whole report:
 
 ## Limitations
 
-- Middleware sends a per-user, provider-separated `user_cache_secret` on text-generation requests. Tinfoil's router must enable `CACHE_SALT_ENABLED` and honor that field for cache isolation; a verified channel and a forwarded-body hash alone do not establish this runtime policy. The router combines it with the shared upstream credential. Caller `cache_salt` strings only subdivide the user's partition, and raw caller cache fields are stripped. See the [live isolation observation](../../prefix-cache-isolation.md#observed-enforcement) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
-- The gateway delegates the hardware, TCB, and source-provenance check set to the Tinfoil SDK version pinned in `pyproject.toml` and `uv.lock`. An upgrade changes the verifier trust root and must be reviewed.
+- Middleware sends a per-user, provider-separated `user_cache_secret` on text-generation requests. Router `v0.0.179` sets `CACHE_SALT_ENABLED: "true"` in its measured `tinfoil-config.yml`. The gateway accepts later signed releases, which could change that policy. The router uses the secret and the authenticated caller identity to derive its own salt. Caller `cache_salt` strings only subdivide the user's partition, and the gateway strips raw caller cache fields. See the [live isolation observation](../../prefix-cache-isolation.md#observed-enforcement) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
+- The gateway delegates the hardware, TCB, and source-provenance check set to the Tinfoil SDK version pinned in `pyproject.toml` and `uv.lock`. An upgrade changes the verifier trust root and must be reviewed. On 2026-11-23 PST the pin was `0.12.1` and upstream stable was `0.15.0`. The pinned SDK verifies the v2 attestation document, which carries no nonce.
 - The default path proves the confidential router channel. Per-model TEE coverage depends on the verified router's own model-enclave policy and is not independently recorded by this gateway.
 - `release_digest` is preserved as evidence but is not checked against a separate operator allowlist in gateway configuration.
 - Verification needs egress to the router's `/.well-known/tinfoil-attestation` endpoint, `kds-proxy.tinfoil.sh` for AMD VCEK certificates, Tinfoil's GitHub attestation proxy, and Sigstore trust material.
@@ -89,7 +91,7 @@ jq -n --arg hash "$request_hash" '{
   provider: "tinfoil",
   upstream_name: "tinfoil-live",
   url_origin: "https://inference.tinfoil.sh",
-  model_id: "kimi-k2-6",
+  model_id: "gpt-oss-120b",
   forwarded_body_hash: $hash,
   required: true,
   timeout_seconds: 300
