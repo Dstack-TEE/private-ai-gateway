@@ -27,7 +27,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Full RFC 8785 JCS (ES6 number formatting, UTF-16 key order) for the 0G
 # Private Computer AAD, which binds arbitrary cleartext JSON.
 serde_json_canonicalizer = "0.4"
-dstack-sdk = "0.1.2"
+dstack-sdk = "0.6.0"
 bytes = "1"
 rust_decimal = "1"
 
