@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import dcap_qvl
 from confidential_verifier.providers.nearai import NearaiProvider
+from confidential_verifier.verifiers.nearai import NearAICloudVerifier
 from provider_verifier.common import tdx_session_material
 from provider_verifier import chutes
 import private_ai_provider_verifier as bridge
@@ -234,6 +235,29 @@ class SessionMaterialTests(unittest.TestCase):
                 release.set()
                 server.shutdown()
                 thread.join()
+
+    def test_near_gateway_dstack_uses_process_deadline(self):
+        address = bytes.fromhex("11" * 20)
+        fingerprint = bytes.fromhex("ab" * 32)
+        nonce = bytes.fromhex("33" * 32)
+        report_data = hashlib.sha256(address + fingerprint).digest() + nonce
+        report = {
+            "gateway_attestation": {
+                "intel_quote": quote_fixture(report_data=report_data).hex(),
+                "signing_address": "0x" + address.hex(),
+                "tls_cert_fingerprint": fingerprint.hex(),
+            },
+        }
+        response = SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {"is_valid": True}
+        )
+        with patch("requests.post", return_value=response) as post:
+            result = asyncio.run(
+                NearAICloudVerifier().verify_gateway_component(report, nonce.hex())
+            )
+        self.assertTrue(result["is_valid"], result["errors"])
+        post.assert_called_once()
+        self.assertIsNone(post.call_args.kwargs.get("timeout"))
 
     def test_phala_compose_and_quote(self):
         base = phala_output()["provider_claims"]

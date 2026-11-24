@@ -1147,14 +1147,25 @@ fi"#
             300,
         )
         .unwrap();
-        assert_eq!(
-            verifier.verify(request.clone()).await.result,
-            VerificationResult::Verified,
-        );
+        let original = verifier.verify(request.clone()).await;
+        assert_eq!(original.result, VerificationResult::Verified);
+        let remaining = verifier.cache_remaining(&request).unwrap();
         let refresh = verifier.refresh(request.clone()).await;
         assert_eq!(refresh.result, VerificationResult::Failed);
         assert_eq!(refresh.failure, failure);
-        assert_eq!(verifier.cached(&request).is_some(), keep_cache);
+
+        let from_cache = verifier.verify(request.clone()).await;
+        if keep_cache {
+            assert_eq!(from_cache.result, VerificationResult::Verified);
+            assert_eq!(from_cache.channel_bindings, original.channel_bindings);
+            assert_eq!(from_cache.evidence, original.evidence);
+            assert!(verifier.cache_remaining(&request).unwrap() <= remaining);
+        } else {
+            assert_eq!(from_cache.result, VerificationResult::Failed);
+            assert_eq!(from_cache.failure, failure);
+            assert!(verifier.cached(&request).is_none());
+        }
+        assert_eq!(std::fs::read_to_string(counter_path).unwrap(), "2");
     }
 }
 

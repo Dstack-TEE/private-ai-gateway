@@ -21,9 +21,9 @@ report a `model_name` that exactly matches the configured upstream model ID
 sent in the request. An alias that resolves to a different name fails this
 check.
 
-The report fetch and the gateway's dstack and NVIDIA verifier requests use a
-3-second connect timeout and a 10-second read timeout. The Rust verifier
-deadline bounds the subprocess across those calls.
+The remote report fetch and NVIDIA verification use a 3-second connect
+timeout and a 10-second read timeout. The Rust subprocess deadline also
+bounds the local dstack verification, including any cold OS-image download.
 
 `NearAICloudVerifier.verify_gateway_component` checks the
 `gateway_attestation` component.
