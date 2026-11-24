@@ -117,6 +117,7 @@ impl UpstreamBackend for StubUpstream {
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         *self.received.lock().unwrap() = Some(req.body.to_vec());
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: self.body.clone(),
             headers: Default::default(),

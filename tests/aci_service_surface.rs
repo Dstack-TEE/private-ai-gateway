@@ -245,6 +245,7 @@ impl UpstreamBackend for RecordingUpstream {
             "upstream-id".to_string(),
         );
         Ok(UpstreamResponse {
+            response_attestation: None,
             status_code: 200,
             body: self.response_body.clone(),
             headers,

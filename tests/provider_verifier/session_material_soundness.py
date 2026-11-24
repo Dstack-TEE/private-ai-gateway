@@ -86,6 +86,7 @@ def near_output(
     valid=True,
     attestations=None,
     tcb_status="UpToDate",
+    component=None,
 ):
     gateway = {
         "intel_quote": quote_fixture(report_data=bytes.fromhex(nonce) * 2, changes=changes).hex(),
@@ -105,6 +106,7 @@ def near_output(
             "confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component",
             new=AsyncMock(return_value=result),
         ),
+        patch.object(NearAICloudVerifier, "_verify_component", new=component) if component else nullcontext(),
     ):
         return run_near_bridge("model-a")
 
@@ -277,15 +279,62 @@ class SessionMaterialTests(unittest.TestCase):
                 self.assertEqual(output["failure"], "binding_mismatch")
                 self.assertIn("model_name does not match", output["reason"])
 
-    def test_near_requires_a_near_hosted_quote(self):
+    def test_near_missing_model_quote_keeps_only_the_router(self):
         for entry in (
             {"model_name": "model-a", "quote_b64": "qw=="},
             {"model_name": "model-a", "intel_quote": ""},
+            {"provider": "chutes", "model": "model-a", "quote_b64": "qw=="},
         ):
             with self.subTest(entry=entry):
                 output = near_output(attestations=[entry])
-                self.assertEqual(output["result"], "failed")
-                self.assertIn("no NEAR-hosted attestation (missing intel_quote)", output["reason"])
+                self.assertEqual(output["result"], "verified")
+                self.assertEqual(output["attested_scope"], "router")
+                self.assertNotIn("near_model", output["evidence"])
+        for entry in (
+            {"provider": "chutes", "model": "model-b", "quote_b64": "qw=="},
+            {"provider": "chutes", "model": "model-a", "model_name": "model-b"},
+            {"provider": "chutes", "model": "model-a", "intel_quote": "ab"},
+        ):
+            with self.subTest(entry=entry):
+                self.assertEqual(near_output(attestations=[entry])["failure"], "binding_mismatch")
+
+    def test_near_requires_all_candidates_to_verify_with_distinct_keys(self):
+        signer = "0x" + "11" * 20
+        other = "0x" + "22" * 20
+        compose = "aa" * 32
+        first = {
+            "model_name": "model-a", "intel_quote": "ab", "signing_algo": "ecdsa",
+            "signing_address": signer, "tls_cert_fingerprint": "aa" * 32,
+            "info": {"compose_hash": compose},
+        }
+        valid = {"is_valid": True, "details": {
+            "compose_verified": True, "dstack": {"details": {
+                "tcb_status": "UpToDate", "app_info": {"compose_hash": compose},
+            }},
+        }}
+        checked = AsyncMock(return_value=valid)
+        output = near_output(attestations=[first], component=checked)
+        self.assertEqual(output["evidence"]["near_model"]["verified_candidates"], {signer: 0})
+        checked.assert_awaited_once()
+
+        checked = AsyncMock(return_value=valid)
+        mixed = near_output(
+            attestations=[first, {**first, "intel_quote": "cd"}, {**first, "signing_address": other}],
+            component=checked,
+        )
+        self.assertEqual(mixed["evidence"]["near_model"]["verified_candidates"], {other: 2})
+        self.assertEqual(checked.await_count, 3)
+
+        for second, outcomes in (
+            ({**first, "intel_quote": "cd"}, []),
+            ({**first, "signing_address": other}, [valid, {"is_valid": False}]),
+            ({**first, "signing_address": other, "nvidia_payload": {"nonce": "wrong"}}, [valid]),
+        ):
+            checked = AsyncMock(side_effect=outcomes)
+            output = near_output(attestations=[first, second], component=checked)
+            self.assertEqual(output["result"], "verified")
+            self.assertNotIn("near_model", output["evidence"])
+            self.assertEqual(checked.await_count, len(outcomes))
 
     def test_near_stalled_report_times_out(self):
         release = Event()
@@ -318,6 +367,33 @@ class SessionMaterialTests(unittest.TestCase):
                 release.set()
                 server.shutdown()
                 thread.join()
+
+    def test_near_stalled_model_verification_keeps_verified_gateway(self):
+        reached = Event()
+        release = Event()
+        finished = Event()
+
+        async def stalled(*_args):
+            reached.set()
+            release.wait(5)
+            finished.set()
+            return {"is_valid": False}
+
+        entry = {
+            "model_name": "model-a", "intel_quote": "ab", "signing_algo": "ecdsa",
+            "signing_address": "0x" + "11" * 20, "tls_cert_fingerprint": "ab" * 32,
+        }
+        try:
+            with patch("provider_verifier.nearai.MODEL_VERIFICATION_BUDGET", 0.1):
+                output = near_output(attestations=[entry], component=stalled)
+            self.assertTrue(reached.is_set())
+            self.assertFalse(finished.is_set())
+            self.assertEqual(output["result"], "verified")
+            self.assertNotIn("near_model", output["evidence"])
+        finally:
+            release.set()
+            if reached.is_set():
+                self.assertTrue(finished.wait(5))
 
     def test_near_gateway_dstack_uses_process_deadline(self):
         address = bytes.fromhex("11" * 20)

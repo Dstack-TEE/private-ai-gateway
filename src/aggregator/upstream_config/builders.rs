@@ -12,7 +12,7 @@ use super::{
 use crate::aci::digest;
 use crate::aci::upstream::{
     CacheSaltField, ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
-    OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
+    NearAiBackend, OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
     UpstreamBackend, ZeroGProviderBackend,
 };
 use crate::aci::verifier::{
@@ -208,6 +208,14 @@ fn build_provider_backend(
                 backend = backend.with_bearer_token(token.clone());
             }
             backend = backend.with_basic_auth(cfg.basic_auth);
+            if cfg.provider == UpstreamProvider::NearAi && !cfg.basic_auth {
+                if let Some(token) = cfg.bearer_token.as_ref().filter(|token| !token.is_empty()) {
+                    return Ok(Arc::new(
+                        NearAiBackend::new(backend, cfg.base_url.clone(), token.clone())
+                            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+                    ));
+                }
+            }
             Ok(Arc::new(backend))
         }
     }

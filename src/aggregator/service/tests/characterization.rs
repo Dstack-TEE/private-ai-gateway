@@ -283,6 +283,7 @@ impl UpstreamBackend for Backend {
             body: self.source.clone(),
             headers: HashMap::from([("content-type".into(), self.content_type.into())]),
             served_instance_id: None,
+            response_attestation: None,
         })
     }
     async fn forward_verified_prepared(

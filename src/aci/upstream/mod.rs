@@ -32,6 +32,7 @@ pub use crate::sse_protocol::SseProtocol;
 mod body;
 mod cache_salt;
 mod chutes;
+mod near;
 mod openai;
 mod privatemode;
 pub mod request_id;
@@ -46,6 +47,7 @@ pub use cache_salt::CacheSaltField;
 pub use chutes::{
     ChutesProviderBackend, ChutesSessionStore, ChutesVerifiedDiscovery, ChutesVerifiedInstance,
 };
+pub use near::{NearAiBackend, EVENT_UPSTREAM_RESPONSE_ATTESTED};
 pub use openai::OpenAICompatibleBackend;
 pub(crate) use privatemode::{forwarding_client, readiness_client};
 pub use privatemode::{
@@ -114,6 +116,9 @@ pub struct UpstreamResponse {
     /// several (Chutes: the serving instance id). Lets the receipt cite that
     /// instance's attested session; `None` for single-channel backends.
     pub served_instance_id: Option<String>,
+    /// Supplemental signature verification to record in the receipt. This
+    /// does not select the session cited by the receipt.
+    pub response_attestation: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub type UpstreamBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;
