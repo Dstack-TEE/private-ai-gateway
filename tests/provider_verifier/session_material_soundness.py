@@ -31,7 +31,8 @@ import jwt
 import requests
 from cryptography.hazmat.primitives.asymmetric import ec
 from provider_verifier.common import tdx_session_material
-from provider_verifier import nearai, chutes
+from provider_verifier import chutes
+import private_ai_provider_verifier as bridge
 import soundness_phala_direct as phala
 
 # Serialized fixture layout from the pinned dcap-qvl TD report definitions.
@@ -60,21 +61,46 @@ def quote_fixture(*, td15=False, report_data=bytes(64), changes=None):
     return header + (struct.pack("<HI", 3, len(body)) if td15 else b"") + body + struct.pack("<I", len(auth)) + auth
 
 
-def near_output(*, measured="aa" * 32, supplied="bb" * 32, signing="0x" + "11" * 20, nonce="33" * 32, changes=None, valid=True):
+def near_output(
+    *,
+    measured="aa" * 32,
+    supplied="bb" * 32,
+    signing="0x" + "11" * 20,
+    nonce="33" * 32,
+    changes=None,
+    valid=True,
+    attestations=None,
+    tcb_status="UpToDate",
+):
     gateway = {
         "intel_quote": quote_fixture(report_data=bytes.fromhex(nonce) * 2, changes=changes).hex(),
         "signing_address": signing, "tls_cert_fingerprint": "ab" * 32,
         "info": {"compose_hash": supplied},
     }
-    report = SimpleNamespace(raw={"gateway_attestation": gateway}, request_nonce=nonce, model_dump=lambda **_: {})
+    if attestations is None:
+        attestations = [{"model_name": "model-a", "intel_quote": "ab"}]
+    report = {"gateway_attestation": gateway, "model_attestations": attestations}
+    response = SimpleNamespace(json=lambda: report, raise_for_status=lambda: None)
     result = {"is_valid": valid, "details": {"dstack": {"details": {
-        "tcb_status": "UpToDate", "app_info": {"compose_hash": measured},
+        "tcb_status": tcb_status, "app_info": {"compose_hash": measured},
     }}}}
-    with patch("confidential_verifier.providers.nearai.NearaiProvider.fetch_report", return_value=report), patch("confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component", new=AsyncMock(return_value=result)):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            asyncio.run(nearai.verify_nearai({"model_id": "model-a", "url_origin": "https://near.example"}))
-        return json.loads(output.getvalue())
+    request = {
+        "provider": "near-ai",
+        "model_id": "model-a",
+        "url_origin": "https://near.example",
+    }
+    output = io.StringIO()
+    with (
+        patch("requests.get", return_value=response),
+        patch(
+            "confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component",
+            new=AsyncMock(return_value=result),
+        ),
+        patch("sys.stdin", io.StringIO(json.dumps(request))),
+        redirect_stdout(output),
+    ):
+        asyncio.run(bridge.main())
+    return json.loads(output.getvalue())
 
 
 def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
@@ -225,6 +251,35 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertNotIn("session_material_version", near_output(measured=None)["provider_claims"])
         self.assertEqual(near_output(valid=False)["result"], "failed")
         self.assertNotIn("canonical_model_id", base)
+        stale = near_output(tcb_status="OutOfDate")
+        self.assertEqual(stale["result"], "verified")
+        self.assertEqual(stale["provider_claims"]["tcb_status"], "OutOfDate")
+
+    def test_near_requires_every_attested_model_name_to_match(self):
+        canonical = {"model_name": "model-a", "intel_quote": "ab"}
+        second = {"model_name": "model-a", "intel_quote": "cd"}
+        self.assertEqual(near_output(attestations=[canonical, second])["result"], "verified")
+        reports = [
+            [{**canonical, "model_name": "model-b"}],
+            [canonical, {**second, "model_name": "Model-a"}],
+            [{"intel_quote": "ab"}],
+        ]
+        for entries in reports:
+            with self.subTest(entries=entries):
+                output = near_output(attestations=entries)
+                self.assertEqual(output["result"], "failed")
+                self.assertEqual(output["failure"], "binding_mismatch")
+                self.assertIn("model_name does not match", output["reason"])
+
+    def test_near_requires_a_near_hosted_quote(self):
+        for entry in (
+            {"model_name": "model-a", "quote_b64": "qw=="},
+            {"model_name": "model-a", "intel_quote": ""},
+        ):
+            with self.subTest(entry=entry):
+                output = near_output(attestations=[entry])
+                self.assertEqual(output["result"], "failed")
+                self.assertIn("no NEAR-hosted attestation (missing intel_quote)", output["reason"])
 
     def test_phala_compose_and_quote(self):
         base = phala_output()["provider_claims"]

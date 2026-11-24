@@ -51,10 +51,15 @@ class NearaiProvider(ServiceProvider):
         data = response.json()
 
         attestations = data.get("model_attestations", [])
-        if not attestations or not isinstance(attestations, list):
-            raise Exception("Near report missing model_attestations")
+        if not isinstance(attestations, list) or not attestations:
+            raise ValueError("NEAR AI report missing model_attestations")
 
         first = attestations[0]
+        intel_quote = first.get("intel_quote") if isinstance(first, dict) else None
+        if not isinstance(intel_quote, str) or not intel_quote:
+            raise ValueError(
+                "NEAR AI model has no NEAR-hosted attestation (missing intel_quote)"
+            )
         nvidia_payload = first.get("nvidia_payload")
         if isinstance(nvidia_payload, str):
             try:
@@ -70,7 +75,7 @@ class NearaiProvider(ServiceProvider):
         return AttestationReport(
             provider="nearai",
             model_id=model_id,
-            intel_quote=first["intel_quote"],
+            intel_quote=intel_quote,
             request_nonce=nonce,
             nvidia_payload=nvidia_payload,
             raw=data,

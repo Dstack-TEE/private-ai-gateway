@@ -14,7 +14,15 @@ workload identity remains unverified.
 
 ## Verification algorithm
 
-The provider bridge asks NEAR AI for a report with a fresh nonce and `include_tls_fingerprint=true`. `NearAICloudVerifier.verify_gateway_component` then checks the `gateway_attestation` component:
+The provider bridge asks NEAR AI for a report with a fresh nonce and
+`include_tls_fingerprint=true`. It requires a non-empty `model_attestations[]`
+with a non-empty string `intel_quote` in the first entry. Every entry must
+report a `model_name` that exactly matches the configured upstream model ID
+sent in the request. An alias that resolves to a different name fails this
+check.
+
+`NearAICloudVerifier.verify_gateway_component` checks the
+`gateway_attestation` component.
 
 1. Send the TDX quote, event log, and VM configuration to the dstack verifier and require `is_valid: true`.
 2. When both `app_compose` and `compose_hash` are present, require `SHA256(UTF8(app_compose))` to equal the reported hash.
@@ -34,7 +42,11 @@ The bridge then requires a `gateway_attestation`, a `tls_cert_fingerprint`, and 
 
 The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest through `report_data`. The gateway pins that digest against the live NEAR AI HTTPS certificate before sending the request.
 
-The verifier cache omits the model from its key because every configured model uses the same router channel. The receipt records the selected model; the session records the shared router evidence.
+The verifier caches and refreshes verification by upstream model ID so each
+model passes the name check. A model name mismatch replaces any cached
+verification for that model. Repeated requests reuse the failed result for
+up to 60 seconds. The receipt records the selected model, and the session records
+the shared router channel evidence.
 
 Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
@@ -65,12 +77,10 @@ The round-1 live checks against `cloud-api.near.ai` rejected these tampered inpu
 ## Limitations
 
 - No workload pin. Any dstack CVM that passes the dstack verifier with matching `report_data` is accepted as the NEAR AI gateway. The adapter does not compare the compose, app ID, or image with a reviewed value.
-- The bridge verifies the gateway component only. Fetching the report still
-  requires a non-empty `model_attestations[]` whose first entry has an
-  `intel_quote` field. Reports without that shape fail lease establishment.
-- NEAR resolves admin-controlled aliases on the server. The adapter does not
-  compare the requested ID with the report's `model_name`, so it can establish
-  a gateway lease under a retargeted alias. See the
+- The model name check uses response metadata. The TDX quote still covers the
+  gateway channel only. The nested model quote is checked for presence.
+- Configure canonical upstream IDs from `/v1/model/list`. NEAR resolves
+  admin-controlled aliases on the server. See the
   [round-2 findings](review.md#open-findings).
 - Nothing in the emitted session identifies the downstream model CVM that served a response.
 - A non-`UpToDate` TCB status can remain `is_valid` and is represented as a refuted typed claim, not a bridge failure.
@@ -79,10 +89,11 @@ The round-1 live checks against `cloud-api.near.ai` rejected these tampered inpu
 
 ## Tests and reproduction
 
-Run the hermetic report-data tamper test:
+Run the hermetic report-data, model selection and bridge checks.
 
 ```sh
-cargo test --test soundness_report_data
+cargo test --locked --test soundness_report_data --test session_material_soundness
+CARGO_BUILD_JOBS=4 cargo test --locked --lib provider_verifier_cache_respects_model_checks
 ```
 
 For a live verifier run, start a trusted dstack verifier and set
