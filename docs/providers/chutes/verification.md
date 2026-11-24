@@ -84,12 +84,13 @@ The bridge records a stale TCB status instead of rejecting it. Relying parties t
 
 ## Reproduce
 
-From the repository root, with `CHUTES_API_KEY` set:
+Set `PROVIDER_API_KEY` to your Chutes API key, then run this command in Bash
+from the repository root.
 
 ```sh
 request_hash="sha256:$(printf '0%.0s' {1..64})"
 jq -n \
-  --arg key "$CHUTES_API_KEY" \
+  --arg key "$PROVIDER_API_KEY" \
   --arg hash "$request_hash" \
   '{
     api_version: "aci.provider-verifier.request.v1",
