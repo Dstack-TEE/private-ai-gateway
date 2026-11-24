@@ -163,7 +163,7 @@ impl Client {
             return Ok(());
         }
         let data = crate::paths::app_data_dir()?;
-        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup_shared)?;
         Self::ensure_service_locked(false)
     }
 
@@ -188,19 +188,23 @@ impl Client {
             Err(error) => return Err(connection_error(error)),
         }
         // Under the service manager a crashed backend is started again.
-        let mut child = if crate::supervisor::start()? {
+        let child = if crate::supervisor::start()? {
             None
         } else if require_supervision {
             return Err("The backend's login service became unavailable during handoff".into());
         } else {
             Some(crate::launch::spawn_background()?)
         };
+        Self::wait_for_service(child)
+    }
+
+    fn wait_for_service(mut child: Option<crate::launch::BackgroundService>) -> Result<(), String> {
         // A backend that exits is reported immediately below; this only bounds a
         // live but slow start.
         let deadline = Instant::now() + BACKEND_START_TIMEOUT;
         loop {
             match block_on(open())? {
-                Ok(connection) if current(&connection.version) => {
+                Ok(connection) if connection.version.version == protocol::BUILD_VERSION => {
                     reap(child);
                     return Ok(());
                 }
@@ -463,7 +467,7 @@ impl Client {
     /// PAP command cannot make the same handoff a second time.
     pub fn handoff_to_supervisor(&self) -> Result<bool, String> {
         let data = crate::paths::app_data_dir()?;
-        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup)?;
         let instance = match block_on(open())? {
             Ok(connection) => Some(connection.version),
             Err(error) if absent(&error) => {
@@ -490,8 +494,38 @@ impl Client {
                 .as_ref()
                 .map(|version| version.instance_id.as_str()),
         )?;
-        Self::ensure_service_locked(true)?;
-        Ok(true)
+        match Self::ensure_service_locked(true) {
+            Ok(()) => Ok(true),
+            Err(manager_error) => match Self::recover_detached(&data) {
+                Ok(()) => Err(manager_error),
+                Err(recovery_error) => Err(format!(
+                    "{manager_error} Cannot restart the detached backend: {recovery_error}"
+                )),
+            },
+        }
+    }
+
+    /// Runs under the exclusive startup gate. The supervisor can still start a
+    /// backend itself, so also check IPC and the backend's own instance lock.
+    fn recover_detached(data: &Path) -> Result<(), String> {
+        match block_on(open())? {
+            Ok(_) => return Ok(()),
+            Err(error) if absent(&error) || error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(connection_error(error)),
+        }
+        if block_on(legacy::is_running())? {
+            return Ok(());
+        }
+        // A replacement may still be starting with no management socket.
+        let Some(instance) = crate::lock::instance(data)
+            .map_err(|error| format!("Cannot inspect backend ownership: {error}"))?
+        else {
+            return Ok(());
+        };
+        drop(instance);
+        // Bypass the supervisor that just failed. If a backend starts in this
+        // gap, the instance lock lets only one process initialize the service.
+        Self::wait_for_service(Some(crate::launch::spawn_background()?))
     }
 
     /// Stops the running backend, of this build or another, and waits for it
@@ -599,12 +633,15 @@ impl Client {
     }
 }
 
-/// Take the startup gate to start the backend. Other clients share it; an
-/// installer or updater holding it is reported after `gate_wait`.
-fn acquire_startup(data: &Path, gate_wait: Duration) -> Result<crate::lock::StartupLock, String> {
+/// Wait for the shared startup gate or take it exclusively to replace a backend.
+fn acquire_startup(
+    data: &Path,
+    gate_wait: Duration,
+    try_lock: fn(&Path) -> io::Result<Option<crate::lock::StartupLock>>,
+) -> Result<crate::lock::StartupLock, String> {
     let deadline = Instant::now() + gate_wait;
     loop {
-        if let Some(startup) = crate::lock::startup_shared(data)
+        if let Some(startup) = try_lock(data)
             .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
         {
             return Ok(startup);
@@ -940,7 +977,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let gate = crate::lock::startup(dir.path()).unwrap().unwrap();
         let started = Instant::now();
-        let result = acquire_startup(dir.path(), Duration::from_millis(200));
+        let result = acquire_startup(
+            dir.path(),
+            Duration::from_millis(200),
+            crate::lock::startup_shared,
+        );
         assert_eq!(result.err().as_deref(), Some(STARTUP_IN_PROGRESS));
         assert!(started.elapsed() < Duration::from_secs(5));
         drop(gate);
@@ -949,9 +990,25 @@ mod tests {
     #[test]
     fn clients_start_the_backend_without_waiting_for_each_other() {
         let dir = tempfile::tempdir().unwrap();
-        let first = acquire_startup(dir.path(), Duration::ZERO).unwrap();
-        let second = acquire_startup(dir.path(), Duration::ZERO).unwrap();
+        let first =
+            acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup_shared).unwrap();
+        let second =
+            acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup_shared).unwrap();
         drop((first, second));
+    }
+
+    #[test]
+    fn replacing_a_backend_excludes_other_starts_and_replacements() {
+        let dir = tempfile::tempdir().unwrap();
+        let _handoff = acquire_startup(dir.path(), Duration::ZERO, crate::lock::startup).unwrap();
+        for try_lock in [crate::lock::startup_shared, crate::lock::startup] {
+            assert_eq!(
+                acquire_startup(dir.path(), Duration::ZERO, try_lock)
+                    .err()
+                    .as_deref(),
+                Some(STARTUP_IN_PROGRESS)
+            );
+        }
     }
 
     #[test]

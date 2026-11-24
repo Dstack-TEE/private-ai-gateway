@@ -175,6 +175,28 @@ fn assert_supervised_stop(offline_stop: bool) {
 #[cfg(target_os = "linux")]
 #[test]
 fn an_already_enabled_user_unit_takes_over_a_detached_backend_once() {
+    assert_user_unit_handoff(None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rejected_handoff_restores_the_detached_backend_and_session() {
+    assert_user_unit_handoff(Some((
+        "reject-start",
+        "Cannot start the backend through its login service",
+    )));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "exercises the production 60-second readiness deadline"]
+fn a_timed_out_handoff_restores_the_detached_backend_and_session() {
+    assert_user_unit_handoff(Some(("no-replacement", "Backend readiness timed out")));
+}
+
+#[cfg(target_os = "linux")]
+fn assert_user_unit_handoff(failure: Option<(&str, &str)>) {
+    use desktop_runtime::usage::UsageStore;
     use std::{os::unix::fs::PermissionsExt, process::Command};
 
     let sandbox = support::Sandbox::new();
@@ -185,7 +207,10 @@ fn an_already_enabled_user_unit_takes_over_a_detached_backend_once() {
     let cli = root.join("private-ai-proxy");
     let backend = root.join("private-ai-proxy-service");
     let config = home.join(".config/private-ai-proxy");
-    for directory in [&bin, &runtime, &config] {
+    let data = home
+        .join(".local/share")
+        .join(desktop_core::brand::APP_IDENTIFIER);
+    for directory in [&bin, &runtime, &config, &data] {
         fs::create_dir_all(directory).unwrap();
     }
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
@@ -194,11 +219,21 @@ fn an_already_enabled_user_unit_takes_over_a_detached_backend_once() {
         .local_addr()
         .unwrap()
         .port();
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    gateway.set_nonblocking(true).unwrap();
+    let gateway_addr = gateway.local_addr().unwrap();
     fs::write(
         config.join("config.toml"),
-        format!("[local-api]\nport = {port}\n"),
+        format!("active-profile = \"test\"\n[local-api]\nport = {port}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"https://{gateway_addr}\"\n"),
     )
     .unwrap();
+    desktop_core::private_fs::write_private(
+        &config.join("credentials.toml"),
+        "[profiles.test]\napi-key = \"test-key\"\n",
+    )
+    .unwrap();
+    let usage = UsageStore::open(data.join("usage.sqlite3")).unwrap();
+    usage.save_active_session("handoff-session", 1).unwrap();
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
 
@@ -224,6 +259,8 @@ case "$1" in
   daemon-reload) ;;
   enable) : > "$HOME/enabled" ;;
   start)
+    [ ! -e "$HOME/reject-start" ] || exit 1
+    [ ! -e "$HOME/no-replacement" ] || exit 0
     "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
     printf '%s\n' "$!" >"$HOME/managed-pid" ;;
   *) exit 2 ;;
@@ -249,6 +286,7 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("PAP_FIXTURE_BACKEND", &backend)
             .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
+            .env("NO_PROXY", "*")
             .args(args)
             .arg("--json")
             .output()
@@ -259,11 +297,48 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
         assert_success(&output);
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
+    let wait_for_verification = || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match gateway.accept() {
+                Ok((stream, _)) => return stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("Cannot observe verification: {error}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "The backend did not resume verification"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
 
     run(&["service", "enable"]);
     fs::write(home.join("no-bus"), "").unwrap();
     let detached = run(&["service", "start"])["processId"].clone();
+    let verifying = wait_for_verification();
     fs::remove_file(home.join("no-bus")).unwrap();
+
+    if let Some((flag, error)) = failure {
+        fs::write(home.join(flag), "").unwrap();
+        let output = launch(&["service", "enable"]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(error),
+            "{output:?}"
+        );
+        let status = run(&["status"]);
+        assert!(status["backend"]["processId"].is_number(), "{status}");
+        assert_ne!(status["backend"]["processId"], detached);
+        assert_eq!(status["gateway"]["sessionId"], "handoff-session");
+        assert_eq!(status["gateway"]["sessionActive"], true);
+        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        assert!(!home.join("managed-pid").exists());
+        let _reverifying = wait_for_verification();
+        run(&["service", "stop", "--yes"]);
+        return;
+    }
+    drop(verifying);
 
     fs::write(home.join("unsafe-restart"), "").unwrap();
     let output = launch(&["service", "enable"]);

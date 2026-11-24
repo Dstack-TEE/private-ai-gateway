@@ -144,7 +144,10 @@ policies such as Fedora's shutdown timeout can coexist with supervision.
 Effective overrides to execution or to the restart policy prevent adoption.
 Where no user manager is reachable, commands launch the backend directly.
 Once the manager is available, `pap start` or `pap service enable` can hand
-that backend over to the already enabled service. Without systemd lingering,
+that backend over to the already enabled service. If the manager rejects the
+start or the replacement misses the readiness deadline, PAP restarts the
+detached backend when no replacement is running. It preserves the session and
+still reports the manager error. Without systemd lingering,
 the manager starts at login. PAP leaves the lingering setting alone.
 
 `pap stop` ends protection and leaves the backend running. `pap service stop`
