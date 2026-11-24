@@ -3684,6 +3684,7 @@ dependencies = [
  "rust_decimal",
  "rustls",
  "rustls-pemfile",
+ "semver 1.0.28",
  "serde",
  "serde-human-bytes",
  "serde_json",

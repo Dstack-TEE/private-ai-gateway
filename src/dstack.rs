@@ -11,6 +11,7 @@ use dstack_sdk::dstack_client_v0::GetKeyConfig;
 use dstack_sdk::DstackClientV1;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
+use semver::Version;
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use x25519_dalek::StaticSecret as X25519SecretKey;
@@ -119,17 +120,34 @@ impl DstackAciProvider {
         let attest_client = DstackClientV1::new(endpoint.as_deref());
         let attest_client = match attest_client.version().await {
             Ok(_) => Some(attest_client),
-            // SDK 0.6 includes the HTTP status and the pRPC error text in
-            // Display. Only an unmounted surface indicates a pre-v1 guest.
-            Err(error)
-                if error
-                    .to_string()
-                    .strip_prefix("HTTP 404: ")
-                    .is_some_and(|body| !body.starts_with("Service not found:")) =>
-            {
-                None
+            // The SDK reports HTTP status in Display. The Unix-socket tests
+            // exercise its 404 format with both guest versions.
+            Err(error) if error.to_string().starts_with("HTTP 404:") => {
+                let response = client.version().await.map_err(|error| {
+                    KeyError::Quote(format!(
+                        "cannot determine dstack attestation API: /v1/Version returned HTTP 404 and /Version failed: {error}"
+                    ))
+                })?;
+                let version = Version::parse(&response.version).map_err(|error| {
+                    KeyError::Quote(format!(
+                        "cannot determine dstack attestation API: invalid version from /Version: {error}"
+                    ))
+                })?;
+                match (version.major, version.minor) {
+                    (0, 5) => None,
+                    series if series >= (0, 6) => Some(attest_client),
+                    _ => {
+                        return Err(KeyError::Quote(format!(
+                            "cannot determine dstack attestation API: unsupported guest version {version}"
+                        )));
+                    }
+                }
             }
-            Err(error) => return Err(KeyError::Quote(format!("dstack v1 Version: {error}"))),
+            Err(error) => {
+                return Err(KeyError::Quote(format!(
+                    "cannot determine dstack attestation API: /v1/Version failed: {error}"
+                )));
+            }
         };
         Self::from_client(client, attest_client, config).await
     }
@@ -592,18 +610,35 @@ mod tests {
         type Exchange = (&'static str, StatusCode, RpcResponse);
 
         fn rpc(path: &'static str, request: Value, response: Value) -> Exchange {
+            rpc_response(path, request, StatusCode::OK, response.to_string())
+        }
+
+        fn rpc_response(
+            path: &'static str,
+            request: Value,
+            status: StatusCode,
+            response: String,
+        ) -> Exchange {
             (
                 path,
-                StatusCode::OK,
+                status,
                 Box::new(move |body| {
                     assert_eq!(body, &request);
-                    response.to_string()
+                    response.clone()
                 }),
             )
         }
 
+        fn version_rpc(path: &'static str, version: &str) -> Exchange {
+            rpc(path, json!({}), json!({"version": version, "rev": "test"}))
+        }
+
+        fn missing_version(path: &'static str, body: &str) -> Exchange {
+            rpc_response(path, json!({}), StatusCode::NOT_FOUND, body.into())
+        }
+
         #[tokio::test]
-        async fn dstack_05_preserves_legacy_evidence() {
+        async fn confirmed_dstack_05_preserves_legacy_evidence() {
             let quote_log = V1_LOG.replace(r#""event_payload":"0102""#, r#""event_payload":"""#);
             let nonce = [0xa5; 32];
             let mut report_data = [0; 64];
@@ -621,7 +656,10 @@ mod tests {
                 "event_log": serde_json::from_str::<Value>(V1_LOG).unwrap(),
             });
             let quote = with_guest(
-                false,
+                vec![
+                    missing_version("/v1/Version", "<h1>Not Found</h1>"),
+                    version_rpc("/Version", "0.5.12"),
+                ],
                 [
                     rpc(
                         "/GetQuote",
@@ -661,10 +699,13 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn dstack_06_uses_recorded_v1_attestation() {
+        async fn confirmed_dstack_06_uses_attest_after_v1_probe_404() {
             let report_data = [0x42; 64];
             let quote = with_guest(
-                true,
+                vec![
+                    missing_version("/v1/Version", ""),
+                    version_rpc("/Version", "0.6.5"),
+                ],
                 [
                     rpc(
                         "/v1/Attest",
@@ -696,6 +737,30 @@ mod tests {
             let vm_config: Value = serde_json::from_str(quote.vm_config.as_str().unwrap()).unwrap();
             assert_eq!(vm_config["tdx_attestation_variant"], "lite");
             assert_eq!(quote.app_compose.as_deref(), Some(APP_COMPOSE));
+        }
+
+        #[tokio::test]
+        async fn inconclusive_version_probes_fail_closed() {
+            for (response, cause) in [
+                (missing_version("/Version", ""), "/Version failed"),
+                (
+                    version_rpc("/Version", "0.5.12 (unparseable)"),
+                    "invalid version from /Version",
+                ),
+            ] {
+                let error = with_guest(
+                    vec![missing_version("/v1/Version", ""), response],
+                    [],
+                    async |_| -> Result<(), KeyError> {
+                        panic!("the guest version was inconclusive")
+                    },
+                )
+                .await
+                .unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains("cannot determine dstack attestation API"));
+                assert!(message.contains(cause));
+            }
         }
 
         #[tokio::test]
@@ -744,7 +809,7 @@ mod tests {
                 json!({"attestation": hex::encode(bytes)}).to_string()
             });
             let body = with_guest(
-                true,
+                vec![version_rpc("/v1/Version", "0.6.5")],
                 [
                     ("/v1/Attest", StatusCode::OK, attest),
                     rpc(
@@ -817,7 +882,7 @@ mod tests {
         }
 
         async fn with_guest<T>(
-            v1: bool,
+            mut exchanges: Vec<Exchange>,
             attestation_exchanges: impl IntoIterator<Item = Exchange>,
             call: impl AsyncFnOnce(DstackAciProvider) -> Result<T, KeyError>,
         ) -> Result<T, KeyError> {
@@ -826,23 +891,6 @@ mod tests {
             let socket_path = dir.path().join("dstack.sock");
             let listener = UnixListener::bind(&socket_path).unwrap();
             let key = json!({"key": "01".repeat(32), "signature_chain": ["ab", "cd"]});
-            let probe = if v1 {
-                rpc(
-                    "/v1/Version",
-                    json!({}),
-                    json!({"version": "0.6.5", "rev": "test"}),
-                )
-            } else {
-                (
-                    "/v1/Version",
-                    StatusCode::NOT_FOUND,
-                    Box::new(|body: &Value| {
-                        assert_eq!(body, &json!({}));
-                        "<h1>Not Found</h1>".into()
-                    }) as RpcResponse,
-                )
-            };
-            let mut exchanges = vec![probe];
             for (path, purpose) in [
                 (&config.receipt_path, "aci.receipt.ed25519.v1"),
                 (&config.x25519_e2ee_path, "aci.e2ee.x25519.v1"),
@@ -897,8 +945,7 @@ mod tests {
             let client = async {
                 let provider =
                     DstackAciProvider::new(Some(format!("unix:{}", socket_path.display())), config)
-                        .await
-                        .unwrap();
+                        .await?;
                 call(provider).await
             };
             tokio::time::timeout(Duration::from_secs(5), async {
