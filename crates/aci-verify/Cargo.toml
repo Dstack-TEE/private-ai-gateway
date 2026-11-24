@@ -19,5 +19,11 @@ sha3 = "0.10"
 thiserror = "1"
 url = "2"
 
+[dev-dependencies]
+# Upstream parity oracle only: serde_jcs enables float_roundtrip, which would
+# otherwise change desktop connection-config recovery through feature unification.
+cc-eventlog = { git = "https://github.com/Dstack-TEE/dstack", tag = "verifier-v0.6.3" }
+ez-hash = "1.1.0"
+
 [lints.rust]
 unused_must_use = "deny"

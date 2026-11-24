@@ -126,6 +126,7 @@ impl UpstreamBackend for FixtureBackend {
             body: br#"{"id":"chat-router-cache","choices":[]}"#.to_vec(),
             headers: HashMap::new(),
             served_instance_id: None,
+            response_attestation: None,
         })
     }
 

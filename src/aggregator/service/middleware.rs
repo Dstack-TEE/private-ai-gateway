@@ -23,6 +23,7 @@ use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
 use crate::aci::upstream::request_id::request_id_from_headers;
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
+    EVENT_UPSTREAM_RESPONSE_ATTESTED,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::endpoint::Endpoint;
@@ -335,6 +336,9 @@ impl AciService {
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
+        if let Some(fields) = response.response_attestation.take() {
+            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields)?;
+        }
         let usage = if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&status) {
             if let Some(content_type) =
                 crate::middleware::speech::response_content_type(&response.headers, &response.body)

@@ -10,7 +10,7 @@ use crate::aci::receipt::{
 };
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    UpstreamStreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
 use crate::aggregator::session::{
@@ -67,6 +67,7 @@ impl WithheldResponse for UpstreamResponse {
             body: Vec::new(),
             headers: Default::default(),
             served_instance_id: None,
+            response_attestation: None,
         }
     }
 }
@@ -359,6 +360,9 @@ impl AciService {
             ReverifyOutcome::Failed(err) => return Err(err.into()),
         };
         let selected = (*admission).select(upstream_response.served_instance_id.as_deref())?;
+        let response_attestation = upstream_response
+            .response_attestation
+            .map(|fields| (digest::sha256_hex(&upstream_response.body), fields));
         let response_model =
             accepted_response_model(upstream_response.status_code, &upstream_response.body)
                 .or_else(|| endpoint.is_media().then(|| prepared.model_id.clone()));
@@ -468,6 +472,10 @@ impl AciService {
             // The session is keyed on the requested (routed) model; record the
             // exact upstream-served model in the receipt's event.
             builder.set_upstream_verified_model_id(response_model.clone());
+        }
+        if let Some((hash, fields)) = response_attestation {
+            builder.add_response_received_hash(hash)?;
+            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields)?;
         }
         // §7.4 wire bytes: whatever is actually served — after E2EE sealing
         // or an image-input 400 remap, when either applies.
@@ -1098,6 +1106,15 @@ impl AciService {
             return Err(ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedSession(model_id.to_string()),
             ));
+        }
+        if (!allowed.is_empty() || admitted_sessions.is_empty())
+            && event.provider_type.as_deref() == Some("near-ai")
+        {
+            // A pin uses only the router. With no admitted session there is no
+            // verified router receipt to supplement.
+            if let Some(evidence) = event.evidence.as_mut().and_then(Value::as_object_mut) {
+                evidence.remove("near_model");
+            }
         }
         // Preserve direct and failed/non-TEE events; they have no sessions.
         if !admitted_sessions.is_empty() {

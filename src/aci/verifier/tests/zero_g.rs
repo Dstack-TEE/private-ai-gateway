@@ -140,20 +140,30 @@ fn measured_compose() -> (Value, [u8; 48], [u8; 48]) {
     let mut rtmr3 = [0; 48];
     let mut log = Vec::new();
     for (event, payload) in events {
-        let digest = Sha384::digest(
-            [
-                EVENT_TYPE.to_le_bytes().as_slice(),
-                b":",
-                event.as_bytes(),
-                b":",
-                payload,
-            ]
-            .concat(),
-        );
+        if event == "app-id" {
+            // Legacy GetQuote may omit a V1 entry's digest. The quote still
+            // measures the digest computed from its event fields.
+            let digest = Sha384::digest(
+                [EVENT_TYPE.to_le_bytes().as_slice(), b":app-id:", payload].concat(),
+            );
+            rtmr3 = Sha384::digest([rtmr3.as_slice(), &digest].concat()).into();
+            log.push(json!({
+                "imr": 3, "event_type": EVENT_TYPE, "event": event,
+                "event_payload": hex::encode(payload), "digest": "",
+            }));
+            continue;
+        }
+        let payload = hex::encode(payload);
+        let preimage = serde_json_canonicalizer::to_vec(&json!({
+            "name": event, "payload": payload, "type": EVENT_TYPE,
+        }))
+        .unwrap();
+        let digest = Sha384::digest(&preimage);
         rtmr3 = Sha384::digest([rtmr3.as_slice(), &digest].concat()).into();
         log.push(json!({
             "imr": 3, "event_type": EVENT_TYPE, "event": event,
-            "event_payload": hex::encode(payload), "digest": "",
+            "event_payload": payload, "digest": hex::encode(digest),
+            "version": 2, "preimage": hex::encode(preimage),
         }));
     }
     let mut mr_config_id = [0; 48];

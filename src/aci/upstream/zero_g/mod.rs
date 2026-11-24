@@ -360,6 +360,7 @@ impl UpstreamBackend for ZeroGProviderBackend {
             body: serde_json::to_vec(&body).map_err(rejected)?,
             headers: HashMap::from([("content-type".to_string(), "application/json".to_string())]),
             served_instance_id: Some(check.provider),
+            response_attestation: None,
         })
     }
 

@@ -18,6 +18,40 @@ class NearaiProvider(ServiceProvider):
         model_id: str,
         include_tls_fingerprint: Optional[bool] = None,
     ) -> AttestationReport:
+        data, nonce = self.fetch_raw_report(model_id, include_tls_fingerprint)
+        attestations = data.get("model_attestations", [])
+        if not isinstance(attestations, list) or not attestations:
+            raise ValueError("NEAR AI report missing model_attestations")
+
+        first = attestations[0]
+        intel_quote = first.get("intel_quote") if isinstance(first, dict) else None
+        if not isinstance(intel_quote, str) or not intel_quote:
+            raise ValueError(
+                "NEAR AI model has no NEAR-hosted attestation (missing intel_quote)"
+            )
+        nvidia_payload = first.get("nvidia_payload")
+        if isinstance(nvidia_payload, str):
+            try:
+                import json
+
+                nvidia_payload = json.loads(nvidia_payload)
+            except ValueError:
+                pass
+
+        return AttestationReport(
+            provider="nearai",
+            model_id=model_id,
+            intel_quote=intel_quote,
+            request_nonce=nonce,
+            nvidia_payload=nvidia_payload,
+            raw=data,
+        )
+
+    def fetch_raw_report(
+        self,
+        model_id: str,
+        include_tls_fingerprint: Optional[bool] = None,
+    ) -> tuple[Dict[str, Any], str]:
         """
         Fetch attestation report from NearAI.
 
@@ -53,37 +87,10 @@ class NearaiProvider(ServiceProvider):
         )
         response.raise_for_status()
         data = response.json()
-
-        attestations = data.get("model_attestations", [])
-        if not isinstance(attestations, list) or not attestations:
-            raise ValueError("NEAR AI report missing model_attestations")
-
-        first = attestations[0]
-        intel_quote = first.get("intel_quote") if isinstance(first, dict) else None
-        if not isinstance(intel_quote, str) or not intel_quote:
-            raise ValueError(
-                "NEAR AI model has no NEAR-hosted attestation (missing intel_quote)"
-            )
-        nvidia_payload = first.get("nvidia_payload")
-        if isinstance(nvidia_payload, str):
-            try:
-                import json
-
-                nvidia_payload = json.loads(nvidia_payload)
-            except:
-                pass
-
-        # Store TLS fingerprint mode in raw data for verifier
+        if not isinstance(data, dict):
+            raise ValueError("NEAR AI attestation report must be an object")
         data["include_tls_fingerprint"] = use_tls_fingerprint
-
-        return AttestationReport(
-            provider="nearai",
-            model_id=model_id,
-            intel_quote=intel_quote,
-            request_nonce=nonce,
-            nvidia_payload=nvidia_payload,
-            raw=data,
-        )
+        return data, nonce
 
     def list_models(self) -> List[str]:
         url = f"{self.api_base}/model/list"

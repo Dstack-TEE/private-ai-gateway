@@ -3,10 +3,15 @@ mod common;
 
 use common::admission::{candidate, request, Attempt, Harness};
 use futures_util::StreamExt;
+use private_ai_gateway::aci::digest;
 use private_ai_gateway::aci::receipt::{ChannelBinding, SignedReceipt};
 use private_ai_gateway::aggregator::service::{
     MiddlewareForwardResult, MiddlewareReceiptJournal, ServiceError, StreamingForwardResult,
 };
+use private_ai_gateway::aggregator::session::EvidenceRef;
+use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
+use serde_json::{json, Value};
+use std::sync::Arc;
 
 fn configure_instances(h: &Harness, provider: &str) {
     let mut event = h.verifier.0.lock().unwrap();
@@ -35,6 +40,113 @@ fn verified_event(receipt: &SignedReceipt) -> serde_json::Value {
         .find(|e| e["type"] == "upstream.verified")
         .unwrap()
         .clone()
+}
+
+#[tokio::test]
+async fn near_ai_signature_evidence_keeps_router_session_stable_across_nonces() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.jsonl");
+    let mut h = Harness::new(
+        (100..104)
+            .map(|at| Attempt::Response { status: 200, at })
+            .collect(),
+    );
+    h.service = h
+        .service
+        .with_session_store(Arc::new(JsonlSessionStore::open(&path, 100).unwrap()));
+    let profiles: Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    let mut session_ids = Vec::new();
+    let mut establishment_evidence = None;
+    let source_url = "https://cloud-api.near.ai/v1/attestation/report";
+    let signer = format!("0x{}", "ab".repeat(20));
+
+    for (round, (nonce, router_measurement, model_measurement)) in [
+        ("first", "22", "22"),
+        ("second", "22", "22"),
+        ("second", "22", "44"),
+        ("second", "33", "44"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut claims = profiles["near-ai"].clone();
+        claims["tdx_report"]["mr_td"] = json!(router_measurement.repeat(48));
+        claims["tdx_report_sha256"] = json!(digest::sha256_hex(
+            &digest::jcs_bytes(&claims["tdx_report"]).unwrap()
+        ));
+        let router = EvidenceRef::from_bytes(
+            "application/json",
+            &serde_json::to_vec(&json!({"nonce": nonce, "mr_td": claims["tdx_report"]["mr_td"]}))
+                .unwrap(),
+        );
+        let report_digest = digest::sha256_hex(
+            &serde_json::to_vec(&json!({"nonce": nonce, "model_measurement": model_measurement}))
+                .unwrap(),
+        );
+        let mut evidence = serde_json::to_value(&router).unwrap();
+        evidence["near_model"] = json!({
+            "digest": report_digest, "source_url": source_url,
+            "verified_candidates": {(signer.as_str()): 0},
+        });
+        {
+            let mut event = h.verifier.0.lock().unwrap();
+            event.provider_type = Some("near-ai".into());
+            event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
+            event.provider_claims = Some(claims);
+            event.evidence = Some(evidence);
+        }
+        let supplemental = json!({
+            "provider": "near-ai",
+            "bound": true,
+            "signing_address": signer,
+            "candidate_evidence": {
+                "digest": report_digest, "source_url": source_url, "model_attestation_index": 0,
+            },
+        });
+        *h.backend.response_attestation.lock().unwrap() = supplemental.as_object().cloned();
+
+        h.clock.set(100 + round as u64);
+        let receipt = h
+            .service
+            .forward_chat_completion_request(request(vec![]))
+            .await
+            .unwrap()
+            .receipt;
+        let verification = verified_event(&receipt);
+        let id = verification["session_id"].as_str().unwrap();
+        session_ids.push(id.to_string());
+        assert_eq!(h.listed().len(), 1);
+        let session = h.service.get_attested_session(id).unwrap();
+        let expected = match round {
+            0 => establishment_evidence.insert(router),
+            1 | 2 => establishment_evidence.as_mut().unwrap(),
+            _ => establishment_evidence.insert(router),
+        };
+        assert_eq!(&session.document().evidence, expected);
+        assert_eq!(
+            session.document().claims.extra.get("trust_boundary"),
+            Some(&json!("near-ai-gateway"))
+        );
+
+        let document = receipt.document_json().unwrap();
+        let event = document["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "upstream.response_attested")
+            .unwrap();
+        for (key, value) in supplemental.as_object().unwrap() {
+            assert_eq!(&event[key], value);
+        }
+        // Only the router bundle and its session are written. A new nonce or
+        // a changed candidate measurement must not write either record.
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(log.lines().count(), if round < 3 { 2 } else { 4 });
+    }
+    assert_eq!(session_ids[0], session_ids[1]);
+    assert_eq!(session_ids[0], session_ids[2]);
+    assert_ne!(session_ids[0], session_ids[3]);
 }
 
 #[tokio::test]

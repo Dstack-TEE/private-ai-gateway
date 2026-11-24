@@ -1,4 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
+import {
+  DEFAULT_ARTIFACT_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
+  readAciJson,
+  timedFetch,
+} from '../attestation-http.js';
+import { AciError } from '../errors.js';
 
 import { jcsEqual } from '../crypto.js';
 
@@ -26,7 +33,6 @@ import {
 import { constrainRequestBody, object, validateProviderHeaderMultiplicity } from './constraints.js';
 export { constrainJsonBody } from './constraints.js';
 
-const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECEIPT_HISTORY_SIZE = 32;
 
 interface InternalExchange extends RecordedAciExchange {
@@ -411,19 +417,30 @@ class RuntimeAciConnection implements AciConnection {
   private async fetchJsonArtifact<T extends object>(path: string, authorization?: string): Promise<T> {
     const root = new URL(this.attestationURL);
     root.pathname = root.pathname.replace(/attestation$/, path);
-    const response = await this.secureFetch(root, {
-      headers: {
-        Accept: 'application/json',
-        ...(authorization ? { Authorization: authorization } : {}),
+    const value = await timedFetch(
+      this.fetch,
+      root,
+      {
+        headers: {
+          Accept: 'application/json',
+          ...(authorization ? { Authorization: authorization } : {}),
+        },
       },
-    });
-    if (!response.ok) {
-      throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
-    }
-    const value: unknown = await response.json().catch((error: unknown) => {
-      throw new AciConnectionError('receipt_fetch', 'ACI artifact endpoint returned invalid JSON', {
-        cause: error,
-      });
+      this.options.timeoutMs
+        ?? (path.startsWith('sessions/') ? DEFAULT_ARTIFACT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS),
+      async (response, signal) => {
+        if (!response.ok) {
+          throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
+        }
+        return readAciJson(response, signal);
+      },
+    ).catch((error: unknown) => {
+      if (error instanceof AciConnectionError) throw error;
+      throw new AciConnectionError(
+        'receipt_fetch',
+        error instanceof AciError ? error.message : 'ACI artifact endpoint returned invalid JSON',
+        { cause: error },
+      );
     });
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
       throw new AciConnectionError('receipt_verification', 'ACI artifact is not a JSON object');
@@ -690,7 +707,7 @@ async function fetchAttestation(
 ): Promise<AttestationReport> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', nonce);
-  const response = await timedFetch(
+  return timedFetch(
     options.bootstrapFetch ?? globalThis.fetch,
     url,
     {
@@ -698,21 +715,36 @@ async function fetchAttestation(
         Accept: 'application/json',
       },
     },
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  );
-  if (!response.ok) {
+    options.timeoutMs ?? DEFAULT_ARTIFACT_TIMEOUT_MS,
+    async (response, signal) => {
+      if (!response.ok) {
+        throw new AciConnectionError(
+          'attestation_fetch',
+          `ACI attestation endpoint returned HTTP ${response.status}`,
+        );
+      }
+      try {
+        return await readAciJson(response, signal) as AttestationReport;
+      } catch (error) {
+        throw new AciConnectionError(
+          'attestation_fetch',
+          error instanceof AciError
+            ? error.message
+            : 'ACI attestation endpoint returned invalid JSON',
+          { cause: error },
+        );
+      }
+    },
+  ).catch((error: unknown) => {
+    if (error instanceof AciConnectionError) throw error;
     throw new AciConnectionError(
       'attestation_fetch',
-      `ACI attestation endpoint returned HTTP ${response.status}`,
+      error instanceof AciError
+        ? error.message
+        : `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
-  }
-  try {
-    return (await response.json()) as AttestationReport;
-  } catch (error) {
-    throw new AciConnectionError('attestation_fetch', 'ACI attestation endpoint returned invalid JSON', {
-      cause: error,
-    });
-  }
+  });
 }
 
 async function probePinnedChannel(
@@ -722,125 +754,44 @@ async function probePinnedChannel(
 ): Promise<string[]> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', randomBytes(32).toString('hex'));
-  const response = await timedFetch(
+  return timedFetch(
     transport.fetch,
     url,
-    {
-      headers: {
-        Accept: 'application/json',
-      },
-    },
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  );
-  if (!response.ok) {
-    throw new AciConnectionError(
-      'channel_binding',
-      `pinned ACI channel probe returned HTTP ${response.status}`,
-    );
-  }
-  try {
-    const report: unknown = await response.json();
-    if (!object(report)) return [];
-    const capabilities = report.service_capabilities;
-    if (!object(capabilities)) return [];
-    const endpoints = capabilities.supported_multipart_constraint_endpoints;
-    return Array.isArray(endpoints) && endpoints.every((path): path is string => typeof path === 'string')
-      ? endpoints : [];
-  } catch (error) {
-    throw new AciConnectionError('channel_binding', 'pinned ACI attestation is not valid JSON', { cause: error });
-  }
-}
-
-async function timedFetch(
-  fetchImpl: AciFetch,
-  input: RequestInfo | URL,
-  init: RequestInit,
-  timeoutMs: number,
-): Promise<Response> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
-  }
-  const deadlineError = () =>
-    new AciConnectionError('attestation_fetch', `ACI request exceeded the ${timeoutMs}ms deadline`);
-  const controller = new AbortController();
-  let expired = false;
-  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
-  let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-  const timeout = setTimeout(() => {
-    expired = true;
-    controller.abort(deadlineError());
-    if (bodyController) {
-      try {
-        bodyController.error(deadlineError());
-      } catch {
-        // The wrapped stream already settled.
+    { headers: { Accept: 'application/json' } },
+    options.timeoutMs ?? DEFAULT_ARTIFACT_TIMEOUT_MS,
+    async (response, signal) => {
+      if (!response.ok) {
+        throw new AciConnectionError(
+          'channel_binding',
+          `pinned ACI channel probe returned HTTP ${response.status}`,
+        );
       }
-    }
-    void bodyReader?.cancel().catch(() => {});
-  }, timeoutMs);
-  timeout.unref();
-  const callerSignal = init.signal ?? null;
-  const onCallerAbort = () => controller.abort(callerSignal?.reason);
-  if (callerSignal) {
-    if (callerSignal.aborted) onCallerAbort();
-    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
-  }
-  try {
-    const response = await fetchImpl(input, { ...init, signal: controller.signal });
-    if (!response.body) {
-      clearTimeout(timeout);
-      return response;
-    }
-    // The deadline covers the whole response, not just its headers: keep the
-    // timer armed until the body is consumed, and surface body-read stalls
-    // as the same deadline failure.
-    const reader = response.body.getReader();
-    bodyReader = reader;
-    const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
-        bodyController = controller;
-        if (expired) controller.error(deadlineError());
-      },
-      async pull(controller) {
-        if (expired) {
-          controller.error(deadlineError());
-          return;
-        }
-        try {
-          const { done, value } = await reader.read();
-          if (done) {
-            clearTimeout(timeout);
-            controller.close();
-          } else {
-            controller.enqueue(value);
-          }
-        } catch (error) {
-          clearTimeout(timeout);
-          controller.error(error);
-        }
-      },
-      async cancel(reason) {
-        clearTimeout(timeout);
-        await reader.cancel(reason).catch(() => {});
-      },
-    });
-    return new Response(stream, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
-  } catch (error) {
-    clearTimeout(timeout);
+      try {
+        const report = await readAciJson(response, signal);
+        if (!object(report)) return [];
+        const capabilities = report.service_capabilities;
+        if (!object(capabilities)) return [];
+        const endpoints = capabilities.supported_multipart_constraint_endpoints;
+        return Array.isArray(endpoints) && endpoints.every((path): path is string => typeof path === 'string')
+          ? endpoints : [];
+      } catch (error) {
+        throw new AciConnectionError(
+          'channel_binding',
+          error instanceof AciError ? error.message : 'pinned ACI attestation is not valid JSON',
+          { cause: error },
+        );
+      }
+    },
+  ).catch((error: unknown) => {
     if (error instanceof AciConnectionError) throw error;
-    if (expired) throw deadlineError();
     throw new AciConnectionError(
       'attestation_fetch',
-      `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
+      error instanceof AciError
+        ? error.message
+        : `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
-  } finally {
-    callerSignal?.removeEventListener('abort', onCallerAbort);
-  }
+  });
 }
 
 // Normalize the protocol-defined provenance struct, as Rust deserialization does.

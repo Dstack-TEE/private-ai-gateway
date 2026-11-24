@@ -1,25 +1,26 @@
 # NEAR AI verification
 
-The NEAR AI adapter verifies the public cloud gateway as one router-scoped TDX
-channel. A verified session attests this gateway channel. Backend model
-workload identity remains unverified.
+The NEAR AI adapter verifies the public cloud gateway as a router-scoped TDX
+channel. A successful buffered chat receipt can also record verification of
+the model signing key against an entry in the preflight report.
 
 | Property | Value |
 | --- | --- |
-| Attestation scope | Router |
+| Attestation scope | Router, with supplemental model key signature verification |
 | Verifier | `scripts/provider_verifier/nearai.py` and vendored `NearAICloudVerifier` |
 | External dependency | dstack verifier at `DSTACK_VERIFIER_URL` (default `http://localhost:8080`) |
-| Enforced binding | `tls_spki_sha256` |
+| Enforced binding | `tls_spki_sha256` for forwarding, EIP-191 for model key signatures |
 | Evidence endpoint | `https://cloud-api.near.ai/v1/attestation/report` |
 
 ## Verification algorithm
 
 The provider bridge asks NEAR AI for a report with a fresh nonce and
-`include_tls_fingerprint=true`. It requires a non-empty `model_attestations[]`
-with a non-empty string `intel_quote` in the first entry. Every entry must
-report a `model_name` that exactly matches the configured upstream model ID
-sent in the request. An alias that resolves to a different name fails this
-check.
+`include_tls_fingerprint=true`. It requires a non-empty `model_attestations[]`.
+Every entry's `model_name` must match the configured upstream model ID exactly.
+For a Chutes entry with neither `model_name` nor `intel_quote`, the bridge uses
+the provider's `model` field for the same check. An alias that resolves to a
+different name fails verification. An entry with the right name and no
+`intel_quote` can establish the router session only.
 
 The remote report fetch and NVIDIA verification use a 3-second connect
 timeout and a 10-second read timeout. The Rust subprocess deadline also
@@ -42,6 +43,17 @@ bounds the local dstack verification, including any cold OS-image download.
 
 The bridge then requires a `gateway_attestation`, a `tls_cert_fingerprint`, and a valid component result, and emits one router-scoped TLS SPKI binding. A missing report-data value, nonce, signing address, or TLS fingerprint fails verification.
 
+For model key verification, the bridge checks all reported model candidates
+against the same fresh nonce. Each candidate needs a TDX quote, a replayed
+event log, a measured compose hash matching the supplied compose, and quote
+report data binding its ECDSA signing key and TLS fingerprint. A supplied GPU
+payload must match the nonce and pass the NVIDIA check. The model evidence
+bundle can contain up to eight candidates and 2 MiB of JSON. This supplemental
+stage gets up to eight seconds within the verifier subprocess deadline.
+Incomplete or invalid model evidence and a supplemental timeout leave the
+verified router channel available. A key shared by several reported candidates
+has no unique evidence entry to reference.
+
 ## Channel binding and forwarding
 
 The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest through `report_data`. The gateway pins that digest against the live NEAR AI HTTPS certificate before sending the request.
@@ -58,10 +70,44 @@ channel evidence.
 
 Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
-Image generation for `black-forest-labs/FLUX.2-klein-4B` uses this same router
-TLS attestation. It does not establish the image model instance, workload,
-or weights provenance. NEAR image responses carry no token usage; middleware
-billing uses `images.count` and synthesizes `usage.cost` from image pricing.
+## Buffered response binding
+
+The adapter adds `x-no-aliasing: true` and `accept-encoding: identity` on the
+buffered upstream chat path when a bearer token and eligible preflight model
+evidence are available. After a 2xx completion it requests
+`GET /v1/signature/{chat_id}?signing_algo=ecdsa` and requires:
+
+- A `provider_tee` ECDSA signature.
+- The exact signed text `<canonical-model-id>:<request-hash>:<response-hash>`,
+  using lowercase unprefixed SHA-256 hex over the bytes sent to and received
+  from NEAR.
+- An EIP-191 recovered signing address matching the advertised address and
+  exactly one candidate from the verified report available at admission.
+
+The receipt always cites the verified router session. For a successful
+check, `upstream.response_attested` records `bound: true`, the signature,
+the recovered signer, and `candidate_evidence`. This reference contains the
+digest and source URL of the exact preflight bundle and the zero-based index
+in its `model_attestations` array. The gateway retains only the reference.
+Rechecking the quote requires a separately retained copy of the exact
+bundle. The source URL returns a fresh report.
+
+An unsuccessful check when a lookup was eligible records `bound: false`
+and leaves the completed response and router receipt available. Requests
+with an explicit router session pin skip the signature lookup.
+
+The lookup has a one-second end-to-end HTTP deadline, an 8 KiB body limit,
+no retries or redirects, and at most 16 in-flight lookups per configured
+upstream. A 429 pauses lookups for the advertised delay in seconds (capped at
+60 seconds), or 10 seconds when that delay is unavailable. Busy, throttled,
+and unavailable lookups leave the completed inference available.
+
+Streaming, image generation, audio transcription, and other endpoints use
+router TLS attestation and skip the signature lookup. A streaming receipt
+commits to the observed bytes and attests the router channel. It carries no
+response signature from the model enclave. NEAR image responses carry no
+token usage, so middleware billing uses `images.count` and synthesizes
+`usage.cost` from image pricing.
 
 The round-1 live checks against `cloud-api.near.ai` rejected these tampered inputs:
 
@@ -82,17 +128,30 @@ The round-1 live checks against `cloud-api.near.ai` rejected these tampered inpu
 | `serving_software_known_good` | Unknown. |
 | `model_weights_provenance` | Unknown. |
 
+The signature and its evidence reference stay in the receipt extension.
+Router sessions reuse reviewed material across nonce-only refreshes and
+rotate when router measurements change. Candidate evidence creates no
+session or session-store record.
+
 ## Limitations
 
 - No workload pin. Any dstack CVM that passes the dstack verifier with matching `report_data` is accepted as the NEAR AI gateway. The adapter does not compare the compose, app ID, or image with a reviewed value.
-- The model name check uses response metadata. The TDX quote still covers the
-  gateway channel only. The nested model quote is checked for presence.
+- The canonical model name in the attestation response is report metadata.
+  For bound chat completions, the model name and hashes are also in the
+  signed response statement.
 - Configure canonical upstream IDs from `/v1/model/list`. NEAR resolves
   admin-controlled aliases on the server. See the
   [round-2 findings](review.md#open-findings).
-- Nothing in the emitted session identifies the downstream model CVM that served a response.
+- A bound signature proves that a holder of the reported model key signed the
+  exact exchange. NEAR can share a signing key with deployments absent from
+  the preflight report. Serving deployment identity and its TCB, OS, and GPU
+  status remain unproven by the signature. See
+  [NEAR's verification policy](https://docs.near.ai/cloud/verification/reference/verification-policy)
+  and [nearai/cloud-api#1422](https://github.com/nearai/cloud-api/issues/1422).
 - A non-`UpToDate` TCB status can remain `is_valid` and is represented as a refuted typed claim, not a bridge failure.
-- Missing compose material is not a failure. A compose that does not match a present hash is rejected, but the adapter does not require both values.
+- Gateway verification accepts missing compose material. Model key verification
+  requires the measured compose and its hash. Workload and model
+  weights allowlisting remain outside this verification.
 - Supplemental GPU verification can run when the gateway report includes a payload. The bridge preserves its presence and acceptance in `gateway_gpu_check`, and reviewed material includes those outcomes. The NVIDIA path decodes JWTs without signature verification and does not bind device identity to the serving CPU, so it cannot establish authenticated GPU identity or continuity.
 
 ## Tests and reproduction
@@ -102,6 +161,7 @@ Run the hermetic report-data, model selection and bridge checks.
 ```sh
 cargo test --locked --test soundness_report_data --test session_material_soundness
 CARGO_BUILD_JOBS=4 cargo test --locked --lib near_ai_caches_model_failures_and_refreshes_healthy_siblings
+CARGO_BUILD_JOBS=4 cargo test --locked --lib aci::upstream::near
 ```
 
 For a live verifier run, start a trusted dstack verifier and set
