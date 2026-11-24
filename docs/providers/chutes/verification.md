@@ -21,9 +21,10 @@ The adapter resolves the model's chute ID and fetches three documents from the C
 - nonce-bound instance evidence from `/chutes/{chute_id}/evidence?nonce=<random>`; and
 - the E2EE instances and their public keys from `/e2e/instances/{chute_id}`.
 
-The adapter skips evidence explicitly tagged with a `tee_type` other than
-`tdx`. Untagged legacy evidence must pass the same TDX checks. For each
-eligible instance with evidence and an E2EE public key, the adapter runs these checks.
+The adapter compares `tee_type` case-insensitively and skips evidence tagged
+with another type. Evidence with a missing or null tag must pass the same TDX
+checks. For each eligible instance with evidence and an E2EE public key, the
+adapter runs these checks.
 
 1. Computes `expected = SHA256(nonce || e2e_pubkey)` over the provider's exact string concatenation.
 2. Reads `report_data` from the TDX quote at byte offset `48 + 520` and requires its first 32 bytes to equal `expected`. Chutes uses the upper 32 bytes for a hash of the attestation proxy certificate's public key. The adapter checks only the first 32 bytes for E2EE binding. [Chutes quote verification source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/util.py#L1235-L1265)
@@ -79,7 +80,12 @@ The bridge records a stale TCB status instead of rejecting it. Relying parties t
 
 - Middleware injects a per-user, provider-separated `cache_salt` into text-generation bodies before receipt hashing and Chutes encryption. Caller salt strings only subdivide the user's partition. Passthrough to vLLM is an observed provider behavior, not an attestation-backed cache-isolation guarantee. See the [live isolation observation](../../prefix-cache-isolation.md#observed-enforcement) and [disposable-CVM runbook](../../cache-salt-cvm-test.md). Hermetic coverage: `cargo test --test middleware_completion cache_salt`.
 - The adapter uses Chutes' public measurement feed as its allowlist. It falls back to the deprecated feed on HTTP 404, 405, 410, or 501. Both feeds returned the same measurement tuples in [round 2](review.md#round-2-2026-11-23-pst). The public Chutes API source omits release-candidate profiles from the legacy feed, including those for debug builds. [Chutes measurement source](https://github.com/chutesai/chutes-api/blob/3b5609f4/api/server/router.py#L485-L522), [sek8s measurement guide](https://github.com/chutesai/sek8s/blob/v1.5.0/docs/reproducing-measurements.md)
-- GPU evidence is supplemental. Failure or absence does not reject an otherwise verified CPU and E2EE-key binding.
+- GPU evidence is supplemental. When GPU evidence is available after the CPU
+  and E2EE-key checks, the adapter fetches the JWKS once with a five-second
+  limit and shares it across the instance checks. The whole GPU step gets up
+  to ten seconds and stops sooner if needed to leave two seconds for the
+  verifier to exit. Failed, missing, and timed-out GPU results leave the GPU
+  claim unknown. A verified CPU and E2EE-key binding remains eligible.
 - GPU evidence is not hardware-bound to the serving CPU TEE. A passing NRAS result shows a genuine confidential-computing GPU for the nonce, not that it served the request.
 - Measurement matching does not prove which model weights are loaded.
 - Instance discovery and evidence endpoints are provider-controlled and rate-limited. `/e2e/instances` limits aggressively: the default three discovery rounds can trigger a `429` on a cold chute, and `chutes_e2ee_discovery_rounds: "1"` is gentler.

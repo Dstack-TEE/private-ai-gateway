@@ -13,12 +13,14 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import socket
 import struct
 import sys
+from threading import Event, Thread
 import time
 from types import SimpleNamespace
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from unittest.mock import AsyncMock, call, patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -86,15 +88,94 @@ def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
 
 def chutes_instance(*, nonce="nonce-a", changes=None):
     key = base64.b64encode(b"key").decode()
-    rd = hashlib.sha256((nonce + key).encode()).digest() + bytes(32)
-    quote = quote_fixture(report_data=rd, changes=changes)
+    binding = hashlib.sha256((nonce + key).encode()).digest()
+    quote = quote_fixture(report_data=binding + bytes(32), changes=changes)
     material = tdx_session_material(quote)["tdx_report"]
     report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({"status": "UpToDate", "report": {"TD10": material}}))
     profile = {"name": "profile", "mrtd": material["mr_td"], "runtime_rtmrs": {f"RTMR{i}": material[f"rt_mr{i}"] for i in range(4)}}
     with patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify:
-        result = asyncio.run(chutes.chutes_verify_instance({"instance_id": "instance-a", "quote": base64.b64encode(quote).decode()}, nonce, key, [profile], 5))
+        result, _ = asyncio.run(chutes.chutes_verify_instance(
+            {"instance_id": "instance-a", "quote": base64.b64encode(quote).decode()}, nonce, key, [profile],
+        ))
         verify.assert_awaited_once_with(quote)
         return result
+
+
+def chutes_output(instances, *, timeout_seconds=60):
+    key = base64.b64encode(b"key").decode()
+    material = tdx_session_material(quote_fixture())
+    report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
+        "status": "UpToDate", "report": {"TD10": material["tdx_report"]},
+    }))
+    profile = {
+        "name": "profile",
+        "mrtd": material["tdx_report"]["mr_td"],
+        **{f"rtmr{i}": material["tdx_report"][f"rt_mr{i}"] for i in range(4)},
+    }
+
+    def fetch(url, params=None, **_kwargs):
+        if url.endswith("/servers/tdx/measurements"):
+            data = [profile]
+        elif url.endswith("/evidence"):
+            binding = hashlib.sha256((params["nonce"] + key).encode()).digest()
+            quote = base64.b64encode(quote_fixture(report_data=binding + bytes(32))).decode()
+            data = {"evidence": [dict(instance, quote=quote) for instance in instances]}
+        elif "/e2e/instances/" in url:
+            data = {"instances": [
+                {"instance_id": instance["instance_id"], "e2e_pubkey": key, "nonces": ["discovery"]}
+                for instance in instances
+            ]}
+        else:
+            raise AssertionError(f"unexpected network boundary: {url}")
+        return SimpleNamespace(status_code=200, content=json.dumps(data).encode(), headers={}, raise_for_status=lambda: None)
+
+    with (
+        patch("requests.get", side_effect=fetch),
+        patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify,
+    ):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(chutes.verify_chutes({
+                "model_id": "00000000-0000-0000-0000-000000000000",
+                "timeout_seconds": timeout_seconds,
+                "provider_options": {
+                    "chutes_api_key": "fixture", "chutes_e2ee_discovery_rounds": "1",
+                },
+            }))
+        return json.loads(output.getvalue()), verify.await_count
+
+
+def nras_jwk(key):
+    jwk = jwt.algorithms.ECAlgorithm.to_jwk(key.public_key(), as_dict=True)
+    jwk["kid"] = "nvidia-key"
+    return jwk
+
+
+@contextmanager
+def silent_http_endpoint():
+    accepted = Event()
+    release = Event()
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(2)
+
+        def hold_connection():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                return
+            with connection:
+                accepted.set()
+                release.wait(8)
+
+        server = Thread(target=hold_connection)
+        server.start()
+        try:
+            yield f"http://127.0.0.1:{listener.getsockname()[1]}", accepted
+        finally:
+            release.set()
+            server.join()
 
 
 def profile_fixtures():
@@ -159,66 +240,82 @@ class SessionMaterialTests(unittest.TestCase):
         self.assertNotEqual(base["tdx_report_sha256"], chutes_instance(changes={"rt_mr3": b"z" * 48})["tdx_report_sha256"])
         self.assertIn("gpu_evidence_nonce_matched", base["gpu"])
 
-    def test_chutes_emits_per_instance_projection_maps(self):
-        key = base64.b64encode(b"key").decode()
-        material = tdx_session_material(quote_fixture())
-        report = SimpleNamespace(advisory_ids=["SA-B", "SA-A", "SA-B"], to_json=lambda: json.dumps({
-            "status": "UpToDate", "report": {"TD10": material["tdx_report"]},
-        }))
-        profile = {
-            "name": "profile",
-            "mrtd": material["tdx_report"]["mr_td"],
-            **{f"rtmr{i}": material["tdx_report"][f"rt_mr{i}"] for i in range(4)},
-        }
-
-        def fetch(url, params=None, **_kwargs):
-            if url.endswith("/servers/tdx/measurements"):
-                data = [profile]
-            elif url.endswith("/evidence"):
-                nonce = params["nonce"]
-                rd = hashlib.sha256((nonce + key).encode()).digest() + bytes(32)
-                quote = base64.b64encode(quote_fixture(report_data=rd)).decode()
-                data = {"evidence": [
-                    {
-                        "tee_type": "tdx", "instance_id": "instance-a", "quote": quote,
-                        "gpu_evidence": [{"arch": "HOPPER"}],
-                    },
-                    {"tee_type": "snp", "instance_id": "instance-b", "quote": quote},
-                    {"instance_id": "instance-c", "quote": quote},
-                ]}
-            elif "/e2e/instances/" in url:
-                data = {"instances": [
-                    {"instance_id": instance_id, "e2e_pubkey": key, "nonces": ["discovery"]}
-                    for instance_id in ("instance-a", "instance-b", "instance-c")
-                ]}
-            else:
-                raise AssertionError(f"unexpected network boundary: {url}")
-            return SimpleNamespace(status_code=200, content=json.dumps(data).encode(), headers={}, raise_for_status=lambda: None)
-
-        with (
-            patch("requests.get", side_effect=fetch),
-            patch("requests.post", return_value=SimpleNamespace(status_code=503)),
-            patch.object(dcap_qvl, "get_collateral_and_verify", new=AsyncMock(return_value=report)) as verify,
-        ):
-            output = io.StringIO()
-            with redirect_stdout(output):
-                asyncio.run(chutes.verify_chutes({"model_id": "00000000-0000-0000-0000-000000000000", "provider_options": {
-                    "chutes_api_key": "fixture", "chutes_e2ee_discovery_rounds": "1",
-                }}))
-            result = json.loads(output.getvalue())
-            self.assertEqual(verify.await_count, 2)
+    def assert_chutes_gpu_unknown(self, result, instance_id):
         self.assertEqual(result["result"], "verified")
-        self.assertEqual([binding["key_id"] for binding in result["channel_bindings"]], ["instance-a", "instance-c"])
-        claims = result["provider_claims"]
-        self.assertEqual(claims["session_material_version"], "chutes/1")
-        for instance_id in ("instance-a", "instance-c"):
-            self.assertEqual(claims["instance_tdx_reports"][instance_id], material["tdx_report"])
-            self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
-            self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
-        gpu = claims["instance_gpu"]["instance-a"]
+        self.assertIn(instance_id, [binding["key_id"] for binding in result["channel_bindings"]])
+        gpu = result["provider_claims"]["instance_gpu"][instance_id]
         self.assertTrue(gpu["gpu_evidence_present"])
         self.assertFalse(gpu["gpu_verified"])
         self.assertIsNone(gpu["gpu_evidence_nonce_matched"])
+
+    def test_chutes_emits_per_instance_projection_maps(self):
+        material = tdx_session_material(quote_fixture())
+        gpu = {"gpu_evidence": [{"arch": "HOPPER"}]}
+        instances = [
+            dict(gpu, tee_type="TDX", instance_id="instance-a"),
+            dict(gpu, tee_type="sNp", instance_id="instance-b"),
+            dict(gpu, tee_type=None, instance_id="instance-c"),
+            {"instance_id": "instance-d", "gpu_evidence": {"unexpected": "shape"}},
+        ]
+        jwks = {"keys": [nras_jwk(ec.generate_private_key(ec.SECP384R1()))]}
+        with (
+            patch.object(jwt.PyJWKClient, "fetch_data", return_value=jwks) as fetch,
+            patch("requests.post", return_value=SimpleNamespace(status_code=503)) as attest,
+        ):
+            result, quotes_checked = chutes_output(instances)
+        fetch.assert_called_once()
+        self.assertEqual(attest.call_count, 2)
+        self.assertEqual(quotes_checked, 3)
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+        self.assert_chutes_gpu_unknown(result, "instance-c")
+        self.assert_chutes_gpu_unknown(result, "instance-d")
+        accepted = ["instance-a", "instance-c", "instance-d"]
+        self.assertEqual([binding["key_id"] for binding in result["channel_bindings"]], accepted)
+        claims = result["provider_claims"]
+        self.assertEqual(claims["session_material_version"], "chutes/1")
+        for instance_id in accepted:
+            self.assertEqual(claims["instance_tdx_reports"][instance_id], material["tdx_report"])
+            self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
+            self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
+
+    def test_chutes_keeps_cpu_binding_when_jwks_fetch_fails(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        with (
+            patch.object(jwt.PyJWKClient, "fetch_data", side_effect=jwt.PyJWKClientConnectionError("offline")) as fetch,
+            patch("requests.post") as attest,
+        ):
+            result, _ = chutes_output(instances)
+        fetch.assert_called_once()
+        attest.assert_not_called()
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+
+    def test_chutes_skips_gpu_checks_without_process_deadline_headroom(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        with patch.object(jwt.PyJWKClient, "fetch_data") as fetch:
+            result, _ = chutes_output(instances, timeout_seconds=2)
+        fetch.assert_not_called()
+        self.assert_chutes_gpu_unknown(result, "instance-a")
+
+    def test_chutes_gpu_budget_does_not_wait_for_a_silent_socket(self):
+        instances = [{"tee_type": "tdx", "instance_id": "instance-a", "gpu_evidence": [{"arch": "HOPPER"}]}]
+        jwks = {"keys": [nras_jwk(ec.generate_private_key(ec.SECP384R1()))]}
+        for endpoint in ("NRAS_JWKS_URL", "NRAS_ATTEST_URL"):
+            with self.subTest(endpoint=endpoint), silent_http_endpoint() as (url, accepted):
+                fetch = (
+                    patch.object(jwt.PyJWKClient, "fetch_data", return_value=jwks)
+                    if endpoint == "NRAS_ATTEST_URL" else nullcontext()
+                )
+                with (
+                    fetch,
+                    patch.object(chutes, endpoint, url),
+                    patch.object(chutes, "NRAS_GPU_BUDGET_SECONDS", 0.5),
+                ):
+                    started_at = time.monotonic()
+                    result, _ = chutes_output(instances)
+                    elapsed = time.monotonic() - started_at
+                self.assertTrue(accepted.is_set())
+                self.assertLess(elapsed, 2)
+                self.assert_chutes_gpu_unknown(result, "instance-a")
 
     def test_chutes_measurements_fallback_only_when_tdx_endpoint_is_unavailable(self):
         base = "https://chutes.example"
@@ -251,8 +348,8 @@ class SessionMaterialTests(unittest.TestCase):
     def test_chutes_gpu_requires_a_signed_fresh_nras_platform_verdict(self):
         trusted = ec.generate_private_key(ec.SECP384R1())
         untrusted = ec.generate_private_key(ec.SECP384R1())
-        jwk = jwt.algorithms.ECAlgorithm.to_jwk(trusted.public_key(), as_dict=True)
-        jwk["kid"] = "nvidia-key"
+        jwk = nras_jwk(trusted)
+        signing_keys = {jwk["kid"]: jwt.PyJWK.from_dict(jwk)}
         nonce = "aa" * 32
         claims = {
             "iss": "https://nras.attestation.nvidia.com",
@@ -276,15 +373,13 @@ class SessionMaterialTests(unittest.TestCase):
             ("wrong subject", token(sub="GPU"), False, None),
             ("expired", token(exp=0), False, None),
         ]
-        with patch.object(jwt.PyJWKClient, "fetch_data", return_value={"keys": [jwk]}) as fetch:
-            for name, platform_jwt, verified, nonce_matched in cases:
-                with self.subTest(name=name):
-                    response = SimpleNamespace(status_code=200, json=lambda: [["JWT", platform_jwt]])
-                    with patch("requests.post", return_value=response):
-                        result = chutes.chutes_verify_gpu([{"arch": "HOPPER"}], nonce, 5)
-                    self.assertIs(result["gpu_verified"], verified)
-                    self.assertIs(result["gpu_evidence_nonce_matched"], nonce_matched)
-        fetch.assert_called()
+        for name, platform_jwt, verified, nonce_matched in cases:
+            with self.subTest(name=name):
+                response = SimpleNamespace(status_code=200, json=lambda: [["JWT", platform_jwt]])
+                with patch("requests.post", return_value=response):
+                    result = chutes.chutes_verify_gpu([{"arch": "HOPPER"}], nonce, signing_keys)
+                self.assertIs(result["gpu_verified"], verified)
+                self.assertIs(result["gpu_evidence_nonce_matched"], nonce_matched)
 
     def test_cross_language_fixtures_match_real_producers(self):
         self.assertEqual(profile_fixtures(), json.loads((ROOT / "tests/fixtures/session_material.json").read_text()))

@@ -377,6 +377,7 @@ pub(super) fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
 }
 
 /// Supplemental GPU check outcome, recorded as verifier-derived metadata.
+/// The Phala Direct path decodes NRAS JWTs without signature verification.
 /// These checks do not bind GPU identity to the serving CPU or establish
 /// continued use of a particular GPU.
 pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
