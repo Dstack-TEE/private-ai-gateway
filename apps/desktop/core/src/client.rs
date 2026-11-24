@@ -164,6 +164,11 @@ impl Client {
         }
         let data = crate::paths::app_data_dir()?;
         let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
+        Self::ensure_service_locked(false)
+    }
+
+    fn ensure_service_locked(require_supervision: bool) -> Result<(), String> {
+        let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         match block_on(open())? {
             Ok(connection) if current(&connection.version) => return Ok(()),
             Ok(connection) => {
@@ -185,6 +190,8 @@ impl Client {
         // Under the service manager a crashed backend is started again.
         let mut child = if crate::supervisor::start()? {
             None
+        } else if require_supervision {
+            return Err("The backend's login service became unavailable during handoff".into());
         } else {
             Some(crate::launch::spawn_background()?)
         };
@@ -451,16 +458,66 @@ impl Client {
         Self::ensure_service()
     }
 
+    /// Moves a detached backend to its enabled login service. Checking the
+    /// manager and replacing the process share the startup gate so another
+    /// PAP command cannot make the same handoff a second time.
+    pub fn handoff_to_supervisor(&self) -> Result<bool, String> {
+        let data = crate::paths::app_data_dir()?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT)?;
+        let instance = match block_on(open())? {
+            Ok(connection) => Some(connection.version),
+            Err(error) if absent(&error) => {
+                if !block_on(legacy::is_running())? {
+                    return Ok(false);
+                }
+                None
+            }
+            Err(error) => return Err(connection_error(error)),
+        };
+        let Some(supervisor_pid) = crate::supervisor::running_pid()? else {
+            return Ok(false);
+        };
+        if instance
+            .as_ref()
+            .is_some_and(|version| version.process_id == supervisor_pid)
+        {
+            return Ok(false);
+        }
+        self.shutdown_matching(
+            Some(&installed_backend()?),
+            ShutdownMode::UpdateRestart,
+            instance
+                .as_ref()
+                .map(|version| version.instance_id.as_str()),
+        )?;
+        Self::ensure_service_locked(true)?;
+        Ok(true)
+    }
+
     /// Stops the running backend, of this build or another, and waits for it
     /// to exit. With `expected`, only a backend of that installation.
     fn shutdown_owned(&self, expected: Option<&Path>, mode: ShutdownMode) -> Result<(), String> {
+        self.shutdown_matching(expected, mode, None)
+    }
+
+    fn shutdown_matching(
+        &self,
+        expected: Option<&Path>,
+        mode: ShutdownMode,
+        instance: Option<&str>,
+    ) -> Result<(), String> {
         let process = block_on(async {
             let mut connection = match open().await {
                 Ok(connection) => connection,
-                Err(error) if absent(&error) => return legacy::shutdown(expected, mode).await,
+                Err(error) if absent(&error) && instance.is_none() => {
+                    return legacy::shutdown(expected, mode).await
+                }
                 Err(error) => return Err(connection_error(error)),
             };
             let before = connection.version.clone();
+            if instance.is_some_and(|instance| instance != before.instance_id) {
+                return Err("The backend instance changed before handoff".into());
+            }
             if let Some(expected) = expected {
                 if !executable_matches(&before.executable, expected)? {
                     return Err(OTHER_INSTALLATION.into());

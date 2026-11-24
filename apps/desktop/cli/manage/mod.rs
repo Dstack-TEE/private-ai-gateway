@@ -81,14 +81,20 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             // Protection the user turned on goes on across logins and crashes
             // until they stop it: the backend moves under the service manager
             // and resumes the session there.
-            if desktop_core::supervisor::automatic(agent_bridge::agents::environment_overridden())
-                && desktop_core::supervisor::enable() == Ok(true)
-            {
-                client.restart_service()?;
-                if !global.json {
+            let registration =
+                desktop_core::supervisor::automatic(agent_bridge::agents::environment_overridden())
+                    .then(|| desktop_core::supervisor::enable().ok())
+                    .flatten();
+            if let Some(newly_enabled) = registration {
+                let moved = client.handoff_to_supervisor()?;
+                if !global.json && (newly_enabled || moved) {
                     eprintln!("Protection now resumes at login and after a crash using the service manager's environment (pap service disable turns that off).");
                 }
-                start(&client, profile.as_deref(), *timeout)?
+                if moved {
+                    start(&client, profile.as_deref(), *timeout)?
+                } else {
+                    state
+                }
             } else {
                 state
             }
@@ -273,6 +279,12 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                     "Stop the backend and restore managed agent configurations?",
                 )?;
                 client.shutdown()?;
+            } else if !cfg!(all(target_os = "macos", feature = "mac-app-store")) {
+                confirm(
+                    global,
+                    "End the saved protection session and restore managed agent configurations?",
+                )?;
+                restore_agents_offline(client)?;
             }
             Ok(json!({"status": "stopped"}))
         }
@@ -282,9 +294,8 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
         }
         Service::Enable => {
             // The backend that runs now moves under the service manager.
-            if desktop_core::supervisor::enable()? && client.is_running()? {
-                client.restart_service()?;
-            }
+            desktop_core::supervisor::enable()?;
+            client.handoff_to_supervisor()?;
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable => {

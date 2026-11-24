@@ -58,6 +58,17 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
 #[cfg(unix)]
 #[test]
 fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
+    assert_supervised_stop(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn service_stop_after_supervised_sigterm_restores_agents_offline() {
+    assert_supervised_stop(true);
+}
+
+#[cfg(unix)]
+fn assert_supervised_stop(offline_stop: bool) {
     use agent_bridge::{agents::Projector, catalog::Catalog};
     use desktop_core::agents::{Agent, ConnectOptions};
     use desktop_runtime::{local_state::LocalState, usage::UsageStore};
@@ -132,11 +143,13 @@ fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
             std::thread::sleep(Duration::from_millis(50));
         }
     };
-    let mut child = start();
-    let pid = rustix::process::Pid::from_child(&child);
-    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
-    desktop_core::launch::wait_for_exit(child.id(), Duration::from_secs(35)).unwrap();
-    assert!(child.wait().unwrap().success());
+    let terminate = |child: &mut std::process::Child| {
+        let pid = rustix::process::Pid::from_child(child);
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        desktop_core::launch::wait_for_exit(child.id(), Duration::from_secs(35)).unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    terminate(&mut start());
     assert_eq!(
         usage.active_session().unwrap(),
         Some(("saved-session".into(), 1))
@@ -144,6 +157,12 @@ fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
     assert_eq!(fs::read(&agent).unwrap(), projected);
 
     let mut child = start();
+    if offline_stop {
+        terminate(&mut child);
+        assert_eq!(backend.run(&["status"])["status"], "not_running");
+        assert!(usage.active_session().unwrap().is_some());
+        assert_eq!(fs::read(&agent).unwrap(), projected);
+    }
     backend.run(&["service", "stop", "--yes"]);
     assert!(child.wait().unwrap().success());
     assert_eq!(usage.active_session().unwrap(), None);
@@ -151,6 +170,118 @@ fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
         serde_json::from_slice::<Value>(&fs::read(&agent).unwrap()).unwrap(),
         original
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_already_enabled_user_unit_takes_over_a_detached_backend_once() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let sandbox = support::Sandbox::new();
+    let root = sandbox.path();
+    let home = root.join("home");
+    let bin = root.join("bin");
+    let runtime = root.join("runtime");
+    let cli = root.join("private-ai-proxy");
+    let backend = root.join("private-ai-proxy-service");
+    let config = home.join(".config/private-ai-proxy");
+    for directory in [&bin, &runtime, &config] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        config.join("config.toml"),
+        format!("[local-api]\nport = {port}\n"),
+    )
+    .unwrap();
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
+
+    // PATH contains only these sandbox commands, even when the user's real
+    // user manager is running under the same UID as the test.
+    let systemctl = r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+[ ! -e "$HOME/no-bus" ] || exit 1
+unit="$HOME/.config/systemd/user/private-ai-proxy.service"
+shift
+case "$1" in
+  show)
+    if [ -f "$unit" ]; then
+      unit_state=disabled
+      [ ! -e "$HOME/enabled" ] || unit_state=enabled
+      pid=0
+      if [ -f "$HOME/managed-pid" ]; then read -r pid <"$HOME/managed-pid"; fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$pid"
+    else
+      printf 'LoadState=not-found\nDropInPaths=\n'
+    fi ;;
+  daemon-reload) ;;
+  enable) : > "$HOME/enabled" ;;
+  start)
+    "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
+    printf '%s\n' "$!" >"$HOME/managed-pid" ;;
+  *) exit 2 ;;
+esac
+"#;
+    let busctl = r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+restart=on-failure
+[ ! -e "$HOME/unsafe-restart" ] || restart=always
+printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n' "$restart"
+"#;
+    for (name, script) in [("systemctl", systemctl), ("busctl", busctl)] {
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let launch = |args: &[&str]| {
+        Command::new(&cli)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PAP_FIXTURE_BACKEND", &backend)
+            .env("DBUS_SYSTEM_BUS_ADDRESS", "unix:path=/dev/null")
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run = |args: &[&str]| {
+        let output = launch(args);
+        assert_success(&output);
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    run(&["service", "enable"]);
+    fs::write(home.join("no-bus"), "").unwrap();
+    let detached = run(&["service", "start"])["processId"].clone();
+    fs::remove_file(home.join("no-bus")).unwrap();
+
+    fs::write(home.join("unsafe-restart"), "").unwrap();
+    let output = launch(&["service", "enable"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected restart policy"));
+    assert_eq!(run(&["status"])["backend"]["processId"], detached);
+    fs::remove_file(home.join("unsafe-restart")).unwrap();
+
+    run(&["service", "enable"]);
+    let managed = run(&["status"])["backend"]["processId"].clone();
+    assert_ne!(managed, detached);
+    assert_eq!(
+        managed.as_u64().unwrap().to_string(),
+        fs::read_to_string(home.join("managed-pid")).unwrap().trim()
+    );
+    run(&["service", "enable"]);
+    assert_eq!(run(&["status"])["backend"]["processId"], managed);
+    run(&["service", "stop", "--yes"]);
 }
 
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its

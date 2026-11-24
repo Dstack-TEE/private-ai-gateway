@@ -35,6 +35,8 @@ On supported Linux and macOS CLI installations, `pap start` registers the
 backend with systemd or launchd. Protection resumes after login and crashes.
 Automatic registration skips shells with agent configuration or proxy
 overrides. `pap service enable` uses the service manager's environment.
+If the backend started directly while the manager was unavailable, `pap start`
+or `pap service enable` can move it under its already enabled login service.
 `pap service disable` stops protection, restores agents, and turns off
 supervision. The desktop app has its own Open at Login. On Windows or without
 a user service manager, run `pap service start` after restarting the machine
@@ -319,12 +321,11 @@ but keeps management available.
 `service restart` restarts the backend without ending the protection session:
 agents stay pointed at the Local API, which answers again once the new backend
 has verified the service.
-When no backend is running, `service stop` restores nothing, and agents may
-still point at the Local API: after an update that was not relaunched, a crash,
-or a Windows sign-out. `stop --offline` does what `stop` does, without a
-backend: it ends the saved protection session, so the next backend start does
-not resume it, and restores the agents through the same restoration journal
-under the same lock, keeping each connection until protection is started again.
+When the backend has exited, `service stop` uses the same offline restoration
+as `stop --offline`. Both end the saved session and restore agents through the
+same journal and instance lock, including after a crash, supervised shutdown,
+or Windows sign-out. Each connection is kept for the next time you start
+protection.
 Running it again changes nothing. It holds the backend's instance lock while it
 works and is refused while a backend runs; use `stop` or `service stop` then.
 The Windows uninstaller runs it after `service stop`; if it fails, the
@@ -332,8 +333,8 @@ uninstaller shows why and asks whether to uninstall anyway, keeping the restore
 data (a silent uninstall continues and logs why). If the app data was also
 to be deleted, it cancels instead, since the app data holds the restore data.
 On macOS and Linux, run `pap service disable` before removing a supervised CLI
-installation. For other installations run `pap --yes service stop` and then
-`pap stop --offline` before removing the app. Mac App Store builds restore
+installation. For other installations run `pap --yes service stop` before
+removing the app. Mac App Store builds restore
 agents through the app's Stop All and Quit.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it

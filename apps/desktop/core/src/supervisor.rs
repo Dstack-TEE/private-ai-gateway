@@ -129,7 +129,16 @@ pub fn disable() -> Result<(), String> {
 
 /// Whether the service manager starts this installation's backend.
 pub fn enabled() -> bool {
-    supported() && platform::enabled()
+    running_pid().is_ok_and(|pid| pid.is_some())
+}
+
+/// PID of the enabled, owned login service. Zero means it is idle.
+pub(crate) fn running_pid() -> Result<Option<u32>, String> {
+    if supported() {
+        platform::running_pid()
+    } else {
+        Ok(None)
+    }
 }
 
 /// Starts the backend under the service manager, if it is enabled there.
@@ -181,37 +190,73 @@ mod platform {
         Ok(output)
     }
 
-    /// The D-Bus string array preserves paths containing spaces.
-    fn safe_drop_ins() -> bool {
+    fn properties(interface: &str, names: &[&str]) -> Option<Vec<serde_json::Value>> {
         #[derive(serde::Deserialize)]
-        struct DropIns {
-            data: Vec<PathBuf>,
+        struct Property {
+            data: serde_json::Value,
         }
-
-        let drop_ins = Command::new("busctl")
+        let output = Command::new("busctl")
             .args([
                 "--user",
                 "--json=short",
                 "get-property",
                 "org.freedesktop.systemd1",
                 UNIT_OBJECT,
-                "org.freedesktop.systemd1.Unit",
-                "DropInPaths",
+                interface,
             ])
+            .args(names)
             .stdin(Stdio::null())
-            .output();
-        drop_ins.is_ok_and(|output| {
-            output.status.success()
-                && serde_json::from_slice::<DropIns>(&output.stdout).is_ok_and(|drop_ins| {
-                    drop_ins.data.iter().all(|path| {
-                        path.parent()
-                            .and_then(Path::file_name)
-                            .is_some_and(|name| name != "private-ai-proxy.service.d")
-                            && fs::read_to_string(path)
-                                .is_ok_and(|text| !overrides_execution(&text))
-                    })
-                })
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter::<Property>()
+            .map(|property| property.ok().map(|property| property.data))
+            .collect()
+    }
+
+    /// The D-Bus string array preserves paths containing spaces.
+    fn safe_drop_ins() -> bool {
+        let Some(properties) = properties("org.freedesktop.systemd1.Unit", &["DropInPaths"]) else {
+            return false;
+        };
+        let [paths] = properties.as_slice() else {
+            return false;
+        };
+        serde_json::from_value::<Vec<PathBuf>>(paths.clone()).is_ok_and(|paths| {
+            paths.iter().all(|path| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name != "private-ai-proxy.service.d")
+                    && fs::read_to_string(path).is_ok_and(|text| !overrides_execution(&text))
+            })
         })
+    }
+
+    fn safe_restart_policy() -> bool {
+        properties(
+            "org.freedesktop.systemd1.Service",
+            &[
+                "Restart",
+                "RestartPreventExitStatus",
+                "RestartForceExitStatus",
+                "SuccessExitStatus",
+            ],
+        )
+        .is_some_and(|values| matches_restart_policy(&values))
+    }
+
+    fn matches_restart_policy(values: &[serde_json::Value]) -> bool {
+        use serde_json::json;
+        values
+            == [
+                json!("on-failure"),
+                json!([[crate::launch::EXIT_ALREADY_RUNNING], []]),
+                json!([[], []]),
+                json!([[], []]),
+            ]
     }
 
     fn overrides_execution(text: &str) -> bool {
@@ -330,7 +375,11 @@ mod platform {
 
         fn exists(&self) -> Result<bool, String> {
             if !self.packaged {
-                return registration::exists(&self.path, &self.contents);
+                return registration::exists(
+                    &registration::record_path()?,
+                    &self.path,
+                    &self.contents,
+                );
             }
             let user = user_unit()?;
             match fs::symlink_metadata(&user) {
@@ -356,7 +405,7 @@ mod platform {
         /// Inspect the effective unit. A user mask, an overlay in another
         /// search directory or an execution override takes precedence over
         /// our file. Distribution-wide timeout settings can still apply.
-        fn state(&self) -> Result<Option<String>, String> {
+        fn state(&self) -> Result<Option<Loaded>, String> {
             let mut state = self.loaded_state()?;
             if matches!(state, State::Reload) {
                 systemctl(&["daemon-reload"])?;
@@ -375,7 +424,7 @@ mod platform {
             let output = systemctl(&[
                 "show",
                 "--all",
-                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState",
+                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState,MainPID",
                 UNIT,
             ])?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -399,7 +448,12 @@ mod platform {
                     if property("NeedDaemonReload") != Some("no") {
                         return Ok(State::Reload);
                     }
-                    Ok(State::Loaded(property("UnitFileState").ok_or("systemd did not report the unit file state")?.to_owned()))
+                    if !safe_restart_policy() {
+                        return Err(format!("The systemd user unit {UNIT} has an unexpected restart policy"));
+                    }
+                    let file_state = property("UnitFileState").ok_or("systemd did not report the unit file state")?.to_owned();
+                    let pid = property("MainPID").and_then(|pid| pid.parse().ok()).ok_or("systemd did not report the backend PID")?;
+                    Ok(State::Loaded(Loaded { file_state, pid }))
                 }
                 _ => Err(format!("The effective systemd user unit {UNIT} belongs to another installation or was customized")),
             }
@@ -408,25 +462,40 @@ mod platform {
 
     enum State {
         Missing,
-        Loaded(String),
+        Loaded(Loaded),
         Reload,
     }
 
-    pub(super) fn enabled() -> bool {
-        Registration::for_installation()
-            .and_then(|registration| registration.state())
-            .is_ok_and(|state| matches!(state.as_deref(), Some("enabled" | "enabled-runtime")))
+    struct Loaded {
+        file_state: String,
+        pid: u32,
+    }
+
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        Ok(Registration::for_installation()?
+            .state()?
+            .and_then(|loaded| {
+                matches!(loaded.file_state.as_str(), "enabled" | "enabled-runtime")
+                    .then_some(loaded.pid)
+            }))
     }
 
     pub(super) fn enable() -> Result<bool, String> {
         let registration = Registration::for_installation()?;
         let state = registration.state()?;
-        if state.as_deref() == Some("enabled") {
+        if state
+            .as_ref()
+            .is_some_and(|state| state.file_state == "enabled")
+        {
             return Ok(false);
         }
         let created = state.is_none() && !registration.packaged && !registration.exists()?;
         if created {
-            super::registration::create(&registration.path, &registration.contents)?;
+            super::registration::create(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
         }
         let result = (|| {
             if state.is_none() {
@@ -442,7 +511,11 @@ mod platform {
             Ok(true)
         })();
         if result.is_err() && created {
-            super::registration::remove(&registration.path, &registration.contents)?;
+            super::registration::remove(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
             let _ = systemctl(&["daemon-reload"]);
         }
         result
@@ -450,7 +523,8 @@ mod platform {
 
     pub(super) fn disable() -> Result<(), String> {
         let registration = Registration::for_installation()?;
-        match registration.state()?.as_deref() {
+        let state = registration.state()?;
+        match state.as_ref().map(|state| state.file_state.as_str()) {
             Some("enabled") => {
                 systemctl(&["disable", UNIT])?;
             }
@@ -460,7 +534,11 @@ mod platform {
             _ => {}
         }
         if !registration.packaged && registration.exists()? {
-            super::registration::remove(&registration.path, &registration.contents)?;
+            super::registration::remove(
+                &super::registration::record_path()?,
+                &registration.path,
+                &registration.contents,
+            )?;
             systemctl(&["daemon-reload"])?;
         }
         Ok(())
@@ -472,6 +550,27 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn effective_restart_policy_keeps_deliberate_quits_stopped() {
+            use serde_json::json;
+            let safe = [
+                json!("on-failure"),
+                json!([[75], []]),
+                json!([[], []]),
+                json!([[], []]),
+            ];
+            assert!(super::matches_restart_policy(&safe));
+            for (index, override_value) in [
+                (0, json!("always")),
+                (1, json!([[], []])),
+                (2, json!([[0], []])),
+                (3, json!([[1], []])),
+            ] {
+                let mut changed = safe.clone();
+                changed[index] = override_value;
+                assert!(!super::matches_restart_policy(&changed));
+            }
+        }
         #[test]
         fn a_written_unit_quotes_the_command_path() {
             let unit = super::unit(std::path::Path::new("/opt/my apps/$100%/pap")).unwrap();
@@ -504,7 +603,7 @@ mod platform {
 #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 mod platform {
     use std::{
-        path::PathBuf,
+        path::{Path, PathBuf},
         process::{Command, Stdio},
     };
 
@@ -527,6 +626,7 @@ mod platform {
     pub(super) struct Agent {
         pub label: String,
         pub plist: PathBuf,
+        arguments: Vec<String>,
     }
 
     impl Agent {
@@ -538,7 +638,16 @@ mod platform {
             let plist = home
                 .join("Library/LaunchAgents")
                 .join(format!("{label}.plist"));
-            Ok(Self { label, plist })
+            let command = command()?.0;
+            let command = command
+                .to_str()
+                .filter(|path| !path.chars().any(char::is_control))
+                .ok_or("The command path cannot be represented in a launch agent")?;
+            Ok(Self {
+                label,
+                plist,
+                arguments: vec![command.into(), "service".into(), "run".into()],
+            })
         }
 
         /// The user's GUI domain (launchctl(1)).
@@ -550,8 +659,37 @@ mod platform {
             format!("{}/{}", Self::domain(), self.label)
         }
 
-        pub fn loaded(&self) -> bool {
-            launchctl(&["print", &self.target()])
+        fn loaded_pid(&self) -> Result<Option<u32>, String> {
+            let output = Command::new("launchctl")
+                .args(["print", &self.target()])
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| format!("Cannot inspect launchd agent {}: {error}", self.label))?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.code() == Some(113)
+                || stderr
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("Could not find service "))
+            {
+                return Ok(None);
+            }
+            if !output.status.success() {
+                return Err(format!(
+                    "Cannot inspect launchd agent {}: {}",
+                    self.label,
+                    stderr.trim()
+                ));
+            }
+            let pid = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(|text| loaded_pid(text, &self.plist, &self.arguments))
+                .ok_or_else(|| {
+                    format!(
+                        "Cannot verify the loaded launchd agent {} belongs to this installation",
+                        self.label
+                    )
+                })?;
+            Ok(Some(pid))
         }
 
         pub fn load(&self) -> bool {
@@ -560,13 +698,63 @@ mod platform {
                 .is_some_and(|plist| launchctl(&["bootstrap", &Self::domain(), plist]))
         }
 
-        pub fn unload(&self) -> bool {
-            launchctl(&["bootout", &self.target()])
+        fn unload(&self) -> Result<(), String> {
+            if self.loaded_pid()?.is_some() && !launchctl(&["bootout", &self.target()]) {
+                return Err("Cannot remove the backend's login item".into());
+            }
+            Ok(())
         }
 
-        pub fn start(&self) -> bool {
-            launchctl(&["kickstart", &self.target()])
+        fn start(&self) -> bool {
+            self.loaded_pid().is_ok_and(|pid| pid.is_some())
+                && launchctl(&["kickstart", &self.target()])
         }
+    }
+
+    /// `launchctl print` is diagnostic output, so require the complete identity
+    /// to match before using a label, and fail closed on an unfamiliar format.
+    fn loaded_pid(text: &str, plist: &Path, expected: &[String]) -> Option<u32> {
+        let mut lines = text.lines();
+        let opening = lines.next()?.strip_suffix(" = {")?;
+        if !opening.starts_with("gui/") {
+            return None;
+        }
+        let mut path = None;
+        let mut program = None;
+        let mut arguments = None;
+        let mut pid = 0;
+        while let Some(line) = lines.next() {
+            if let Some(value) = line.strip_prefix("\tpath = ") {
+                path = Some(Path::new(value));
+            } else if let Some(value) = line.strip_prefix("\tprogram = ") {
+                program = Some(value);
+            } else if let Some(value) = line.strip_prefix("\tpid = ") {
+                pid = value.parse().ok()?;
+            } else if line == "\targuments = {" {
+                let mut entries = Vec::new();
+                loop {
+                    let entry = lines.next()?;
+                    if entry == "\t}" {
+                        break;
+                    }
+                    entries.push(entry.strip_prefix("\t\t")?);
+                }
+                arguments = Some(entries);
+            }
+        }
+        let source = path?;
+        let same_source = source == plist
+            || std::fs::canonicalize(source)
+                .ok()
+                .zip(std::fs::canonicalize(plist).ok())
+                .is_some_and(|(source, plist)| source == plist);
+        (same_source
+            && program? == expected.first()?
+            && arguments?
+                .iter()
+                .copied()
+                .eq(expected.iter().map(String::as_str)))
+        .then_some(pid)
     }
 
     /// Runs `arguments` at login and again whenever it exits with a failure;
@@ -610,22 +798,29 @@ mod platform {
 
     fn written() -> Result<(Agent, String), String> {
         let agent = Agent::backend()?;
-        let command = command()?.0;
-        let command = command.to_str().ok_or("This command's path is not UTF-8")?;
-        let text = plist(&agent.label, &[command, "service", "run"]);
+        let arguments = agent
+            .arguments
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let text = plist(&agent.label, &arguments);
         Ok((agent, text))
     }
 
-    pub(super) fn enabled() -> bool {
-        written().is_ok_and(|(agent, text)| {
-            registration::exists(&agent.plist, &text) == Ok(true) && agent.loaded()
-        })
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        let (agent, text) = written()?;
+        if registration::exists(&registration::record_path()?, &agent.plist, &text)? {
+            agent.loaded_pid()
+        } else {
+            Ok(None)
+        }
     }
 
     pub(super) fn enable() -> Result<bool, String> {
         let (agent, text) = written()?;
-        let exists = registration::exists(&agent.plist, &text)?;
-        if agent.loaded() {
+        let record = registration::record_path()?;
+        let exists = registration::exists(&record, &agent.plist, &text)?;
+        if agent.loaded_pid()?.is_some() {
             return if exists {
                 Ok(false)
             } else {
@@ -636,13 +831,13 @@ mod platform {
             };
         }
         if !exists {
-            registration::create(&agent.plist, &text)?;
+            registration::create(&record, &agent.plist, &text)?;
         }
         if agent.load() {
             Ok(true)
         } else {
             if !exists {
-                registration::remove(&agent.plist, &text)?;
+                registration::remove(&record, &agent.plist, &text)?;
             }
             Err("launchd did not accept the backend's login item".into())
         }
@@ -650,13 +845,15 @@ mod platform {
 
     pub(super) fn disable() -> Result<(), String> {
         let (agent, text) = written()?;
-        if !registration::exists(&agent.plist, &text)? {
+        let record = registration::record_path()?;
+        if !registration::exists(&record, &agent.plist, &text)? {
+            if agent.loaded_pid()?.is_some() {
+                return Err(registration::foreign(&agent.plist));
+            }
             return Ok(());
         }
-        if agent.loaded() && !agent.unload() {
-            return Err("Cannot remove the backend's login item".into());
-        }
-        registration::remove(&agent.plist, &text)
+        agent.unload()?;
+        registration::remove(&record, &agent.plist, &text)
     }
 
     pub(super) fn start() -> bool {
@@ -688,23 +885,37 @@ mod platform {
             let agent = Agent {
                 plist: directory.path().join(format!("{label}.plist")),
                 label,
+                arguments: vec!["/bin/sleep".into(), "600".into()],
             };
             fs::write(&agent.plist, plist(&agent.label, &["/bin/sleep", "600"])).unwrap();
-            assert!(!agent.loaded());
+            assert_eq!(agent.loaded_pid().unwrap(), None);
             assert!(agent.load());
             struct UnloadOnDrop<'a>(&'a Agent);
             impl Drop for UnloadOnDrop<'_> {
                 fn drop(&mut self) {
-                    if self.0.loaded() {
-                        self.0.unload();
-                    }
+                    launchctl(&["bootout", &self.0.target()]);
                 }
             }
             let _unload = UnloadOnDrop(&agent);
-            assert!(agent.loaded());
+            assert!(agent.loaded_pid().unwrap().is_some());
             assert!(agent.start());
-            assert!(agent.unload());
-            assert!(!agent.loaded());
+            let other_file = Agent {
+                label: agent.label.clone(),
+                plist: directory.path().join("other.plist"),
+                arguments: agent.arguments.clone(),
+            };
+            let other_args = Agent {
+                label: agent.label.clone(),
+                plist: agent.plist.clone(),
+                arguments: vec!["/bin/sleep".into(), "42".into()],
+            };
+            for foreign in [other_file, other_args] {
+                assert!(!foreign.start());
+                assert!(foreign.unload().is_err());
+                assert!(agent.loaded_pid().unwrap().is_some());
+            }
+            agent.unload().unwrap();
+            assert_eq!(agent.loaded_pid().unwrap(), None);
         }
     }
 }
@@ -716,8 +927,8 @@ mod platform {
 mod platform {
     use super::UNSUPPORTED;
 
-    pub(super) fn enabled() -> bool {
-        false
+    pub(super) fn running_pid() -> Result<Option<u32>, String> {
+        Ok(None)
     }
     pub(super) fn enable() -> Result<bool, String> {
         Err(UNSUPPORTED.into())
