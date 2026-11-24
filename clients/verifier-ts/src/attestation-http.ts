@@ -2,6 +2,7 @@ import { AciError } from './errors.js';
 
 export const MAX_ATTESTATION_RESPONSE_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_TIMEOUT_MS = 10_000;
+export const DEFAULT_ARTIFACT_TIMEOUT_MS = 30_000;
 
 /** One deadline for fetching headers and consuming the response body. */
 export async function timedFetch<T>(

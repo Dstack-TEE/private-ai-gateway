@@ -2,9 +2,19 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
-import { MAX_ATTESTATION_RESPONSE_BYTES, readAciJson } from '../src/attestation-http.js';
+import {
+  DEFAULT_ARTIFACT_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
+  MAX_ATTESTATION_RESPONSE_BYTES,
+  readAciJson,
+} from '../src/attestation-http.js';
 import { verifyService } from '../src/index.js';
 import { connectAci } from '../src/node/index.js';
+
+test('artifact defaults leave room for multi-megabyte evidence', () => {
+  assert.equal(DEFAULT_TIMEOUT_MS, 10_000);
+  assert.equal(DEFAULT_ARTIFACT_TIMEOUT_MS, 30_000);
+});
 
 test('bounded JSON reader preserves UTF-8 across chunks', async () => {
   const encoded = new TextEncoder().encode('{"value":"é🚀"}');

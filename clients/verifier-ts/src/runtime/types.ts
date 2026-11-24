@@ -61,7 +61,7 @@ export interface ConnectAciOptions {
   policy?: AciPolicy;
   /** Gateway serving constraints applied to JSON and supported multipart POSTs. */
   serving?: AciServingPolicy;
-  /** Attestation/receipt/session request timeout, including bodies. Default: 10 seconds. */
+  /** Artifact request timeout, including bodies. Defaults to 30 seconds for attestation/session fetches and 10 seconds for receipts. */
   timeoutMs?: number;
   pccsUrl?: string;
   /** Fetch used only to bootstrap attestation over normal CA-validated TLS. */

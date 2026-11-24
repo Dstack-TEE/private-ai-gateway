@@ -1,5 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { DEFAULT_TIMEOUT_MS, readAciJson, timedFetch } from '../attestation-http.js';
+import {
+  DEFAULT_ARTIFACT_TIMEOUT_MS,
+  DEFAULT_TIMEOUT_MS,
+  readAciJson,
+  timedFetch,
+} from '../attestation-http.js';
 import { AciError } from '../errors.js';
 
 import { jcsEqual } from '../crypto.js';
@@ -421,7 +426,8 @@ class RuntimeAciConnection implements AciConnection {
           ...(authorization ? { Authorization: authorization } : {}),
         },
       },
-      this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      this.options.timeoutMs
+        ?? (path.startsWith('sessions/') ? DEFAULT_ARTIFACT_TIMEOUT_MS : DEFAULT_TIMEOUT_MS),
       async (response, signal) => {
         if (!response.ok) {
           throw new AciConnectionError('receipt_fetch', `ACI artifact fetch returned HTTP ${response.status}`);
@@ -709,7 +715,7 @@ async function fetchAttestation(
         Accept: 'application/json',
       },
     },
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    options.timeoutMs ?? DEFAULT_ARTIFACT_TIMEOUT_MS,
     async (response, signal) => {
       if (!response.ok) {
         throw new AciConnectionError(
@@ -752,7 +758,7 @@ async function probePinnedChannel(
     transport.fetch,
     url,
     { headers: { Accept: 'application/json' } },
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    options.timeoutMs ?? DEFAULT_ARTIFACT_TIMEOUT_MS,
     async (response, signal) => {
       if (!response.ok) {
         throw new AciConnectionError(
