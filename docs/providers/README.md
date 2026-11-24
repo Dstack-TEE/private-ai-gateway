@@ -8,14 +8,14 @@ Each provider has a living `verification.md` page for the current adapter and, o
 
 | Provider | Attested boundary | Enforced binding | Living reference | Dated audit decision |
 | --- | --- | --- | --- | --- |
-| 0G Private Computer | Per-provider 0G broker TEE (dstack), private tier only | `e2ee_public_key_sha256` | [Verification](0g-private-computer/verification.md) | [Acceptable with conditions](0g-private-computer/review.md), 2026-11-23 PST |
+| 0G Private Computer | Per-provider 0G broker TEE (dstack), private tier only | `e2ee_public_key_sha256` | [Verification](0g-private-computer/verification.md) | [Acceptable with conditions](0g-private-computer/review.md), 2026-11-23 PST. The plaintext destination is outside the verified boundary, barring strict inclusion. |
 | ACI service | ACI-compatible dstack service | `tls_spki_sha256` | [Verification](aci-service/verification.md) | First-party path; no separate audit |
 | ArmetAI | Per-model Intel TDX + NVIDIA CC GPU endpoint (non-dstack), measurement-pinned. Published workload uses SGLang. | `tls_spki_sha256` | [Verification](armet-ai/verification.md) | [Decision pending](armet-ai/review.md), 2026-11-23 PST |
 | Chutes | Per-instance Intel TDX workload | `e2ee_public_key_sha256` | [Configuration](chutes/configuration.md), [verification](chutes/verification.md) | [Accepted for limited traffic](chutes/review.md), 2026-11-23 PST |
-| NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Acceptable with conditions](near-ai/review.md), 2026-11-23 PST |
-| Phala direct | Per-model dstack CVM with Phala Inference Guard or dstack-vllm-proxy | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md), 2026-11-23 PST |
+| NEAR AI | Intel TDX router gateway | `tls_spki_sha256` | [Verification](near-ai/verification.md) | [Acceptable with conditions](near-ai/review.md) for the gateway channel, 2026-11-23 PST. Hard rejects bar model-scoped verified inference. |
+| Phala direct | Per-model dstack CVM with Phala Inference Guard or dstack-vllm-proxy | `tls_spki_sha256` | [Verification](phala-direct/verification.md) | [Acceptable with conditions](phala-direct/review.md) for the v2 TLS channel, 2026-11-23 PST. Open findings block strict confidential-inference admission, including log handling and runtime policy. |
 | Privatemode | Official proxy co-deployed in the gateway's measured Compose | `proxy_image_sha256` | [Verification](privatemode/verification.md) | [Acceptable with conditions](privatemode/review.md), 2026-11-23 PST |
-| SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Acceptable with conditions](secret-ai/review.md), 2026-11-23 PST |
+| SecretAI | SecretVM router workload | `tls_spki_sha256` | [Verification](secret-ai/verification.md) | [Acceptable with conditions](secret-ai/review.md) for the reviewed JEDI deployment, 2026-11-23 PST. RYTN remains unverified. |
 | Tinfoil | Confidential model router | `tls_spki_sha256` | [Verification](tinfoil/verification.md) | [Acceptable with conditions](tinfoil/review.md), 2026-11-23 PST |
 
 `openai-compatible` and `anthropic` are supported transport adapters, but they do not create verified TEE sessions.
