@@ -37,7 +37,7 @@ both current providers before sending a prompt.
 | `report_data` | All 11 responding brokers served the v1 layout with the on-chain signer. Requests for the v2 layout returned 404. |
 | Compose | Both providers' Compose files matched the hashes bound by their quotes and used digest-pinned images and in-CVM targets. The `glm-5.3` Compose ran without a controller or Docker socket. |
 | `pcverify` outcome | The event logs replayed to RTMR3. Both runs reported `PASS (INCOMPLETE)` because no reviewed Compose baseline or recorded upstream set was available. |
-| Shared CVM | The `0GM-1.0-35B-A3B` provider shares its TD, signer and encryption key with eight other provider addresses. |
+| Shared CVM | The `0GM-1.0-35B-A3B` provider shares its TD, signer and encryption key with several other provider addresses. |
 | Round-1 separated providers | `compute-network-41` and the Baidu and Tencent relays were absent from the registry. |
 | Response binding | All responding brokers advertised `e2ee_features: ["resp-bind"]`. |
 
