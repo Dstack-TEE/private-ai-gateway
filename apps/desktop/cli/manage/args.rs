@@ -112,9 +112,9 @@ pub enum Service {
     Stop,
     /// Restart the backend. Protection resumes and agents stay connected.
     Restart,
-    /// Start the backend at login and after a crash, resuming protection that was on (Linux and macOS).
+    /// Use the service manager's environment and start the backend at login and after a crash (Linux and macOS).
     Enable,
-    /// Stop starting the backend at login. A running backend and its protection go on.
+    /// Stop the backend, restore agent configurations and turn off login supervision.
     Disable,
     /// Run the backend in the foreground, as the login service does.
     #[command(hide = true)]

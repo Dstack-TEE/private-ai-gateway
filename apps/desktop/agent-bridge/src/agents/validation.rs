@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    registry::{
+        OPENCODE_CONFIG, OPENCODE_CONFIG_CONTENT, OPENCODE_CONFIG_DIR, PROGRAM_DATA,
+        XDG_CONFIG_HOME,
+    },
+    *,
+};
 
 pub(super) const CLAUDE_SWITCH_DRIFT: &str =
     "Claude Code's provider switch changed outside the app. Access is paused. Reconnect to restore Private AI Proxy routing.";
@@ -338,7 +344,7 @@ impl Projector {
         };
         let global = self
             .tool_env
-            .then(|| env_path("XDG_CONFIG_HOME"))
+            .then(|| env_path(XDG_CONFIG_HOME))
             .flatten()
             .unwrap_or_else(|| self.home.join(".config"))
             .join("opencode");
@@ -349,10 +355,10 @@ impl Projector {
             global.join("opencode.jsonc"),
         ];
         if self.tool_env {
-            if let Some(path) = env_path("OPENCODE_CONFIG") {
+            if let Some(path) = env_path(OPENCODE_CONFIG) {
                 paths.push(path);
             }
-            if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
+            if let Some(dir) = env_path(OPENCODE_CONFIG_DIR) {
                 paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
             }
         }
@@ -379,8 +385,7 @@ impl Projector {
             merge_opencode_config(&mut merged, layer);
         }
         if self.tool_env {
-            if let Some(text) =
-                env::var_os("OPENCODE_CONFIG_CONTENT").filter(|text| !text.is_empty())
+            if let Some(text) = env::var_os(OPENCODE_CONFIG_CONTENT).filter(|text| !text.is_empty())
             {
                 let layer = text
                     .to_str()
@@ -392,7 +397,7 @@ impl Projector {
                          Access is disabled; fix that override or Disconnect.",
                     )
                     })?;
-                sources.push("OPENCODE_CONFIG_CONTENT".to_string());
+                sources.push(OPENCODE_CONFIG_CONTENT.to_string());
                 merge_opencode_config(&mut merged, layer);
             }
         }
@@ -525,7 +530,7 @@ impl Projector {
         let projected = doc.as_json()?;
         let global = self
             .tool_env
-            .then(|| env_path("XDG_CONFIG_HOME"))
+            .then(|| env_path(XDG_CONFIG_HOME))
             .flatten()
             .unwrap_or_else(|| self.home.join(".config"))
             .join("opencode");
@@ -536,10 +541,10 @@ impl Projector {
             global.join("opencode.jsonc"),
         ];
         if self.tool_env {
-            if let Some(path) = env_path("OPENCODE_CONFIG") {
+            if let Some(path) = env_path(OPENCODE_CONFIG) {
                 paths.push(path);
             }
-            if let Some(dir) = env_path("OPENCODE_CONFIG_DIR") {
+            if let Some(dir) = env_path(OPENCODE_CONFIG_DIR) {
                 paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
             }
         }
@@ -556,7 +561,7 @@ impl Projector {
             merge_opencode_config(&mut merged, layer);
         }
         if self.tool_env {
-            if let Some(content) = env::var_os("OPENCODE_CONFIG_CONTENT") {
+            if let Some(content) = env::var_os(OPENCODE_CONFIG_CONTENT) {
                 merge_opencode_config(&mut merged, parse_jsonc(&content.into_string().ok()?).ok()?);
             }
         }
@@ -917,7 +922,7 @@ fn helper_fields_hold(agent: Agent, record: &Connection, doc: Option<&ConfigDoc>
 pub(super) fn opencode_system_config_dir(os: &str) -> Option<PathBuf> {
     match os {
         "macos" => Some(PathBuf::from("/Library/Application Support/opencode")),
-        "windows" => env::var_os("ProgramData").map(|path| PathBuf::from(path).join("opencode")),
+        "windows" => env::var_os(PROGRAM_DATA).map(|path| PathBuf::from(path).join("opencode")),
         _ => Some(PathBuf::from("/etc/opencode")),
     }
 }

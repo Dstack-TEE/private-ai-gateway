@@ -1,5 +1,54 @@
 use super::*;
 
+pub(super) const CODEX_HOME: &str = "CODEX_HOME";
+pub(super) const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
+pub(super) const OPENCODE_CONFIG: &str = "OPENCODE_CONFIG";
+pub(super) const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+pub(super) const PI_CODING_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
+pub(super) const HERMES_HOME: &str = "HERMES_HOME";
+pub(super) const OPENCODE_CONFIG_DIR: &str = "OPENCODE_CONFIG_DIR";
+pub(super) const OPENCODE_CONFIG_CONTENT: &str = "OPENCODE_CONFIG_CONTENT";
+pub(super) const OPENCLAW_CONFIG_PATH: &str = "OPENCLAW_CONFIG_PATH";
+pub(super) const OPENCLAW_STATE_DIR: &str = "OPENCLAW_STATE_DIR";
+pub(super) const OPENCLAW_HOME: &str = "OPENCLAW_HOME";
+pub(super) const OPENCLAW_PROFILE: &str = "OPENCLAW_PROFILE";
+pub(super) const OPENCLAW_NIX_MODE: &str = "OPENCLAW_NIX_MODE";
+pub(super) const PI_CONFIG_DIR: &str = "PI_CONFIG_DIR";
+pub(super) const OMP_PROFILE: &str = "OMP_PROFILE";
+pub(super) const PI_PROFILE: &str = "PI_PROFILE";
+pub(super) const DSH_HOME: &str = "DSH_HOME";
+pub(super) const LOCALAPPDATA: &str = "LOCALAPPDATA";
+pub(super) const PROGRAM_DATA: &str = "ProgramData";
+
+/// Agent paths and validation depend on these process environment overrides.
+pub fn environment_overridden() -> bool {
+    [
+        CODEX_HOME,
+        CLAUDE_CONFIG_DIR,
+        OPENCODE_CONFIG,
+        XDG_CONFIG_HOME,
+        PI_CODING_AGENT_DIR,
+        HERMES_HOME,
+        OPENCODE_CONFIG_DIR,
+        OPENCODE_CONFIG_CONTENT,
+        OPENCLAW_CONFIG_PATH,
+        OPENCLAW_STATE_DIR,
+        OPENCLAW_HOME,
+        OPENCLAW_PROFILE,
+        OPENCLAW_NIX_MODE,
+        PI_CONFIG_DIR,
+        OMP_PROFILE,
+        PI_PROFILE,
+        DSH_HOME,
+        LOCALAPPDATA,
+        PROGRAM_DATA,
+        HOME_OVERRIDE_ENV,
+        dsh::TOKEN_REF,
+    ]
+    .into_iter()
+    .any(|name| env::var_os(name).is_some())
+}
+
 /// How the bridge reaches and configures each agent.
 pub(crate) trait AgentIntegration {
     fn surface(self) -> Surface;
@@ -42,19 +91,19 @@ impl AgentIntegration for Agent {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
             Agent::Dsh => dsh::config_path(home, tool_env),
-            Agent::Codex => override_dir("CODEX_HOME")
+            Agent::Codex => override_dir(CODEX_HOME)
                 .unwrap_or_else(|| home.join(".codex"))
                 .join("config.toml"),
-            Agent::ClaudeCode => override_dir("CLAUDE_CONFIG_DIR")
+            Agent::ClaudeCode => override_dir(CLAUDE_CONFIG_DIR)
                 .unwrap_or_else(|| home.join(".claude"))
                 .join("settings.json"),
-            Agent::OpenCode => override_dir("OPENCODE_CONFIG").unwrap_or_else(|| {
-                override_dir("XDG_CONFIG_HOME")
+            Agent::OpenCode => override_dir(OPENCODE_CONFIG).unwrap_or_else(|| {
+                override_dir(XDG_CONFIG_HOME)
                     .unwrap_or_else(|| home.join(".config"))
                     .join("opencode")
                     .join("opencode.json")
             }),
-            Agent::Pi => override_dir("PI_CODING_AGENT_DIR")
+            Agent::Pi => override_dir(PI_CODING_AGENT_DIR)
                 .map(|path| match path.strip_prefix("~") {
                     Ok(suffix) => home.join(suffix),
                     Err(_) => path,
@@ -70,17 +119,13 @@ impl AgentIntegration for Agent {
             return None;
         }
         let vars = match self {
-            Agent::Codex => &["CODEX_HOME"][..],
-            Agent::ClaudeCode => &["CLAUDE_CONFIG_DIR"][..],
-            Agent::OpenCode => &["OPENCODE_CONFIG", "XDG_CONFIG_HOME"][..],
-            Agent::Pi | Agent::OhMyPi => &["PI_CODING_AGENT_DIR", "PI_CONFIG_DIR"][..],
-            Agent::Hermes => &["HERMES_HOME"][..],
-            Agent::OpenClaw => &[
-                "OPENCLAW_CONFIG_PATH",
-                "OPENCLAW_STATE_DIR",
-                "OPENCLAW_HOME",
-            ][..],
-            Agent::Dsh => &["DSH_HOME"][..],
+            Agent::Codex => &[CODEX_HOME][..],
+            Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR][..],
+            Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME][..],
+            Agent::Pi | Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR][..],
+            Agent::Hermes => &[HERMES_HOME][..],
+            Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME][..],
+            Agent::Dsh => &[DSH_HOME][..],
         };
         vars.iter().find(|name| env_path(name).is_some()).copied()
     }

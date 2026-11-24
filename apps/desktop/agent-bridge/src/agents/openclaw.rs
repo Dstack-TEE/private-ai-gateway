@@ -3,7 +3,13 @@
 //! config/paths.ts, secrets/resolve.ts and secrets/exec-provider-path-validation.ts.
 //! JSON5 editing and conditional restoration belong to the parent projector.
 
-use super::*;
+use super::{
+    registry::{
+        OPENCLAW_CONFIG_PATH, OPENCLAW_HOME, OPENCLAW_NIX_MODE, OPENCLAW_PROFILE,
+        OPENCLAW_STATE_DIR,
+    },
+    *,
+};
 use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
@@ -227,10 +233,10 @@ pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<String> {
 
 pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
     let override_path = |key| tool_env.then(|| env_path(key)).flatten();
-    override_path("OPENCLAW_CONFIG_PATH").unwrap_or_else(|| {
-        override_path("OPENCLAW_STATE_DIR")
+    override_path(OPENCLAW_CONFIG_PATH).unwrap_or_else(|| {
+        override_path(OPENCLAW_STATE_DIR)
             .unwrap_or_else(|| {
-                override_path("OPENCLAW_HOME")
+                override_path(OPENCLAW_HOME)
                     .unwrap_or_else(|| home.into())
                     .join(".openclaw")
             })
@@ -240,11 +246,7 @@ pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
 
 pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
     if tool_env {
-        for key in [
-            "OPENCLAW_CONFIG_PATH",
-            "OPENCLAW_STATE_DIR",
-            "OPENCLAW_HOME",
-        ] {
+        for key in [OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME] {
             if env_path(key)
                 .is_some_and(|p| !p.is_absolute() || p.to_str().is_none_or(|s| s.trim() != s))
             {
@@ -253,10 +255,10 @@ pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
                 ));
             }
         }
-        if env::var("OPENCLAW_PROFILE")
+        if env::var(OPENCLAW_PROFILE)
             .ok()
             .is_some_and(|p| !p.trim().is_empty() && !p.eq_ignore_ascii_case("default"))
-            || env::var("OPENCLAW_NIX_MODE").as_deref() == Ok("1")
+            || env::var(OPENCLAW_NIX_MODE).as_deref() == Ok("1")
         {
             return Err("Only the native default OpenClaw profile is supported".into());
         }
@@ -265,9 +267,9 @@ pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
     if !path.is_absolute() || path.to_string_lossy().starts_with("\\\\") {
         return Err("OpenClaw requires an absolute local host configuration path".into());
     }
-    if !(tool_env && env_path("OPENCLAW_CONFIG_PATH").is_some()) {
+    if !(tool_env && env_path(OPENCLAW_CONFIG_PATH).is_some()) {
         let effective_home = if tool_env {
-            env_path("OPENCLAW_HOME").unwrap_or_else(|| home.into())
+            env_path(OPENCLAW_HOME).unwrap_or_else(|| home.into())
         } else {
             home.into()
         };
@@ -279,7 +281,7 @@ pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
             return Err("OpenClaw legacy config discovery is ambiguous; set OPENCLAW_CONFIG_PATH explicitly".into());
         }
         if tool_env
-            && env_path("OPENCLAW_STATE_DIR").is_some()
+            && env_path(OPENCLAW_STATE_DIR).is_some()
             && !path.exists()
             && effective_home.join(".openclaw/openclaw.json").exists()
         {

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-* **Protection resumes after login and crashes.** `pap start` enables the login service for supported Linux and macOS CLI installations. `pap service disable` turns off supervision and preserves any running protection session.
+* **Protection resumes after logout, reboot, and crashes.** `pap start` enables supervision for supported Linux and macOS CLI installations when the shell has no agent path or proxy overrides. `pap service enable` uses the service manager's environment. `pap service disable` ends protection, restores agents, and turns off supervision.
 * **`pap agents connect` starts protection.** If protection cannot start, the command exits 1 with the reason before saving the connection. `--dry-run` leaves the backend and protection state alone.
 
 ### Bug Fixes

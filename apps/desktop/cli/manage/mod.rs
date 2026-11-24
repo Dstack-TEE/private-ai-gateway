@@ -81,12 +81,12 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             // Protection the user turned on goes on across logins and crashes
             // until they stop it: the backend moves under the service manager
             // and resumes the session there.
-            if desktop_core::supervisor::automatic()
+            if desktop_core::supervisor::automatic(agent_bridge::agents::environment_overridden())
                 && desktop_core::supervisor::enable() == Ok(true)
             {
                 client.restart_service()?;
                 if !global.json {
-                    eprintln!("Protection now resumes at login and after a crash (pap service disable turns that off).");
+                    eprintln!("Protection now resumes at login and after a crash using the service manager's environment (pap service disable turns that off).");
                 }
                 start(&client, profile.as_deref(), *timeout)?
             } else {
@@ -288,18 +288,19 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable => {
-            // Removing the registration ends a backend the service manager
-            // runs, so it is stopped as for a restart and started again
-            // outside it, keeping the protection session.
-            let supervised = desktop_core::supervisor::enabled() && client.is_running()?;
-            if supervised {
-                client.stop_for_restart()?;
+            // Quit through IPC before booting out a launch agent, which would
+            // otherwise preserve the session when it receives the signal.
+            if desktop_core::supervisor::enabled() && client.is_running()? {
+                client.shutdown_installed()?;
+                desktop_core::supervisor::disable()?;
+            } else {
+                desktop_core::supervisor::disable()?;
+                if client.is_running()? {
+                    client.shutdown_installed()?;
+                } else {
+                    restore_agents_offline(client)?;
+                }
             }
-            let disabled = desktop_core::supervisor::disable();
-            if supervised {
-                Client::ensure_service()?;
-            }
-            disabled?;
             Ok(json!({"startAtLogin": false}))
         }
         Service::Run => {
@@ -312,7 +313,9 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                let error = desktop_core::launch::child_command(&backend).exec();
+                let error = desktop_core::launch::child_command(&backend)
+                    .arg("--supervised")
+                    .exec();
                 Err(format!("Cannot run {}: {error}", backend.display()).into())
             }
             #[cfg(not(unix))]

@@ -104,13 +104,19 @@ restarts.
 
 The first successful `pap start` registers the backend with the user's service
 manager on supported CLI installations. The backend starts at login and after
-a crash and resumes the protection it left. `pap service disable` turns off
-supervision and keeps a running backend and its protection going. `pap service
-enable` turns supervision back on.
+a crash. A shutdown signal while supervised preserves its protection session
+and agent routing, and protection resumes after verification on the next start.
+`pap service disable` stops the backend, ends protection, restores agents, and
+turns off supervision. Run it before uninstalling a supervised CLI.
+
+Automatic registration skips shells with agent or PAP path overrides or proxy
+settings such as `HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. `pap service enable`
+uses the service manager's environment. Configure any required agent paths
+or proxies there before enabling it.
 
 | Installation | Registration | Runs |
 | --- | --- | --- |
-| Linux DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages ship one | the packaged backend |
+| Linux DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages ship one | the packaged backend with `--supervised` |
 | Linux npm, install script, archive | `$XDG_CONFIG_HOME/systemd/user/private-ai-proxy.service` (defaults to `~/.config/systemd/user/`), written with the same settings | `<command> service run` |
 | macOS npm, install script, Homebrew, archive | `~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist`, with `RunAtLoad` and `KeepAlive` on a failed exit | `<command> service run` |
 
@@ -122,7 +128,10 @@ enable`. Before moving an archive or changing the npm global prefix, run
 `pap service disable` from the old installation, then `pap service enable`
 from the new one. If the old installation is already gone, remove its
 registration after checking which command it runs. PAP leaves a user unit,
-mask, drop-in, or registration for another installation alone. On Linux
+mask, per-service drop-in, or registration for another installation alone.
+Distribution-wide policies such as Fedora's shutdown timeout can coexist with
+supervision. Overrides to the command, environment, or user prevent PAP from
+using the unit. On Linux
 without a reachable user manager (including containers and some WSL setups),
 commands launch the backend directly. Without systemd lingering, the manager
 starts at login. PAP leaves the system's lingering setting alone.
@@ -130,8 +139,9 @@ starts at login. PAP leaves the system's lingering setting alone.
 `pap stop` ends protection and leaves the backend running. `pap service stop`
 stops the backend and ends protection. The service manager treats the latter
 as a clean exit. The backend starts again the next time the user manager
-starts or when you run `pap service start`. If port 4180 is busy, the backend remains available for status and
-configuration so you can free the port or choose another. The install script
+starts or when you run `pap service start`. If port 4180 is busy, the backend
+remains available for status and configuration so you can free the port or
+choose another. The install script
 keeps the service's command path across upgrades and stops the old backend
 during installation. Run `pap start` to turn protection back on.
 

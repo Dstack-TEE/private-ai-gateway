@@ -31,15 +31,14 @@ With an API key instead of an account, replace the first step with
 the key at a hidden prompt. `pap status` shows what protection is doing and why
 at any time.
 
-Protection that is on stays on until `pap stop`. On Linux and macOS, the first
-`pap start` registers the backend with the user's service manager (a systemd
-user service, a launchd agent), so it starts at login and after a crash and
-resumes protection; `pap service disable` turns that off and
-`pap service enable` on again
-([Standalone CLI](cli-distribution.md#standalone-cli)). The desktop app has its
-own Open at Login. On Windows, and where no user service manager runs, run
-`pap service start` after a restart of the machine; until then connected agents
-cannot reach the Local API.
+On supported Linux and macOS CLI installations, `pap start` registers the
+backend with systemd or launchd. Protection resumes after login and crashes.
+Automatic registration skips shells with agent configuration or proxy
+overrides. `pap service enable` uses the service manager's environment.
+`pap service disable` stops protection, restores agents, and turns off
+supervision. The desktop app has its own Open at Login. On Windows or without
+a user service manager, run `pap service start` after restarting the machine
+to bring back the Local API. See [Standalone CLI](cli-distribution.md#standalone-cli).
 
 ## Discover Commands
 
@@ -331,18 +330,21 @@ works and is refused while a backend runs; use `stop` or `service stop` then.
 The Windows uninstaller runs it after `service stop`; if it fails, the
 uninstaller shows why and asks whether to uninstall anyway, keeping the restore
 data (a silent uninstall continues and logs why). If the app data was also
-to be deleted, it cancels instead, since the app data holds the restore data. On macOS (moving the app to the Trash) and Linux (the
-packages run no removal scripts) nothing does, so run `pap --yes service stop`
-and then `pap stop --offline` before removing the app. Mac App Store builds
-restore agents only through the app's Stop All and Quit.
+to be deleted, it cancels instead, since the app data holds the restore data.
+On macOS and Linux, run `pap service disable` before removing a supervised CLI
+installation. For other installations run `pap --yes service stop` and then
+`pap stop --offline` before removing the app. Mac App Store builds restore
+agents through the app's Stop All and Quit.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it
 reports that the backend keeps running, and the service log has the reason. Mac
-App Store builds stop anyway. A signal (SIGTERM or SIGINT, as systemd, launchd
-and `kill` send) always stops the backend, since a service manager would kill it
-next; a restore that failed is logged and retried when the backend next starts.
-A signal during a `service stop` waits for it, and stops the backend itself only
-if that stop was refused. On Windows, signing out or shutting down ends the
+App Store builds stop anyway. SIGTERM and SIGINT always stop the backend.
+A supervised backend preserves its active protection session and agent
+routing so they resume after verification on the next launch. A standalone
+backend ends protection and restores agents on a signal. A failed restore is
+logged and retried when it next starts. A signal during `service stop` waits
+for that request and handles shutdown itself only if the request was refused.
+On Windows, signing out or shutting down ends the
 windowless backend without this sequence; the next start resumes the
 protection session it left, and until then agents stay pointed at the Local API.
 Shutdown is bounded: running commands get 10 seconds, then open connections and

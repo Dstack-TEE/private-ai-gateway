@@ -431,6 +431,11 @@ impl Client {
         self.shutdown_owned(None, ShutdownMode::Quit)
     }
 
+    /// Stops this installation's backend and ends its protection session.
+    pub fn shutdown_installed(&self) -> Result<(), String> {
+        self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::Quit)
+    }
+
     /// Stops this installation's backend as a restart does: the protection
     /// session stays for the next backend to resume, and connected agents
     /// stay pointed at the Local API.

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::*;
+use super::{registry::DSH_HOME, *};
 use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
@@ -45,7 +45,7 @@ fn key(id: &str) -> EntryKey {
 /// `$DSH_HOME` as `resolveDshHome` reads it: blank is unset, `~` is the home.
 pub(super) fn home_dir(home: &Path, tool_env: bool) -> PathBuf {
     let configured = tool_env
-        .then(|| env::var("DSH_HOME").ok())
+        .then(|| env::var(DSH_HOME).ok())
         .flatten()
         .filter(|path| !path.trim().is_empty());
     match configured.as_deref() {

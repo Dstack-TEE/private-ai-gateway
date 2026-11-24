@@ -69,8 +69,25 @@ fn command() -> Result<(PathBuf, bool), String> {
 
 /// Whether `pap start` turns this on by itself: installations whose command
 /// keeps a path across upgrades. A desktop app owns its backend's lifetime.
-pub fn automatic() -> bool {
+pub fn automatic(agent_environment_overridden: bool) -> bool {
     supported()
+        && !agent_environment_overridden
+        && ![
+            // An XDG override can select different credentials or session data.
+            "XDG_DATA_HOME",
+            // Reqwest's default system proxy matcher uses these variables.
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+            "REQUEST_METHOD",
+        ]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some())
         && !declined().is_some_and(|marker| marker.exists())
         && match installation() {
             Installation::Deb
@@ -96,8 +113,8 @@ pub fn enable() -> Result<bool, String> {
     Ok(enabled)
 }
 
-/// Leaves starting the backend to commands again. On macOS this ends a
-/// backend the service manager runs, so stop it for a restart first.
+/// Removes the login registration. The caller quits a running backend first
+/// so that launchd's signal does not preserve a session the user ended.
 pub fn disable() -> Result<(), String> {
     if !supported() {
         return Err(UNSUPPORTED.into());
@@ -138,6 +155,7 @@ mod platform {
     use super::{command, registration};
 
     const UNIT: &str = "private-ai-proxy.service";
+    const UNIT_OBJECT: &str = "/org/freedesktop/systemd1/unit/private_2dai_2dproxy_2eservice";
     const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/private-ai-proxy.service";
     const PACKAGED_BACKEND: &str = "/usr/libexec/private-ai-proxy/private-ai-proxy-service";
     const PACKAGED_CONTENTS: &str =
@@ -161,6 +179,87 @@ mod platform {
             ));
         }
         Ok(output)
+    }
+
+    /// The D-Bus string array preserves paths containing spaces.
+    fn safe_drop_ins() -> bool {
+        #[derive(serde::Deserialize)]
+        struct DropIns {
+            data: Vec<PathBuf>,
+        }
+
+        let drop_ins = Command::new("busctl")
+            .args([
+                "--user",
+                "--json=short",
+                "get-property",
+                "org.freedesktop.systemd1",
+                UNIT_OBJECT,
+                "org.freedesktop.systemd1.Unit",
+                "DropInPaths",
+            ])
+            .stdin(Stdio::null())
+            .output();
+        drop_ins.is_ok_and(|output| {
+            output.status.success()
+                && serde_json::from_slice::<DropIns>(&output.stdout).is_ok_and(|drop_ins| {
+                    drop_ins.data.iter().all(|path| {
+                        path.parent()
+                            .and_then(Path::file_name)
+                            .is_some_and(|name| name != "private-ai-proxy.service.d")
+                            && fs::read_to_string(path)
+                                .is_ok_and(|text| !overrides_execution(&text))
+                    })
+                })
+        })
+    }
+
+    fn overrides_execution(text: &str) -> bool {
+        let mut service = false;
+        text.lines().map(str::trim).any(|line| {
+            if line.starts_with('[') {
+                service = line == "[Service]";
+            }
+            if !service {
+                return false;
+            }
+            line.split_once('=').is_some_and(|(key, _)| {
+                let key = key.trim();
+                [
+                    "Exec",
+                    "Environment",
+                    "Root",
+                    "Bind",
+                    "Extension",
+                    "Mount",
+                    "Credential",
+                    "LoadCredential",
+                    "SetCredential",
+                    "ImportCredential",
+                ]
+                .into_iter()
+                .any(|prefix| key.starts_with(prefix))
+                    || matches!(
+                        key,
+                        "User"
+                            | "Group"
+                            | "SupplementaryGroups"
+                            | "DynamicUser"
+                            | "PrivateUsers"
+                            | "PAMName"
+                            | "WorkingDirectory"
+                            | "SetLoginEnvironment"
+                            | "PassEnvironment"
+                            | "UnsetEnvironment"
+                            | "TemporaryFileSystem"
+                            | "ProtectHome"
+                            | "ReadOnlyPaths"
+                            | "ReadWritePaths"
+                            | "InaccessiblePaths"
+                            | "Type"
+                    )
+            })
+        })
     }
 
     /// The package's unit, when it starts this installation's backend.
@@ -255,7 +354,8 @@ mod platform {
         }
 
         /// Inspect the effective unit. A user mask, an overlay in another
-        /// search directory or any drop-in takes precedence over our file.
+        /// search directory or an execution override takes precedence over
+        /// our file. Distribution-wide timeout settings can still apply.
         fn state(&self) -> Result<Option<String>, String> {
             let mut state = self.loaded_state()?;
             if matches!(state, State::Reload) {
@@ -287,7 +387,7 @@ mod platform {
             if property("LoadState") == Some("masked") {
                 return Err(format!("The systemd user unit {UNIT} is masked"));
             }
-            if property("DropInPaths") != Some("") {
+            if property("DropInPaths") != Some("") && !safe_drop_ins() {
                 return Err(format!("The systemd user unit {UNIT} has overrides"));
             }
             match property("LoadState") {
@@ -377,6 +477,26 @@ mod platform {
             let unit = super::unit(std::path::Path::new("/opt/my apps/$100%/pap")).unwrap();
             assert!(unit.contains("ExecStart=:\"/opt/my apps/$100%%/pap\" service run\n"));
             assert!(unit.contains("Restart=on-failure\n"));
+        }
+
+        #[test]
+        fn global_timeout_settings_do_not_override_execution() {
+            assert!(!super::overrides_execution(
+                "# Fedora\n[Service]\nTimeoutStopFailureMode=abort\n"
+            ));
+            for key in [
+                "ExecStart",
+                "ExecStartPre",
+                "EnvironmentFile",
+                "UnsetEnvironment",
+                "User",
+                "WorkingDirectory",
+            ] {
+                assert!(
+                    super::overrides_execution(&format!("[Service]\n{key} = replacement\n")),
+                    "{key}"
+                );
+            }
         }
     }
 }

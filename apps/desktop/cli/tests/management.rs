@@ -55,6 +55,104 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
         .all(|agent| agent["recorded"] == false));
 }
 
+#[cfg(unix)]
+#[test]
+fn supervised_sigterm_preserves_the_session_and_service_stop_restores_agents() {
+    use agent_bridge::{agents::Projector, catalog::Catalog};
+    use desktop_core::agents::{Agent, ConnectOptions};
+    use desktop_runtime::{local_state::LocalState, usage::UsageStore};
+    use std::sync::Arc;
+
+    let backend = Backend::start_with_credentials("[profiles.test]\napi-key = \"test-key\"\n");
+    backend.run(&["service", "stop", "--yes"]);
+    let home = backend.directory.path().join("home");
+    let data = home.join(".private-ai-proxy");
+    let config = data.join("Config/config.toml");
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("https://{}", gateway.local_addr().unwrap());
+    fs::write(
+        &config,
+        format!(
+            "active-profile = \"test\"\n{}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"{url}\"\n",
+            fs::read_to_string(&config).unwrap(),
+        ),
+    )
+    .unwrap();
+    // A previous verified run left a session and an agent projection. The
+    // loopback listener observes re-verification without contacting a gateway.
+    let usage = UsageStore::open(data.join("usage.sqlite3")).unwrap();
+    usage.save_active_session("saved-session", 1).unwrap();
+    let agent = home.join(".claude/settings.json");
+    fs::create_dir_all(agent.parent().unwrap()).unwrap();
+    let original = json!({"env": {"ANTHROPIC_API_KEY": "original-key"}});
+    fs::write(&agent, original.to_string()).unwrap();
+    let projector = Projector::new_for_home(
+        home,
+        data.clone(),
+        backend.directory.path().join("private-ai-proxy-helper"),
+        "http://127.0.0.1:4180",
+        Arc::new(LocalState::open(&data)),
+    )
+    .unwrap();
+    let catalog = Catalog::from_remote(&json!({"data":[{"id":"test/model"}]}), 1).unwrap();
+    let options = ConnectOptions::default();
+    let kind = Agent::ClaudeCode;
+    let preview = projector
+        .preview(kind, true, Some(&catalog), &options)
+        .unwrap();
+    projector
+        .apply(kind, true, &preview.revision, Some(&catalog), &options)
+        .unwrap();
+    let projected = fs::read(&agent).unwrap();
+    gateway.set_nonblocking(true).unwrap();
+
+    let start = || {
+        // Discard any retry queued by the previous backend before it exited.
+        while gateway.accept().is_ok() {}
+        let mut child = backend
+            .command(&["service", "run"])
+            .env("NO_PROXY", "*")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let expires = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok((connection, _)) = gateway.accept() {
+                let state = backend.run(&["status"]);
+                assert_eq!(state["gateway"]["sessionId"], "saved-session");
+                assert_eq!(state["gateway"]["sessionActive"], true);
+                drop(connection);
+                return child;
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            assert!(
+                Instant::now() < expires,
+                "The backend did not resume verification"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let mut child = start();
+    let pid = rustix::process::Pid::from_child(&child);
+    rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+    desktop_core::launch::wait_for_exit(child.id(), Duration::from_secs(35)).unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        usage.active_session().unwrap(),
+        Some(("saved-session".into(), 1))
+    );
+    assert_eq!(fs::read(&agent).unwrap(), projected);
+
+    let mut child = start();
+    backend.run(&["service", "stop", "--yes"]);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(usage.active_session().unwrap(), None);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&agent).unwrap()).unwrap(),
+        original
+    );
+}
+
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
 /// streams; the legacy alias must stay byte-for-byte the canonical command.
 #[cfg(unix)]
