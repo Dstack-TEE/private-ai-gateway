@@ -17,7 +17,7 @@ Router source: `tinfoilsh/confidential-model-router`.
 Reviewed deployed router `v0.0.179` (commit
 `0f1270114bd6066772a83540b8a491c0450b6e0d`), router image
 `ghcr.io/tinfoilsh/confidential-model-router@sha256:6531d8e2981166da6248b7b52e8dbe8412eb591f7564bb5f6afba541cf9042bb`,
-and CVM image `0.14.19`. The deployed tag is 201 commits and 77 releases
+and CVM image `0.14.19`. The deployed tag is 201 commits and 76 releases
 past round 1. The audit also read router `main` at `ea051bb` (PR #554),
 which was outside the deployed release. [Router release](https://github.com/tinfoilsh/confidential-model-router/releases/tag/v0.0.179),
 [measured config](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.179/tinfoil-config.yml),
@@ -77,9 +77,9 @@ allowlist. Upgrade the gateway verifier SDK and keep cache locality unclaimed.
 - The router implements rendezvous-hash cache routing. Its per-model mode
   comes from the unmeasured control-plane config, so cache locality remains
   unclaimed. [Cache routing code](https://github.com/tinfoilsh/confidential-model-router/tree/v0.0.179/cacheroute).
-- The measured config sets `CACHE_SALT_ENABLED: "true"`. On supported
-  requests the router strips the supplied `cache_salt` and uses
-  `user_cache_secret` as an input to its own salt derivation.
+- The measured config sets `CACHE_SALT_ENABLED: "true"`. The router strips
+  caller-supplied `cache_salt` from every parsed body. It injects a derived
+  salt only on supported endpoints, using `user_cache_secret` as an input.
   [Cache salt code](https://github.com/tinfoilsh/confidential-model-router/blob/v0.0.179/cache_salt.go).
 - Per-model subdomain routing was removed, superseding the round-1
   `X-Forwarded-Host` caveat. [Routing change](https://github.com/tinfoilsh/confidential-model-router/pull/490).
