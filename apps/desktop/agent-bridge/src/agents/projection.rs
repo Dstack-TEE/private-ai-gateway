@@ -254,7 +254,10 @@ fn normalize_model_map(expected: &mut serde_json::Value, current: &mut serde_jso
             continue;
         };
         let Some(expected_model) = expected_models.get(id) else {
-            routing.insert(id.clone(), routing_value(current_model));
+            let value = routing_value(current_model);
+            if !value.as_object().is_some_and(serde_json::Map::is_empty) {
+                routing.insert(id.clone(), value);
+            }
             continue;
         };
         if current_model != expected_model {
