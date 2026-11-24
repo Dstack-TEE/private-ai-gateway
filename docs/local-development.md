@@ -89,6 +89,9 @@ python3 -m compileall scripts
 python3 scripts/check_docs.py
 ```
 
+The dstack guest-agent regression tests use a recorded TDX response and run offline.
+[Fixture provenance](../tests/fixtures/dstack/README.md)
+
 The TypeScript workspace contains only `@phala/aci-verifier`. Use
 [`pap`](../apps/desktop/docs/cli.md) for coding agents and provider access. Run
 these commands from the repository root after changing anything under

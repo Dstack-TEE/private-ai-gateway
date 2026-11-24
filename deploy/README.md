@@ -229,6 +229,12 @@ step.
 
 Use [Verification and security model](../docs/attested-confidential-inference.md) for the artifact flow. Verify new deployments through `/v1/aci/attestation`; the [legacy endpoints](../docs/api-reference.md#legacy-compatibility-endpoints) exist only for older clients.
 
+Gateway self-attestation requires a dstack guest exposing Intel TDX. On dstack
+0.6 the gateway uses the guest agent's `/v1/Attest` to return the quote and its
+event log, including V2 digest preimages. The gateway logs the detected TEE
+variant if it cannot publish evidence for that platform. dstack 0.5 guests use
+the original `GetQuote` flow.
+
 ## Toolchain trust
 
 `entrypoint.sh` builds `private-ai-gateway` in release mode with `cargo build --release --locked`. If a C compiler is absent, it installs `build-essential`; if Cargo is absent, it installs `rustup`. Both come from the runtime Ubuntu package repositories, and `rustup` resolves the current stable Rust toolchain.

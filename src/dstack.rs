@@ -7,9 +7,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dstack_sdk::dstack_client::DstackClient;
+use dstack_sdk::dstack_client_v0::GetKeyConfig;
+use dstack_sdk::DstackClientV1;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
+use semver::Version;
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use x25519_dalek::StaticSecret as X25519SecretKey;
@@ -27,6 +29,12 @@ use crate::aci::keys::{
     Quoter, ALGO_ED25519, LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519,
 };
 use crate::aci::types::{KeyedPublicKey, TlsSpki};
+
+mod attestation;
+
+// The frozen guest API preserves the deployed KMS key derivation.
+#[expect(deprecated, reason = "the gateway uses the frozen dstack guest API")]
+type DstackClientV0 = dstack_sdk::dstack_client_v0::DstackClientV0;
 
 const RECEIPT_PURPOSE: &str = "aci.receipt.ed25519.v1";
 const E2EE_X25519_PURPOSE: &str = "aci.e2ee.x25519.v1";
@@ -86,7 +94,8 @@ struct KmsKeyEvidence {
 
 /// Provider backed by dstack KMS keys plus dstack TDX quotes.
 pub struct DstackAciProvider {
-    client: Arc<DstackClient>,
+    client: Arc<DstackClientV0>,
+    attest_client: Option<DstackClientV1>,
     receipt: Ed25519SigningKey,
     x25519_e2ee: X25519SecretKey,
     legacy_e2ee: k256::SecretKey,
@@ -107,12 +116,45 @@ impl DstackAciProvider {
         config: DstackAciProviderConfig,
     ) -> Result<Self, KeyError> {
         let endpoint = normalize_dstack_endpoint(endpoint)?;
-        let client = Arc::new(DstackClient::new(endpoint.as_deref()));
-        Self::from_client(client, config).await
+        let client = Arc::new(DstackClientV0::new(endpoint.as_deref()));
+        let attest_client = DstackClientV1::new(endpoint.as_deref());
+        let attest_client = match attest_client.version().await {
+            Ok(_) => Some(attest_client),
+            // The SDK reports HTTP status in Display. The Unix-socket tests
+            // exercise its 404 format with both guest versions.
+            Err(error) if error.to_string().starts_with("HTTP 404:") => {
+                let response = client.version().await.map_err(|error| {
+                    KeyError::Quote(format!(
+                        "cannot determine dstack attestation API: /v1/Version returned HTTP 404 and /Version failed: {error}"
+                    ))
+                })?;
+                let version = Version::parse(&response.version).map_err(|error| {
+                    KeyError::Quote(format!(
+                        "cannot determine dstack attestation API: invalid version from /Version: {error}"
+                    ))
+                })?;
+                match (version.major, version.minor) {
+                    (0, 5) => None,
+                    series if series >= (0, 6) => Some(attest_client),
+                    _ => {
+                        return Err(KeyError::Quote(format!(
+                            "cannot determine dstack attestation API: unsupported guest version {version}"
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(KeyError::Quote(format!(
+                    "cannot determine dstack attestation API: /v1/Version failed: {error}"
+                )));
+            }
+        };
+        Self::from_client(client, attest_client, config).await
     }
 
     async fn from_client(
-        client: Arc<DstackClient>,
+        client: Arc<DstackClientV0>,
+        attest_client: Option<DstackClientV1>,
         config: DstackAciProviderConfig,
     ) -> Result<Self, KeyError> {
         let (receipt_bytes, receipt_chain) =
@@ -178,6 +220,7 @@ impl DstackAciProvider {
 
         Ok(Self {
             client,
+            attest_client,
             receipt,
             x25519_e2ee,
             legacy_e2ee,
@@ -223,13 +266,13 @@ fn kms_counterpart_public_key_hex(role: &str, key_bytes: &[u8; 32]) -> Result<St
 /// Release a KMS key and require it to be exactly 32 bytes — the raw scalar
 /// shared by the k256/Ed25519/X25519 roles.
 async fn load_kms_raw32_key(
-    client: &DstackClient,
+    client: &DstackClientV0,
     role: &'static str,
     path: &str,
     purpose: &'static str,
 ) -> Result<([u8; 32], Vec<String>), KeyError> {
     let response = client
-        .get_key(Some(path.to_string()), Some(purpose.to_string()))
+        .get_key(GetKeyConfig::builder().path(path).purpose(purpose).build())
         .await
         .map_err(|e| KeyError::Crypto(format!("dstack KMS get_key({role}): {e}")))?;
     let key_bytes = response
@@ -277,9 +320,22 @@ impl DstackAciProvider {
     }
 
     /// Request a dstack TDX quote binding exactly the supplied 64-byte
-    /// report-data, returning the verified quote plus its event log and VM
-    /// config evidence.
+    /// report-data, returning the quote plus its event log and VM config.
     async fn quote_with_report_data(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
+        if let Some(client) = &self.attest_client {
+            let response = client
+                .attest(report_data.to_vec(), false)
+                .await
+                .map_err(|e| KeyError::Quote(format!("dstack v1 Attest: {e}")))?;
+            let mut quote = attestation::decode_tdx_quote(&response.attestation, report_data)?;
+            let info = client
+                .info()
+                .await
+                .map_err(|e| KeyError::Quote(format!("dstack v1 Info: {e}")))?;
+            quote.app_compose = Some(info.app_compose);
+            return Ok(quote);
+        }
+
         let response = self
             .client
             .get_quote(report_data.to_vec())
@@ -506,5 +562,397 @@ mod tests {
                 .as_deref(),
             Some("/tmp/dstack.sock")
         );
+    }
+
+    #[cfg(unix)]
+    mod guest_rpc {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use aci_verify::dstack::verify_dstack_compose_measurement;
+        use aci_verify::quote::quote_bytes;
+        use aci_verify::report::validate_aci_report_binding;
+        use axum::body::Body;
+        use bytes::Bytes;
+        use dcap_qvl::quote::Quote as DcapQuote;
+        use dstack_sdk::dstack_client_v1::AttestResponse;
+        use http_body_util::{BodyExt, Full};
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+        use serde_json::{json, Value};
+        use tokio::net::UnixListener;
+        use tower::ServiceExt;
+
+        use super::super::{attestation, DstackAciProvider, DstackAciProviderConfig, Quoter};
+        use crate::aci::keys::KeyError;
+        use crate::aci::types::AttestationReport;
+        use crate::aci::upstream::OpenAICompatibleBackend;
+        use crate::aci::verifier::{dcap_report_data, verify_dstack_event_log};
+        use crate::aggregator::service::{
+            AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
+        };
+        use crate::http::build_router;
+
+        // The V1 app-id vector generated by cc-eventlog at dad8326f in PR #531.
+        const V1_LOG: &str = concat!(
+            r#"[{"imr":0,"event_type":4,"digest":"010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101","event":"","event_payload":"0102"},"#,
+            r#"{"imr":3,"event_type":134217729,"digest":"#,
+            r#""3f1fbb6cfe25e7f19bd48cfa9dc590cabaa946da04f9215402e7083550177292c1478402b258a90c649ccfcb5f408175","#,
+            r#""event":"app-id","event_payload":"1111111111111111111111111111111111111111"}]"#,
+        );
+        const APP_COMPOSE: &str = r#"{"name":"gateway"}"#;
+        const RECORDED_ATTEST: &str =
+            include_str!("../tests/fixtures/dstack/tdx-lite-v1-attest.json");
+
+        type RpcResponse = Box<dyn Fn(&Value) -> String>;
+        type Exchange = (&'static str, StatusCode, RpcResponse);
+
+        fn rpc(path: &'static str, request: Value, response: Value) -> Exchange {
+            rpc_response(path, request, StatusCode::OK, response.to_string())
+        }
+
+        fn rpc_response(
+            path: &'static str,
+            request: Value,
+            status: StatusCode,
+            response: String,
+        ) -> Exchange {
+            (
+                path,
+                status,
+                Box::new(move |body| {
+                    assert_eq!(body, &request);
+                    response.clone()
+                }),
+            )
+        }
+
+        fn version_rpc(path: &'static str, version: &str) -> Exchange {
+            rpc(path, json!({}), json!({"version": version, "rev": "test"}))
+        }
+
+        fn missing_version(path: &'static str, body: &str) -> Exchange {
+            rpc_response(path, json!({}), StatusCode::NOT_FOUND, body.into())
+        }
+
+        #[tokio::test]
+        async fn confirmed_dstack_05_preserves_legacy_evidence() {
+            let quote_log = V1_LOG.replace(r#""event_payload":"0102""#, r#""event_payload":"""#);
+            let nonce = [0xa5; 32];
+            let mut report_data = [0; 64];
+            report_data[..32].copy_from_slice(&nonce);
+            let report_data_hex = hex::encode(report_data);
+            let tcb_info = json!({
+                "mrtd": "00".repeat(48),
+                "rtmr0": "01".repeat(48),
+                "rtmr1": "02".repeat(48),
+                "rtmr2": "03".repeat(48),
+                "rtmr3": "04".repeat(48),
+                "compose_hash": "05".repeat(32),
+                "device_id": "06".repeat(32),
+                "app_compose": APP_COMPOSE,
+                "event_log": serde_json::from_str::<Value>(V1_LOG).unwrap(),
+            });
+            let quote = with_guest(
+                vec![
+                    missing_version("/v1/Version", "<h1>Not Found</h1>"),
+                    version_rpc("/Version", "0.5.12"),
+                ],
+                [
+                    rpc(
+                        "/GetQuote",
+                        json!({"report_data": report_data_hex}),
+                        json!({
+                            "quote": "1122",
+                            "event_log": quote_log,
+                            "report_data": report_data_hex,
+                            "vm_config": "{}",
+                        }),
+                    ),
+                    rpc(
+                        "/Info",
+                        json!({}),
+                        json!({
+                            "app_id": "07".repeat(20),
+                            "instance_id": "08".repeat(20),
+                            "app_cert": "",
+                            "tcb_info": serde_json::to_string_pretty(&tcb_info).unwrap(),
+                            "app_name": "gateway",
+                            "device_id": tcb_info["device_id"],
+                            "key_provider_info": "",
+                            "compose_hash": tcb_info["compose_hash"],
+                            "vm_config": "{}",
+                        }),
+                    ),
+                ],
+                async move |provider| provider.get_quote(nonce).await,
+            )
+            .await
+            .unwrap();
+            assert_eq!(quote.report_data, report_data);
+            assert_eq!(quote.raw_quote, [0x11, 0x22]);
+            assert_eq!(quote.event_log.as_str(), Some(V1_LOG));
+            assert_eq!(quote.vm_config.as_str(), Some("{}"));
+            assert_eq!(quote.app_compose.as_deref(), Some(APP_COMPOSE));
+        }
+
+        #[tokio::test]
+        async fn confirmed_dstack_06_uses_attest_after_v1_probe_404() {
+            let report_data = [0x42; 64];
+            let quote = with_guest(
+                vec![
+                    missing_version("/v1/Version", ""),
+                    version_rpc("/Version", "0.6.5"),
+                ],
+                [
+                    rpc(
+                        "/v1/Attest",
+                        json!({"report_data": hex::encode(report_data), "include_boottime_gpu_evidence": false}),
+                        serde_json::from_str(RECORDED_ATTEST).unwrap(),
+                    ),
+                    rpc(
+                        "/v1/Info",
+                        json!({}),
+                        json!({
+                            "app_id": "07".repeat(20),
+                            "instance_id": "08".repeat(20),
+                            "device_id": "06".repeat(32),
+                            "compose_hash": "05".repeat(32),
+                            "app_compose": APP_COMPOSE,
+                        }),
+                    ),
+                ],
+                async move |provider| provider.get_quote_raw(report_data).await,
+            )
+            .await
+            .unwrap();
+            assert_eq!(quote.report_data, report_data);
+            let event_log: Vec<Value> =
+                serde_json::from_str(quote.event_log.as_str().unwrap()).unwrap();
+            assert!(event_log
+                .iter()
+                .any(|event| event["event"] == "compose-hash"));
+            let vm_config: Value = serde_json::from_str(quote.vm_config.as_str().unwrap()).unwrap();
+            assert_eq!(vm_config["tdx_attestation_variant"], "lite");
+            assert_eq!(quote.app_compose.as_deref(), Some(APP_COMPOSE));
+        }
+
+        #[tokio::test]
+        async fn inconclusive_version_probes_fail_closed() {
+            for (response, cause) in [
+                (missing_version("/Version", ""), "/Version failed"),
+                (
+                    version_rpc("/Version", "0.5.12 (unparseable)"),
+                    "invalid version from /Version",
+                ),
+            ] {
+                let error = with_guest(
+                    vec![missing_version("/v1/Version", ""), response],
+                    [],
+                    async |_| -> Result<(), KeyError> {
+                        panic!("the guest version was inconclusive")
+                    },
+                )
+                .await
+                .unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains("cannot determine dstack attestation API"));
+                assert!(message.contains(cause));
+            }
+        }
+
+        #[tokio::test]
+        async fn gateway_v2_report_verifies_rtmr3_and_compose() {
+            const NOW: u64 = 1_700_000_000;
+            let nonce = "17".repeat(32);
+            let fixture: Value = serde_json::from_str(include_str!(
+                "../clients/verifier-ts/test/fixtures/dstack_event_vectors.json"
+            ))
+            .unwrap();
+            let vector = fixture["vectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|vector| vector["name"] == "v2")
+                .unwrap();
+            let mut binary_events = vector["events"].clone();
+            for event in binary_events.as_array_mut().unwrap() {
+                for field in ["digest", "event_payload"] {
+                    event[field] = json!(hex::decode(event[field].as_str().unwrap()).unwrap());
+                }
+            }
+            let rtmr3 = hex::decode(vector["rtmr3"].as_str().unwrap()).unwrap();
+            let recorded: AttestResponse = serde_json::from_str(RECORDED_ATTEST).unwrap();
+            let recorded =
+                attestation::decode_tdx_quote(&recorded.attestation, [0x42; 64]).unwrap();
+            let quote = DcapQuote::parse(&recorded.raw_quote).unwrap();
+            assert_eq!(quote.header.version, 4);
+            assert!(matches!(quote.report, dcap_qvl::quote::Report::TD10(_)));
+            let attest: RpcResponse = Box::new(move |request| {
+                assert_eq!(request["include_boottime_gpu_evidence"], false);
+                let report_data = request["report_data"].as_str().unwrap();
+                let report_bytes: [u8; 64] = hex::decode(report_data).unwrap().try_into().unwrap();
+                let mut raw_quote = recorded.raw_quote.clone();
+                // Substitute the V2 RTMR3 and the caller's challenge in the TD10
+                // body. This invalidates the signature, so the test starts
+                // verification at the parsed quote body.
+                raw_quote[520..568].copy_from_slice(&rtmr3);
+                raw_quote[568..632].copy_from_slice(&report_bytes);
+                let bytes = rmp_serde::to_vec_named(&json!({
+                    "version": 1,
+                    "platform": {"kind": "tdx", "data": {"quote": raw_quote, "event_log": binary_events}},
+                    "stack": {"kind": "dstack", "data": {"report_data": report_bytes.to_vec(), "config": "{}"}},
+                }))
+                .unwrap();
+                json!({"attestation": hex::encode(bytes)}).to_string()
+            });
+            let body = with_guest(
+                vec![version_rpc("/v1/Version", "0.6.5")],
+                [
+                    ("/v1/Attest", StatusCode::OK, attest),
+                    rpc(
+                        "/v1/Info",
+                        json!({}),
+                        json!({
+                            "app_id": "11".repeat(20),
+                            "instance_id": "08".repeat(20),
+                            "device_id": "06".repeat(32),
+                            "compose_hash": vector["compose_hash"],
+                            "app_compose": vector["app_compose"],
+                        }),
+                    ),
+                ],
+                async |provider| {
+                    let provider = Arc::new(provider);
+                    let service = Arc::new(
+                        AciService::new(
+                            provider.clone(),
+                            provider,
+                            Arc::new(OpenAICompatibleBackend::new("http://127.0.0.1:1").unwrap()),
+                            Arc::new(InMemoryReceiptStore::default()),
+                            AciServiceConfig::for_test(),
+                            Arc::new(FixedClock(NOW)),
+                        )
+                        .unwrap(),
+                    );
+                    let response = build_router(service)
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!("/v1/aci/attestation?nonce={nonce}"))
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK);
+                    Ok(response.into_body().collect().await.unwrap().to_bytes())
+                },
+            )
+            .await
+            .unwrap();
+            let report: AttestationReport = serde_json::from_slice(&body).unwrap();
+            let binding = validate_aci_report_binding(&report, Some(&nonce), NOW, None).unwrap();
+            let evidence = &report.attestation.evidence;
+            let quote = DcapQuote::parse(&quote_bytes(evidence).unwrap()).unwrap();
+            assert_eq!(
+                dcap_report_data(&quote.report),
+                &crate::aci::identity::report_data_slot(binding.report_data)
+            );
+            let log = verify_dstack_event_log(evidence, &quote.report).unwrap();
+            assert_eq!(
+                verify_dstack_compose_measurement(evidence, &log).unwrap(),
+                vector["compose_hash"]
+            );
+
+            let mut altered_evidence = evidence.clone();
+            let mut events: Value =
+                serde_json::from_str(evidence["event_log"].as_str().unwrap()).unwrap();
+            assert_eq!(events, vector["events"]);
+            assert!(events[0]
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("preimage")
+                .is_some());
+            altered_evidence["event_log"] = json!(events.to_string());
+            assert!(verify_dstack_event_log(&altered_evidence, &quote.report)
+                .unwrap_err()
+                .contains("preimage"));
+        }
+
+        async fn with_guest<T>(
+            mut exchanges: Vec<Exchange>,
+            attestation_exchanges: impl IntoIterator<Item = Exchange>,
+            call: impl AsyncFnOnce(DstackAciProvider) -> Result<T, KeyError>,
+        ) -> Result<T, KeyError> {
+            let config = DstackAciProviderConfig::default();
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("dstack.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let key = json!({"key": "01".repeat(32), "signature_chain": ["ab", "cd"]});
+            for (path, purpose) in [
+                (&config.receipt_path, "aci.receipt.ed25519.v1"),
+                (&config.x25519_e2ee_path, "aci.e2ee.x25519.v1"),
+                (&config.legacy_e2ee_path, "aci.e2ee.v1"),
+                (&config.legacy_ed25519_path, "aci.legacy.ed25519.v1"),
+            ] {
+                exchanges.push(rpc(
+                    "/GetKey",
+                    json!({"path": path, "purpose": purpose, "algorithm": "secp256k1"}),
+                    key.clone(),
+                ));
+            }
+            exchanges.extend(attestation_exchanges);
+
+            let server = async {
+                for (path, status, response) in exchanges {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    http1::Builder::new()
+                        .keep_alive(false)
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(|request: hyper::Request<hyper::body::Incoming>| {
+                                let response = &response;
+                                async move {
+                                    assert_eq!(request.method(), Method::POST);
+                                    assert_eq!(
+                                        request.uri().path_and_query().unwrap().as_str(),
+                                        path
+                                    );
+                                    let headers = request.headers();
+                                    assert_eq!(headers.get_all("content-type").iter().count(), 1);
+                                    assert_eq!(headers["content-type"], "application/json");
+                                    assert_eq!(headers["host"], "dstack");
+                                    let body =
+                                        request.into_body().collect().await.unwrap().to_bytes();
+                                    let response =
+                                        response(&serde_json::from_slice(&body).unwrap());
+                                    Ok::<_, std::convert::Infallible>(
+                                        Response::builder()
+                                            .status(status)
+                                            .body(Full::new(Bytes::from(response)))
+                                            .unwrap(),
+                                    )
+                                }
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                }
+                Ok(())
+            };
+            let client = async {
+                let provider =
+                    DstackAciProvider::new(Some(format!("unix:{}", socket_path.display())), config)
+                        .await?;
+                call(provider).await
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::try_join!(server, client).map(|(_, quote)| quote)
+            })
+            .await
+            .unwrap()
+        }
     }
 }
