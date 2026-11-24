@@ -50,7 +50,7 @@ class ChutesProvider(ServiceProvider):
         Look up chute_id by name.
 
         Args:
-            name: Chute name, e.g. "moonshotai/Kimi-K2.5-TEE"
+            name: Chute name, e.g. "moonshotai/Kimi-K2.6-TEE"
 
         Returns:
             The chute_id (UUID string)
@@ -237,7 +237,7 @@ class ChutesProvider(ServiceProvider):
         so that the resulting AttestationReport can be verified offline later.
 
         Args:
-            model_id: Either the chute UUID or the chute name (e.g. "moonshotai/Kimi-K2.5-TEE")
+            model_id: Either the chute UUID or the chute name (e.g. "moonshotai/Kimi-K2.6-TEE")
         """
         # Resolve name to chute_id if necessary
         chute_id = self._resolve_model_id(model_id)
@@ -329,7 +329,7 @@ class ChutesProvider(ServiceProvider):
         List available public chutes.
 
         Returns:
-            List of chute names (e.g. ["moonshotai/Kimi-K2.5-TEE", ...])
+            List of chute names (e.g. ["moonshotai/Kimi-K2.6-TEE", ...])
         """
         try:
             items = self.search_chutes(include_public=True)

@@ -16,10 +16,9 @@ server cannot lie about it:
        => changes sha256sum.txt
           => changes os_image_hash (no longer matches the quote)
 
-`resolve_os_image()` re-downloads the image and re-checks both equalities before
-trusting `is_dev`. Known fleet images are seeded inline so the common case needs
-no network. Resolved misses are cached on disk. Every failure path returns None
-(undecided) — never a fabricated decision.
+`resolve_os_image()` checks both equalities before trusting `is_dev` from a
+download. Known images are seeded inline so the common case needs no network.
+Resolved misses are cached on disk. Unresolved hashes return None (undecided).
 """
 
 from __future__ import annotations
@@ -34,26 +33,39 @@ from typing import Any, Optional
 
 DEFAULT_DOWNLOAD_URL_TEMPLATE = "https://download.dstack.org/os-images/mr_{}.tar.gz"
 
-# Seed map of os_image_hash -> verified metadata, so the deployed fleet resolves
-# offline. Each entry was produced by resolve_os_image() (download + re-verify the
-# os_image_hash == SHA256(sha256sum.txt) and metadata.json binding). Re-verify with:
-#   uv run python scripts/dstack_os_image.py <os_image_hash>
+# Seed map of os_image_hash -> verified metadata. Each entry was checked against
+# the published image archive's sha256sum.txt and metadata.json.
 KNOWN_OS_IMAGES: dict[str, dict[str, Any]] = {
-    # dstack PROD image 0.5.9 — entire reachable Phala fleet as of 2026-06-11
-    # (glm4-7-flash.use2, gemma*/gpt-oss/qwen*/bge-reranker/embedding, …).
+    "5aa762ee7cddc62174c13e1081d56f7ab2a9aebc513973a1d63b3775fda250ec": {
+        "is_dev": False,
+        "version": "0.6.6",
+        "git_revision": "c87303818753e7abb3233bd1f5a4b611cb981154",
+    },
+    "4771a29e03e93f0e2d5e37174cd8bb1112942c9689deb36b16c5df9e183d8623": {
+        "is_dev": False,
+        "version": "0.6.5",
+        "git_revision": "350a0a73ffdb6041bda69118f13d81591870b565",
+    },
+    "38a6f97b60e47eb9d68c13246bbd872e83fb9b39d178b4e0d3091285cd07b572": {
+        "is_dev": False,
+        "version": "0.6.3",
+        "git_revision": "c5df598f5bbdfd3d71ae1931129639b4cce24e10",
+    },
+    "4597735f1a38ad8ec9f781356b88737fc052062deb7c9aaa4be89bf1b35643ca": {
+        "is_dev": False,
+        "version": "0.5.15",
+        "git_revision": "ee82bd6a4fb5a33cb0cfe52df54b31d665f0488a",
+    },
     "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9": {
         "is_dev": False,
         "version": "0.5.9",
         "git_revision": "e3655d1390feee3736476f4bda35c4354b4a12fc",
     },
-    # dstack DEV image 0.5.9 — the fleet's pre-flip image (now superseded by the
-    # prod build above). Kept as a known-dev vector and for any un-flipped box.
     "0e09f2bcb510c682b461d16b97192c710886db582852991e05146291063f890b": {
         "is_dev": True,
         "version": "0.5.9",
         "git_revision": "e3655d1390feee3736476f4bda35c4354b4a12fc",
     },
-    # dstack DEV image 0.5.5 — earlier embedding/reranker image (now superseded).
     "021bf66a7c9fd4a05031b8fa688834948874631c2ad5b9a2d566b4421b817271": {
         "is_dev": True,
         "version": "0.5.5",

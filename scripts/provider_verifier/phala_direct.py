@@ -21,6 +21,9 @@ from .common import (
     tdx_session_material,
 )
 
+ACCEPTED_SUBJECT_OPTION = "phala_direct_accepted_subject:"
+COMPOSE_SUBJECT_PREFIX = "dstack-compose:"
+
 
 def _phala_direct_compose_hash_ok(
     info: dict[str, Any], dstack_result: dict[str, Any]
@@ -48,13 +51,12 @@ def _phala_direct_compose_hash_ok(
 
 
 async def verify_phala_direct(request: dict[str, Any]) -> None:
-    """Verify a Phala dstack-vllm-proxy attestation endpoint reached directly.
+    """Verify a Phala Inference Guard or dstack-vllm-proxy endpoint directly.
 
-    Mirrors the NEAR AI path: fetch the per-model attestation report (version 2),
-    verify the dstack TDX quote, the report_data binding (signing address +
-    request nonce + custom-domain TLS SPKI), the compose hash, and the GPU
-    evidence; then return the attested TLS SPKI as the enforceable channel
-    binding so the forwarding backend pins the connection.
+    Verify the version 2 report's TDX quote, report_data binding (signing
+    address, request nonce and custom-domain TLS SPKI), and measured compose.
+    Return the attested TLS SPKI for the forwarding backend to pin. Record
+    GPU evidence, TCB status and OS classification as supplemental claims.
     """
     import requests
 
@@ -121,9 +123,8 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     evidence = json_evidence_bundle(report, attestation_url)
 
-    # A per-model PhalaDirect endpoint returns a single attestation at the top level
-    # of the report — use it directly. (all_attestations is a multi-instance gateway
-    # shape and is not expected here.)
+    # Both producers expose the per-model attestation at the top level, and may
+    # repeat it in all_attestations. Use the top-level fields.
     attestation = report
 
     intel_quote = attestation.get("intel_quote") or attestation.get("quote")
@@ -156,7 +157,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     if not tls_cert_fingerprint:
         failed(
             provider,
-            "PhalaDirect report did not include tls_cert_fingerprint; the proxy "
+            "PhalaDirect report did not include tls_cert_fingerprint; the producer "
             "must serve attestation version 2 (custom-domain TLS SPKI binding)",
             failure="evidence_invalid",
             evidence=evidence,
@@ -229,6 +230,25 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
+    dstack_details = dstack_result["details"]
+    app_info = dstack_details["app_info"]
+    compose_hash = app_info["compose_hash"]
+    compose_pins = {
+        key[len(ACCEPTED_SUBJECT_OPTION):]
+        for key, value in options.items()
+        if key.startswith(ACCEPTED_SUBJECT_OPTION + COMPOSE_SUBJECT_PREFIX) and value == "true"
+    }
+    subject = f"{COMPOSE_SUBJECT_PREFIX}sha256:{str(compose_hash).lower()}"
+    if compose_pins and subject not in compose_pins:
+        failed(
+            provider,
+            "PhalaDirect measured compose hash is not in accepted_subjects",
+            failure="provenance_not_accepted",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
+        return
+
     # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
     # report_data from the quote bytes the dstack verifier just proved authentic
     # (it does not surface report_data itself).
@@ -286,30 +306,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         except Exception:  # noqa: BLE001 - supplemental; a GPU error is never fatal
             gpu_attested = False
 
-    # Surface the granular TDX TCB status (e.g. "UpToDate", "OutOfDate") so the
-    # session layer can populate a tri-state `tcb_up_to_date` claim instead of
-    # only seeing the dstack verifier's overall is_valid.
-    dstack_details = dstack_result.get("details") if isinstance(dstack_result, dict) else None
-    tcb_status = dstack_details.get("tcb_status") if isinstance(dstack_details, dict) else None
-
-    # OS-image provenance (production-vs-dev decision).
-    #
-    # The attested os_image_hash (proved by the dstack verifier — is_valid implies
-    # os_image_hash_verified) is SHA256(sha256sum.txt) of dstack's published OS
-    # image, and that manifest pins SHA256(metadata.json) — so the image's `is_dev`
-    # flag is cryptographically bound to the attested hash. resolve_os_image()
-    # re-downloads the published image, re-verifies that binding, and reads is_dev
-    # (known fleet images are seeded, so the common case is offline). A dev image
-    # (dstack-nvidia-dev-*, SSH/serial-console enabled) is NOT a production OS.
-    #
-    # This is recorded metadata, not a gate (mirrors how GPU evidence is handled):
-    # the deployed fleet currently runs dev images, and gating here would reject
-    # them. The session layer decides policy. None means "could not resolve"
-    # (unknown hash + offline/unreachable) — never silently treated as production.
-    app_info = dstack_details.get("app_info") if isinstance(dstack_details, dict) else None
-    os_image_hash = app_info.get("os_image_hash") if isinstance(app_info, dict) else None
-    if not os_image_hash and isinstance(dstack_details, dict):
-        os_image_hash = dstack_details.get("os_image_hash")
+    # The verified OS image hash binds the published metadata, including is_dev.
+    # Known hashes resolve offline. Unresolved hashes leave the OS claim unknown.
+    tcb_status = dstack_details.get("tcb_status")
+    os_image_hash = app_info.get("os_image_hash") or dstack_details.get("os_image_hash")
 
     os_image = resolve_os_image(os_image_hash) if os_image_hash else None
     if os_image is not None:
@@ -322,8 +322,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         production_os_image = None
 
     material = tdx_session_material(intel_quote)
-    compose_hash = (app_info or {}).get("compose_hash")
-    if material and compose_hash:
+    if material:
         material["session_material_version"] = "phala-direct/1"
 
     emit(

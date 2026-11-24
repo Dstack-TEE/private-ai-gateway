@@ -11,6 +11,13 @@ Date: 2026-11-23 PST (currency check). Original review 2026-06-10 UTC, updated
 > The [November currency check](#currency-check-2026-11-23-pst) records the
 > deployed producers and the current conditions for inclusion.
 
+## Adapter update (2026-11-23 PST)
+
+The adapter resolves the current production dstack OS images from its seed map
+and supports optional pins for the measured compose. TCB status and OS
+classification remain informational. See [Verification](verification.md) for
+the pin format and claim mapping.
+
 ## Currency check (2026-11-23 PST)
 
 The audit used verified session evidence from the production gateway. The

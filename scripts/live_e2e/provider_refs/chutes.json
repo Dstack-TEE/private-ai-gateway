@@ -1,12 +1,9 @@
 {
   "provider": "chutes",
-  "reviewed_at": "2026-05-16",
+  "reviewed_at": "2026-11-23",
   "mode": "provider-current",
   "accepted_models": {
-    "moonshotai/Kimi-K2.5-TEE": {
-      "expected_binding": "e2ee_public_key_sha256"
-    },
-    "Qwen/Qwen3-Embedding-8B-TEE": {
+    "moonshotai/Kimi-K2.6-TEE": {
       "expected_binding": "e2ee_public_key_sha256"
     }
   }
