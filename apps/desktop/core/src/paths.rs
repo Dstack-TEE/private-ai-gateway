@@ -2,7 +2,11 @@
 //! identically by the desktop shell, the CLI, the backend and the credential
 //! helper.
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use crate::brand::APP_IDENTIFIER;
 
@@ -12,6 +16,8 @@ pub const HOME_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_HOME";
 pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
 /// Exact override for the settings directory (`config.toml`, `credentials.toml`).
 pub const CONFIG_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_CONFIG_DIR";
+pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
+pub const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 /// The settings directory name under `~/.config` (`$XDG_CONFIG_HOME` on Linux).
 const CONFIG_DIR_NAME: &str = "private-ai-proxy";
 /// The settings subdirectory of the app directory where settings cannot live
@@ -67,7 +73,7 @@ fn app_data_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
             .join("Application Support"),
         Platform::Windows => env("APPDATA").ok_or_else(|| "APPDATA is not set".to_string())?,
         // The XDG base directory spec: a relative path is invalid and ignored.
-        Platform::Linux => env("XDG_DATA_HOME")
+        Platform::Linux => env(XDG_DATA_HOME)
             .filter(|path| path.is_absolute())
             .map_or_else(
                 || home_dir_in(platform, env).map(|home| home.join(".local").join("share")),
@@ -113,7 +119,7 @@ fn config_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
         return Ok(app_data_dir_in(platform, env)?.join(CONFIG_SUBDIR));
     }
     // The XDG base directory spec: a relative path is invalid and ignored.
-    let base = env("XDG_CONFIG_HOME")
+    let base = env(XDG_CONFIG_HOME)
         .filter(|path| platform == Platform::Linux && path.is_absolute())
         .map_or_else(
             || home_dir_in(platform, env).map(|home| home.join(".config")),
@@ -149,7 +155,27 @@ fn legacy_config_dir_in(platform: Platform, env: Env) -> Option<PathBuf> {
 pub fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(|value| matching_xdg_default(name, &value).unwrap_or_else(|| PathBuf::from(value)))
+}
+
+/// A set XDG home variable changes the login environment unless it names the default.
+pub fn xdg_home_overridden(name: &str) -> bool {
+    env::var_os(name).is_some_and(|value| matching_xdg_default(name, &value).is_none())
+}
+
+fn matching_xdg_default(name: &str, value: &OsStr) -> Option<PathBuf> {
+    let relative = match name {
+        XDG_CONFIG_HOME => ".config",
+        XDG_DATA_HOME => ".local/share",
+        _ => return None,
+    };
+    let default = home_dir().ok()?.join(relative);
+    let path = value
+        .to_str()
+        .map_or_else(|| Path::new(value), |value| Path::new(value.trim()));
+    // Path equality ignores trailing separators. Canonicalizing the spelling
+    // of the default here keeps discovery and enrollment in agreement.
+    (path == default).then_some(default)
 }
 
 pub fn home_dir() -> Result<PathBuf, String> {
@@ -173,6 +199,58 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn default_xdg_homes_do_not_override_supervision() {
+        const CHILD: &str = "PAP_TEST_XDG_SUPERVISION";
+        if let Some(case) = env::var_os(CHILD) {
+            let custom = case == "custom";
+            let home = home_dir().unwrap();
+            for (variable, relative) in [
+                (XDG_CONFIG_HOME, ".config"),
+                (XDG_DATA_HOME, ".local/share"),
+            ] {
+                assert_eq!(xdg_home_overridden(variable), custom, "{variable}");
+                let expected = if custom {
+                    home.join("custom").join(relative)
+                } else {
+                    home.join(relative)
+                };
+                assert_eq!(env_path(variable), Some(expected), "{variable}");
+            }
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        for case in ["default", "custom"] {
+            let mut child = std::process::Command::new(env::current_exe().unwrap());
+            child
+                .env_clear()
+                .env("HOME", home.path())
+                .env(CHILD, case)
+                .args([
+                    "--exact",
+                    "paths::tests::default_xdg_homes_do_not_override_supervision",
+                ]);
+            for (variable, relative) in [
+                (XDG_CONFIG_HOME, ".config"),
+                (XDG_DATA_HOME, ".local/share"),
+            ] {
+                let value = if case == "custom" {
+                    home.path().join("custom").join(relative).into_os_string()
+                } else {
+                    format!("  {}/  ", home.path().join(relative).display()).into()
+                };
+                child.env(variable, value);
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+    }
 
     /// An absolute path on every platform the tests run on.
     fn absolute(name: &str) -> PathBuf {

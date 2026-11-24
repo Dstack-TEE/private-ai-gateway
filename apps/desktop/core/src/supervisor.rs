@@ -72,9 +72,8 @@ fn command() -> Result<(PathBuf, bool), String> {
 pub fn automatic(agent_environment_overridden: bool) -> bool {
     supported()
         && !agent_environment_overridden
+        && !crate::paths::xdg_home_overridden(crate::paths::XDG_DATA_HOME)
         && ![
-            // An XDG override can select different credentials or session data.
-            "XDG_DATA_HOME",
             // Reqwest's default system proxy matcher uses these variables.
             "HTTP_PROXY",
             "http_proxy",
@@ -316,8 +315,7 @@ mod platform {
 
     /// The unit a user may write, as systemd.unit(5) places it.
     fn user_unit() -> Result<PathBuf, String> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
+        let config = crate::paths::env_path(crate::paths::XDG_CONFIG_HOME)
             .filter(|path| path.is_absolute())
             .or_else(|| std::env::home_dir().map(|home| home.join(".config")))
             .ok_or("Cannot locate the user's configuration directory")?;

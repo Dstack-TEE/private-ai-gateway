@@ -1,9 +1,10 @@
 use super::*;
 
+pub(super) use desktop_core::paths::XDG_CONFIG_HOME;
+
 pub(super) const CODEX_HOME: &str = "CODEX_HOME";
 pub(super) const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 pub(super) const OPENCODE_CONFIG: &str = "OPENCODE_CONFIG";
-pub(super) const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 pub(super) const PI_CODING_AGENT_DIR: &str = "PI_CODING_AGENT_DIR";
 pub(super) const HERMES_HOME: &str = "HERMES_HOME";
 pub(super) const OPENCODE_CONFIG_DIR: &str = "OPENCODE_CONFIG_DIR";
@@ -22,31 +23,33 @@ pub(super) const PROGRAM_DATA: &str = "ProgramData";
 
 /// Agent paths and validation depend on these process environment overrides.
 pub fn environment_overridden() -> bool {
-    [
-        CODEX_HOME,
-        CLAUDE_CONFIG_DIR,
-        OPENCODE_CONFIG,
-        XDG_CONFIG_HOME,
-        PI_CODING_AGENT_DIR,
-        HERMES_HOME,
-        OPENCODE_CONFIG_DIR,
-        OPENCODE_CONFIG_CONTENT,
-        OPENCLAW_CONFIG_PATH,
-        OPENCLAW_STATE_DIR,
-        OPENCLAW_HOME,
-        OPENCLAW_PROFILE,
-        OPENCLAW_NIX_MODE,
-        PI_CONFIG_DIR,
-        OMP_PROFILE,
-        PI_PROFILE,
-        DSH_HOME,
-        LOCALAPPDATA,
-        PROGRAM_DATA,
-        HOME_OVERRIDE_ENV,
-        dsh::TOKEN_REF,
-    ]
-    .into_iter()
-    .any(|name| env::var_os(name).is_some())
+    desktop_core::paths::xdg_home_overridden(XDG_CONFIG_HOME)
+        || (cfg!(windows)
+            && [LOCALAPPDATA, PROGRAM_DATA]
+                .into_iter()
+                .any(|name| env::var_os(name).is_some()))
+        || [
+            CODEX_HOME,
+            CLAUDE_CONFIG_DIR,
+            OPENCODE_CONFIG,
+            PI_CODING_AGENT_DIR,
+            HERMES_HOME,
+            OPENCODE_CONFIG_DIR,
+            OPENCODE_CONFIG_CONTENT,
+            OPENCLAW_CONFIG_PATH,
+            OPENCLAW_STATE_DIR,
+            OPENCLAW_HOME,
+            OPENCLAW_PROFILE,
+            OPENCLAW_NIX_MODE,
+            PI_CONFIG_DIR,
+            OMP_PROFILE,
+            PI_PROFILE,
+            DSH_HOME,
+            HOME_OVERRIDE_ENV,
+            dsh::TOKEN_REF,
+        ]
+        .into_iter()
+        .any(|name| env::var_os(name).is_some())
 }
 
 /// How the bridge reaches and configures each agent.
@@ -175,6 +178,41 @@ impl AgentIntegration for Agent {
             Agent::Hermes => {
                 "Hermes uses a machine-local token command. Start a new session without --api-key or --base-url overrides; existing native credentials and fallbacks are never erased."
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enrollment_ignores_default_xdg_config_and_checks_windows_paths_only_on_windows() {
+        const CHILD: &str = "PAP_TEST_AGENT_ENVIRONMENT";
+        if let Ok(case) = env::var(CHILD) {
+            assert_eq!(environment_overridden(), case == "custom" || cfg!(windows));
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        for (case, config) in [
+            ("default", home.path().join(".config")),
+            ("custom", home.path().join("config-override")),
+        ] {
+            let output = std::process::Command::new(env::current_exe().unwrap())
+                .env_clear()
+                .env(CHILD, case)
+                .env("HOME", home.path())
+                .env(XDG_CONFIG_HOME, config)
+                .env(LOCALAPPDATA, home.path())
+                .env(PROGRAM_DATA, home.path())
+                .args(["--exact", "agents::registry::tests::enrollment_ignores_default_xdg_config_and_checks_windows_paths_only_on_windows"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
         }
     }
 }
