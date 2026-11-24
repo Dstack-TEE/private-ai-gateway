@@ -1,6 +1,6 @@
 # Phala direct verification
 
-The `phala-direct` adapter connects to one dstack-vllm-proxy origin and verifies that origin's legacy version 2 attestation report. It is a per-model compatibility path for services that do not expose canonical ACI reports.
+The `phala-direct` adapter verifies a version 2 attestation report from a per-model Phala Inference Guard (PIG) or dstack-vllm-proxy origin. It is a compatibility path for services that do not expose canonical ACI reports.
 
 | Property | Value |
 | --- | --- |
@@ -12,14 +12,14 @@ The `phala-direct` adapter connects to one dstack-vllm-proxy origin and verifies
 
 ## Producer requirement
 
-The upstream proxy must serve attestation version 2 with a custom-domain TLS SPKI bound into TDX report data:
+The adapter requires attestation version 2 with a custom-domain TLS SPKI bound into TDX report data. This layout was checked in PIG `v0.12.41` and dstack-vllm-proxy `v0.2.20`.
 
 ```text
 report_data[0:32] = SHA256(signing_address || tls_cert_fingerprint)
 report_data[32:64] = request nonce
 ```
 
-`tls_cert_fingerprint` is the SHA-256 of the leaf certificate's SubjectPublicKeyInfo DER, and the report must return it. A proxy that ignores `version=2` cannot produce an enforceable custom-domain binding and is rejected.
+`tls_cert_fingerprint` is the SHA-256 of the leaf certificate's SubjectPublicKeyInfo DER, and the report must return it. PIG reads the certificate from `TLS_CERT_PATH`, which can point to the dstack-ingress certificate. The adapter rejects a report without `tls_cert_fingerprint`.
 
 This property is meaningful only when TLS private-key custody belongs to the attested workload, such as a dstack-ingress sidecar inside the CVM. An off-TEE TLS terminator breaks the intended custody claim even if the digest appears in the report.
 
@@ -104,9 +104,10 @@ The adapter records the classification and does not enforce it. A relying party 
 - A non-current TCB state is recorded rather than rejected by the bridge.
 - Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
 - The compose check proves the compose was measured. The adapter does not compare the compose or image digests with an operator allowlist.
+- The measured production Compose exports container and kernel logs outside the CVM with credential-only redaction. Whether the exported logs carry request content is outside the scope of adapter verification.
 - GPU evidence is an online existence and nonce check. It is not hardware-bound to the serving CPU TEE and does not prove which GPU served a request.
 - Model weights are not measured into the accepted identity.
-- The legacy producer and external dstack verifier are additional trust and availability dependencies.
+- The producer (PIG or dstack-vllm-proxy) and the external dstack verifier are additional trust and availability dependencies.
 
 ## Tests and reproduction
 
@@ -134,16 +135,14 @@ It runs `scripts/soundness_phala_direct.py`, which stubs the HTTP fetch, dstack 
 
 `tests/soundness_report_data.rs` covers the shared `report_data` binding logic.
 
-For a live endpoint, start a trusted dstack verifier and set the optional provider credential:
+For a live endpoint, start a trusted dstack verifier. Set `ORIGIN` and `MODEL_ID` for the endpoint under test. Export `PROVIDER_BEARER_TOKEN` if the endpoint requires authentication.
 
 ```sh
 export DSTACK_VERIFIER_URL='http://localhost:8080'
-export PHALA_DIRECT_API_KEY='...'
 request_hash="sha256:$(printf '0%.0s' {1..64})"
 jq -n \
-  --arg origin 'https://model.example' \
-  --arg model 'provider/model-id' \
-  --arg key "$PHALA_DIRECT_API_KEY" \
+  --arg origin "${ORIGIN:?Set the HTTPS origin}" \
+  --arg model "${MODEL_ID:?Set the canonical model ID}" \
   --arg hash "$request_hash" \
   '{
     api_version: "aci.provider-verifier.request.v1",
@@ -154,7 +153,7 @@ jq -n \
     forwarded_body_hash: $hash,
     required: true,
     timeout_seconds: 300,
-    provider_options: {phala_direct_bearer_token: $key}
+    provider_options: {phala_direct_bearer_token: env.PROVIDER_BEARER_TOKEN}
   }' | uv run python scripts/private_ai_provider_verifier.py
 ```
 
