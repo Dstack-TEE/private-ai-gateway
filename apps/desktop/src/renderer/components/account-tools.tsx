@@ -62,8 +62,9 @@ export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean;
   const reportFailure = useReportFailure();
   const { opening, openPage } = useAccountPage((error) => reportFailure("Could not open billing", error));
   if (!balance) return null;
-  if (props.funding !== "credits" && balance.usedPercent != null) return <WeeklyUsage balance={balance} />;
-  if (props.funding === "subscription") return null;
+  if (props.funding === "subscription") {
+    return balance.usedPercent != null ? <WeeklyUsage balance={balance} /> : null;
+  }
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
     onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(props.provider, scopeSlug))} />;
 }
