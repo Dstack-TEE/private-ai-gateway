@@ -77,11 +77,12 @@ through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
 > default header unchanged. No adapter behavior change is needed.
 > Upstream moved its Contrast dependency (the Coordinator attestation library)
 > from v1.24.1 to v1.25.0; the live Phala run covers this update.
-> [Live acceptance passed][v159-live-evidence] on a test CVM running the
-> `dstack-0.5.9` production OS. The attested Compose equaled the local render.
+> The [live test][v159-live-evidence] ran on the `dstack-0.5.9` production OS.
+> The attested Compose equaled the local render.
 > `pap verify --require-production-os --accept-compose` passed `id-1` through
-> `id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200, and
-> `pap audit --require-verified` had zero failures.
+> `id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200.
+> The receipt audit passed. The endpoint-binding check (`id-6`) failed in this
+> test.
 > The session binds the v1.59.0 proxy image digest and credential digest.
 
 > **Status (2026-10-19 PDT, shared prompt cache):** slow first tokens and rate
@@ -258,9 +259,9 @@ receipt.
 On 2026-09-23, the same pinned image again verified a live Coordinator SNP
 quote, exchanged a secret, and returned a real `gpt-oss-120b` completion
 through a fresh Phala deployment. A client E2EE v2 request returned a response
-that decrypted successfully, and the signed receipt and session audit had zero
-failures. `pap verify` passed the quote, keyset, expiry, and measured-Compose
-checks.
+that decrypted successfully. `pap verify` passed the quote, keyset, expiry,
+and measured-Compose checks. The receipt audit passed. The endpoint-binding
+check (`id-6`) failed in this test.
 
 The live manifest SHA-256 was
 `f53011576c782d61912c884158a781ae5b55f3a49948e577c6292befc2535ab7`:
@@ -299,16 +300,14 @@ because the official dstack v0.5.3 and v0.6.0 simulators' sample Compose bytes
 disagree with their quotes' recorded Compose hash. This was a problem in the
 simulator sample data.
 
-The [Phala verification on 2026-10-13][v158-live-evidence] supplies the live
-acceptance evidence. A test CVM on the `dstack-0.5.9` production OS ran the
-pinned v1.58.0 proxy. The attested Compose equaled the local render.
+The [2026-10-13 live test][v158-live-evidence] ran the pinned v1.58.0 proxy on the
+`dstack-0.5.9` production OS. The attested Compose equaled the local render.
 `pap verify --require-production-os --accept-compose` passed `id-1` through
-`id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200, and
-`pap audit --require-verified` had zero
-failures, with `receipt-1` through `receipt-4` and `upstream-1` through
-`upstream-2` passing. The session's `proxy_image_sha256` binding matched the
+`id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200.
+The receipt audit passed. The endpoint-binding check (`id-6`) failed in this
+test. The session's `proxy_image_sha256` binding matched the
 v1.58.0 image digest and credential digest, with an explicitly unbound dynamic
-manifest observation. The test CVM was then deleted.
+manifest observation.
 
 [v158-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/410#issuecomment-6136973775
 
