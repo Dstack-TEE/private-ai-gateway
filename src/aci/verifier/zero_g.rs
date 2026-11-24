@@ -300,6 +300,11 @@ impl ZeroGProviderVerifier {
         if let Some(compose_hash) = mr_config::compose_hash(&td.mr_config_id, &td.rt_mr3, &reply) {
             claims.insert("compose_hash".into(), compose_hash.into());
         }
+        // §7.6 advertises support in the broker's HTTPS quote reply. The
+        // router preview cannot enable or disable it.
+        let response_binding = reply["e2ee_features"]
+            .as_array()
+            .is_some_and(|features| features.iter().any(|feature| feature == "resp-bind"));
         let enc_pub: [u8; 32] = report_data[..32].try_into().expect("32 bytes");
         Ok(VerifiedCandidate {
             provider: VerifiedProvider {
@@ -309,6 +314,7 @@ impl ZeroGProviderVerifier {
                 model: model.to_string(),
                 signing_address: signer,
                 e2ee_public_key: hex::encode(enc_pub),
+                response_binding,
             },
             enc_pub,
             claims,

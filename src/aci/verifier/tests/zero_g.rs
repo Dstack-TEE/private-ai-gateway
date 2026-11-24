@@ -119,8 +119,8 @@ fn quote(name: &str) -> Value {
             reply["event_log"] = serde_json::to_string(&log).unwrap().into();
         }
         "k" => quote[MR_CONFIG_ID + 1] ^= 1,
-        "l" => reply = json!({}),
-        _ => {}
+        "l" => reply = json!({"e2ee_features": "resp-bind"}),
+        _ => reply["e2ee_features"] = json!(["future-feature", "resp-bind"]),
     }
     reply["quote"] = hex::encode(quote).into();
     reply
@@ -299,6 +299,7 @@ async fn model_identity_comes_only_from_configuration_and_chain() {
         .unwrap();
     assert_eq!(verified.provider.model, "0GM-1.0-35B-A3B");
     assert_eq!(verified.claims["compose_hash"], hex::encode(COMPOSE_HASH));
+    assert!(!verified.provider.response_binding);
 
     // A router substituting a legitimate provider for model B under a
     // configured model A, either by offering B or by mislabelling it A, and
@@ -357,6 +358,7 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert_eq!(instance["tcb_status"], "UpToDate");
     assert_eq!(instance["boot_chain"], BOOT_CHAIN);
     assert_eq!(instance["compose_hash"], hex::encode(COMPOSE_HASH));
+    assert_eq!(instance["response_binding"], true);
     let (headers, body) = mock.preview_requests.lock().unwrap()[0].clone();
     assert_eq!(headers["x-0g-provider-trust-mode"], "private");
     assert_eq!(body, json!({"model": MODEL, "service_type": "chatbot"}));
@@ -379,6 +381,7 @@ async fn omits_compose_claim_without_matching_event_log_and_register() {
             .await
             .unwrap();
         assert!(!verified.claims.contains_key("compose_hash"), "{name}");
+        assert!(!verified.provider.response_binding, "{name}");
     }
     server.abort();
 }

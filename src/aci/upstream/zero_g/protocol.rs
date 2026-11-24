@@ -4,10 +4,11 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use hkdf::Hkdf;
 use hpke::aead::{AeadCtxR, ChaCha20Poly1305};
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
-use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
+use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, PskBundle, Serializable};
 use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -20,6 +21,8 @@ pub(super) type Kem = X25519HkdfSha256;
 pub(super) const SEAL_INFO: &[u8] = b"0g-pc/v1/seal";
 pub(super) const RESP_INFO: &[u8] = b"0g-pc/v1/resp";
 pub(super) const E2EE: &str = "_e2ee";
+pub(super) const RESP_BIND_INFO: &[u8] = b"0g-pc/v1/resp-bind";
+pub(super) const BIND: &str = "_bind";
 
 /// Fields sent in the clear but bound in the AAD: those 0G's router reads
 /// before the broker opens the request. Every other field is sealed: §5.1 lets
@@ -64,11 +67,14 @@ pub(crate) fn seal_chat_request(
     mut request: Map<String, Value>,
     enc_pub: &[u8; 32],
     signer: &str,
+    response_binding: bool,
 ) -> Result<(Value, ResponseOpener), UpstreamError> {
-    if request.contains_key(E2EE) {
-        return Err(UpstreamError::InvalidRequest(
-            "request field \"_e2ee\" is reserved".to_string(),
-        ));
+    for field in [E2EE, BIND] {
+        if request.contains_key(field) {
+            return Err(UpstreamError::InvalidRequest(format!(
+                "request field {field:?} is reserved"
+            )));
+        }
     }
     if !request.contains_key("messages") {
         return Err(UpstreamError::InvalidRequest(
@@ -91,6 +97,14 @@ pub(crate) fn seal_chat_request(
         .map_err(|_| ProtocolError("invalid provider encryption key".into()))?;
     let mut rng = rand::rngs::OsRng;
     let (response_secret, response_public) = Kem::gen_keypair(&mut rng);
+    if response_binding {
+        request.insert(
+            BIND.into(),
+            URL_SAFE_NO_PAD
+                .encode(response_psk(&response_secret))
+                .into(),
+        );
+    }
     let (encapped, mut context) = hpke::setup_sender::<ChaCha20Poly1305, HkdfSha256, Kem, _>(
         &OpModeS::Base,
         &recipient,
@@ -120,8 +134,21 @@ pub(crate) fn seal_chat_request(
         .seal(&plaintext, &aad)
         .map_err(|e| ProtocolError(e.to_string()))?;
     envelope[E2EE]["ciphertext"] = URL_SAFE_NO_PAD.encode(&ciphertext).into();
-    let opener = ResponseOpener::new(response_secret, binding_hash(&aad, &ciphertext), model);
+    let opener = ResponseOpener::new(
+        response_secret,
+        binding_hash(&aad, &ciphertext),
+        model,
+        response_binding,
+    );
     Ok((Value::Object(envelope), opener))
+}
+
+fn response_psk(secret: &<Kem as hpke::Kem>::PrivateKey) -> [u8; 32] {
+    let mut psk = [0; 32];
+    Hkdf::<Sha256>::new(None, &secret.to_bytes())
+        .expand(RESP_BIND_INFO, &mut psk)
+        .expect("32-byte HKDF output is valid");
+    psk
 }
 
 #[derive(Deserialize)]
@@ -144,6 +171,7 @@ pub(crate) struct ResponseOpener {
     model: Option<Value>,
     frame_hashes: Vec<[u8; 32]>,
     saw_final: bool,
+    response_binding: bool,
 }
 
 impl ResponseOpener {
@@ -151,6 +179,7 @@ impl ResponseOpener {
         secret: <Kem as hpke::Kem>::PrivateKey,
         request_hash: [u8; 32],
         model: Option<Value>,
+        response_binding: bool,
     ) -> Self {
         Self {
             secret,
@@ -159,6 +188,7 @@ impl ResponseOpener {
             model,
             frame_hashes: Vec::new(),
             saw_final: false,
+            response_binding,
         }
     }
 
@@ -199,8 +229,18 @@ impl ResponseOpener {
             };
             let encapped = <Kem as hpke::Kem>::EncappedKey::from_bytes(&decode(&enc)?)
                 .map_err(|_| ProtocolError("invalid 0G response enc".into()))?;
+            let psk;
+            let mode = if self.response_binding {
+                psk = response_psk(&self.secret);
+                OpModeR::Psk(PskBundle {
+                    psk: &psk,
+                    psk_id: RESP_BIND_INFO,
+                })
+            } else {
+                OpModeR::Base
+            };
             self.context = Some(
-                hpke::setup_receiver(&OpModeR::Base, &self.secret, &encapped, RESP_INFO)
+                hpke::setup_receiver(&mode, &self.secret, &encapped, RESP_INFO)
                     .map_err(|e| ProtocolError(e.to_string()))?,
             );
         }

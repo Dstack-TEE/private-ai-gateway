@@ -49,6 +49,8 @@ pub(crate) struct VerifiedProvider {
     pub signing_address: String,
     /// Hex X25519 key from the verified quote's report_data.
     pub e2ee_public_key: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub response_binding: bool,
 }
 
 /// A provider broker's `/v1` API base (0G's deriveV1Base), HTTPS only.
@@ -140,7 +142,12 @@ impl ZeroGProviderBackend {
             ))
         })?;
         let api = broker_api(&provider.endpoint).map_err(UpstreamError::Transport)?;
-        let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)?;
+        let (envelope, opener) = seal_chat_request(
+            request,
+            &enc_pub,
+            &provider.signing_address,
+            provider.response_binding,
+        )?;
 
         // No caller or route headers are forwarded, so no X-0G-* control can
         // be injected.
