@@ -1,6 +1,6 @@
 //! The verified remote catalog (`GET /v1/models` through the ACI verifier) is
-//! the only source of model truth. Entries are validated and preserved as the
-//! service lists them; nothing is added or inferred. The display name shown
+//! the only source of model truth. Entries are validated and kept as the
+//! service gives them, newest first; nothing is added or inferred. The display name shown
 //! in the app and agent pickers is derived from each entry and is part of the
 //! catalog revision, so connected agents pick up a new name like any other
 //! catalog update.
@@ -185,7 +185,6 @@ impl Catalog {
         if entries.is_empty() {
             return Err("the service returned no models".to_string());
         }
-        let mut hasher = Sha256::new();
         let mut models = Vec::with_capacity(entries.len());
         for entry in entries {
             if entry.id.trim().is_empty() {
@@ -197,14 +196,23 @@ impl Catalog {
             {
                 continue;
             }
-            let model = CatalogModel {
+            models.push(CatalogModel {
                 display_name: display_name(&entry),
                 remote: entry,
-            };
-            let canonical = serde_json::to_vec(&model).map_err(|error| error.to_string())?;
+            });
+        }
+        // The service lists models in no particular order. Newest first,
+        // then by id, pickers lead with what was just added and a reordered
+        // list is the same catalog.
+        models.sort_by(|a, b| {
+            let created = |model: &CatalogModel| model.remote.extra.get("created")?.as_u64();
+            created(b).cmp(&created(a)).then_with(|| a.id().cmp(b.id()))
+        });
+        let mut hasher = Sha256::new();
+        for model in &models {
+            let canonical = serde_json::to_vec(model).map_err(|error| error.to_string())?;
             hasher.update((canonical.len() as u64).to_be_bytes());
             hasher.update(&canonical);
-            models.push(model);
         }
         let revision = hex::encode(hasher.finalize());
         Ok(Self {

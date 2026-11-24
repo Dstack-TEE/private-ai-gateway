@@ -7,6 +7,7 @@ import base64
 import contextlib
 import gzip
 import sys
+from secrets import token_hex
 from typing import Any
 
 from .common import emit, failed, json_evidence_bundle, provider_options, verifier_id_for
@@ -34,7 +35,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     # chain that our previous hand-rolled SEV-SNP path skipped: the AMD report
     # signature + VCEK->ASK->ARK certificate chain and policy/TCB (or DCAP for TDX),
     # Sigstore-verified code-measurement provenance bound to the GitHub repo and
-    # workflow identity, and the TLS public-key binding. The verified TLS key
+    # release tag, and the TLS public-key binding. The verified TLS key
     # fingerprint (report_data[0:32]) is returned as the enforceable channel binding.
     from urllib.parse import urlparse
 
@@ -52,9 +53,18 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     attestation_url = f"{url_origin.rstrip('/')}/.well-known/tinfoil-attestation"
     options = provider_options(request)
     repo = options.get("tinfoil_repo") or "tinfoilsh/confidential-model-router"
+    accepted_releases = {
+        name.removeprefix("tinfoil_accepted_subject:")
+        for name in options
+        if name.startswith("tinfoil_accepted_subject:")
+    }
 
     def _verify():
-        client = SecureClient(enclave=enclave_host, repo=repo)
+        # The bridge never sends inference through this client. Keep its
+        # unused prompt-cache secret in memory instead of persisting one.
+        client = SecureClient(
+            enclave=enclave_host, repo=repo, user_cache_secret=token_hex(32)
+        )
         client.verify()
         return client.get_verification_document()
 
@@ -75,6 +85,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
     evidence_doc = {
         "config_repo": doc.config_repo,
         "enclave_host": doc.enclave_host,
+        "release_tag": doc.release_tag,
         "release_digest": doc.release_digest,
         "code_fingerprint": doc.code_fingerprint,
         "enclave_fingerprint": doc.enclave_fingerprint,
@@ -98,6 +109,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Tinfoil verification returned no TLS public key fingerprint",
+            failure="no_channel_binding",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -118,6 +130,19 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
             provider,
             "Tinfoil verification was not router-scoped; expected the "
             f"confidential-model-router enclave (repo={repo!r})",
+            failure="provenance_not_accepted",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
+        return
+    if accepted_releases and (
+        not doc.release_digest
+        or f"tinfoil-release:sha256:{doc.release_digest.lower()}" not in accepted_releases
+    ):
+        failed(
+            provider,
+            "Verified Tinfoil release digest is missing or absent from accepted_subjects",
+            failure="provenance_not_accepted",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -144,6 +169,7 @@ async def verify_tinfoil(request: dict[str, Any]) -> None:
                 "used_router": True,
                 "config_repo": doc.config_repo,
                 "release_digest": doc.release_digest,
+                **({"release_tag": doc.release_tag} if doc.release_tag else {}),
                 "code_fingerprint": doc.code_fingerprint,
                 "tls_spki_from_report_data": True,
                 "verification_steps": {k: v["status"] for k, v in steps.items()},

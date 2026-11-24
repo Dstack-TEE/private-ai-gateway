@@ -1,6 +1,6 @@
 use crate::aci::identity::InvalidStatementInput;
 use crate::aci::keys::KeyError;
-use crate::aci::receipt::ReceiptError;
+use crate::aci::receipt::{ReceiptError, VerificationFailure};
 use crate::aci::upstream::UpstreamError;
 
 #[derive(Debug, thiserror::Error)]
@@ -54,8 +54,10 @@ pub enum ServiceError {
 pub enum UpstreamVerificationError {
     #[error("upstream verification required but no verifier result supplied")]
     NoVerifierResult,
-    #[error("upstream verifier reported failed: {0}")]
-    VerifierFailed(String),
+    /// The cause comes from a closed set, so this text is safe to serve and
+    /// to sign into a refusal receipt.
+    #[error("upstream verification failed: {0}")]
+    VerifierFailed(VerificationFailure),
     /// The request is restricted to ACI-verified upstreams and no
     /// route was eligible to serve it. Distinct from [`Self::VerifierFailed`]:
     /// no verifier ran and no upstream failed — the routes on offer were never

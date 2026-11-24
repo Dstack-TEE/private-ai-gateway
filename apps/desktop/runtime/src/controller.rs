@@ -45,6 +45,8 @@ use crate::{
 };
 
 const USAGE_DATABASE: &str = "usage.sqlite3";
+/// How often a protected session reads the service's model list again.
+const CATALOG_REFRESH: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 pub struct RuntimeOptions {
     pub launcher: Arc<dyn VerifierLauncher>,
@@ -275,7 +277,7 @@ impl DesktopRuntime {
             .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
         let listener = proxy::bind_std(local.bind);
         let (proxy_events_tx, proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
-        let proxy = ProxyState::new(proxy_events_tx)?;
+        let proxy = ProxyState::new(proxy_events_tx, proxy::VERIFICATION_WAIT)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join(USAGE_DATABASE)) {
             Ok(store) => (store, None),
             Err(error) => (
@@ -303,6 +305,15 @@ impl DesktopRuntime {
             task_runtime.clone(),
             initial_state,
         ));
+        let weak = Arc::downgrade(&manager);
+        proxy.set_catalog_refresher(Box::new(move || {
+            let manager = weak.upgrade();
+            Box::pin(async move {
+                if let Some(manager) = manager {
+                    let _ = manager.refresh_catalog().await;
+                }
+            })
+        }));
         let runtime = Arc::new(Self {
             manager: manager.clone(),
             proxy: proxy.clone(),
@@ -378,8 +389,8 @@ impl DesktopRuntime {
     }
 
     /// What keeps the backend current while it lives: network recovery and
-    /// agent reconciliation, request activity, and the retry of queued
-    /// account key cleanups.
+    /// agent reconciliation, request activity, the model catalog, and the
+    /// retry of queued account key cleanups.
     fn spawn_background_tasks(
         self: &Arc<Self>,
         task_runtime: &Handle,
@@ -422,6 +433,26 @@ impl DesktopRuntime {
         task_runtime.spawn(async move {
             while let Some(event) = proxy_events.recv().await {
                 events_runtime.manager.record_proxy_event(event);
+            }
+        });
+        // A session can last for weeks, and the service adds and removes
+        // models meanwhile. A changed catalog reaches the agents through the
+        // reconciliation above.
+        let weak = Arc::downgrade(self);
+        task_runtime.spawn(async move {
+            loop {
+                tokio::time::sleep(CATALOG_REFRESH).await;
+                let Some(runtime) = weak.upgrade() else {
+                    break;
+                };
+                if runtime.closing() {
+                    break;
+                }
+                if runtime.state().is_protected() {
+                    if let Err(error) = runtime.refresh_catalog().await {
+                        tracing::warn!("{error}");
+                    }
+                }
             }
         });
         let weak = Arc::downgrade(self);

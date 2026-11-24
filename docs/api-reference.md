@@ -37,12 +37,23 @@ error behavior below.
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |
+| `POST /v1/audio/speech` | OpenAI speech synthesis | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered audio with exact-byte receipts and character usage; explicit endpoint opt-in. |
 | `POST /v1/audio/transcriptions` | OpenAI multipart transcription | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | JSON or verbose JSON; middleware requires explicit endpoint opt-in. |
+| `POST /v1/images/edits` | Multipart image editing | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Up to 16 input images; inline base64 output; separate endpoint opt-in and multipart constraints. |
 | `POST /v1/images/generations` | OpenAI Image Generations | No | No; E2EE headers cause `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON with inline `data[].b64_json` only. Middleware requires explicit `supportedEndpoints` opt-in. |
+| `POST /v1/rerank` | Reranking | No | No; any `x-e2ee-*` header causes `400 e2ee_unsupported_endpoint` before parsing or admission | Buffered JSON; explicit endpoint opt-in required. |
 | `POST /v1/embeddings` | OpenAI Embeddings | No | Yes | The gateway forces a client-supplied `stream: true` back to buffered mode. |
-| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the request unchanged; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
+| `POST /v1/responses` | OpenAI Responses create | Yes | No | E2EE headers return `400 e2ee_unsupported_endpoint`. In middleware mode, a candidate that lists `/v1/responses` in `supportedEndpoints` receives the native request with gateway routing and cache controls removed; any other candidate receives a converted chat completion. Dedicated System One candidates receive neither. See the [candidate fields](control-plane-contract.md#post-consultpre). |
 | `POST /v1/messages` | Anthropic Messages | Yes | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Middleware can translate between Anthropic and OpenAI provider formats. |
 | `POST /v1/systemone` | System One structured decisions | No | No; E2EE headers return `400 e2ee_unsupported_endpoint` | Accepts native `model`, `state`, and `questions` fields and returns native `model`, `answers`, and `usage` fields. Middleware forwards only to candidates that list `/v1/systemone` in `supportedEndpoints`, and sends no other endpoint to them; it never converts the request to chat. |
+
+In middleware mode, `cache_salt` and `user_cache_secret` are gateway-owned
+upstream controls. A non-empty string `cache_salt` can subdivide the
+authenticated user's cache partition; caller fields are removed before
+forwarding. Supported providers receive a derived per-user, provider-specific
+field on text-generation routes. Anonymous requests receive no generated
+salt. Direct mode retains existing caller-field behavior. See
+[Prefix-cache isolation](prefix-cache-isolation.md).
 
 System One requests and responses are buffered JSON. Middleware preserves in-band
 `error` using the shared public error sanitizer, removing upstream metadata.
@@ -51,16 +62,42 @@ without interpreting question types, scores, probabilities, or confidence. In
 middleware mode, `usage` keeps `input_tokens`, `output_tokens`, and the
 gateway-added `cost` when present. The endpoint has no E2EE v2 field contract.
 
+Images, rerank and audio require an `Authorization` header in both direct and middleware
+modes. Requests missing it receive `401` before parsing, buffering, or admission,
+using the bounded discard described in the configuration reference. In middleware
+mode, credentials continue through the existing control-plane authorization.
+
+### Reranking
+
+`POST /v1/rerank` takes `model`, string `query`, and 1–1000 `documents` (strings
+or `{text: s}`, normalized to strings upstream). Optional fields are `top_n`
+(positive integer, clamped to the document count), boolean `return_documents`,
+positive `max_tokens_per_doc` and `truncate_prompt_tokens`, and `instruction`
+(≤32000 Unicode scalars).
+Explicit null `top_n` and `return_documents` are treated as absent.
+`user` is accepted and removed; `provider` carries routing policy. `/v2/rerank`
+and `/rerank` aliases use `/v1/rerank` for forwarding, opt-in, receipts and metrics.
+
+Responses contain only `id`, `model`, `results` (unique in-range `index`, finite
+`relevance_score`, optional `document: {text}`) and `usage`
+(`prompt_tokens`, `total_tokens`, gateway `cost` when priced). Results cannot
+exceed `top_n`; null documents are absent, and `return_documents: false`
+suppresses documents. Billing uses validated input-token usage; absent or
+malformed usage produces a receipted `502` instead of a free request. Token
+counts must be JSON integers in the pricing system's range, 1..9007199254740991.
+
+### Image generation
+
 Image generation requires string `model` and `prompt` (at most 32,000 Unicode
 characters). Request up to `n` images (`n` is an integer from 1 through 10,
 default 1); providers may return fewer, and image charges use the returned
 count. `n` is forwarded unchanged without retries to fill the count. `size`, `quality`,
-`background`, `output_format`, and `moderation` are strings;
+`background`, `output_format`, `input_fidelity`, and `moderation` are strings;
 `output_compression` is an integer from 0 through 100. Provider-specific values
-for the string options are validated upstream. `size`, `quality`, and `background`
-set to `"auto"` are omitted upstream to use the provider defaults; request-based
-billing dimensions stay unchanged. `response_format` must be absent
-or `"b64_json"`; the gateway always forwards `"b64_json"`. `user`,
+for the string options are validated upstream. The default `"auto"` values of
+`size`, `quality`, and `background` are omitted upstream for both image endpoints.
+`response_format` must be absent or `"b64_json"`; the gateway always forwards
+`"b64_json"`. `user`,
 `safety_identifier`, and `style` are accepted as strings and removed before
 forwarding; user identifiers stay private to the gateway. `provider` uses the
 existing routing and ACI constraints. Any other field returns `400` with
@@ -108,12 +145,47 @@ URLs, provider IDs, model IDs, and other fields are removed. Image
 receipts have `chat_id: null`; retrieve them using `X-Receipt-Id`. Image pricing
 follows the [control-plane pricing contract](control-plane-contract.md#image-generation).
 
+### Image edits
+
+`POST /v1/images/edits` accepts the OpenAI SDK multipart surface: required
+`model`, `prompt` (1–32000 Unicode scalars), and either one `image` part or
+1–16 repeated `image[]` parts. Mixed names and repeated bare `image` parts are
+rejected. Input order is preserved. Images must have PNG/JPEG/WebP magic bytes
+and be at most 50 MiB each. Optional `mask` is one PNG at most 4 MiB; optional
+`markup` is one PNG within the body limit. `mask` and `markup` are mutually
+exclusive. Dimension and transparency validation is left to the provider. The complete
+multipart body is limited to 64 MiB, including files, text and framing; aggregate
+text is limited to 1 MiB.
+
+Optional forwarded fields are `n` (integer 1–10, default 1), `size`, `quality`,
+`background`, `output_format`, `input_fidelity`, `moderation`, and
+`output_compression` (integer 0–100). Other optional fields above are strings;
+no provider-specific enum is enforced. Non-default parameters are forwarded as-is,
+so support depends on the routed provider. Default `auto` values and
+`response_format` follow [image generation](#image-generation).
+`user`, `safety_identifier`, and `stream=false` are accepted and removed.
+Routing/pinning uses `X-ACI-Provider`.
+
+The gateway re-encodes one input as `image`, multiple inputs as ordered repeated
+`image[]`, and the optional PNG as `mask` or `markup`. It replaces caller
+filenames and MIME headers with safe names and media types detected from bytes.
+The receipt hashes these exact encoded bytes. Responses use the sanitized inline
+generation schema with 1..n returned images; billing uses the returned count and
+provider-reported token usage when configured. URL-only or excess-image successes
+produce a receipted `502` without a billable image count, following the
+[generation pricing contract](control-plane-contract.md#image-generation).
+
+Gateway limits: `stream=true` and `partial_images` are unsupported by the buffered
+path, and `response_format=url` is unsupported by inline-only output. JSON edit
+bodies, `file_id`, remote image URLs, and GIF/SVG preview parameters are not
+implemented; unknown multipart fields return `400 unknown_parameter`. Edits use
+the [shared upload budget and deadline](configuration-reference.md#transcription-routing-and-launch-gate)
+and share inference admission with generations.
+
 ### Audio transcription
 
-Images and audio require an `Authorization` header in both direct and middleware
-modes. Requests missing it receive `401` before parsing, buffering, or admission,
-using the bounded discard described in the configuration reference. In middleware
-mode, credentials continue through the existing control-plane authorization.
+The [audio transcription example](../examples/audio/README.md) configures an
+upstream and sends a request.
 
 Send `multipart/form-data` to `/v1/audio/transcriptions`. Required fields are
 `model` and exactly one nonempty `file` (up to 25 MiB), with filename extension
@@ -133,15 +205,15 @@ removed; `stream=true` or any other value returns `400`. `provider` form fields,
 parts, and malformed multipart return `400`.
 
 Limits: 64 KiB aggregate text, 70-byte boundary, 8192-byte part headers,
-255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads share a
-402 MiB byte budget (16 times the whole-body limit) and a 60-second whole-upload deadline
+255-byte filename, and a whole-body cap of 25 MiB + 128 KiB. Uploads use the
+[shared byte budget and 60-second deadline](configuration-reference.md#transcription-routing-and-launch-gate)
 (`408 upload_timeout`). A 25 MiB file needs about 3.5 Mbps to finish within
 that deadline. Each received chunk reserves only its actual bytes;
 `Content-Length` is used only for early 413 rejection. Connections with no
 buffered data reserve no upload capacity. Budget exhaustion returns
 `429 rate_limit_exceeded` with `Retry-After: 1`. Size failures (`413`) and upload
-timeouts (`408`) close the connection. A separate 16-slot transcription inference
-admission follows validation and, in middleware mode, successful control-plane
+timeouts (`408`) close the connection. A 16-slot inference admission shared by
+transcription and speech follows validation and, in middleware mode, successful control-plane
 authorization and route selection. Upload accounting remains held until that
 handoff. Response bodies and pending write buffers own inference admission until
 completion or disconnect. There are no queue or whitespace heartbeats.
@@ -152,7 +224,7 @@ non-ASCII bytes, malformed/non-object JSON, invalid pins, and unknown `aci_`
 members return `400`.
 The header is consumed; it never reaches the upstream. JSON endpoints reject
 this carrier. The attestation report advertises support as
-`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions"]`.
+`service_capabilities.supported_multipart_constraint_endpoints: ["/v1/audio/transcriptions", "/v1/images/edits"]`.
 Constrained clients must obtain this capability over their accepted pinned
 channel before uploading. Receipt body hashes do not commit to this header;
 clients retain their effective policy and check the cited session against it.
@@ -205,6 +277,22 @@ reverse proxies for uploads within those bounds. Exhausted slots, excess bytes,
 transport errors, or a deadline cause immediate connection closure; upload
 capacity and inference permits are never held by the discard.
 
+### Speech synthesis
+
+`POST /v1/audio/speech` takes JSON `model`, `input` (1–4096 Unicode scalars),
+and string `voice`. Optional fields are `response_format`
+(`mp3|opus|aac|flac|wav|pcm`), `speed` (0.25–4), and `instructions` (≤4096 scalars).
+`stream_format: "audio"` is a no-op; SSE is unsupported. JSON `provider` carries
+routing/pinning.
+
+The body is exact buffered audio with a validated lowercase `audio/<subtype>`
+content type, parameters stripped; empty, malformed or non-audio successes yield receipted
+`502`s.
+Long input with `wav`/`pcm` output at low speed can exceed the default 64 MiB response cap
+(`502`). Successful receipts sign the request's Unicode scalar count via the
+[ACI `usage.reported` extension](../spec/aci.md#74-event-vocabulary).
+See [speech metering](control-plane-contract.md#speech-routing-and-metering) for billing and pricing requirements.
+
 ### Inference responses
 
 The normal provider-backed response path adds:
@@ -217,13 +305,130 @@ The normal provider-backed response path adds:
 | `X-E2EE-Algo` | Selected E2EE key algorithm when encryption was applied. |
 
 For a normal streaming call, the gateway sends `X-Receipt-Id` before the stream
-is complete and stores the receipt after the finalizer observes the terminal
-body. An upstream non-2xx returned before streaming begins is buffered and does
-not receive a receipt.
+is complete. Publication at the first destination terminal requires the source
+protocol's own terminal on a route with an established protocol, or clean EOF,
+accepted from the provider adapter after any authentication barrier. The selected
+backend declares protocol evidence for the shaped upstream wire operation,
+including on custom paths. The route protocol always controls decoding and billing;
+a contradictory declaration is a routing failure for every streaming operation. An unknown declaration retains EOF publication.
+The gateway signs and stores the receipt before returning that terminal's bytes.
+The body stays open and reads the source until EOF, emitting no later bytes.
+Accounting observes filtered upstream usage in the source protocol through EOF
+or disconnect, as on every other response path. Closing after a terminal with a
+published receipt leaves it queryable and settles as completed with the usage
+observed so far, retaining any failure status. A bridge-generated failure terminal
+without an accepted source terminal retains source consumption and EOF
+finalization. At clean source EOF, synthesized terminals publish in the poll that
+returns them. Cancellation or failure can leave the reserved id unpublished,
+including after an error terminal. A receipt proves neither client delivery nor
+model-generation completeness. Source-read, decoder or transform failures before
+publication can prevent completion and leave no receipt. Later failures retain
+their report status even when a receipt already exists. An upstream
+non-2xx returned before streaming begins is buffered and does not receive a receipt.
 
 In middleware mode, an unconstrained, non-E2EE stream can be committed as HTTP
 `200` before the upstream answers, and that response omits `X-Receipt-Id`; see
 [Streaming keepalives and early commit](configuration-reference.md#streaming-keepalives-and-early-commit).
+
+### Event-stream framing
+
+SSE fields use WHATWG parsing with LF, CRLF or bare CR line endings and an optional
+leading UTF-8 BOM. Only `data` fields dispatch payloads: a bare `[DONE]` or bare
+JSON line is an unknown field. A colonless `event` resets the event name. Data
+fields join with LF, including empty data fields. At clean EOF, a final block
+ending on a complete field line is dispatched even without its blank delimiter;
+a genuinely incomplete final line is discarded. A read failure or truncated EOF
+before the destination terminal emits the protocol error tail. Invalid UTF-8 in a recognized field
+fails the upstream read; it is never replaced with another character.
+
+The gateway returns canonical SSE framing: LF line endings, one space after each
+field colon, and fields in `event`, `data`, `id`, `retry` order. Repeated metadata
+fields keep the last valid value; invalid `id` or `retry` values and unknown fields
+are omitted. Retry values use decimal integer notation. Upstream comments and
+empty blocks are omitted; generated errors have no leading blank block. Unedited
+data strings retain their text, including JSON
+whitespace. JSON changes such as identity rewriting, cost injection or encryption
+produce compact JSON. Gateway heartbeats remain `: PROCESSING` comments. Direct
+serving emits this heartbeat after 5 seconds of upstream idleness through the same
+keep-alive stage as middleware. Its interval is fixed and is not configurable.
+Middleware uses `middleware.sse_keepalive_ms`; zero disables middleware heartbeats
+and early commitment.
+
+Protocol event names and `[DONE]` data are matched exactly, including whitespace.
+Known control names that contradict the payload type fail client output at the
+source-control boundary after readable usage is observed. Source observation
+continues; invalid UTF-8 and size overflow remain fatal decoder errors.
+The middleware response owner uses the protocol meaning assigned at ingress. It
+records usage from a failed event and sanitizes native records in place. Native
+Chat retains allowlisted chunk fields, content and failure finish reasons; a
+finish reason alone does not add an error object. Native Messages retains a
+failed delta's content and usage, while error events use the Messages error
+sanitizer. Native Responses retains its two terminal forms: `error` and
+`response.failed`, with output, usage and cost in the failed response object.
+For a failure crossing a bridge, Chat emits an error and one `[DONE]`, Messages
+emits an `error` event, and Responses emits `response.failed`. Failure alone does
+not create bridge startup events. A bridge closes content already emitted before
+its failure terminal, preserving partial output in a failed Responses object.
+Sanitization follows every payload's existing schema and identity rules regardless
+of unknown or mismatched SSE names; ingress classification determines outcome.
+Unrepresentable bridge payloads are upstream transport failures. Multiline JSON data is interpreted and metered
+once as one payload.
+
+Failure evidence remains sticky through the source protocol's terminal. Later
+source events cannot change that outcome. Publication freezes the received hash
+at the accepted source terminal block and suppresses later client output;
+source observation continues through EOF. A bridge failure terminal without an
+accepted source terminal retains source authentication, full source hashing and
+EOF publication. For early publication, `response.received` covers the decoder's
+accepted source prefix through the terminal block independently of chunking;
+SSE dispatch at CR excludes a following LF from that prefix.
+Accounting reads usage only from source payloads in the source protocol,
+before conversion. It observes usage through source EOF or client disconnect,
+including usage after terminals, failures and malformed records. Chat uses the
+latest cumulative usage; Messages merges start and delta counters; Responses uses
+its reported response usage. Repeated cumulative values are never added together.
+Every usage object is filtered by the source protocol's allowlist before pricing
+and reporting, including native Messages and buffered responses. Client usage is a
+projection and never a billing input.
+After the owner emits a destination terminal for a failed response, no further
+records are converted or sent to the client. A native failure record without a
+terminal continues normally until its protocol terminal arrives. When conversion,
+encoding or E2EE fails, source observation continues synchronously to EOF or client
+disconnect, without further client output. The report retains its failure status,
+attribution and label and includes usage observed so far; its publication is
+delayed until that observation ends. A failure before publication can suppress
+the receipt; an already-published receipt remains available. A buffered response that parses but fails conversion
+likewise retains filtered source usage on its existing 502 report.
+A source terminal alone does not prove a conversion succeeded: the destination
+terminal must be produced. Gateway stage failures still fail the response, even
+if the destination terminal has already been sent; no error tail is appended
+after that terminal.
+After an in-band failure, a later upstream read error supplies the report status
+and class, including after a failure terminal: a timeout reports 504
+`upstream_timeout`, and a reset reports 502 `upstream_transport`. Usage follows
+the source rule above.
+
+Application blocks are limited to 16 MiB. A clean EOF between events retains the
+existing completion policy: Chat gets a missing `data: [DONE]` marker, while
+Messages and Responses receive no fabricated success terminal. Legacy Anthropic
+completion conversion emits exactly one typed `data: [DONE]` marker. A body that
+explicitly declares a non-SSE content type follows a byte path: valid
+JSON objects report filtered source usage before identity rewriting and sanitization,
+without adding cost to the client body, while invalid JSON and
+non-object bodies pass through. It gets no SSE blank-line suffix or sentinel.
+This path retains the 16 MiB buffering bound. Overflow ends the body and records
+an upstream `502` with `upstream_transport` and no usage.
+If early commit already emitted a heartbeat before upstream headers arrived,
+that comment precedes the non-SSE body. Normal non-SSE responses have no heartbeat.
+An overflow after early commit retains the protocol's error tail and terminal,
+since the gateway already committed event-stream headers.
+Streaming E2EE still requires SSE.
+
+Receipt `response.received` hashes the provider adapter's application bytes before
+framing normalization or payload edits. `response.returned` hashes the exact bytes
+after all edits, heartbeats and optional E2EE. Chutes and 0G envelope opening keep
+their verification gates; 0G releases its application `[DONE]` only after verifying
+the provider signature.
 
 ### Require ACI verification
 
@@ -295,6 +500,11 @@ extension events, which verifiers that do not know them ignore (ACI §7.4):
 | `route.selected` | The selected route's `target_route_id` |
 | `response.received` | Hash of the upstream response body before response transforms |
 
+An admitted Tinfoil router response can also add an `upstream.tinfoil_enclave`
+extension event. Its `enclave` string records the `Tinfoil-Enclave` header
+from the selected response when its value is 1 to 256 bytes.
+See [Tinfoil verification](providers/tinfoil/verification.md#channel-binding-and-forwarding).
+
 ## Model catalogs
 
 | Method and path | Direct mode | Middleware mode |
@@ -305,6 +515,9 @@ extension events, which verifiers that do not know them ignore (ACI §7.4):
 
 On a [TEE-only hostname](configuration-reference.md#tee-only-hostnames), the
 gateway relays `tee=true` in place of any client-supplied `tee` parameter.
+In middleware mode, a request with a bearer key also relays the key's SHA-256
+as `x-api-key-hash`; see the
+[control-plane contract](control-plane-contract.md#catalog-endpoints).
 
 ## Canonical ACI endpoints
 
@@ -399,8 +612,56 @@ to these statuses.
 
 The following errors use the OpenAI envelope on every path, including
 `/v1/messages`: E2EE header and decryption errors, `X-Upstream-Verification`,
-invalid JSON, invalid `provider.aci_*` fields, and errors the gateway generates
-in direct mode other than the `504` for an upstream timeout.
+invalid JSON, and invalid `provider.aci_*` fields.
+
+Every response to an inference request names the gateway's request id:
+`x-request-id` on the OpenAI paths and `request-id` on `/v1/messages`. It is
+the id the gateway logs the request under and is generated by the gateway,
+whichever upstream served the request.
+
+A `429` or `503` that answers for an upstream carries that upstream's
+`Retry-After` when it gave one as a number of seconds.
+
+A request that fails after it was accepted is answered the same way in both
+modes. The message is fixed wording for the condition; the cause is written to
+the gateway log with the request id and is not returned.
+
+| Condition | Response |
+| --- | --- |
+| Upstream verification refused the request | `503 upstream_verification_failed` or `412 session_not_accepted`, with `X-Receipt-Id`. The message and the receipt's `reason` name the cause from the fixed list below. |
+| No route serves the model | `404 not_found_error`, with a message naming the model. |
+| The request body is malformed, or the route cannot carry the request | `400 invalid_request_error`, with a message that says what is wrong with the request. |
+| The upstream did not answer in time | `504 timeout_error`. |
+| The upstream could not be reached, broke off, or failed its channel binding | `502`. |
+| The gateway itself failed | `500 internal_error` (`api_error` on `/v1/messages`). |
+
+A failed `upstream.verified` event carries one of the reasons below, and a
+`503 upstream_verification_failed` on an OpenAI path carries the matching
+`error.code`. The receipt is the gateway's signed statement, so the reason is
+always one of these sentences. A verifier's own account of the failure, which
+may quote what an unverified upstream returned, goes to the gateway log and
+the operator's status view.
+
+| `error.code` | Reason | Meaning |
+| --- | --- | --- |
+| `evidence_unavailable` | `the upstream's attestation evidence could not be obtained` | The evidence could not be fetched or the verifier could not run. Nothing was judged; a later attempt may succeed. |
+| `evidence_invalid` | `the upstream's attestation evidence is malformed or incomplete` | The evidence arrived but a required part is missing or unparsable. |
+| `quote_invalid` | `the upstream's hardware attestation did not verify` | The hardware quote, or the GPU attestation with it, did not verify. |
+| `binding_mismatch` | `the upstream's attestation is not bound to this verification's nonce, keys or model` | The evidence does not commit to the fresh nonce, the channel key, or the requested model. |
+| `keyset_expired` | `the upstream's attested keyset has expired` | The upstream's keyset is past its `not_after`. |
+| `provenance_not_accepted` | `the upstream's measured workload is not accepted by this gateway's policy` | The measurement, compose hash, or source provenance is not one the operator accepts. |
+| `custody_not_verified` | `the upstream's key custody did not verify` | The key custody evidence did not verify. |
+| `policy_rejected` | `the upstream's platform state is not accepted by this gateway's policy` | For example an out-of-date TCB or a debug-mode TD. |
+| `no_channel_binding` | `no enforceable channel binding` | Verification pinned nothing the gateway can enforce. |
+| `no_verifier` | `no upstream verifier configured` | The route has no verifier. |
+| `verifier_misconfigured` | `the upstream verifier is not fully configured` | The route's verifier lacks configuration it needs. |
+| `unattributed_response` | `upstream withheld an unverified response without a serving instance` | The response could not be attributed to a verified instance. |
+| `not_verified` | `the upstream's attestation was not verified` | The verifier did not accept the upstream and named no cause above. |
+
+A refusal receipt records the refusal's own message as the reason: one of the
+sentences above prefixed with `upstream verification failed: `, or the
+gateway's fixed sentence when no route or pinned session was eligible or no
+verifier result was supplied.
 
 The gateway passes actionable upstream client errors through in its own
 envelope, maps upstream authentication failures to gateway errors, and maps a

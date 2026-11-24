@@ -34,6 +34,11 @@ use serde_json::{Map, Value};
 use tokio::{runtime::Handle, sync::watch};
 
 const MAX_ACTIVITY: usize = 50;
+/// How long a verified session's service gets to answer a probe.
+#[cfg(not(test))]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const SERVICE_PROBE_TIMEOUT: Duration = Duration::from_millis(200);
 
 pub struct SessionManager {
     inner: Mutex<RuntimeState>,
@@ -99,6 +104,18 @@ pub struct VerifierConfig {
     pub remote_url: String,
 }
 
+/// What attesting a protecting session's service again found.
+pub enum Reverified {
+    /// No session is protecting; there is nothing to verify in place.
+    NotProtecting,
+    /// The same service: the session went on undisturbed.
+    Kept,
+    /// Another service that verifies: the session restarts on it.
+    Changed,
+    /// It did not verify: the session is closed and retried.
+    Failed(String),
+}
+
 pub type VerifierEventSink = Arc<dyn Fn(VerifierEvent) + Send + Sync>;
 
 /// The status and error a state change introduced, for the service log.
@@ -159,15 +176,12 @@ struct RuntimeState {
 impl RuntimeState {
     /// Verification is lost: the epoch moves so a catalog read still in
     /// flight can neither publish nor clear this state, and the identity must
-    /// be reported again before anything opens. The status is an error unless
-    /// a security block holds. The session goes on while the user still
-    /// intends it.
+    /// be reported again before anything opens. The session goes on while
+    /// the user still intends it.
     fn lose_verification(&mut self) {
         self.epoch += 1;
         self.identity_ready = false;
-        if self.state.status != VerificationStatus::Blocked {
-            self.state.status = VerificationStatus::Error;
-        }
+        self.state.status = VerificationStatus::Error;
         self.state.reconnecting = crate::recovery::connection_intended(&self.state);
         self.state.progress = None;
         self.state.catalog = None;
@@ -289,7 +303,9 @@ impl SessionManager {
 
         let mut runtime = self.lock()?;
         if let Some(error) = &runtime.state.endpoint_error {
-            return Err(format!("The local endpoint is unavailable: {error}").into());
+            return Err(Error::invalid_state(format!(
+                "The Local API is unavailable: {error}. Free the port or choose another with `pap settings set local-api.port <port>`."
+            )));
         }
         if runtime.task.is_some() {
             return Err(Error::already_running(&runtime.state));
@@ -350,7 +366,10 @@ impl SessionManager {
         }
         drop(runtime);
 
-        self.publish_unverified(generation, 0, Some(session_id.clone()));
+        // Agents wait for a session the user intends, not for the
+        // verification of a profile being saved.
+        let intended = continuing || !verification_only;
+        self.publish_unverified(generation, 0, intended.then(|| session_id.clone()));
         self.publish();
         let state = self.snapshot();
         let weak = Arc::downgrade(self);
@@ -391,10 +410,7 @@ impl SessionManager {
                 let _ = task.stop();
                 return Err("Protection start was superseded".into());
             }
-            if matches!(
-                runtime.state.status,
-                VerificationStatus::Error | VerificationStatus::Blocked
-            ) {
+            if runtime.state.status == VerificationStatus::Error {
                 let _ = task.stop();
             } else {
                 runtime.task = Some(task);
@@ -428,7 +444,7 @@ impl SessionManager {
                 }
                 match state.status {
                     VerificationStatus::Verified => return Ok(state),
-                    VerificationStatus::Blocked | VerificationStatus::Error => {
+                    VerificationStatus::Error => {
                         let failure = self.lock()?.failure.clone();
                         return Err(failure.unwrap_or_else(|| {
                             state
@@ -653,6 +669,18 @@ impl SessionManager {
 
     /// A request the local proxy answered itself, before any receipt.
     pub fn record_proxy_event(&self, event: ProxyEvent) {
+        // The only trace of a request an agent saw fail, next to the session
+        // changes around it.
+        if event.status >= 400 && !event.detail.is_empty() {
+            tracing::warn!(
+                "Local API {} {} -> {} for {}: {}",
+                event.method,
+                event.path,
+                event.status,
+                event.agent.as_deref().unwrap_or("an unknown client"),
+                event.detail
+            );
+        }
         if event.path == "/v1/models" {
             return;
         }
@@ -713,6 +741,59 @@ impl SessionManager {
         changes.write();
     }
 
+    /// Attests the protecting session's service again where it runs.
+    pub async fn verify_running(&self) -> Reverified {
+        let running = self.lock().ok().and_then(|runtime| {
+            let service = runtime
+                .state
+                .is_protected()
+                .then(|| runtime.service.clone());
+            Some((runtime.generation, service.flatten()?))
+        });
+        let Some((generation, service)) = running else {
+            return Reverified::NotProtecting;
+        };
+        if let Err(reason) = service.verify_again().await {
+            return Reverified::Failed(reason);
+        }
+        // The same verifier, still open: a service that turned out to be
+        // another one retired it.
+        let kept = self.lock().is_ok_and(|runtime| {
+            runtime.generation == generation
+                && runtime.service.is_some()
+                && runtime.state.is_protected()
+        });
+        if kept {
+            Reverified::Kept
+        } else {
+            Reverified::Changed
+        }
+    }
+
+    /// Whether the verified session's service can still be reached. Blocks the
+    /// calling thread, which must not be a runtime worker.
+    pub fn service_answers(self: &Arc<Self>) -> bool {
+        let Some(service) = self.lock().ok().and_then(|runtime| runtime.service.clone()) else {
+            return false;
+        };
+        let Ok(request) = axum::http::Request::get("/v1/models").body(axum::body::Body::empty())
+        else {
+            return false;
+        };
+        // An error the service answered or a local refusal leaves the
+        // session to the verifier, which closes it when it must. No answer
+        // in time is a connection the address change left dead: nothing
+        // else would notice it before a request waited out its timeout.
+        self.task_runtime.block_on(async move {
+            tokio::time::timeout(SERVICE_PROBE_TIMEOUT, service.call(request, None))
+                .await
+                .is_ok_and(|response| {
+                    response.extensions().get()
+                        != Some(&agent_bridge::proxy::VerifierRefusal::Unreachable)
+                })
+        })
+    }
+
     /// Refresh discovery without revoking the current verified session.
     pub async fn refresh_catalog(self: &Arc<Self>) -> Result<AppState, Error> {
         let (generation, epoch) = {
@@ -752,10 +833,13 @@ impl SessionManager {
         }
         let outcome = match result {
             Ok(catalog) => {
+                // A refresh leaves an error other work reported in place.
+                if runtime.state.status != VerificationStatus::Verified {
+                    runtime.state.error = None;
+                }
                 runtime.state.status = VerificationStatus::Verified;
                 runtime.state.reconnecting = false;
                 runtime.state.progress = None;
-                runtime.state.error = None;
                 let summary = catalog_summary(&catalog, runtime.last_catalog.as_ref());
                 runtime.last_catalog = Some(summary.clone());
                 runtime.state.catalog = Some(summary);
@@ -776,8 +860,8 @@ impl SessionManager {
             Err(error) => {
                 let message = format!("Cannot read the verified model list: {error}");
                 if runtime.state.status == VerificationStatus::Verified {
-                    // A failed manual refresh keeps the session it had.
-                    runtime.state.error = Some(message.clone());
+                    // A failed refresh keeps the session and catalog it had;
+                    // only its caller hears of it.
                     Err(message)
                 } else {
                     // The first catalog read failed: never leave a running
@@ -834,10 +918,7 @@ impl SessionManager {
             return Ok(());
         }
         runtime.task = None;
-        if !matches!(
-            runtime.state.status,
-            VerificationStatus::Error | VerificationStatus::Blocked
-        ) {
+        if runtime.state.status != VerificationStatus::Error {
             runtime.state.error = Some(match error {
                 Some(error) => format!("Verifier task stopped unexpectedly: {error}"),
                 None => "Verifier stopped unexpectedly".to_string(),
@@ -883,9 +964,13 @@ impl SessionManager {
         runtime.service = None;
         runtime.verification_only = false;
         runtime.lose_verification();
-        let (epoch, session_id) = (runtime.epoch, runtime.session_id.clone());
+        let session_id = runtime
+            .state
+            .session_active
+            .then(|| runtime.session_id.clone());
+        let epoch = runtime.epoch;
         drop(runtime);
-        self.publish_unverified(generation, epoch, Some(session_id));
+        self.publish_unverified(generation, epoch, session_id);
         if let Some(mut task) = task {
             let _ = task.stop();
         }

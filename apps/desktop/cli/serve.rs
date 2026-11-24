@@ -371,8 +371,8 @@ impl ProxyState {
 
     /// Block forwards until a fresh verify re-establishes trust: cancel the
     /// gate of the identity the change was `observed` under and report the
-    /// rotation (the managed backend rebuilds its session on
-    /// `keyset_changed`). Only the block that closes the current identity's
+    /// rotation (the managed backend rebuilds its session on any
+    /// block). Only the block that closes the current identity's
     /// gate reports it: an observation made under an identity since
     /// replaced, or one already blocked, only cancels a closed gate.
     fn block_for_keyset_change(&self, observed: &TrustedIdentity, reason: String) {
@@ -415,7 +415,7 @@ impl ProxyState {
     /// before it started waiting: an attempt that failed since is shared, not
     /// repeated (single flight). Only the caller that ran a failed attempt
     /// reports it, and not once the verifier is stopping: a managed backend
-    /// stops this verifier on `keyset_changed` to rebuild the session, and
+    /// stops this verifier on any block to rebuild the session, and
     /// that expected stop is not a verification failure.
     ///
     /// `refused_pins` heals a stale TLS pin: a send whose handshake that pin
@@ -1076,11 +1076,17 @@ async fn proxy_inference(
                     Ok(prepared) => prepared,
                     Err(reason) => {
                         tracing::warn!("private-ai-proxy serve: refreshed session policy rejected request: {reason}");
-                        return text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
+                        // The first send already reached the service.
+                        let mut refused =
+                            text_response(StatusCode::BAD_REQUEST, format!("{reason}\n"));
+                        refused
+                            .extensions_mut()
+                            .insert(agent_bridge::proxy::VerifierRefusal::Interrupted);
+                        return refused;
                     }
                 };
                 match race_delivery(&delivery, send(&prepared)).await {
-                    None => return delivery_revoked_response(&path),
+                    None => return delivery_interrupted_response(&path),
                     Some(Ok(retried)) => resp = retried,
                     Some(Err(e)) => {
                         return send_error(&state, Method::POST, path, e, context.clone())
@@ -1261,7 +1267,7 @@ where
     let pins = state.client.pinned_spkis(&state.host);
     let attempts = state.reverify_attempts.load(Ordering::SeqCst);
     let error = match race_delivery(&admitted.delivery, send()).await {
-        None => return Err(Box::new(delivery_revoked_response(path))),
+        None => return Err(Box::new(delivery_interrupted_response(path))),
         Some(Ok(resp)) => return Ok(resp),
         Some(Err(e)) => e,
     };
@@ -1269,7 +1275,7 @@ where
         return Err(failed(error));
     }
     if let Err(reason) = state.reverify_blocked(attempts, Some(&pins)).await {
-        // A managed verifier stops on `keyset_changed` while the backend
+        // A managed verifier stops on a block while the backend
         // rebuilds its session; the request is retryable, not failed.
         if state.shutdown.is_cancelled() {
             return Err(Box::new(delivery_revoked_response(path)));
@@ -1288,7 +1294,7 @@ where
     // a new delivery gate; send under that one.
     *admitted = current;
     match race_delivery(&admitted.delivery, send()).await {
-        None => Err(Box::new(delivery_revoked_response(path))),
+        None => Err(Box::new(delivery_interrupted_response(path))),
         Some(Ok(resp)) => Ok(resp),
         Some(Err(e)) => Err(failed(e)),
     }
@@ -1323,6 +1329,20 @@ fn delivery_revoked_response(path: &str) -> Response {
         StatusCode::SERVICE_UNAVAILABLE,
         "verification changed before the request was sent; retry once the gateway is verified again\n",
     )
+}
+
+/// The delivery gate closed while the request was being sent: it may have
+/// reached the service, so nothing here tells the caller to send it again.
+fn delivery_interrupted_response(path: &str) -> Response {
+    tracing::warn!("!! {path} -> 503 verification changed while the request was being sent");
+    let mut response = text_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "verification changed while the request was being sent; whether it was delivered is unknown\n",
+    );
+    response
+        .extensions_mut()
+        .insert(agent_bridge::proxy::VerifierRefusal::Interrupted);
+    response
 }
 
 /// A response digest gates new sends until one fresh verification establishes
@@ -1432,13 +1452,18 @@ fn send_error(
         rewritten: None,
         local_policy_applied: false,
     });
-    text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n")
+    let mut response = text_response(StatusCode::BAD_GATEWAY, "upstream connection failed\n");
+    response
+        .extensions_mut()
+        .insert(agent_bridge::proxy::VerifierRefusal::Unreachable);
+    response
 }
 
 fn text_response(status: StatusCode, body: impl Into<Body>) -> Response {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain")
+        .extension(agent_bridge::proxy::VerifierRefusal::NotSent)
         .body(body.into())
         .unwrap_or_else(|_| internal_error())
 }

@@ -308,7 +308,7 @@ async fn events<B: Backend>(
                     // End the stream; the client reconnects and receives a fresh snapshot.
                     Err(_) => break,
                 },
-                // An open page counts as activity; revoked or expired sessions end here.
+                // Revoked sessions end here.
                 _ = session.tick() => if !session_live() {
                     break;
                 },

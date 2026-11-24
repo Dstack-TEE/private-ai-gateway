@@ -62,6 +62,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
 multer = "3"
+mime = "0.3"
 # Serving the public entry directly (rather than via axum::serve) is what lets the
 # connection IO be wrapped with a write-idle timeout; axum 0.7 takes a concrete
 # TcpListener and offers no hook for that. Deliberately NOT hyper-util's
@@ -73,6 +74,9 @@ hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body-util = "0.1"
 async-stream = "0.3"
+
+# Server-sent event framing at provider and client boundaries.
+sse-stream = "0.3"
 
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
 # validation normal without linking against system OpenSSL.

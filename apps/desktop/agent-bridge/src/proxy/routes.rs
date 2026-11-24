@@ -32,15 +32,9 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
     let surface = Surface::ChatCompletions;
     let auth = match state.authorize(&headers, "/v1/models") {
         Ok(auth) => auth,
-        Err(rejection) => {
-            return error_response(
-                surface,
-                rejection.status,
-                rejection.code,
-                &rejection.message,
-            )
-        }
+        Err(rejection) => return rejection.response(surface),
     };
+    state.verification_settled().await;
     let session = state.session();
     match (session.verified, session.catalog) {
         (true, Some(catalog)) => {
@@ -49,12 +43,18 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
                 .unwrap_or(catalog);
             Json(catalog.openai_list()).into_response()
         }
-        _ => error_response(
-            surface,
+        _ => Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "gateway_not_verified",
             "The verified model list is not available until verification succeeds",
-        ),
+        )
+        .retry_after(
+            session
+                .session_id
+                .is_some()
+                .then_some(VERIFICATION_RETRY_SECS),
+        )
+        .response(surface),
     }
 }
 

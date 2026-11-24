@@ -31,6 +31,7 @@ async fn middleware_capacity_refusal_reports_gateway_failure_with_request_id() {
     let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
     let middleware = Middleware::new(
         PrefixHashKey::new([7; 32]),
+        private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
         &serde_json::from_value(json!({
             "control_url":format!("http://{address}")
         }))
@@ -47,6 +48,7 @@ async fn middleware_capacity_refusal_reports_gateway_failure_with_request_id() {
     let permits: Vec<_> = (0..admission::MAX_IN_FLIGHT)
         .map(|_| admission::try_acquire(Endpoint::ImagesGenerations).unwrap())
         .collect();
+    assert!(admission::try_acquire(Endpoint::ImagesEdits).is_err());
     let response = app
         .oneshot(
             Request::builder()

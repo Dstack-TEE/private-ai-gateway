@@ -1,13 +1,12 @@
 use super::wire::{E2eeAadMode, E2eeDecryptor};
+use super::ServiceError;
 
 use serde_json::{json, Value};
 
-use super::streaming::E2eeSseTransformer;
 use super::{E2eeError, E2eeRequestContext, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 use crate::aci::digest;
 
-/// JCS bytes for the AAD documents — same bytes main's `canonical` module
-/// produced for these integer-and-ASCII inputs.
+/// Canonical JCS bytes for the AAD documents.
 fn canonicalize(value: &Value) -> Result<Vec<u8>, digest::JcsError> {
     digest::jcs_bytes(value)
 }
@@ -534,14 +533,12 @@ pub(super) fn encrypt_e2ee_final_response(
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
     is_sse: bool,
-) -> Result<Vec<u8>, E2eeError> {
+) -> Result<Vec<u8>, ServiceError> {
     if !is_sse {
-        return encrypt_e2ee_response_body(cleartext_body, ctx, endpoint_path);
+        return encrypt_e2ee_response_body(cleartext_body, ctx, endpoint_path).map_err(Into::into);
     }
-    let mut transformer = E2eeSseTransformer::new(ctx.clone(), endpoint_path.to_string());
-    let mut out = transformer.push_chunk(cleartext_body)?;
-    out.extend(transformer.finish()?);
-    Ok(out)
+    super::streaming::finalize_sse_body(cleartext_body, Some(ctx), endpoint_path)
+        .map(|(bytes, _)| bytes)
 }
 
 pub fn is_sse_content_type(content_type: Option<&str>) -> bool {
@@ -550,26 +547,45 @@ pub fn is_sse_content_type(content_type: Option<&str>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
-pub(super) fn encrypt_e2ee_stream_payload(
-    cleartext_payload: &[u8],
+pub(super) fn encrypt_e2ee_record(
+    record: &mut crate::sse::Record,
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
-) -> Result<Vec<u8>, E2eeError> {
+) -> Result<(), E2eeError> {
+    let Some(event) = record.event() else {
+        return Ok(());
+    };
+    if event.meaning.kind == crate::sse_protocol::EventKind::Done {
+        return Ok(());
+    }
+    let Some(event) = record.event_mut() else {
+        return Ok(());
+    };
+    let crate::sse::Payload::Json(value) = &mut event.payload else {
+        return Err(E2eeError::EncryptionFailed);
+    };
+    let value = value.take();
+    record.set_encrypted(encrypt_e2ee_stream_value(value, ctx, endpoint_path)?);
+    Ok(())
+}
+
+pub(super) fn encrypt_e2ee_stream_value(
+    mut payload: Value,
+    ctx: &E2eeRequestContext,
+    endpoint_path: &str,
+) -> Result<Value, E2eeError> {
     if endpoint_path == EMBEDDINGS_PATH {
-        // OpenAI's embeddings endpoint is buffered-only; the router
-        // forces stream=false, so reaching here means an internal
-        // inconsistency that we fail closed on.
+        // Embeddings are buffered-only. A streaming embedding is an internal
+        // inconsistency: fail closed rather than send unencrypted vectors.
         return Err(E2eeError::EncryptionFailed);
     }
-    let mut payload: Value =
-        serde_json::from_slice(cleartext_payload).map_err(|_| E2eeError::EncryptionFailed)?;
     let response_id = payload
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
     let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
-        return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
+        return Ok(payload);
     };
 
     for (position, choice) in choices.iter_mut().enumerate() {
@@ -616,7 +632,7 @@ pub(super) fn encrypt_e2ee_stream_payload(
         }
     }
 
-    serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
+    Ok(payload)
 }
 
 pub(super) fn encrypt_response_field(

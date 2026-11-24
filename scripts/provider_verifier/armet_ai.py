@@ -206,17 +206,20 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     options = provider_options(request)
     subjects = accepted_subjects(options)
     if not subjects:
-        reject("armet-ai upstream has no accepted_subjects; refusing an unpinned TD")
+        reject(
+            "armet-ai upstream has no accepted_subjects; refusing an unpinned TD",
+            failure="verifier_misconfigured",
+        )
         return
 
     raw_origin = request.get("url_origin")
     model_id = request.get("model_id")
     if not raw_origin or not model_id:
-        reject("armet-ai request is missing url_origin or model_id")
+        reject("armet-ai request is missing url_origin or model_id", failure="verifier_misconfigured")
         return
     origin = str(raw_origin).rstrip("/")
     if not origin.startswith("https://"):
-        reject("armet-ai upstream origin must be https")
+        reject("armet-ai upstream origin must be https", failure="verifier_misconfigured")
         return
     timeout = request_timeout_seconds(request, 30)
     bearer = (options.get(BEARER_OPTION) or "").strip()
@@ -229,7 +232,10 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     try:
         body, content_type = await asyncio.to_thread(fetch_report, url, params, headers, timeout)
     except Exception as exc:  # noqa: BLE001
-        reject(f"failed to fetch armet-ai attestation report: {exc}")
+        reject(
+            f"failed to fetch armet-ai attestation report: {exc}",
+            failure="evidence_unavailable",
+        )
         return
 
     # Evidence is the exact response bytes the checks below consumed.
@@ -238,71 +244,109 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     try:
         report = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        reject(f"armet-ai attestation report is not JSON: {exc}", evidence=evidence)
+        reject(
+            f"armet-ai attestation report is not JSON: {exc}",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     if not isinstance(report, dict):
-        reject("armet-ai attestation report must be a JSON object", evidence=evidence)
+        reject(
+            "armet-ai attestation report must be a JSON object",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
 
     if report.get("version") != REPORT_VERSION:
-        reject(f"armet-ai report version must be {REPORT_VERSION}", evidence=evidence)
+        reject(
+            f"armet-ai report version must be {REPORT_VERSION}",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     if str(report.get("nonce") or "").lower() != nonce:
-        reject("armet-ai report nonce did not match the request nonce", evidence=evidence)
+        reject(
+            "armet-ai report nonce did not match the request nonce",
+            failure="binding_mismatch",
+            evidence=evidence,
+        )
         return
     if report.get("model_id") != model_id:
         reject(
             f"armet-ai report model_id {report.get('model_id')!r} does not match "
             f"requested model {model_id!r}",
+            failure="binding_mismatch",
             evidence=evidence,
         )
         return
     spki = str(report.get("tls_spki_sha256") or "").lower()
     if not _HEX64.match(spki):
-        reject("armet-ai report tls_spki_sha256 must be 64 lowercase hex", evidence=evidence)
+        reject(
+            "armet-ai report tls_spki_sha256 must be 64 lowercase hex",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     quote_hex = report.get("quote")
     try:
         quote_bytes = bytes.fromhex(str(quote_hex or ""))
     except ValueError:
-        reject("armet-ai report quote is not hex", evidence=evidence)
+        reject("armet-ai report quote is not hex", failure="evidence_invalid", evidence=evidence)
         return
     if not quote_bytes:
-        reject("armet-ai report is missing quote", evidence=evidence)
+        reject("armet-ai report is missing quote", failure="evidence_invalid", evidence=evidence)
         return
 
     # GPU evidence is mandatory. It travels as a JSON *string* so its hash is
     # over unambiguous bytes; the TD commits to that hash in report_data.
     gpu_text = report.get("nvidia_payload")
     if not isinstance(gpu_text, str) or not gpu_text:
-        reject("armet-ai report is missing nvidia_payload GPU evidence", evidence=evidence)
+        reject(
+            "armet-ai report is missing nvidia_payload GPU evidence",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     gpu_bytes = gpu_text.encode("utf-8")
     if len(gpu_bytes) > MAX_GPU_PAYLOAD_BYTES:
-        reject("armet-ai nvidia_payload exceeds the size limit", evidence=evidence)
+        reject(
+            "armet-ai nvidia_payload exceeds the size limit",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     try:
         gpu_payload = json.loads(gpu_text)
     except json.JSONDecodeError as exc:
-        reject(f"armet-ai nvidia_payload is not JSON: {exc}", evidence=evidence)
+        reject(f"armet-ai nvidia_payload is not JSON: {exc}", failure="evidence_invalid", evidence=evidence)
         return
     if not isinstance(gpu_payload, dict) or not gpu_payload.get("evidence_list"):
-        reject("armet-ai nvidia_payload carries no GPU evidence_list", evidence=evidence)
+        reject(
+            "armet-ai nvidia_payload carries no GPU evidence_list",
+            failure="evidence_invalid",
+            evidence=evidence,
+        )
         return
     gpu_nonce = str(gpu_payload.get("nonce") or "").lower()
     if not hmac.compare_digest(gpu_nonce, nonce):
-        reject("armet-ai GPU evidence nonce did not match the request nonce", evidence=evidence)
+        reject(
+            "armet-ai GPU evidence nonce did not match the request nonce",
+            failure="binding_mismatch",
+            evidence=evidence,
+        )
         return
 
     try:
         if tdx_debug_enabled(quote_bytes):
             reject(
                 "armet-ai TDX quote is in debug mode (TD_ATTRIBUTES TUD set)",
+                failure="policy_rejected",
                 evidence=evidence,
             )
             return
     except ValueError as exc:
-        reject(f"armet-ai quote is not a TDX quote: {exc}", evidence=evidence)
+        reject(f"armet-ai quote is not a TDX quote: {exc}", failure="evidence_invalid", evidence=evidence)
         return
 
     # 1. Quote signature and collateral, to the Intel root.
@@ -310,14 +354,16 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
         with contextlib.redirect_stdout(sys.stderr):
             dcap_result = await verify_quote(quote_bytes)
     except Exception as exc:  # noqa: BLE001
+        # Collateral retrieval and verification raise alike, so the cause is
+        # not known here.
         reject(f"armet-ai quote verification failed: {exc}", evidence=evidence)
         return
     tcb_status = dcap_result.get("status")
     if not tcb_status:
-        reject("dcap-qvl returned no TCB status", evidence=evidence)
+        reject("dcap-qvl returned no TCB status", failure="evidence_invalid", evidence=evidence)
         return
     if str(tcb_status).lower() in REJECTED_TCB_STATUSES:
-        reject(f"armet-ai platform TCB status is {tcb_status}", evidence=evidence)
+        reject(f"armet-ai platform TCB status is {tcb_status}", failure="policy_rejected", evidence=evidence)
         return
 
     try:
@@ -326,7 +372,7 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
         module = module_fields(fields)
         verified_report_data = bytes.fromhex(str(fields.get("report_data") or ""))
     except ValueError as exc:
-        reject(f"armet-ai verified report is malformed: {exc}", evidence=evidence)
+        reject(f"armet-ai verified report is malformed: {exc}", failure="evidence_invalid", evidence=evidence)
         return
 
     # 2. report_data binding, read from the VERIFIED report (not raw bytes).
@@ -337,6 +383,7 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
         reject(
             "armet-ai report_data does not commit to this nonce, TLS SPKI, GPU evidence "
             "and model",
+            failure="binding_mismatch",
             evidence=evidence,
         )
         return
@@ -347,6 +394,7 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     if subject not in subjects:
         reject(
             f"armet-ai measurement {subject} is not in accepted_subjects",
+            failure="provenance_not_accepted",
             evidence=evidence,
             observed_measurements=pinned,
         )
@@ -356,11 +404,12 @@ async def verify_armet_ai(request: dict[str, Any]) -> None:
     try:
         gpu_result = await asyncio.to_thread(check_gpu_attestation, gpu_text)
     except Exception as exc:  # noqa: BLE001
+        # The NRAS call and the verification raise alike.
         reject(f"armet-ai GPU attestation failed: {exc}", evidence=evidence)
         return
     if gpu_result.valid is not True:
         reason = "; ".join(str(error) for error in gpu_result.errors) or "unknown failure"
-        reject(f"armet-ai GPU attestation failed: {reason}", evidence=evidence)
+        reject(f"armet-ai GPU attestation failed: {reason}", failure="quote_invalid", evidence=evidence)
         return
     try:
         gpu_models, gpu_count = verified_nras_gpu_claims(gpu_result, nonce, "armet-ai")

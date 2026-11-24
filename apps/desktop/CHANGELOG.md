@@ -1,5 +1,107 @@
 # Changelog
 
+## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
+
+Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, network changes and routine commands that used to interrupt it, and adds `pap update` and `pap service restart`.
+
+### ⚠ BREAKING CHANGES
+
+* **`blocked` is gone from the state.** `status` and `protection.phase` in `pap status --json` and the management API no longer report `blocked`; a session that lost verification reports the error states and is retried ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **`pap agents connect` fails when it did not route the agent.** With protection off it saves the connection and exits 1, saying the agent still uses its own provider, instead of reporting success ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+
+### Features
+
+* **`pap update`.** Installs the newer release of the saved update channel for package-manager installations (CLI-only DEB, RPM and Arch packages, the Arch desktop package, npm outside Windows). Connected agents stay on the proxy during the installation, and the installed release resumes protection; if the installation fails, the previous release does ([#581](https://github.com/Dstack-TEE/private-ai-gateway/pull/581), [#586](https://github.com/Dstack-TEE/private-ai-gateway/pull/586), [#592](https://github.com/Dstack-TEE/private-ai-gateway/pull/592), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **`pap service restart`.** Restarts the backend and resumes the protection session ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **Requests wait out a brief re-verification.** For the first 30 seconds after verification is lost, new requests wait for it instead of failing; after that they are refused with `503` and `Retry-After` ([#583](https://github.com/Dstack-TEE/private-ai-gateway/pull/583), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **The model list stays current.** It is read again every 10 minutes while protected and when a request names a model it lacks, and connected agents' configurations follow ([#582](https://github.com/Dstack-TEE/private-ai-gateway/pull/582), [#584](https://github.com/Dstack-TEE/private-ai-gateway/pull/584)).
+* **`pap profiles verify --replace-key`.** Replaces a saved API key at a hidden prompt ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+
+### Bug Fixes
+
+* **A session no longer stays stuck after a gateway key rotation.** After the service's key set changed, protection could stay in "verifying" until `pap stop` and `pap start`. Any lost verification now retires the verifier and is retried with a fresh verification on a backoff ([#580](https://github.com/Dstack-TEE/private-ai-gateway/pull/580)).
+* **`pap profiles verify` no longer interrupts protection.** On the profile that is protecting it stopped and restarted the session, which cut requests in flight and returned `gateway_not_verified` meanwhile. It now attests the service again where it runs ([#596](https://github.com/Dstack-TEE/private-ai-gateway/pull/596)).
+* **A network address change no longer restarts the session.** Containers, VPNs and temporary IPv6 addresses changed the address list and each change restarted protection. The session is now rebuilt only when the service can no longer be reached ([#588](https://github.com/Dstack-TEE/private-ai-gateway/pull/588), [#593](https://github.com/Dstack-TEE/private-ai-gateway/pull/593), [#594](https://github.com/Dstack-TEE/private-ai-gateway/pull/594)).
+* **Agents are not sent to their own provider unasked.** A Local API address change before the first verified model list, and `pap update`, restored connected agents' own configuration for a while; they now stay pointed at the proxy ([#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590), [#592](https://github.com/Dstack-TEE/private-ai-gateway/pull/592)).
+* **Errors say what to do.** A rejected API key is reported as the key saved in the proxy (`service_key_rejected`) rather than as the agent's token; failures to reach the service reach agents in the OpenAI or Anthropic error format; an interrupted request says its delivery is unknown instead of advising a retry; and `pap status`, `pap start` and `pap stop` name the next command when there is no backend, profile or key, or the Local API port is taken ([#587](https://github.com/Dstack-TEE/private-ai-gateway/pull/587), [#590](https://github.com/Dstack-TEE/private-ai-gateway/pull/590)).
+* **Refused requests are logged.** The service log records each request the Local API refused or failed, with its client and reason, and why protection restarted ([#588](https://github.com/Dstack-TEE/private-ai-gateway/pull/588)).
+* **Models are listed newest first**, then by id, in `GET /v1/models`, the app and agents' pickers ([#585](https://github.com/Dstack-TEE/private-ai-gateway/pull/585)).
+* **Web UI sessions stay signed in**, and the web UI gains page basics ([#577](https://github.com/Dstack-TEE/private-ai-gateway/pull/577)).
+
+### Verification
+
+Checked on the published 0.9.0-beta.3 against the live service: the live end-to-end suite for every supported agent; streams kept open across repeated `pap profiles verify` and across address changes; unattended recovery after the service presented a TLS key outside its attested set; a soak across a periodic model list refresh. Not exercised: a gateway key rotation performed by the operator, and manual runs on macOS and Windows beyond their CI jobs.
+
+## [0.9.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.2...desktop-v0.9.0-beta.3) (2026-11-18)
+
+
+### Bug Fixes
+
+* **desktop:** verify the protecting profile where it runs instead of stopping and restarting protection, which cut requests and returned `gateway_not_verified` on every `pap profiles verify` ([b0270b6](https://github.com/Dstack-TEE/private-ai-gateway/commit/b0270b669a145de7c4fc92ac69216412cc3d44d2))
+
+## [0.9.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0-beta.1...desktop-v0.9.0-beta.2) (2026-11-18)
+
+
+### Bug Fixes
+
+* **desktop:** exit 1 from `pap profiles verify` when protection does not return ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** make `pap update` hold the installation lock, resume with its own command, and not report a failure while the new backend resumes ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** rebuild a session whose connection a network change left dead instead of leaving requests to time out ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** send a request that waited through a restart instead of refusing it with `credentials_changed` ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+* **desktop:** stop making agents wait when a profile is saved with protection off ([08400f8](https://github.com/Dstack-TEE/private-ai-gateway/commit/08400f8ef74657ece8fe6f27c5321ceb3f75d2c4))
+
+## [0.9.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0-beta.1) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **desktop:** `status` in the state no longer reports `blocked`, and `protection.phase` no longer reports `blocked`; both report the error states instead.
+
+### Features
+
+* **desktop:** add `pap update` ([#581](https://github.com/Dstack-TEE/private-ai-gateway/issues/581)) ([52690d7](https://github.com/Dstack-TEE/private-ai-gateway/commit/52690d7c81be69702f17459c773fbf7509fc37ab))
+* **desktop:** let requests wait out a brief re-verification ([#583](https://github.com/Dstack-TEE/private-ai-gateway/issues/583)) ([9e1a001](https://github.com/Dstack-TEE/private-ai-gateway/commit/9e1a0019cd417d36694ccdefe6c043249eeb8b01))
+* **desktop:** read the catalog again for an unknown model ([#584](https://github.com/Dstack-TEE/private-ai-gateway/issues/584)) ([7c7f2c3](https://github.com/Dstack-TEE/private-ai-gateway/commit/7c7f2c3b9ec404d6b905b3948c3397b6bdb94460))
+* **desktop:** refresh the model catalog while protected ([#582](https://github.com/Dstack-TEE/private-ai-gateway/issues/582)) ([5923da5](https://github.com/Dstack-TEE/private-ai-gateway/commit/5923da55828036cb16bab5a5a6cc81c68e26f5fb))
+* **desktop:** start protection again after `pap update` ([#586](https://github.com/Dstack-TEE/private-ai-gateway/issues/586)) ([4fb2827](https://github.com/Dstack-TEE/private-ai-gateway/commit/4fb282707c8385af3d66d320d80f04f162406341))
+
+
+### Bug Fixes
+
+* **desktop:** finish the dead ends a user meets from the terminal ([#590](https://github.com/Dstack-TEE/private-ai-gateway/issues/590)) ([bb012b8](https://github.com/Dstack-TEE/private-ai-gateway/commit/bb012b8a45eb14f2ad06494aec2b0376305632e8))
+* **desktop:** keep agents routed while `pap update` installs ([#592](https://github.com/Dstack-TEE/private-ai-gateway/issues/592)) ([251ccb4](https://github.com/Dstack-TEE/private-ai-gateway/commit/251ccb44ff233f62b0a5540cd6a8f6d24db9b2e0))
+* **desktop:** keep the session when an address changes and the service answers ([#588](https://github.com/Dstack-TEE/private-ai-gateway/issues/588)) ([ef8ee4a](https://github.com/Dstack-TEE/private-ai-gateway/commit/ef8ee4a93881157853a7b2136a2cf8f69e4bdac1))
+* **desktop:** keep web UI sessions signed in and add page basics ([#577](https://github.com/Dstack-TEE/private-ai-gateway/issues/577)) ([7584f49](https://github.com/Dstack-TEE/private-ai-gateway/commit/7584f49bd46d18f6c502d0c408f1e8328b611e08))
+* **desktop:** list models newest first ([#585](https://github.com/Dstack-TEE/private-ai-gateway/issues/585)) ([c1bfcbe](https://github.com/Dstack-TEE/private-ai-gateway/commit/c1bfcbe93a39d83b7cc35ae3f8dfb63be04c1071))
+* **desktop:** recover a blocked session and add `pap service restart` ([#580](https://github.com/Dstack-TEE/private-ai-gateway/issues/580)) ([679fc0f](https://github.com/Dstack-TEE/private-ai-gateway/commit/679fc0fbcfb088e147e037efa4167e41ea77e49b))
+* **desktop:** say what to do in the errors users actually hit ([#587](https://github.com/Dstack-TEE/private-ai-gateway/issues/587)) ([5d22578](https://github.com/Dstack-TEE/private-ai-gateway/commit/5d22578e0908a178cd2bd210c511fdcaffda59ef))
+
+## [0.8.5](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.4...desktop-v0.8.5) (2026-11-14)
+
+Private AI Proxy 0.8.5 fixes the RedPill account and top-up links and updates dependencies.
+
+### Bug Fixes
+
+* **RedPill account links.** RedPill moved organization pages under `/orgs/{slug}`, so **Manage account** and **Top up** opened pages that returned 404. They now open `https://redpill.ai/orgs/{slug}` and `https://redpill.ai/orgs/{slug}/credits` ([#556](https://github.com/Dstack-TEE/private-ai-gateway/pull/556)).
+
+### Maintenance
+
+* Update desktop npm dependencies ([#551](https://github.com/Dstack-TEE/private-ai-gateway/pull/551), [#566](https://github.com/Dstack-TEE/private-ai-gateway/pull/566)).
+* Update desktop Rust dependencies, including zbus 6 and dcap-qvl 0.7.1 ([#552](https://github.com/Dstack-TEE/private-ai-gateway/pull/552), [#553](https://github.com/Dstack-TEE/private-ai-gateway/pull/553), [#570](https://github.com/Dstack-TEE/private-ai-gateway/pull/570)).
+
+## [0.8.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.3...desktop-v0.8.4) (2026-11-05)
+
+Private AI Proxy 0.8.4 adds image generation and audio transcription examples to the Local API examples dialog.
+
+### Features
+
+* **Images and Transcription examples.** The Local API examples dialog has Images and Transcription tabs next to Chat and Decisions, with cURL, Python and JavaScript code using the OpenAI SDK. Image examples save the returned image with the right extension (PNG or JPEG); transcription examples upload `audio.wav`. A tab is disabled when the verified catalog has no model of that kind ([#541](https://github.com/Dstack-TEE/private-ai-gateway/pull/541)).
+* **Tab icons.** Each example tab shows an icon for its kind (text, image, microphone, decisions), hidden in very narrow windows ([#543](https://github.com/Dstack-TEE/private-ai-gateway/pull/543)).
+
+### Maintenance
+
+* macOS packaging waits for Finder to list the DMG and stops retrying after it unmounts ([#539](https://github.com/Dstack-TEE/private-ai-gateway/pull/539)).
+
 ## [0.8.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.0...desktop-v0.8.3) (2026-11-05)
 
 Private AI Proxy 0.8.3 shows every model the verified gateway lists and ships smaller binaries. Changes since stable 0.8.0; 0.8.1 and 0.8.2 were not published.

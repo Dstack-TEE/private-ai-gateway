@@ -26,9 +26,9 @@ current general account portals:
 | Entry | Current destination | MAS decision |
 | --- | --- | --- |
 | Phala billing | `https://cloud.phala.com/{workspace}/billing` | Available from an actionable balance |
-| RedPill billing | `https://redpill.ai/{organization}/credits` | Available from an actionable balance |
+| RedPill billing | `https://redpill.ai/orgs/{organization}/credits` | Available from an actionable balance |
 | Get API key | `https://cloud.phala.com/dashboard`, `https://www.redpill.ai/dashboard` | Blocked: general dashboards are not verified purchase-free |
-| Manage account | `https://redpill.ai/{organization}` | Blocked: organization portal is not verified purchase-free |
+| Manage account | `https://redpill.ai/orgs/{organization}` | Blocked: organization portal is not verified purchase-free |
 
 Account connection, account switching and manual key entry remain. Neutral
 account/security/key-management links may return only after their actual connected

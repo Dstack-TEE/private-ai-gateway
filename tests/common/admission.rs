@@ -45,6 +45,7 @@ pub struct Backend {
     pub events: Mutex<Vec<UpstreamVerifiedEvent>>,
     pub instance: Mutex<Option<String>>,
     pub tls_key: Mutex<Option<String>>,
+    pub response_headers: Mutex<HashMap<String, String>>,
 }
 impl Backend {
     async fn respond(
@@ -80,7 +81,7 @@ impl Backend {
                 Ok(UpstreamResponse {
                     status_code: status,
                     body: RESPONSE.to_vec(),
-                    headers: HashMap::new(),
+                    headers: self.response_headers.lock().unwrap().clone(),
                     served_instance_id: self.instance.lock().unwrap().clone(),
                 })
             }
@@ -89,6 +90,14 @@ impl Backend {
 }
 #[async_trait]
 impl UpstreamBackend for Backend {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn url_origin(&self) -> Option<&str> {
         None
     }
@@ -163,6 +172,7 @@ impl Harness {
             events: Mutex::new(Vec::new()),
             instance: Mutex::new(None),
             tls_key: Mutex::new(None),
+            response_headers: Mutex::new(HashMap::new()),
         });
         let verifier = Arc::new(CachedVerifier(Mutex::new(verified_event(
             "admission-test",
@@ -203,7 +213,7 @@ impl Harness {
 
 pub fn request(ids: Vec<String>) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext::default(),
         endpoint_path: "/v1/chat/completions",
         received_body: REQUEST,
@@ -217,8 +227,10 @@ pub fn request(ids: Vec<String>) -> ChatCompletionRequest<'static> {
 }
 pub fn candidate(id: &str) -> ForwardCandidate {
     ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: id.to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: REQUEST.to_vec(),
     }
 }

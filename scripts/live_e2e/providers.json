@@ -4,7 +4,7 @@
     "provider": "tinfoil",
     "base_url": "https://inference.tinfoil.sh",
     "public_model": "live-tinfoil",
-    "upstream_model": "kimi-k2-6",
+    "upstream_model": "gpt-oss-120b",
     "api_key_env": "TINFOIL_API_KEY",
     "binding": "tls_spki_sha256",
     "capabilities": [
@@ -21,7 +21,7 @@
     "provider": "near-ai",
     "base_url": "https://cloud-api.near.ai",
     "public_model": "live-near",
-    "upstream_model": "google/gemma-4-31B-it",
+    "upstream_model": "Qwen/Qwen3.8-27B",
     "api_key_env": "NEARAI_API_KEY",
     "binding": "tls_spki_sha256",
     "requires": [
@@ -32,14 +32,15 @@
       "streaming",
       "structured_outputs",
       "context"
-    ]
+    ],
+    "structured_output_max_tokens": 2048
   },
   {
     "name": "chutes-live",
     "provider": "chutes",
     "base_url": "https://api.chutes.ai",
     "public_model": "live-chutes",
-    "upstream_model": "moonshotai/Kimi-K2.5-TEE",
+    "upstream_model": "moonshotai/Kimi-K2.6-TEE",
     "api_key_env": "CHUTES_API_KEY",
     "binding": "e2ee_public_key_sha256",
     "capabilities": [
@@ -49,23 +50,6 @@
     ],
     "session_refresh_seconds": 45,
     "chutes_e2ee_discovery_rounds": 3
-  },
-  {
-    "name": "chutes-live-embed",
-    "provider": "chutes",
-    "base_url": "https://api.chutes.ai",
-    "public_model": "live-chutes-embed",
-    "upstream_model": "Qwen/Qwen3-Embedding-8B-TEE",
-    "api_key_env": "CHUTES_API_KEY",
-    "binding": "e2ee_public_key_sha256",
-    "capabilities": [
-      "embeddings"
-    ],
-    "session_refresh_seconds": 45,
-    "chutes_e2ee_discovery_rounds": 3,
-    "chutes_chute_ids": {
-      "Qwen/Qwen3-Embedding-8B-TEE": "21822836-bfa6-5426-b27e-dd5fdda1249e"
-    }
   },
   {
     "name": "near-ai-live-images",
@@ -109,7 +93,49 @@
       "audio_transcriptions"
     ],
     "privatemode_manifest_log_path": "/run/privatemode/manifests.jsonl",
-    "privatemode_proxy_image_digest": "sha256:3cd4da0ee6ceee91ca84dde4e3e3f0e94e8b354d7c1d46987e4331a5c2f8bcff",
-    "pending_verification": "Pinned v1.59.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
+    "privatemode_proxy_image_digest": "sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334",
+    "pending_verification": "Pinned v1.64.0 proxy multipart encryption/decryption unverified; gateway encrypted-path allowlist intentionally blocks transcription. Do not enable for launch."
+  },
+  {
+    "name": "near-ai-live-rerank",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-rerank",
+    "upstream_model": "Qwen/Qwen3-Reranker-0.6B",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "rerank"
+    ]
+  },
+  {
+    "name": "near-ai-live-images-edits",
+    "provider": "near-ai",
+    "base_url": "https://cloud-api.near.ai",
+    "public_model": "live-near-images-edits",
+    "upstream_model": "black-forest-labs/FLUX.2-klein-4B",
+    "api_key_env": "NEARAI_API_KEY",
+    "binding": "tls_spki_sha256",
+    "requires": [
+      "DSTACK_VERIFIER_URL"
+    ],
+    "capabilities": [
+      "images_edits"
+    ]
+  },
+  {
+    "name": "tinfoil-live-speech",
+    "provider": "tinfoil",
+    "base_url": "https://inference.tinfoil.sh",
+    "public_model": "live-tinfoil-speech",
+    "upstream_model": "qwen3-tts",
+    "api_key_env": "TINFOIL_API_KEY",
+    "binding": "tls_spki_sha256",
+    "capabilities": [
+      "speech"
+    ]
   }
 ]

@@ -8,24 +8,28 @@ use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
 use super::streaming::{
-    E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
-    MiddlewareResponseFinalizingStream,
+    finalize_sse_body, MiddlewareProviderResponseDraftingStream, ResponseContext, ResponseInput,
+    ResponseOwner,
 };
 use super::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    FailedAttempt, ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult,
-    MiddlewareForwarded, MiddlewareGeneratedFinalization, MiddlewareReceiptDraft,
-    MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
-    MiddlewareStreamingForwarded, MiddlewareUpstreamError, ReceiptOwner, ServiceError,
-    ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
+    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, FailedAttempt,
+    ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
+    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
+    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
+    MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
+    StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
+use crate::aci::upstream::request_id::request_id_from_headers;
 use crate::aci::upstream::{
     PreparedUpstreamRequest, UpstreamError, UpstreamRequest, UpstreamResponse,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
+use crate::endpoint::Endpoint;
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
-use crate::sse_framing::SseFramingObserver;
+use crate::middleware::sse::Accounting;
+use crate::middleware::types::ProviderFormat;
+use crate::sse::EventStream;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -53,8 +57,10 @@ use std::time::{Duration, Instant};
 fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> Option<u16> {
     match err {
         UpstreamError::Timeout(_) => Some(504),
-        UpstreamError::InvalidRequest(reason) => {
-            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, reason = %reason, "candidate skipped before sending: the route cannot carry this request");
+        // The reason is written for the caller and can quote the request, so
+        // it is served, not logged.
+        UpstreamError::InvalidRequest(_) => {
+            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, "candidate skipped before sending: the route cannot carry this request");
             None
         }
         // A withheld non-2xx is forwarded as a response before it gets here;
@@ -65,8 +71,12 @@ fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> 
         UpstreamError::Upstream { .. }
         | UpstreamError::Routing(_)
         | UpstreamError::Transport(_)
+        | UpstreamError::SseLineOverflow
+        | UpstreamError::SseTruncated
+        | UpstreamError::EnvelopeTruncated
         | UpstreamError::ResponseTooLarge
-        | UpstreamError::ChannelBindingMismatch(_) => Some(502),
+        | UpstreamError::ChannelBindingMismatch(_)
+        | UpstreamError::ResponseBindingMismatch { .. } => Some(502),
     }
 }
 
@@ -164,6 +174,16 @@ enum RetainedResponse {
 }
 
 impl RetainedResponse {
+    /// Drop the answer's `Retry-After`. It counted from when the answer
+    /// arrived; once the gateway has waited on it, relaying it would make the
+    /// caller wait a second time.
+    fn forget_retry_after(&mut self) {
+        match self {
+            Self::Streaming { error, .. } => error.upstream_headers.remove("retry-after"),
+            Self::Buffered { inputs, .. } => inputs.response.headers.remove("retry-after"),
+        };
+    }
+
     /// Where this candidate's own entry sits in `failed_attempts`. Removing it
     /// on commit keeps the committed attempt last: attempts are reported by
     /// position, and a request's user-facing status is read as the one at the
@@ -185,7 +205,8 @@ pub(super) struct BufferedCommit {
     pub response_model: Option<String>,
     pub admission: SelectedUpstream,
     pub route_id: String,
-    pub path: &'static str,
+    pub endpoint: Endpoint,
+    pub format: ProviderFormat,
     pub middleware_forwarded_body: Vec<u8>,
     pub forwarded_body: bytes::Bytes,
 }
@@ -209,6 +230,7 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
     pub forwarded_body: &'a [u8],
     pub recorded_event: UpstreamVerifiedEvent,
     pub recorded: Option<String>,
+    pub upstream_headers: &'a HashMap<String, String>,
 }
 
 impl AciService {
@@ -229,6 +251,7 @@ impl AciService {
             forwarded_body,
             recorded_event,
             recorded,
+            upstream_headers,
         } = inputs;
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
@@ -245,7 +268,12 @@ impl AciService {
         builder.add_request_forwarded(forwarded_body)?;
         // A direct service has no upstream hop, so §7.5's event does not apply.
         if !self.serves_directly() {
-            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &recorded_event,
+                recorded,
+                upstream_headers,
+            )?;
         }
         Ok(builder)
     }
@@ -263,23 +291,22 @@ impl AciService {
         user_model: Option<String>,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let BufferedCommit {
-            response,
+            mut response,
             response_model,
             admission,
             route_id,
-            path,
+            endpoint,
+            format,
             middleware_forwarded_body,
             forwarded_body,
         } = commit;
         let status = response.status_code;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
 
         let receipt_id = generate_receipt_id();
         let served_at = admission.admitted_at;
         let keyset = self.current_keyset();
-        let chat_id = if matches!(
-            endpoint_path,
-            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
-        ) {
+        let chat_id = if client_endpoint.is_media() {
             None
         } else {
             extract_chat_id(&response.body)
@@ -302,28 +329,54 @@ impl AciService {
             forwarded_body: &forwarded_body,
             recorded_event: admission.event,
             recorded,
+            upstream_headers: &response.headers,
         })?;
         // The session is keyed on the requested (routed) model; record the
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
+        let usage = if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&status) {
+            if let Some(content_type) =
+                crate::middleware::speech::response_content_type(&response.headers, &response.body)
+            {
+                response.headers.insert("content-type".into(), content_type);
+                let usage = serde_json::from_slice::<serde_json::Value>(received_body)
+                    .ok()
+                    .and_then(|params| crate::middleware::speech::usage(&params))
+                    .ok_or_else(|| {
+                        UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                    })?;
+                Self::append_speech_usage(&mut builder, usage.clone())?;
+                Some(usage)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
+                usage,
                 receipt_id: receipt_id.clone(),
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
                     builder,
                     endpoint_path: endpoint_path.to_string(),
                     request_mode: RequestMode::Buffered,
-                    response_model,
+                    response_model: std::sync::Arc::new(
+                        response_model
+                            .map(std::sync::OnceLock::from)
+                            .unwrap_or_default(),
+                    ),
                     session_lease: admission.lease,
                 },
                 upstream_status: status,
                 upstream_body: response.body,
                 upstream_headers: response.headers,
                 selected_route: route_id,
-                selected_path: path,
+                selected_endpoint: endpoint,
+                selected_format: format,
                 failed_attempts,
                 session_id,
             },
@@ -343,6 +396,7 @@ impl AciService {
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
         // The user-requested model, recorded as the receipt's top-level `model`.
         let user_model = req.context.user_model.clone();
         let mode = if stream {
@@ -422,6 +476,7 @@ impl AciService {
         // The longest `Retry-After` among this pass's capacity rejections.
         let mut capacity_wait: Duration;
 
+        let mut response_binding_reverified = false;
         loop {
             capacity_indices.clear();
             capacity_wait = Duration::ZERO;
@@ -433,11 +488,14 @@ impl AciService {
                 // Mirrored into the journal as well as the local list: the
                 // local list reaches the caller only through the forward
                 // result, which a request cancelled mid-walk never sees.
-                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>,
+                               status: u16,
+                               upstream_request_id: Option<String>| {
                     let attempt = FailedAttempt {
                         route_id: route_id.clone(),
                         status,
                         duration_ms: attempt_started.elapsed().as_millis() as u64,
+                        upstream_request_id,
                     };
                     receipt_journal.record_abandoned(attempt.clone());
                     failed_attempts.push(attempt);
@@ -448,17 +506,38 @@ impl AciService {
                 // attributed to it.
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
-                let prepared = match self.upstream.prepare(UpstreamRequest {
-                    body: candidate.body.clone().into(),
-                    form: req.audio_form.clone(),
-                    content_type: None,
-                    headers: upstream_headers.clone(),
-                    path: Some(candidate.path.to_string()),
-                    target_route_id: Some(route_id.clone()),
-                }) {
+                let (prepared, source_protocol) = match self
+                    .upstream
+                    .prepare(UpstreamRequest {
+                        cache_salt: req.context.cache_salt.clone(),
+                        body: candidate.body.clone().into(),
+                        form: req.form.clone(),
+                        content_type: None,
+                        headers: upstream_headers.clone(),
+                        path: Some(candidate.endpoint.path().to_string()),
+                        target_route_id: Some(route_id.clone()),
+                    })
+                    .and_then(|prepared| {
+                        let protocol = self
+                            .upstream
+                            .response_protocol(&prepared, candidate.wire_endpoint);
+                        // Evidence validates the shaped route protocol; it never
+                        // replaces the protocol used by the source decoder.
+                        if stream
+                            && protocol.is_some_and(|protocol| {
+                                protocol != (candidate.format, candidate.endpoint).into()
+                            })
+                        {
+                            return Err(UpstreamError::Routing(
+                                "candidate format contradicts the configured upstream protocol"
+                                    .into(),
+                            ));
+                        }
+                        Ok((prepared, protocol))
+                    }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -467,15 +546,15 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
                 };
 
                 let mut prepared = prepared;
-                if let Err(err) = prepared.encode_audio().await {
-                    abandon(&mut failed_attempts, 502);
+                if let Err(err) = prepared.encode_media().await {
+                    abandon(&mut failed_attempts, 502, None);
                     upgrade_err(&mut aggregated_err, 2, err.into());
                     continue;
                 }
@@ -512,7 +591,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -561,6 +640,7 @@ impl AciService {
                             // Failover path: flush a possibly-stale binding on any
                             // terminal mismatch so the next candidate/request re-verifies.
                             true,
+                            &mut response_binding_reverified,
                             |prepared, event| async move {
                                 self.upstream
                                     .forward_stream_verified_prepared(prepared, &event)
@@ -601,7 +681,7 @@ impl AciService {
                         Ok(response) => response,
                         Err(status) => {
                             if let Some(status) = status {
-                                abandon(&mut failed_attempts, status);
+                                abandon(&mut failed_attempts, status, None);
                             }
                             continue;
                         }
@@ -632,7 +712,11 @@ impl AciService {
                             Ok(body) => body,
                             Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
                                 if let Some(status) = abandoned_status(&err, &prepared) {
-                                    abandon(&mut failed_attempts, status);
+                                    abandon(
+                                        &mut failed_attempts,
+                                        status,
+                                        request_id_from_headers(&upstream_headers),
+                                    );
                                 }
                                 upgrade_err(&mut aggregated_err, 2, err.into());
                                 continue;
@@ -655,6 +739,7 @@ impl AciService {
                                 capacity_indices.push(index);
                                 capacity_wait = capacity_wait.max(retry_after(&upstream_headers));
                             }
+                            let upstream_request_id = request_id_from_headers(&upstream_headers);
                             retained = Some(RetainedResponse::Streaming {
                                 error: StreamingUpstreamError {
                                     upstream_status: status,
@@ -664,7 +749,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            abandon(&mut failed_attempts, attempt_status);
+                            abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                             continue;
                         }
                         self.metrics
@@ -684,6 +769,11 @@ impl AciService {
 
                     // Commit this candidate.
                     let upstream_headers = upstream_response.headers;
+                    let content_type = upstream_headers
+                        .get("content-type")
+                        .map(|value| value.split(';').next().unwrap_or("").trim())
+                        .filter(|base| !base.is_empty());
+                    let is_sse = content_type.is_none_or(|value| is_sse_content_type(Some(value)));
                     let receipt_id = generate_receipt_id();
                     let served_at = admission.admitted_at;
                     // Early SSE headers may already cite a keyset. Preserve
@@ -710,10 +800,12 @@ impl AciService {
                             forwarded_body: &forwarded_body,
                             recorded_event: admission.event,
                             recorded,
+                            upstream_headers: &upstream_headers,
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
                     let keyset_digest = keyset.digest().to_string();
+                    receipt_journal.set_early_publication(source_protocol.is_some());
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
                         MiddlewareReceiptDraft {
@@ -722,22 +814,25 @@ impl AciService {
                             session_lease: admission.lease,
                             endpoint_path: endpoint_path.to_string(),
                             request_mode: RequestMode::Streaming,
-                            response_model: None,
+                            response_model: receipt_journal.response_model.clone(),
                         },
                         receipt_journal,
                         self.metrics.clone(),
                         status,
+                        !is_sse,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
+                            is_sse,
                             receipt_id: receipt_id.clone(),
                             keyset_digest,
                             upstream_status: status,
                             upstream_headers,
                             body: Box::pin(body),
                             selected_route: route_id.clone(),
-                            selected_path: candidate.path,
+                            selected_endpoint: candidate.endpoint,
+                            selected_format: candidate.format,
                             failed_attempts: std::mem::take(&mut failed_attempts),
                             session_id,
                         },
@@ -756,6 +851,7 @@ impl AciService {
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
+                        &mut response_binding_reverified,
                         |prepared, event| async move {
                             self.upstream
                                 .forward_verified_prepared(prepared, &event)
@@ -789,7 +885,7 @@ impl AciService {
                     Ok(response) => response,
                     Err(status) => {
                         if let Some(status) = status {
-                            abandon(&mut failed_attempts, status);
+                            abandon(&mut failed_attempts, status, None);
                         }
                         continue;
                     }
@@ -804,11 +900,9 @@ impl AciService {
                 let status = upstream_response.status_code;
                 let response_model = accepted_response_model(status, &upstream_response.body)
                     .or_else(|| {
-                        (matches!(
-                            endpoint_path,
-                            super::IMAGES_GENERATIONS_PATH | super::AUDIO_TRANSCRIPTIONS_PATH
-                        ))
-                        .then(|| prepared.model_id.clone())
+                        client_endpoint
+                            .is_media()
+                            .then(|| prepared.model_id.clone())
                     });
                 self.metrics.record_upstream_response(
                     endpoint_path,
@@ -832,19 +926,21 @@ impl AciService {
                         capacity_indices.push(index);
                         capacity_wait = capacity_wait.max(retry_after(&upstream_response.headers));
                     }
+                    let upstream_request_id = request_id_from_headers(&upstream_response.headers);
                     retained = Some(RetainedResponse::Buffered {
                         inputs: Box::new(BufferedCommit {
                             response: upstream_response,
                             response_model,
                             admission,
                             route_id: route_id.clone(),
-                            path: candidate.path,
+                            endpoint: candidate.endpoint,
+                            format: candidate.format,
                             middleware_forwarded_body: candidate.body.clone(),
                             forwarded_body,
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    abandon(&mut failed_attempts, attempt_status);
+                    abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                     continue;
                 }
 
@@ -855,7 +951,8 @@ impl AciService {
                         response_model,
                         admission,
                         route_id,
-                        path: candidate.path,
+                        endpoint: candidate.endpoint,
+                        format: candidate.format,
                         middleware_forwarded_body: candidate.body.clone(),
                         forwarded_body,
                     },
@@ -873,6 +970,9 @@ impl AciService {
                 && capacity_retry_eligible(capacity_retry_done, forward_started)
             {
                 capacity_retry_done = true;
+                if let Some(retained) = retained.as_mut() {
+                    retained.forget_retry_after();
+                }
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
                 // Nothing is being waited on during the pause; a request abandoned
                 // here must not be pinned on whichever candidate happened to
@@ -950,24 +1050,26 @@ impl AciService {
         e2ee: Option<E2eeRequestContext>,
     ) -> Result<MiddlewareReceiptFinalization, ServiceError> {
         let is_sse = is_sse_content_type(content_type);
-        if is_sse {
-            let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(&final_cleartext_body);
-            if parser.chat_id().is_some() {
-                draft.builder.set_chat_id(parser.chat_id());
+        let wire_body = if is_sse {
+            let (wire, ids) =
+                finalize_sse_body(&final_cleartext_body, e2ee.as_ref(), &draft.endpoint_path)?;
+            if ids.chat_id.is_some() {
+                draft.builder.set_chat_id(ids.chat_id);
             }
-        } else if let Some(chat_id) = extract_chat_id(&final_cleartext_body) {
-            draft.builder.set_chat_id(Some(chat_id));
-        }
-
-        let wire_body = match e2ee.as_ref() {
-            Some(ctx) => encrypt_e2ee_final_response(
-                &final_cleartext_body,
-                ctx,
-                &draft.endpoint_path,
-                is_sse,
-            )?,
-            None => final_cleartext_body,
+            wire
+        } else {
+            if let Some(id) = extract_chat_id(&final_cleartext_body) {
+                draft.builder.set_chat_id(Some(id));
+            }
+            match e2ee.as_ref() {
+                Some(ctx) => encrypt_e2ee_final_response(
+                    &final_cleartext_body,
+                    ctx,
+                    &draft.endpoint_path,
+                    false,
+                )?,
+                None => final_cleartext_body,
+            }
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -982,7 +1084,7 @@ impl AciService {
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
-            draft.response_model.as_deref(),
+            draft.response_model.get().map(String::as_str),
         );
 
         Ok(MiddlewareReceiptFinalization {
@@ -1002,6 +1104,7 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         let wire_body = match e2ee.as_ref() {
             Some(ctx) => encrypt_e2ee_final_response(cleartext_body, ctx, endpoint_path, is_sse)?,
+            None if is_sse => finalize_sse_body(cleartext_body, None, endpoint_path)?.0,
             None => cleartext_body.to_vec(),
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
@@ -1014,42 +1117,53 @@ impl AciService {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn finalize_middleware_response_stream(
+    pub(crate) fn finalize_middleware_events(
         &self,
         journal: MiddlewareReceiptJournal,
-        cleartext_stream: ServiceResponseStream,
-        endpoint_path: &str,
-        content_type: Option<&str>,
-        requester: Option<ReceiptOwner>,
-        e2ee: Option<E2eeRequestContext>,
-        request_id: Option<String>,
-    ) -> Result<MiddlewareStreamFinalization, ServiceError> {
-        let is_sse = is_sse_content_type(content_type);
-        if e2ee.is_some() && !is_sse {
-            return Err(E2eeError::EncryptionFailed.into());
-        }
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+        events: EventStream,
+        context: ResponseContext,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        let info = context.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let e2ee_transformer = e2ee
-            .clone()
-            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-        let body = MiddlewareResponseFinalizingStream::new(
-            self,
-            cleartext_stream,
-            journal,
-            requester,
-            endpoint_path.to_string(),
-            e2ee_transformer,
-            request_id,
-            is_sse,
-        );
-        Ok(MiddlewareStreamFinalization {
-            body: Box::pin(body),
-            e2ee: e2ee_response,
-        })
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Events(events),
+                journal,
+                context,
+                accounting,
+            )),
+            e2ee: info,
+        }
+    }
+    pub(crate) fn finalize_middleware_bytes(
+        &self,
+        journal: MiddlewareReceiptJournal,
+        body: ServiceResponseStream,
+        endpoint: &str,
+        requester: Option<ReceiptOwner>,
+        request_id: Option<String>,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Bytes(body),
+                journal,
+                ResponseContext {
+                    requester,
+                    endpoint: endpoint.into(),
+                    e2ee: None,
+                    request_id,
+                    identity: None,
+                },
+                accounting,
+            )),
+            e2ee: None,
+        }
     }
 }
 
@@ -1058,7 +1172,34 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use super::{is_retryable_provider_status, retry_after};
+    use super::{is_retryable_provider_status, retry_after, RetainedResponse};
+
+    /// The gateway waits on a rejection's `Retry-After` before its second
+    /// pass. If that pass gets no answer, the first one is what the caller
+    /// receives — without a delay the gateway has already served.
+    #[test]
+    fn a_retained_answer_loses_the_retry_after_the_gateway_waited_on() {
+        let mut retained = RetainedResponse::Streaming {
+            error: crate::aggregator::service::StreamingUpstreamError {
+                upstream_status: 429,
+                upstream_headers: HashMap::from([
+                    ("retry-after".to_string(), "8".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                ]),
+                upstream_body: Vec::new(),
+            },
+            route_id: "route".to_string(),
+            attempt_slot: 0,
+        };
+        retained.forget_retry_after();
+        let RetainedResponse::Streaming { error, .. } = retained else {
+            unreachable!()
+        };
+        assert_eq!(
+            error.upstream_headers,
+            HashMap::from([("content-type".to_string(), "application/json".to_string())])
+        );
+    }
 
     #[test]
     fn retry_after_reads_delay_seconds_capped_at_the_budget() {

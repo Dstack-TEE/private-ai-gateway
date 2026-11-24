@@ -398,7 +398,7 @@ other freshness metadata.
   },
   "service_capabilities": {
     "supported_e2ee_versions": ["2"],
-    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions"],
+    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions", "/v1/images/edits"],
     "serving": "direct"
   }
 }
@@ -466,8 +466,11 @@ specified transport extension says otherwise. ACI adds headers and artifacts.
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
+| `POST /v1/rerank` | OPTIONAL (non-streaming JSON; prompt-token usage) |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
+| `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, non-streaming, inline base64 output; constraints via §5.3) |
 | `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output; request up to `n` images, 1..10, default 1; providers may return fewer; image charges use the returned count) |
+| `POST /v1/audio/speech` | OPTIONAL (non-streaming binary `audio/*`; character usage) |
 | `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
@@ -540,7 +543,8 @@ For `multipart/form-data`, the carrier is a single HTTP header
 `X-ACI-Provider: <JSON>`. Its value MUST be a JSON object using exactly the
 same schema and semantics as the JSON `provider` field above, including
 non-empty session lists, boolean `aci_verified`, and rejection of unknown
-`aci_` members. The v1 multipart path is `POST /v1/audio/transcriptions`.
+`aci_` members. The v1 multipart paths are `POST /v1/audio/transcriptions` and
+`POST /v1/images/edits`.
 The field value MUST contain only US-ASCII bytes for HTTP
 field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
 surrogate pairs where needed, for non-ASCII characters in strings.
@@ -595,9 +599,54 @@ GET /v1/aci/receipts/{id}
 `{id}` is the `X-Receipt-Id` header value (preferred), or the
 OpenAI-compatible response `id` when the response body contains one.
 `X-Receipt-Id` arrives with the response, so the client holds the id before
-the receipt is queryable. A receipt is finalized when the response
-completes: a streamed response has no in-flight receipt (its hashes cover
-the whole stream). Receipts are retained for a bounded,
+the receipt is queryable. For a streamed response, publication at the first
+destination protocol terminal requires acceptance of the source protocol's own
+terminal on a route with an established source protocol, or clean EOF from the
+provider adapter, after any adapter authentication barrier. If either boundary
+has been reached when that terminal is produced, the gateway MUST finalize and
+publish the receipt before returning its bytes. The body stays open and continues
+reading the source until EOF, emitting no bytes after the destination terminal.
+Accounting observes allowlisted upstream usage in the source protocol through
+EOF or disconnect, regardless of terminals, failures or malformed records. The
+final cumulative value counts once; Messages start and delta usage is merged.
+Settlement remains at EOF. The
+`response.received` hash covers the accepted source bytes through its terminal
+block, or all source bytes at clean EOF; `response.returned` includes the
+destination terminal's final wire bytes.
+Bytes after that source boundary are excluded from the received hash. SSE dispatch
+at CR includes that CR; a following LF is outside the accepted prefix.
+
+The selected backend declares its source wire protocol for the prepared request
+and typed upstream operation, independently of the URL path and control-plane
+format. This backend method is required: routing and configuration wrappers
+delegate to the serving backend, while a backend without that knowledge returns
+unknown explicitly. Shaping derives the wire operation once: Chat requests in
+Anthropic format send Messages, and Messages requests in OpenAI format send Chat.
+Response transforms retain the client-facing operation. The OpenAI-compatible
+backend declares Chat for typed Chat or legacy-completion operations, Responses
+for a typed Responses operation, and Messages only for a typed Messages operation
+on the native Anthropic provider. Other providers' Messages operations are unknown.
+Chutes delegates to its OpenAI-compatible backend; the 0G adapter only serves
+Chat and declares it for every operation. The route protocol always controls decoding and source accounting.
+For every streaming operation, backend evidence that contradicts that route
+protocol is a routing failure; matching evidence permits terminal publication.
+Unknown evidence keeps the declared format and forwarding behavior, but requires
+clean adapter EOF for publication. Custom paths do not change this evidence.
+
+A bridge-generated failure terminal without an accepted source terminal does
+not permit early publication: the source retains its normal EOF or failure path.
+At clean source EOF, synthesized terminals publish in the poll that returns
+them. Middleware source-read, decoder or transform failures before publication
+can prevent completion and leave no receipt. Later failures retain their report
+status while an already-published receipt remains available. Publication failure
+withholds the successful terminal and continues source observation through EOF or
+disconnect before reporting the failure. Cancellation or failure can leave a reserved
+id unpublished even if an error terminal was returned. A receipt records the
+gateway's observed exchange; it does not prove client delivery or
+model-generation completeness.
+Cancellation after a terminal returned with a published receipt settles as
+completed, retaining any failure status and the usage observed so far.
+Receipts are retained for a bounded,
 implementation-defined period. Clients SHOULD fetch receipts promptly. An
 unknown or expired id returns `not_found`.
 
@@ -666,7 +715,10 @@ receipt hashes.
 Services MAY add events with implementation-specific types (the reference
 implementation records routing decisions, for example), but MUST NOT reuse
 the required types. Verifiers ignore event types they don't recognize
-unless local policy cares.
+unless local policy cares. The reference speech endpoint adds a signed
+`usage.reported` extension event on success with
+`{"usage":{"type":"characters","characters":N}}`, derived from the request's
+Unicode scalar count (1..4096).
 
 ### 7.5 `upstream.verified`
 
@@ -1029,6 +1081,10 @@ ACI defines these types, with the HTTP status a service SHOULD use:
 | `unauthorized` | 401 | The receipt is credential-bound and no credential was presented. |
 | `upstream_verification_failed` | 503 | Upstream verification was required and did not produce an enforceable verified binding. The prompt was not forwarded. |
 | `session_not_accepted` | 412 | The request pinned sessions (§5.3) and none of them could serve it. The prompt was not forwarded. |
+
+A service MAY set `code` to a token that narrows the type, for example the
+cause of an `upstream_verification_failed`. Clients that do not recognize a
+`code` ignore it.
 
 A service MAY use a different status where an HTTP intermediary requires it
 (for example 429 for rate limiting), but SHOULD preserve the `type` so

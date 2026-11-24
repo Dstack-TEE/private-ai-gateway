@@ -590,6 +590,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_capabilities: ServiceCapabilities {
             supported_multipart_constraint_endpoints: vec![
                 private_ai_gateway::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH.into(),
+                private_ai_gateway::aggregator::service::IMAGES_EDITS_PATH.into(),
             ],
             supported_e2ee_versions: if gateway_config.enable_e2ee {
                 vec!["2".to_string()]
@@ -685,8 +686,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = if let Some(middleware_config) = middleware_config {
         let prefix_hash_key = PrefixHashKey::new(provider.prefix_hash_key().await?);
-        let middleware =
-            Arc::new(Middleware::new(prefix_hash_key, &middleware_config).map_err(invalid_input)?);
+        let cache_salt_key =
+            private_ai_gateway::middleware::CacheSaltKey::new(provider.cache_salt_key().await?);
+        let middleware = Arc::new(
+            Middleware::new(prefix_hash_key, cache_salt_key, &middleware_config)
+                .map_err(invalid_input)?,
+        );
         tracing::info!(
             control_url = %middleware_config.control_url,
             "private-ai-gateway middleware enabled"

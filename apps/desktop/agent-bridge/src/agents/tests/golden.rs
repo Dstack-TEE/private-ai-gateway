@@ -76,7 +76,11 @@ impl Golden {
             .to_string();
         let mut text = text.replace(&canonical, "$HOME").replace(&home, "$HOME");
         for (value, name) in &self.names {
-            text = text.replace(value, name);
+            // YAML quotes a token that reads as a number, such as one that
+            // starts with `0b`; that is the same token.
+            text = text
+                .replace(&format!("'{value}'"), name)
+                .replace(value, name);
         }
         text
     }

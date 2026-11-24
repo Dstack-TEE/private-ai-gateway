@@ -1,4 +1,5 @@
 use super::*;
+use crate::verifier_session::Reverified;
 
 impl DesktopRuntime {
     pub async fn save_configuration(
@@ -86,6 +87,40 @@ impl DesktopRuntime {
             remote_url: candidate.remote_url.clone(),
         };
 
+        // The profile that is protecting, unchanged, is attested where it
+        // runs: stopping it to verify it would only cut its requests. The
+        // verifier owns the session's state throughout; only the time of a
+        // successful attestation is saved.
+        if verify && !profile_changed && !replace_key && initial.active_profile_id == id {
+            match self.manager.verify_running().await {
+                Reverified::NotProtecting => {}
+                Reverified::Kept => {
+                    candidate.verified_at = Some(desktop_core::now_secs());
+                    self.update_config(|settings| {
+                        settings.upsert(id.clone(), candidate)?;
+                        Ok(())
+                    })?;
+                    self.publish_profiles()?;
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    });
+                }
+                Reverified::Changed => {
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    })
+                }
+                Reverified::Failed(reason) => {
+                    return Err(Error::invalid_state(format!(
+                        "The service did not verify again: {reason}. Protection is retried automatically."
+                    )))
+                }
+            }
+        }
         if reconnect {
             self.pause_protection()?;
         }

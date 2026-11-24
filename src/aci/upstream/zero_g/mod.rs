@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod protocol;
 
-use protocol::{seal_chat_request, verify_signature, ChatSignature, ResponseOpener};
+use protocol::{seal_chat_request, verify_signature, ChatSignature, ProtocolError, ResponseOpener};
 
 use super::{
     forwarding_client, read_buffered_upstream_response, readiness_client, transport_error,
@@ -22,6 +22,7 @@ use super::{
     UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::endpoint::Endpoint;
 
 pub const ZERO_G_PROVIDER: &str = "0g-private-computer";
 pub const ZERO_G_E2EE_ALGORITHM: &str = "0g-pc-v1-hpke-x25519-hkdf-sha256-chacha20poly1305";
@@ -31,6 +32,8 @@ pub(crate) const TRUST_MODE_HEADER: &str = "x-0g-provider-trust-mode";
 const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 const SIGNATURE_FETCH_TIMEOUT_SECONDS: u64 = 15;
 const MAX_SSE_BUFFER_BYTES: usize = 4 << 20;
+const MAX_CONFLICT_BODY_BYTES: usize = 4096;
+const KEY_MISMATCH: &str = "e2ee_key_mismatch";
 
 /// A verified provider, recorded by the verifier under
 /// `provider_claims.instances[<address>]`.
@@ -46,6 +49,8 @@ pub(crate) struct VerifiedProvider {
     pub signing_address: String,
     /// Hex X25519 key from the verified quote's report_data.
     pub e2ee_public_key: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub response_binding: bool,
 }
 
 /// A provider broker's `/v1` API base (0G's deriveV1Base), HTTPS only.
@@ -111,9 +116,8 @@ impl ZeroGProviderBackend {
 
     /// Seal the request to the first provider `event` binds for its model and
     /// send it through the router pinned to that provider. Only a 200 response
-    /// naming its signature continues; any other status is returned as its
-    /// status alone, so provider-controlled bodies never reach the client
-    /// unverified.
+    /// naming its signature continues. A stale-key conflict asks the caller
+    /// to reverify. Other failures return only their status.
     async fn send(
         &self,
         req: PreparedUpstreamRequest,
@@ -121,7 +125,7 @@ impl ZeroGProviderBackend {
     ) -> Result<(reqwest::Response, ResponseOpener, SignatureCheck), UpstreamError> {
         if req.request.path.as_deref().unwrap_or(CHAT_COMPLETIONS_PATH) != CHAT_COMPLETIONS_PATH {
             return Err(UpstreamError::InvalidRequest(
-                "0G Private Computer serves only /v1/chat/completions".to_string(),
+                "this model serves only /v1/chat/completions".to_string(),
             ));
         }
         let request: Map<String, Value> =
@@ -138,7 +142,12 @@ impl ZeroGProviderBackend {
             ))
         })?;
         let api = broker_api(&provider.endpoint).map_err(UpstreamError::Transport)?;
-        let (envelope, opener) = seal_chat_request(request, &enc_pub, &provider.signing_address)?;
+        let (envelope, opener) = seal_chat_request(
+            request,
+            &enc_pub,
+            &provider.signing_address,
+            provider.response_binding,
+        )?;
 
         // No caller or route headers are forwarded, so no X-0G-* control can
         // be injected.
@@ -160,6 +169,11 @@ impl ZeroGProviderBackend {
         let response = builder.send().await.map_err(transport_error)?;
         let status = response.status().as_u16();
         if status != 200 {
+            if status == 409 && is_stale_key_conflict(response).await {
+                return Err(UpstreamError::ChannelBindingMismatch(
+                    "0G broker rejected the verified encryption key as stale".into(),
+                ));
+            }
             return Err(UpstreamError::Upstream { status });
         }
         let key = response
@@ -182,6 +196,26 @@ impl ZeroGProviderBackend {
         };
         Ok((response, opener, check))
     }
+}
+
+/// The broker sends a top-level JSON error string with this token before any
+/// inference. Treat the body only as a signal to reverify, never as key material.
+async fn is_stale_key_conflict(response: reqwest::Response) -> bool {
+    #[derive(Deserialize)]
+    struct Conflict {
+        error: String,
+    }
+
+    read_buffered_upstream_response(response, MAX_CONFLICT_BODY_BYTES)
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_slice::<Conflict>(&body).ok())
+        .is_some_and(|body| {
+            body.error
+                .split_once(':')
+                .map_or(body.error.as_str(), |(code, _)| code)
+                == KEY_MISMATCH
+        })
 }
 
 /// The first provider, in preview order, whose recorded key hashes to a
@@ -233,14 +267,22 @@ struct SignatureCheck {
 impl SignatureCheck {
     async fn verify(&self, expected_text: &str) -> Result<(), UpstreamError> {
         let signature = self.fetch().await.map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_unavailable", %reason, "0G response signature could not be fetched");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_unavailable", %reason,
+                "0G response signature could not be fetched"
+            );
             match reason {
                 UpstreamError::ResponseTooLarge => reason,
                 _ => UpstreamError::Transport("0G response signature unavailable".to_string()),
             }
         })?;
         verify_signature(&signature, expected_text, &self.signer).map_err(|reason| {
-            tracing::warn!(target: "zero_g", provider = %self.provider, kind = "signature_invalid", %reason, "0G response signature failed verification");
+            tracing::warn!(
+                target: "zero_g", provider = %self.provider,
+                kind = "signature_invalid", %reason,
+                "0G response signature failed verification"
+            );
             UpstreamError::Transport("0G response signature invalid".to_string())
         })
     }
@@ -284,6 +326,15 @@ impl UpstreamBackend for ZeroGProviderBackend {
         Some(&self.router_base)
     }
 
+    // The 0G adapter only serves OpenAI Chat, independently of the requested operation.
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        _operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        Some(super::SseProtocol::OpenaiChat)
+    }
+
     fn requires_verified_binding(&self, _req: &PreparedUpstreamRequest) -> bool {
         true
     }
@@ -302,7 +353,7 @@ impl UpstreamBackend for ZeroGProviderBackend {
             &read_buffered_upstream_response(response, self.max_buffered_response_bytes).await?,
         )
         .map_err(rejected)?;
-        let body = opener.open_frame(frame)?;
+        let body = open_frame(&mut opener, frame, &check.provider)?;
         check.verify(&opener.signed_text(false)?).await?;
         Ok(UpstreamResponse {
             status_code: 200,
@@ -338,13 +389,40 @@ impl UpstreamBackend for ZeroGProviderBackend {
         let raw = response
             .bytes_stream()
             .map(|chunk| chunk.map_err(transport_error));
+        let response_binding = opener.requires_response_binding();
+        let mut body = verified_event_stream(raw, opener, check);
+        if response_binding {
+            // The caller can reverify only before it receives a stream. Peek
+            // in PSK mode and put any regular stream item back for delivery.
+            if let Some(first) = body.next().await {
+                match first {
+                    Err(error @ UpstreamError::ResponseBindingMismatch { .. }) => {
+                        return Err(error)
+                    }
+                    first => body = Box::pin(futures_util::stream::iter([first]).chain(body)),
+                }
+            }
+        }
         Ok(UpstreamStreamResponse {
             status_code: 200,
             headers: HashMap::from([("content-type".to_string(), content_type.to_string())]),
-            body: verified_event_stream(raw, opener, check),
+            body,
             served_instance_id,
         })
     }
+}
+
+fn open_frame(
+    opener: &mut ResponseOpener,
+    frame: Map<String, Value>,
+    instance_id: &str,
+) -> Result<Map<String, Value>, UpstreamError> {
+    opener.open_frame(frame).map_err(|err| match err {
+        ProtocolError::FirstBoundFrame => UpstreamError::ResponseBindingMismatch {
+            instance_id: instance_id.to_string(),
+        },
+        err => err.into(),
+    })
 }
 
 /// Opens each SSE frame as it arrives. `[DONE]` is emitted only after the
@@ -356,51 +434,30 @@ fn verified_event_stream(
     check: SignatureCheck,
 ) -> UpstreamBodyStream {
     Box::pin(async_stream::try_stream! {
-        let mut raw = Box::pin(raw);
-        let mut buffer = Vec::new();
-        let mut data: Option<Vec<u8>> = None;
-        'read: loop {
-            let chunk = raw.next().await.transpose()?;
-            let at_end = chunk.is_none();
-            // At EOF a final event without its blank line still counts.
-            buffer.extend_from_slice(chunk.as_deref().unwrap_or(b"\n\n"));
-            if buffer.len() > MAX_SSE_BUFFER_BYTES {
-                Err(rejected("SSE line too long"))?;
-            }
-            while let Some(end) = buffer.iter().position(|b| *b == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
-                let line = line.trim_ascii_end();
-                if let Some(value) = line.strip_prefix(b"data:") {
-                    let value = value.strip_prefix(b" ").unwrap_or(value);
-                    let data = data.get_or_insert_with(Vec::new);
-                    if !data.is_empty() {
-                        data.push(b'\n');
-                    }
-                    data.extend_from_slice(value);
-                } else if line.is_empty() {
-                    let Some(event) = data.take() else { continue };
-                    if event.trim_ascii() == b"[DONE]" {
-                        break 'read;
-                    }
-                    let frame = serde_json::from_slice(&event).map_err(rejected)?;
-                    let opened = opener.open_frame(frame)?;
-                    // Opening drops the unbound fields; a frame left without
-                    // a value carries nothing for the caller.
-                    if opened.values().all(is_empty) {
-                        continue;
-                    }
-                    let mut out = b"data: ".to_vec();
-                    out.extend(serde_json::to_vec(&opened).map_err(rejected)?);
-                    out.extend_from_slice(b"\n\n");
-                    yield Bytes::from(out);
-                }
-            }
-            if at_end {
+        let mut events = crate::sse::decode_envelope(Box::pin(raw), MAX_SSE_BUFFER_BYTES);
+        while let Some(record) = events.next().await {
+            let record = record?;
+            let crate::sse::Record::Event(event) = record else {
+                continue;
+            };
+            if event.meaning.kind == crate::sse_protocol::EventKind::Done {
                 break;
             }
+            let frame = match event.payload {
+                crate::sse::Payload::Json(Value::Object(frame)) => Ok(frame),
+                _ => Err(rejected("invalid SSE frame JSON")),
+            }?;
+            let opened = open_frame(&mut opener, frame, &check.provider)?;
+            // Opening removes unbound fields; an otherwise empty frame carries
+            // no authenticated value for the caller.
+            if opened.values().all(is_empty) {
+                continue;
+            }
+            let data = serde_json::to_string(&opened).map_err(rejected)?;
+            yield sse_stream::Sse::default().data(data).encode().map_err(rejected)?;
         }
         check.verify(&opener.signed_text(true)?).await?;
-        yield Bytes::from_static(b"data: [DONE]\n\n");
+        yield sse_stream::Sse::default().data("[DONE]").encode().map_err(rejected)?;
     })
 }
 
@@ -414,4 +471,4 @@ fn is_empty(value: &Value) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

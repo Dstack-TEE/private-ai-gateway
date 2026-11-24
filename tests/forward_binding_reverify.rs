@@ -167,6 +167,14 @@ impl MismatchingBackend {
 
 #[async_trait]
 impl UpstreamBackend for MismatchingBackend {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -273,7 +281,7 @@ fn forward_request(
     upstream_verification_event: Option<UpstreamVerifiedEvent>,
 ) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext::default(),
         endpoint_path: "/v1/chat/completions",
         received_body: CHAT_BODY,
@@ -372,8 +380,10 @@ async fn middleware_single_candidate_caller_supplied_always_mismatch_flushes() {
     let service = build_service(backend, verifier.clone());
 
     let candidates = vec![ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "route-a".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: CHAT_BODY.to_vec(),
     }];
     let journal = MiddlewareReceiptJournal::default();
@@ -590,10 +600,12 @@ async fn audio_binding_retry_reuses_exact_encoded_bytes_and_boundary() {
     request.endpoint_path = "/v1/audio/transcriptions";
     request.received_body = b"raw multipart bytes";
     request.forwarded_body = Some(br#"{"model":"model-a","response_format":"json"}"#.to_vec());
-    request.audio_form = Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
-        file: bytes::Bytes::from_static(b"spoken audio"),
-        extension: "wav".into(),
-    }));
+    request.form = Some(Arc::new(
+        private_ai_gateway::middleware::media::MediaForm::Transcription {
+            file: bytes::Bytes::from_static(b"spoken audio"),
+            extension: "wav".into(),
+        },
+    ));
     // The mock returns a chat-shaped body, so the audio response becomes a
     // receipted 502 after a successful binding retry; the send invariants hold.
     let response = service

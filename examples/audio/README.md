@@ -1,3 +1,11 @@
+# Audio transcription example
+
+`upstreams.json` routes `whisper-large-v3` to NEAR AI's
+`/v1/audio/transcriptions` endpoint, and `transcribe.sh` sends one file through
+a gateway with `aci_verified` required. The
+[HTTP API reference](../../docs/api-reference.md#audio-transcription) defines
+the accepted fields.
+
 The upstream example omits credentials. Provision `bearer_token` through the
 existing secret-backed runtime configuration workflow; do not commit it.
 `transcribe.sh` reads the caller credential and file path from environment

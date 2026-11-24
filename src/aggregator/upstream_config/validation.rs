@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::aci::verifier::TinfoilProviderVerifier;
+
 use super::{
     ConfiguredUpstreams, UpstreamConfig, UpstreamConfigError, UpstreamConfigSnapshot,
     UpstreamProvider, UpstreamRuntimeOptions,
@@ -37,13 +39,9 @@ pub(super) fn verification_targets(config: &[UpstreamConfig]) -> Vec<UpstreamVer
     let mut targets = Vec::new();
     for cfg in config {
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
-        // A router's attestation is of the gateway/enclave channel itself, which
-        // is identical for every model it fronts — every model resolves to the
-        // same channel-keyed verification. So probing a second model would only
-        // re-verify the same channel (a cache hit); we probe once with one
-        // representative model (`models` is a BTreeMap, so `.take(1)` is
-        // deterministic). Per-model / per-instance providers verify every model.
-        let model_ids: Vec<&String> = if cfg.provider.attestation_scope().is_per_router() {
+        // NEAR AI validates the selected model even though its evidence is
+        // router-scoped. Routers with shared verification use one model.
+        let model_ids: Vec<&String> = if cfg.provider.shares_verification_across_models() {
             cfg.models.values().take(1).collect()
         } else {
             cfg.models.values().collect()
@@ -232,6 +230,21 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream.provider == UpstreamProvider::Tinfoil {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            for pin in subjects.iter().filter_map(|subject| {
+                subject.strip_prefix(TinfoilProviderVerifier::RELEASE_SUBJECT_PREFIX)
+            }) {
+                if !pin.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                }) {
+                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                        "upstream {:?} provider tinfoil accepted_subjects release pins must be tinfoil-release:sha256:<64 lowercase hex>",
+                        upstream.name
+                    )));
+                }
+            }
+        }
         if upstream.provider == UpstreamProvider::ArmetAi {
             if !valid_root_https_origin(&upstream.base_url) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
@@ -249,6 +262,23 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             if let Some(bad) = subjects.iter().find(|s| !valid_tdx_measurement_subject(s)) {
                 return Err(UpstreamConfigError::InvalidConfig(format!(
                     "upstream {:?} provider armet-ai accepted_subjects entry {bad:?} must be tdx-measurement:sha256:<64 lowercase hex>",
+                    upstream.name
+                )));
+            }
+        }
+        if upstream.provider == UpstreamProvider::PhalaDirect {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if let Some(bad) = subjects.iter().find(|subject| {
+                subject.starts_with("dstack-compose:")
+                    && !subject
+                        .strip_prefix("dstack-compose:sha256:")
+                        .is_some_and(|hex| {
+                            hex.len() == 64
+                                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                        })
+            }) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider phala-direct accepted_subjects entry {bad:?} must be dstack-compose:sha256:<64 lowercase hex>",
                     upstream.name
                 )));
             }

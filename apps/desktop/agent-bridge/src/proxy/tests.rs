@@ -106,7 +106,10 @@ async fn mock_upstream() -> String {
 
 fn state() -> (Arc<ProxyState>, mpsc::Receiver<ProxyEvent>) {
     let (sender, receiver) = mpsc::channel(4);
-    (ProxyState::new(sender).unwrap(), receiver)
+    (
+        ProxyState::new(sender, std::time::Duration::ZERO).unwrap(),
+        receiver,
+    )
 }
 
 fn tokens() -> TokenSet {
@@ -146,7 +149,7 @@ async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
         ("opencode-token", &["text"]),
         (
             "local-tools-token",
-            &["text", "decisions", "image", "audio"],
+            &["audio", "decisions", "image", "text"],
         ),
     ] {
         let mut headers = HeaderMap::new();
@@ -171,6 +174,65 @@ async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
     assert_eq!(error.code, "model_endpoint_unavailable");
 }
 
+/// A request that arrives while a session is being verified waits for it.
+/// Once the session has been unverified for longer than the wait, requests
+/// are refused at once and told when to come back; a stopped session
+/// refuses at once too.
+#[tokio::test(start_paused = true)]
+async fn requests_wait_out_a_brief_verification_only() {
+    let wait = Duration::from_secs(30);
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, wait).unwrap();
+    state.set_tokens(tokens());
+    let request = || {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer codex-token".parse().unwrap());
+        models(State(state.clone()), headers)
+    };
+    let pending = || Session {
+        session_id: Some("session".into()),
+        ..Session::default()
+    };
+    let refused_after = |response: Response, started: tokio::time::Instant| {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        (
+            started.elapsed(),
+            response.headers().get(header::RETRY_AFTER).cloned(),
+        )
+    };
+
+    let started = tokio::time::Instant::now();
+    let stopped = refused_after(request().await, started);
+    assert_eq!(stopped, (Duration::ZERO, None));
+
+    state.publish(pending());
+    let waiting = tokio::spawn(request());
+    tokio::time::sleep(wait / 2).await;
+    assert!(!waiting.is_finished());
+    state.publish(Session {
+        verified: true,
+        service: Some(http_service("http://127.0.0.1:1")),
+        catalog: Some(Catalog::from_remote(&json!({"data": [{"id": "text"}]}), 1).unwrap()),
+        ..pending()
+    });
+    assert_eq!(waiting.await.unwrap().status(), StatusCode::OK);
+
+    let retry = Some(HeaderValue::from(VERIFICATION_RETRY_SECS));
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (wait, retry.clone())
+    );
+    // A retry of the same outage republishes the session and waits no more.
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (Duration::ZERO, retry)
+    );
+}
+
 async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
     state.publish(Session {
         generation,
@@ -189,6 +251,194 @@ async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u6
         verified: true,
         catalog: Some(catalog),
     });
+}
+
+/// A model the service added since the last read works on its first
+/// request; a misspelled one costs a single read.
+#[tokio::test]
+async fn an_unknown_model_reads_the_catalog_again_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    state.set_catalog_refresher(Box::new({
+        let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+        move || {
+            let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+            Box::pin(async move {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let catalog =
+                    Catalog::from_remote(&json!({"data": [{"id": "new-model"}]}), 2).unwrap();
+                state.publish(Session {
+                    generation: 1,
+                    epoch: 1,
+                    session_id: Some("test-session".to_string()),
+                    service: Some(http_service(&upstream)),
+                    verified: true,
+                    catalog: Some(catalog),
+                });
+            })
+        }
+    }));
+    let proxy = spawn(router(state.clone())).await;
+    let status = |model: &'static str| {
+        let request = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": model, "messages": [] }));
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(status("new-model").await, 200);
+    assert_eq!(status("misspelled").await, 404);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+/// The service's 401 is about the key this proxy sent, not the agent's token.
+#[tokio::test]
+async fn a_rejected_service_key_is_reported_as_such() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "text"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": {"message": "Invalid API key provided"}})),
+                    )
+                }),
+            ),
+    )
+    .await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-revoked".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "service_key_rejected");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("the agent's token is fine"));
+}
+
+struct RefusingService;
+
+impl VerifiedService for RefusingService {
+    fn call(
+        self: Arc<Self>,
+        request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(async move {
+            if request.method() == "GET" {
+                return Json(json!({"data": [{"id": "text"}]})).into_response();
+            }
+            let mut response =
+                (StatusCode::BAD_GATEWAY, "upstream connection failed\n").into_response();
+            response
+                .extensions_mut()
+                .insert(VerifierRefusal::Unreachable);
+            response
+        })
+    }
+}
+
+/// What the verifier refuses in plain text reaches an agent in the error
+/// format it parses, on either API.
+#[tokio::test]
+async fn a_verifier_refusal_reaches_agents_in_their_error_format() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let session = |catalog: Option<Catalog>| Session {
+        generation: 1,
+        epoch: 1,
+        session_id: Some("test-session".to_string()),
+        service: Some(Arc::new(RefusingService) as Arc<dyn VerifiedService>),
+        verified: catalog.is_some(),
+        catalog,
+    };
+    state.publish(session(None));
+    let catalog = state.fetch_catalog(1, 1).await.unwrap();
+    state.publish(session(Some(catalog)));
+    state.set_api_key(Some("sk-real".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let openai: Value = client
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(openai["error"]["code"], "upstream_unreachable");
+    let anthropic = client
+        .post(format!("{proxy}/v1/messages"))
+        .bearer_auth("claude-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anthropic.status().as_u16(), 502);
+    let anthropic: Value = anthropic.json().await.unwrap();
+    assert_eq!(anthropic["type"], "error");
+    assert!(anthropic["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not reach the service"));
+}
+
+/// A restart ends most outages, and a restart replaces the service key.
+/// A request that waited through it is sent with the new one.
+#[tokio::test]
+async fn a_request_that_waited_through_a_restart_is_sent() {
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, Duration::from_secs(10)).unwrap();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-before".to_string()));
+    state.publish(Session {
+        generation: 1,
+        epoch: 2,
+        session_id: Some("test-session".to_string()),
+        ..Session::default()
+    });
+    let proxy = spawn(router(state.clone())).await;
+    let waiting = tokio::spawn(
+        reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
+            .send(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished());
+    state.set_api_key(None);
+    state.set_api_key(Some("sk-after".to_string()));
+    verified(&state, &upstream, 2, 1).await;
+    let response = waiting.await.unwrap().unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let echoed: Value = response.json().await.unwrap();
+    assert_eq!(echoed["authorization"], "Bearer sk-after");
 }
 
 #[test]

@@ -72,29 +72,40 @@ this is not planned.
 
 ## What the manifest observation proves
 
-Privatemode v1.59 writes every fetched manifest to
-`<workspace>/manifests/log.txt`, the manifest history its documentation
-describes for audit. The documentation does not specify the line format; the
-gateway parses the v1.59 format (`<RFC 3339 time> <path>/<N>.json`, from
-[`internal/manifestlog`][manifestlog-source] in the tagged source) and resolves
-`<N>.json` next to the log. Recheck that format whenever the pinned proxy image
-changes. The gateway reads the latest version from the shared read-only
-manifest-history volume and reports:
+Privatemode v1.64 writes the attested manifest before appending an entry to
+`<workspace>/manifests/log.txt` after a successful secret exchange. Its format
+is `<RFC 3339 time> <path>/<N>.json <secret ID>`; unchanged manifests reuse
+the same numbered file across secret rotations. See the tagged
+[logger][manifestlog-source] and [secret-exchange setup][setup-source]. The
+gateway also accepts the legacy timestamp/path format, which v1.62 wrote before
+Coordinator verification and secret exchange. It resolves `<N>.json` next to
+the log, ignores an incomplete final line, and tolerates a pending manifest
+file from older proxies. The gateway reports:
 
 - `observed_manifest_sha256`
 - `manifest_observed_at`
 - `manifest_observation: "latest-proxy-fetch-log"`
+- `observed_secret_id` when present in the log (omitted for legacy entries)
 - `manifest_bound_to_active_secret: false`
 
-This is useful update visibility, but it is not a channel binding. The proxy
-writes the history entry before Coordinator verification and before secret
-exchange completes. The v1.59 API does not expose the manifest associated with
-the secret used for a request. A receipt therefore must not use the observation
-to assert manifest-specific GPU, OS, serving-software, or model-weight claims.
+The observation evidence also includes `secret_id` when present and always
+sets `bound_to_active_secret: false`. The ID identifies a successful secret
+exchange associated with that manifest on v1.64. It does not identify the
+secret used for this gateway request. The [proxy handler][handler-source]
+selects `LatestSecret` for each attempt and sets `Privatemode-Secret-ID` only
+on the outbound request. Its response mapper does not return that selected ID
+to the gateway. Concurrent requests, secret rotation, and retries prevent
+inferring the request's ID from the newest log entry. A receipt therefore must
+not assert manifest-specific GPU, OS, serving-software, or model-weight claims
+on this basis.
 
 The observation may also be older than the request by the route's
-`verifier_cache_seconds` lease. Its timestamp states when the proxy fetched the
-manifest, not when the gateway emitted the receipt.
+`verifier_cache_seconds` lease. On v1.64 its timestamp states when the proxy
+logged the successful exchange; on older proxies it records a manifest fetch.
+It is not the time the gateway emitted the receipt.
+
+Request binding would need the measured proxy to return the selected secret ID
+in its response; v1.64 does not.
 
 ## Verification and forwarding
 
@@ -120,7 +131,7 @@ startup and liveness. It does not use or identify the current inference secret.
 The refresh loop now retries failed background updates with bounded backoff;
 `LatestSecret` still fails closed if an expired secret cannot be refreshed.
 
-For inference, the gateway permits only these v1.59 handlers, all of which the
+For inference, the gateway permits only these v1.64 handlers, all of which the
 proxy encrypts. The proxy also encrypts transcription, Anthropic Messages, and
 unstructured handlers, which the gateway does not expose; it forwards
 `/v1/models` unencrypted.
@@ -131,20 +142,22 @@ unstructured handlers, which the gateway does not expose; it forwards
 
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound because the Compose explicitly sets
-`--api-key-fallback=always`. Upstream v1.59 warns that the default will change
+`--api-key-fallback=always`. Upstream v1.64.0 warns that the default will change
 to `never` in a future release; the explicit flag preserves this behavior.
 As of 2026-10-19 PDT, the Compose uses the canonical `--api-key`,
 `--nvidia-ocsp-allow-unknown=false`, and
-`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.59.0 [CLI][cli-source]
+`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.64.0 [CLI][cli-source]
 shares each deprecated alias's flag value and backing variable with its
 canonical spelling, including the same `@file` credential loading and whitespace
 trimming. Switching spellings preserves behavior and removes deprecation
 warnings. The strict OCSP settings remain an admission condition: only good
 status is accepted, with no unknown-status tolerance or revoked-certificate
-grace period. On each encrypted request, the proxy authenticates the OCSP
-policy with an HMAC using the inference secret; the worker verifies that MAC
-and enforces the policy against its driver, GPU, and VBIOS statuses. See the
-[proxy handler][handler-source] and [worker enforcement][worker-source].
+grace period. On each encrypted request, the proxy includes the OCSP policy in
+authenticated metadata inside the encrypted request. The worker requires that
+metadata from v1.61 and newer clients, verifies it during decryption, and
+enforces the policy against its driver, GPU, and VBIOS statuses before
+forwarding to the model.
+See the [proxy handler][handler-source] and [worker enforcement][worker-source].
 
 The proxy supports `--listen-address`; its default remains `0.0.0.0`, appropriate
 for the private Compose network. The forwarding client rejects redirects and
@@ -154,26 +167,68 @@ Plain HTTP is intentional on the internal hop. Both services and the private
 network are inside the same attested dstack workload. Privatemode E2EE protects
 the request after it leaves that workload.
 
+## Proxy timeouts
+
+The v1.64.0 [CLI][cli-source] exposes the incoming HTTP server's timeouts as
+flags. Their defaults match the values already hard-coded in v1.59.0:
+`--timeout-read=2m`, `--timeout-read-header=10s`, `--timeout-idle=1m`, and
+`--timeout-write=0`. The upstream response-header timeout remains one hour,
+now configurable with `--timeout-upstream-response-header`.
+
+The two-minute read timeout limits receiving the request body, not waiting for
+inference headers or completing a response. Before forwarding, the proxy's
+`limitRequestBody` middleware consumes the body through
+[`persist.ReadBody`][persist-source]. In Go 1.27's [`net/http` server][go-server-source],
+body EOF starts the background disconnect reader, which clears the socket's
+read deadline. `IdleTimeout` applies after the handler finishes while waiting
+for the next keep-alive request; it does not limit an active response. With no
+write timeout, long buffered inference and streaming responses remain supported.
+The Compose therefore keeps the existing command unchanged.
+
+On 2026-11-05 PST, the pinned image passed a controlled local HTTPS-upstream
+test at these defaults: a request with a fully consumed body received no
+headers for 130 seconds and then completed with HTTP 200. A second response
+sent SSE headers immediately, paused for 65 seconds between chunks twice, and
+completed at 130 seconds with HTTP 200 and exact expected bytes. The test used
+`GET /v1/models/{model}` through the same body-reading middleware as encrypted
+inference, without credentials or provider traffic. Separate minimal live
+`glm-5.3` buffered and streaming calls passed through the proxy with attestation,
+secret exchange, and strict OCSP settings; see [review.md](review.md).
+
 ## Prompt cache
 
-The reference Compose sets `--disable-prompt-cache=false`. The default
-`--prompt-cache-salt random` generates one salt per proxy startup, so requests
-without a caller-supplied salt share one cache namespace across all callers of
-that proxy replica. Restarts generate a new namespace; replicas do not share
-their startup salts. This removes the proxy's default per-request cache
-isolation. Tinfoil's namespace is broader: it derives from the shared upstream
-credential, spans replicas, and survives restarts. See
-[Prefix-cache isolation](../README.md#prefix-cache-isolation-observation).
+The reference Compose sets `--disable-prompt-cache=false`. In authenticated
+middleware mode, the gateway supplies a per-user, provider-separated
+`cache_salt` (64 lowercase hex characters, satisfying the proxy's minimum 32
+bytes). A non-empty caller `cache_salt` string subdivides that user's partition;
+the caller's raw salt and `user_cache_secret` are removed. This replaces the
+shared namespace implied by the proxy's default startup-random salt. See
+[Prefix-cache isolation](../../prefix-cache-isolation.md) for
+identity trust, provider limitations, and rotation.
 
-Sharing a prefix cache creates a cross-tenant prefix-timing side channel: a
-caller can infer whether another caller recently sent the same prompt prefix.
-Callers that need isolation can supply their own `cache_salt` (at least 32
-bytes), which takes precedence. The proxy derives shard affinity from the
-effective salt and prompt content, helping repeated prefixes reach the same
-workers. This does not guarantee a cache hit or a particular worker. The
-gateway preserves caller salts and does not derive a tenant salt.
-See the tagged v1.59.0 [CLI][cli-source], [handler][handler-source], and
-[shard-key implementation][shard-source].
+Without a generated or valid caller salt (including anonymous middleware
+traffic), the proxy's default `--prompt-cache-salt random` generates one salt
+per startup. Those requests share a namespace within that replica until it
+restarts. Direct gateway mode retains its existing caller-salt behavior.
+
+The proxy derives shard affinity from the effective salt and prompt content.
+The stable per-user salt can therefore make a user's traffic linkable through
+shard keys visible to Privatemode's gateway. Provider separation prevents the
+same pseudonym being sent to other providers, but does not remove this
+within-provider linkability. Partitioning also reduces cache reuse between
+users and can change worker affinity, throughput, and the frequency of
+provider rate-limit responses. It guarantees neither a cache hit nor a
+particular worker. Obtain appropriate provider quota; do not add quota
+workarounds. The provider must honor the salt for isolation to hold.
+
+See the tagged v1.64.0 [CLI][cli-source], [handler][handler-source], and
+[shard-key implementation][shard-source]. Hermetic gateway coverage:
+`cargo test --test middleware_completion cache_salt` checks authenticated and
+anonymous requests, streaming, failover, caller sub-partitions, and receipt
+hashes. A disposable-CVM run on 2026-11-12 confirmed per-user isolation
+with the pinned proxy; see
+[Prefix-cache isolation](../../prefix-cache-isolation.md).
+Production rollout remains unverified.
 
 ## Session binding and claims
 
@@ -257,8 +312,12 @@ To test a Phala deployment, follow the
 - [Privatemode TCB source](https://github.com/edgelesssys/privatemode-public)
 - [Contrast source](https://github.com/edgelesssys/contrast)
 
-[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/manifestlog/manifestlog.go
-[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/cmd/cmd.go
-[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/privatemode-proxy/internal/server/server.go
-[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/internal/oss/mutators/mutators.go
-[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.59.0/inference-proxy/internal/adapter/inference/inference.go
+[manifestlog-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/manifestlog/manifestlog.go
+[setup-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/setup/setup.go
+[cli-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/cmd/cmd.go
+[handler-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/privatemode-proxy/internal/server/server.go
+[shard-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/internal/oss/mutators/mutators.go
+[worker-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/inference-proxy/internal/adapter/inference/inference.go
+
+[persist-source]: https://github.com/edgelesssys/privatemode-public/blob/v1.64.0/internal/oss/persist/persist.go
+[go-server-source]: https://github.com/golang/go/blob/go1.27.0/src/net/http/server.go

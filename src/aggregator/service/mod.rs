@@ -29,10 +29,12 @@ use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const AUDIO_SPEECH_PATH: &str = "/v1/audio/speech";
+pub const RERANK_PATH: &str = "/v1/rerank";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const RESPONSES_PATH: &str = "/v1/responses";
-pub use crate::aci::types::AUDIO_TRANSCRIPTIONS_PATH;
+pub use crate::aci::types::{AUDIO_TRANSCRIPTIONS_PATH, IMAGES_EDITS_PATH};
 pub const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
@@ -88,7 +90,6 @@ pub struct AciService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct E2eeReplayKey {
-    client_public_key_hex: String,
     model_public_key_hex: String,
     nonce: String,
 }
@@ -337,3 +338,10 @@ fn validate_keyset(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use streaming::{
+    decode_source, done_record, error_records, ResponseContext, StreamControl, TerminalPublication,
+};

@@ -162,6 +162,7 @@ impl RequestMode {
 pub enum StreamErrorKind {
     UpstreamNon2xx,
     UpstreamRead,
+    Transform,
     ReceiptFinalize,
     E2ee,
 }
@@ -171,6 +172,7 @@ impl StreamErrorKind {
         match self {
             Self::UpstreamNon2xx => "upstream_non_2xx",
             Self::UpstreamRead => "upstream_read",
+            Self::Transform => "transform",
             Self::ReceiptFinalize => "receipt_finalize",
             Self::E2ee => "e2ee",
         }

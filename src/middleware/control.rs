@@ -236,10 +236,23 @@ impl ControlClient {
     /// Fetch a model catalog from the control plane and relay it verbatim.
     /// Bounded by the consult timeout so a hung control plane cannot stall a
     /// catalog request.
-    pub async fn catalog_get(&self, path: &str) -> Result<CatalogResponse, ControlError> {
+    ///
+    /// `api_key_hash` is the hash of the caller's key when the request carried
+    /// one, sent as `x-api-key-hash`: the same hash a consult carries, and the
+    /// only thing about the caller that leaves the gateway.
+    pub async fn catalog_get(
+        &self,
+        path: &str,
+        api_key_hash: Option<&str>,
+    ) -> Result<CatalogResponse, ControlError> {
         let build = || {
-            self.authorize(self.client.get(self.url(path)))
-                .timeout(self.pre_timeout)
+            let request = self
+                .authorize(self.client.get(self.url(path)))
+                .timeout(self.pre_timeout);
+            match api_key_hash {
+                Some(hash) => request.header("x-api-key-hash", hash),
+                None => request,
+            }
         };
         let response = self
             .send_idempotent(build)

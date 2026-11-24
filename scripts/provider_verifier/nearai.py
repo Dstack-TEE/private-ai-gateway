@@ -8,6 +8,8 @@ import os
 import sys
 from typing import Any
 
+from requests.exceptions import ConnectionError, HTTPError, Timeout
+
 from .common import (
     emit,
     failed,
@@ -32,6 +34,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
             "verifier contract drift: NearAICloudVerifier is missing "
             "verify_gateway_component; the confidential_verifier package is out of sync "
             "with this bridge (see scripts/confidential_verifier/VENDOR.md)",
+            failure="verifier_misconfigured",
             verifier_id=verifier_id,
         )
         return
@@ -41,20 +44,44 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         api_key=provider_options.get("near_ai_api_key"),
     )
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
-    with contextlib.redirect_stdout(sys.stderr):
-        report = await asyncio.to_thread(near_provider.fetch_report, request["model_id"])
-        verifier = NearAICloudVerifier(dstack_verifier_url)
-        gateway = (report.raw or {}).get("gateway_attestation") or {}
-        gateway_result = await verifier.verify_gateway_component(
-            report.raw or {},
-            report.request_nonce,
+    model_id = request["model_id"]
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            report = await asyncio.to_thread(near_provider.fetch_report, model_id)
+    except (ConnectionError, HTTPError, Timeout) as exc:
+        failed(
+            provider,
+            f"NEAR AI attestation report fetch failed: {exc}",
+            failure="evidence_unavailable",
         )
+        return
+    raw = report.raw or {}
+    attestations = raw.get("model_attestations")
+    # An external verifier checkout can supply a different fetch implementation.
+    if not isinstance(attestations, list) or not attestations:
+        failed(provider, "NEAR AI report missing model_attestations", failure="evidence_invalid")
+        return
+    if any(
+        not isinstance(entry, dict) or entry.get("model_name") != model_id
+        for entry in attestations
+    ):
+        failed(
+            provider,
+            "NEAR AI model attestation model_name does not match the requested model ID",
+            failure="binding_mismatch",
+        )
+        return
+    with contextlib.redirect_stdout(sys.stderr):
+        verifier = NearAICloudVerifier(dstack_verifier_url)
+        gateway = raw.get("gateway_attestation") or {}
+        gateway_result = await verifier.verify_gateway_component(raw, report.request_nonce)
     report_obj = model_dump(report)
     attestation_url = "https://cloud-api.near.ai/v1/attestation/report"
     if not gateway:
         failed(
             provider,
             "NEAR AI report did not include gateway_attestation",
+            failure="evidence_invalid",
             evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
@@ -64,6 +91,7 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI report did not include TLS SPKI binding",
+            failure="evidence_invalid",
             evidence=json_evidence_bundle(report_obj, attestation_url),
             verifier_id=verifier_id,
         )
@@ -78,11 +106,8 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         )
         return
 
-    # NEAR AI is a router: this verifier attests the gateway TEE channel
-    # (attested_scope = "router"), shared by every model. Per-model TEE coverage
-    # is delegated to the verified gateway, which attests its own backends; the
-    # model is only a fetch parameter and is recorded on the receipt as an
-    # identifier.
+    # The model_name check guards model selection. The resulting evidence and
+    # binding cover the shared gateway TEE channel.
     #
     # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
     # so the session layer can populate a tri-state `tcb_up_to_date` claim. The

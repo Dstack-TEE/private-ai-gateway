@@ -16,24 +16,22 @@ use axum::{body::to_bytes, routing::post, Json, Router};
 use futures_util::StreamExt;
 use private_ai_gateway::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
 use private_ai_gateway::aci::upstream::{
-    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
-    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
-    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+    CacheSaltField, ModelRoute, ModelRouterBackend, OpenAICompatibleBackend,
+    PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse, MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, ChatCompletionRequest, FailedAttempt, FixedClock,
     ForwardCandidate, GatewayRequestContext, InMemoryReceiptStore, MiddlewareForwardResult,
-    MiddlewareReceiptJournal, ServiceError, ServiceResponseStream, UpstreamVerificationError,
-    UpstreamVerificationRequest, UpstreamVerifier,
+    MiddlewareReceiptJournal, ServiceError, UpstreamVerificationError, UpstreamVerificationRequest,
+    UpstreamVerifier,
 };
 use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
-use private_ai_gateway::middleware::control::ControlClient;
-use private_ai_gateway::middleware::errors::{SseProtocol, Surface};
+use private_ai_gateway::middleware::errors::Surface;
 use private_ai_gateway::middleware::request_transform::Endpoint;
-use private_ai_gateway::middleware::sse::{MeterStream, StreamReport};
-use private_ai_gateway::middleware::types::{OrganizationScope, TenantIdentity};
+use private_ai_gateway::middleware::types::ProviderFormat;
 use private_ai_gateway::middleware::{
     CompletionInput, Middleware, MiddlewareConfig, PrefixHashKey,
 };
@@ -45,11 +43,16 @@ use common::{event_from_request, StaticKeyProvider, StubQuoter};
 /// A middleware with a fixed prefix-hash key; the gateway derives the real
 /// key from dstack KMS.
 fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-    Middleware::new(PrefixHashKey::new([7; 32]), config)
+    Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
+        config,
+    )
 }
 
 // A mock upstream that returns a fixed response for any forward.
 struct MockUpstream {
+    format: ProviderFormat,
     status: u16,
     body: Vec<u8>,
     /// Headers an upstream may add on top of `content-type` — the kind the
@@ -67,10 +70,55 @@ struct RecordedRequest {
 }
 
 struct RecordingUpstream {
+    format: ProviderFormat,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     status: u16,
     body: Vec<u8>,
     content_type: &'static str,
+}
+
+// These fixtures resolve chat-shaped client paths to their configured protocol,
+// as ModelRouterBackend does before handing a request to a concrete backend.
+fn prepare_mock_request(
+    backend: &dyn UpstreamBackend,
+    mut req: UpstreamRequest,
+    format: ProviderFormat,
+) -> Result<PreparedUpstreamRequest, UpstreamError> {
+    if matches!(
+        req.path.as_deref(),
+        Some("/v1/messages" | "/v1/chat/completions")
+    ) {
+        req.path = Some(
+            match format {
+                ProviderFormat::Openai => "/v1/chat/completions",
+                ProviderFormat::Anthropic => "/v1/messages",
+            }
+            .into(),
+        );
+    }
+    Ok(PreparedUpstreamRequest {
+        model_id: serde_json::from_slice::<Value>(&req.body).unwrap()["model"]
+            .as_str()
+            .unwrap_or_default()
+            .into(),
+        route_id: None,
+        is_tee: None,
+        upstream_name: backend.name().into(),
+        url_origin: backend.url_origin().map(str::to_string),
+        request: req,
+    })
+}
+
+fn mock_response_protocol(format: ProviderFormat, operation: Endpoint) -> Option<SseProtocol> {
+    match operation {
+        Endpoint::Complete => Some(SseProtocol::OpenaiChat),
+        Endpoint::CreateModelResponse => Some(SseProtocol::OpenaiResponses),
+        Endpoint::ChatComplete | Endpoint::Messages => Some(match format {
+            ProviderFormat::Openai => SseProtocol::OpenaiChat,
+            ProviderFormat::Anthropic => SseProtocol::AnthropicMessages,
+        }),
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -83,12 +131,28 @@ impl UpstreamBackend for RecordingUpstream {
         Some("https://recording-upstream.example")
     }
 
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        prepare_mock_request(self, req, self.format)
+    }
+
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        mock_response_protocol(self.format, operation)
+    }
+
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let parsed = if let Some(content_type) = req.content_type.as_deref() {
-            private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type)
-                .await
-                .unwrap()
-                .0
+            (if req.path.as_deref() == Some("/v1/images/edits") {
+                private_ai_gateway::middleware::image_edits::parse(req.body.clone(), content_type)
+                    .await
+            } else {
+                private_ai_gateway::middleware::audio::parse(req.body.clone(), content_type).await
+            })
+            .unwrap()
+            .0
         } else {
             serde_json::from_slice(&req.body).unwrap()
         };
@@ -137,6 +201,16 @@ impl UpstreamBackend for MockUpstream {
     }
     fn url_origin(&self) -> Option<&str> {
         Some("https://mock-upstream.example")
+    }
+    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
+        prepare_mock_request(self, req, self.format)
+    }
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        mock_response_protocol(self.format, operation)
     }
     async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         let mut headers = HashMap::new();
@@ -188,6 +262,14 @@ struct TeeAwareUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TeeAwareUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "tee-aware-upstream"
     }
@@ -372,11 +454,21 @@ fn build_service_with_upstream_headers(
     body: Vec<u8>,
     extra_headers: Vec<(&'static str, &'static str)>,
 ) -> Arc<AciService> {
+    build_service_with_format(status, body, extra_headers, ProviderFormat::Openai)
+}
+
+fn build_service_with_format(
+    status: u16,
+    body: Vec<u8>,
+    extra_headers: Vec<(&'static str, &'static str)>,
+    format: ProviderFormat,
+) -> Arc<AciService> {
     Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(MockUpstream {
+                format,
                 status,
                 body,
                 extra_headers,
@@ -395,12 +487,22 @@ fn build_recording_service(
     body: Vec<u8>,
     content_type: &'static str,
 ) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    build_recording_service_with_format(status, body, content_type, ProviderFormat::Openai)
+}
+
+fn build_recording_service_with_format(
+    status: u16,
+    body: Vec<u8>,
+    content_type: &'static str,
+    format: ProviderFormat,
+) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(RecordingUpstream {
+                format,
                 requests: requests.clone(),
                 status,
                 body,
@@ -636,6 +738,333 @@ fn middleware(control_url: String) -> Middleware {
     .unwrap()
 }
 
+fn cache_salt_service(
+    routes: &[(&str, Option<CacheSaltField>, u16)],
+    upstream_path: Option<&str>,
+    stream: bool,
+    format: ProviderFormat,
+) -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>) {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut router = ModelRouterBackend::new("cache-salt-router");
+    let response = json!({
+        "id":"upstream", "object":"chat.completion", "model":"actual-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"delta":{"content":"hi"},"finish_reason":"stop"}],
+        "role":"assistant", "content":[{"type":"text","text":"hi"}],
+        "stop_reason":"end_turn", "output":[], "status":"completed",
+        "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"input_tokens":1,"output_tokens":1}
+    });
+    for (route_id, field, status) in routes {
+        let body = if stream {
+            format!("data: {response}\n\ndata: [DONE]\n\n").into_bytes()
+        } else {
+            serde_json::to_vec(&response).unwrap()
+        };
+        router
+            .add_route(
+                ModelRoute::new(
+                    "gpt-test",
+                    "actual-model",
+                    Arc::new(RecordingUpstream {
+                        format,
+                        requests: requests.clone(),
+                        status: *status,
+                        body,
+                        content_type: if stream {
+                            "text/event-stream"
+                        } else {
+                            "application/json"
+                        },
+                    }),
+                    *route_id,
+                )
+                .unwrap()
+                .with_path(upstream_path.map(str::to_owned))
+                .with_cache_salt_field(*field),
+            )
+            .unwrap();
+    }
+    (build_service_with_backend(Arc::new(router)), requests)
+}
+
+#[tokio::test]
+async fn cache_salt_is_user_and_provider_scoped_in_buffered_and_streaming_middleware() {
+    use private_ai_gateway::aci::digest::sha256_hex;
+    let _ = captured_logs();
+    let mut salts = HashMap::new();
+    for (provider, field, name) in [
+        (
+            "chutes",
+            Some(CacheSaltField::CacheSalt("chutes")),
+            "cache_salt",
+        ),
+        (
+            "privatemode",
+            Some(CacheSaltField::CacheSalt("privatemode")),
+            "cache_salt",
+        ),
+        (
+            "tinfoil",
+            Some(CacheSaltField::UserCacheSecret("tinfoil")),
+            "user_cache_secret",
+        ),
+        ("unsupported", None, "cache_salt"),
+    ] {
+        for streaming in [false, true] {
+            for user in [Some(7), Some(8), None] {
+                let mut pre = json!({"allow":true,"candidates":[{"routeId":"route:gpt-test","format":"openai"}]});
+                if let Some(user) = user {
+                    pre["userId"] = json!(user);
+                    pre["organizationId"] = json!(11);
+                    pre["workspaceId"] = json!(13);
+                }
+                let (control_url, pres, posts) = spawn_control_capturing_pre(pre).await;
+                let (service, requests) = cache_salt_service(
+                    &[("route:gpt-test", field, 200)],
+                    None,
+                    streaming,
+                    ProviderFormat::Openai,
+                );
+                let mut input = chat_input();
+                input.stream = streaming;
+                input.params["stream"] = json!(streaming);
+                input.params["cache_salt"] = json!("caller-cache-canary");
+                input.params["user_cache_secret"] = json!("raw-secret-canary");
+                input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+                let received_hash = sha256_hex(&input.received_body);
+                let response = middleware(control_url)
+                    .handle_completion(&service, input)
+                    .await;
+                assert_eq!(response.status(), 200);
+                let (headers, _) = raw_body(response).await;
+                let request = requests.lock().unwrap()[0].clone();
+                let derived = request.body.get(name).and_then(Value::as_str);
+                if let (Some(_), Some(user)) = (field, user) {
+                    let derived = derived.unwrap();
+                    assert_eq!(derived.len(), 64);
+                    let key = (provider, user);
+                    if let Some(previous) = salts.insert(key, derived.to_owned()) {
+                        assert_eq!(previous, derived, "stream mode must not change the salt");
+                    }
+                    assert!(!request.body.as_object().unwrap().contains_key(
+                        if name == "cache_salt" {
+                            "user_cache_secret"
+                        } else {
+                            "cache_salt"
+                        }
+                    ));
+                } else {
+                    assert!(request.body.get("cache_salt").is_none());
+                    assert!(request.body.get("user_cache_secret").is_none());
+                }
+                let receipt = service
+                    .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+                    .unwrap()
+                    .document_json()
+                    .unwrap();
+                let events = receipt["event_log"].as_array().unwrap();
+                assert_eq!(
+                    events
+                        .iter()
+                        .find(|e| e["type"] == "request.received")
+                        .unwrap()["body_hash"],
+                    received_hash
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .find(|e| e["type"] == "request.forwarded")
+                        .unwrap()["body_hash"],
+                    sha256_hex(&request.raw_body)
+                );
+                assert_ne!(received_hash, sha256_hex(&request.raw_body));
+                let report = wait_for_post(&posts, |p| p["status"] == 200).await;
+                for document in [
+                    report.to_string(),
+                    pres.lock().unwrap()[0].to_string(),
+                    receipt.to_string(),
+                    captured_logs().text(),
+                ] {
+                    assert!(!document.contains("caller-cache-canary"));
+                    assert!(!document.contains("raw-secret-canary"));
+                    if let Some(derived) = derived {
+                        assert!(!document.contains(derived));
+                    }
+                }
+            }
+        }
+    }
+    for provider in ["chutes", "privatemode", "tinfoil"] {
+        assert_ne!(salts[&(provider, 7)], salts[&(provider, 8)]);
+    }
+    assert_ne!(salts[&("chutes", 7)], salts[&("privatemode", 7)]);
+    assert_ne!(salts[&("chutes", 7)], salts[&("tinfoil", 7)]);
+}
+
+#[tokio::test]
+async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller_fields() {
+    let mut values = Vec::new();
+    for (surface, format, native_path) in [
+        (Endpoint::ChatComplete, ProviderFormat::Openai, None),
+        (Endpoint::Complete, ProviderFormat::Openai, None),
+        (
+            Endpoint::CreateModelResponse,
+            ProviderFormat::Openai,
+            Some("/v1/responses"),
+        ),
+        (Endpoint::CreateModelResponse, ProviderFormat::Openai, None),
+        (
+            Endpoint::Messages,
+            ProviderFormat::Anthropic,
+            Some("/v1/messages"),
+        ),
+        (Endpoint::Messages, ProviderFormat::Openai, None),
+    ] {
+        let pre = json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
+            "candidates":[{"routeId":"route:gpt-test","format":format,
+                "supportedEndpoints":native_path.into_iter().collect::<Vec<_>>() }]});
+        let control_url = spawn_control(200, pre).await;
+        let (service, requests) = cache_salt_service(
+            &[(
+                "route:gpt-test",
+                Some(CacheSaltField::UserCacheSecret("tinfoil")),
+                200,
+            )],
+            native_path,
+            false,
+            format,
+        );
+        let mw = middleware(control_url);
+        for (index, caller) in [
+            Value::Null,
+            json!(17),
+            json!({"bad":true}),
+            json!(""),
+            json!("subpartition"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut input = match surface {
+                Endpoint::Messages => messages_input(false),
+                Endpoint::CreateModelResponse => responses_input(false),
+                Endpoint::Complete => CompletionInput {
+                    endpoint: surface,
+                    endpoint_path: "/v1/completions",
+                    params: json!({"model":"gpt-test","prompt":"hi"}),
+                    ..chat_input()
+                },
+                _ => chat_input(),
+            };
+            input.request_id = format!("cache-salt-{index}");
+            if !caller.is_null() {
+                input.params["cache_salt"] = caller;
+            }
+            input.params["user_cache_secret"] = json!("raw-secret-canary");
+            input.received_body = serde_json::to_vec(&input.params).unwrap().into();
+            let response = mw.handle_completion(&service, input).await;
+            assert_eq!(response.status(), 200, "{surface:?}, {format:?}, {index}");
+            let _ = raw_body(response).await;
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        let salt = requests[0].body["user_cache_secret"].as_str().unwrap();
+        for request in &requests[..4] {
+            assert_eq!(request.body["user_cache_secret"], salt);
+            assert!(request.body.get("cache_salt").is_none());
+        }
+        assert_ne!(requests[4].body["user_cache_secret"], salt);
+        if let Some(path) = native_path {
+            assert_eq!(requests[0].path.as_deref(), Some(path));
+        }
+        values.push(salt.to_owned());
+    }
+    assert!(
+        values.iter().all(|salt| salt == &values[0]),
+        "bridging must preserve the original user partition"
+    );
+}
+
+#[tokio::test]
+async fn cache_salt_failover_uses_each_selected_providers_partition() {
+    for stream in [false, true] {
+        let control_url = spawn_control(200, json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
+            "candidates":[{"routeId":"first:gpt-test","format":"openai"},{"routeId":"second:gpt-test","format":"openai"}]})).await;
+        let (service, requests) = cache_salt_service(
+            &[
+                (
+                    "first:gpt-test",
+                    Some(CacheSaltField::CacheSalt("chutes")),
+                    503,
+                ),
+                (
+                    "second:gpt-test",
+                    Some(CacheSaltField::CacheSalt("privatemode")),
+                    200,
+                ),
+            ],
+            None,
+            stream,
+            ProviderFormat::Openai,
+        );
+        let mut input = chat_input();
+        input.stream = stream;
+        input.params["stream"] = json!(stream);
+        let response = middleware(control_url)
+            .handle_completion(&service, input)
+            .await;
+        assert_eq!(response.status(), 200);
+        let _ = raw_body(response).await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body["cache_salt"].as_str().unwrap().len(), 64);
+        assert_eq!(requests[1].body["cache_salt"].as_str().unwrap().len(), 64);
+        assert_ne!(
+            requests[0].body["cache_salt"],
+            requests[1].body["cache_salt"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn cache_salt_direct_http_topology_preserves_caller_fields() {
+    use axum::{body::Body, http::Request};
+    use private_ai_gateway::http::build_router;
+    use tower::ServiceExt;
+
+    let (service, requests) = cache_salt_service(
+        &[(
+            "route:gpt-test",
+            Some(CacheSaltField::UserCacheSecret("tinfoil")),
+            200,
+        )],
+        None,
+        false,
+        ProviderFormat::Openai,
+    );
+    let original = json!({"model":"gpt-test","messages":[],"cache_salt":"caller-cache","user_cache_secret":"caller-secret"});
+    let response = build_router(service)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&original).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let _ = raw_body(response).await;
+    let mut expected = original;
+    expected["model"] = json!("actual-model");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body, expected,
+        "direct mode only performs its existing model rewrite"
+    );
+}
+
 /// The (route, status) view of a failover chain; per-attempt timing is not
 /// deterministic and is asserted separately where it matters.
 fn attempts(chain: &[FailedAttempt]) -> Vec<(String, u16)> {
@@ -647,7 +1076,7 @@ fn attempts(chain: &[FailedAttempt]) -> Vec<(String, u16)> {
 
 fn chat_input() -> CompletionInput {
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::ChatComplete,
         endpoint_path: "/v1/chat/completions",
@@ -682,7 +1111,7 @@ fn systemone_input() -> CompletionInput {
         "stream": true
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::SystemOne,
         endpoint_path: "/v1/systemone",
@@ -709,7 +1138,7 @@ fn responses_input(stream: bool) -> CompletionInput {
         "max_output_tokens": 16
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::CreateModelResponse,
         endpoint_path: "/v1/responses",
@@ -752,9 +1181,12 @@ const LEAKY_UPSTREAM_HEADERS: &[(&str, &str)] = &[
 
 fn assert_no_upstream_headers(headers: &axum::http::HeaderMap) {
     assert!(!headers.contains_key("x-typesafe-request-id"));
-    for (name, _) in LEAKY_UPSTREAM_HEADERS {
+    for (name, value) in LEAKY_UPSTREAM_HEADERS {
+        // `x-request-id` is also the gateway's own header for its own id; the
+        // upstream's value must never be what it carries.
+        let relayed = headers.get(*name).and_then(|v| v.to_str().ok());
         assert!(
-            headers.get(*name).is_none(),
+            relayed.is_none() || (*name == "x-request-id" && relayed != Some(*value)),
             "{name} reached the client; response headers must be an allowlist"
         );
     }
@@ -1059,7 +1491,7 @@ async fn streamed_success_hides_which_upstream_served_it() {
     let service = build_service_with_upstream_headers(
         200,
         b"data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"vendor-model-int\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"matched_stop\":424242}]}\n\ndata: [DONE]\n\n".to_vec(),
-        LEAKY_UPSTREAM_HEADERS.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.iter().copied().chain([("content-type", "text/event-stream")]).collect(),
     );
     let mut input = chat_input();
     input.stream = true;
@@ -1642,7 +2074,12 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
         "content": [{ "type": "text", "text": "hi" }],
         "usage": { "input_tokens": 100, "output_tokens": 20 }
     });
-    let service = build_service_with_upstream(200, serde_json::to_vec(&anthropic_body).unwrap());
+    let service = build_service_with_format(
+        200,
+        serde_json::to_vec(&anthropic_body).unwrap(),
+        vec![],
+        ProviderFormat::Anthropic,
+    );
 
     let input = chat_input();
     let (status, _headers, body) =
@@ -1662,7 +2099,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     })
     .await;
     assert_eq!(report["selectedRouteId"], json!("anthropic:claude"));
-    assert_eq!(report["usage"]["prompt_tokens"], json!(100));
+    assert_eq!(report["usage"]["input_tokens"], json!(100));
     assert!(
         report["usage"].get("cost").is_none(),
         "report usage must be pre-cost-injection"
@@ -1873,10 +2310,7 @@ async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_m
             "anthropic:claude",
             anthropic_message.to_string(),
             anthropic_stream,
-            json!({
-                "prompt_tokens": 100, "completion_tokens": 5, "total_tokens": 105,
-                "cache_read_input_tokens": 30, "cache_creation_input_tokens": 20
-            }),
+            anthropic_usage.clone(),
             // 50 input + 30 cache read * 0.1 + 20 cache creation * 1.25 + 5 output * 2
             88,
         ),
@@ -1904,7 +2338,12 @@ async fn bridged_responses_report_and_price_the_upstream_usage_in_both_serving_m
                 }),
             )
             .await;
-            let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+            let (service, _) = build_recording_service_with_format(
+                200,
+                wire.into_bytes(),
+                content_type,
+                serde_json::from_value(json!(format)).unwrap(),
+            );
             let response = middleware(control_url)
                 .handle_completion(&service, responses_input(streaming))
                 .await;
@@ -1936,7 +2375,7 @@ fn messages_input(stream: bool) -> CompletionInput {
         "messages": [{ "role": "user", "content": "hi" }]
     });
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::Messages,
         endpoint_path: "/v1/messages",
@@ -2073,6 +2512,23 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
             1400,
         ),
     ] {
+        let expected = if format == "openai" {
+            let input: Value = if streaming {
+                serde_json::from_str(
+                    wire.strip_prefix("data: ")
+                        .unwrap()
+                        .split("\n\n")
+                        .next()
+                        .unwrap(),
+                )
+                .unwrap()
+            } else {
+                serde_json::from_str(&wire).unwrap()
+            };
+            input["usage"].clone()
+        } else {
+            expected
+        };
         let route = format!("{format}:gpt-test");
         let (control_url, posts) = spawn_control_capturing(
             200,
@@ -2089,7 +2545,12 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
         } else {
             "application/json"
         };
-        let (service, _) = build_recording_service(200, wire.into_bytes(), content_type);
+        let (service, _) = build_recording_service_with_format(
+            200,
+            wire.into_bytes(),
+            content_type,
+            serde_json::from_value(json!(format)).unwrap(),
+        );
         let response = middleware(control_url)
             .handle_completion(&service, messages_input(streaming))
             .await;
@@ -2112,80 +2573,6 @@ async fn messages_report_and_price_every_usage_bucket_in_both_serving_modes() {
 }
 
 #[tokio::test]
-async fn meter_stream_injects_cost_classifies_completed_and_reports() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r1".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: Some(json!({ "inputCostPerToken": "0.000001", "outputCostPerToken": "0.000002" })),
-        spend_mode: None,
-        tenant: TenantIdentity {
-            user_id: Some(9),
-            organization: Some(OrganizationScope {
-                organization_id: 11,
-                workspace_id: 13,
-            }),
-        },
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, _>> = vec![
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        )),
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20}}\n\n",
-        )),
-        Ok(Bytes::from("data: [DONE]\n\n")),
-    ];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    let collected: Vec<Bytes> = metered.map(|r| r.unwrap()).collect().await;
-    let text: String = collected
-        .iter()
-        .map(|b| String::from_utf8_lossy(b).into_owned())
-        .collect();
-
-    // Cost injected into the usage chunk; [DONE] preserved.
-    assert!(text.contains("\"cost\""), "cost not injected: {text}");
-    assert!(text.contains("[DONE]"));
-
-    let report = wait_for_post(&posts, |r| {
-        r["isStreaming"] == json!(true) && r["status"].as_i64() == Some(200)
-    })
-    .await;
-    assert_eq!(report["selectedRouteId"], json!("openai:gpt"));
-    assert_eq!(report["usage"]["prompt_tokens"], json!(10));
-    assert!(
-        report["usage"].get("cost").is_none(),
-        "report usage must be pre-cost"
-    );
-    assert!(report["ttftMs"].is_number(), "ttft must be recorded");
-    assert_eq!(report["userId"], json!(9));
-    assert_eq!(report["organizationId"], json!(11));
-    assert_eq!(report["workspaceId"], json!(13));
-}
-
-#[tokio::test]
 async fn malformed_2xx_body_returns_502_upstream() {
     let (control_url, posts) = spawn_control_capturing(
         200,
@@ -2194,7 +2581,12 @@ async fn malformed_2xx_body_returns_502_upstream() {
     .await;
     let mw = middleware(control_url);
     // Upstream returns HTTP 200 with a non-JSON body.
-    let service = build_service_with_upstream(200, b"<html>not json</html>".to_vec());
+    let service = build_service_with_format(
+        200,
+        b"<html>not json</html>".to_vec(),
+        vec![],
+        ProviderFormat::Anthropic,
+    );
     let input = chat_input();
 
     let (status, _, body) = response_parts(mw.handle_completion(&service, input).await).await;
@@ -2343,8 +2735,8 @@ async fn messages_bridge_stream_failure_keeps_route_and_usage() {
 
     let report = wait_for_post(&posts, |_| true).await;
     assert_eq!(report["selectedRouteId"], "openai:gpt");
-    assert_eq!(report["usage"]["input_tokens"], 3, "{report}");
-    assert_eq!(report["usage"]["output_tokens"], 4, "{report}");
+    assert_eq!(report["usage"]["prompt_tokens"], 3, "{report}");
+    assert_eq!(report["usage"]["completion_tokens"], 4, "{report}");
 }
 
 #[tokio::test]
@@ -2474,12 +2866,17 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
     // A retryable non-2xx that is NOT a capacity signal, so the walk is a single
     // pass and this stays a test about attribution. 429 would take the delayed
     // capacity-retry path, which the capacity_retry_* suite covers on its own.
-    let service = build_service_with_upstream(503, br#"{"error":"unavailable"}"#.to_vec());
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"error":"unavailable"}"#.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
     let mut input = chat_input();
     input.stream = true;
 
-    let (status, _, _) = response_parts(mw.handle_completion(&service, input).await).await;
+    let (status, headers, _) = response_parts(mw.handle_completion(&service, input).await).await;
     assert_eq!(status, 503, "the upstream status must reach the client");
+    assert_no_upstream_headers(&headers);
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(503)).await;
     assert_eq!(
@@ -2676,7 +3073,7 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
     .unwrap();
 
     let request = |session_ids| ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             ..GatewayRequestContext::default()
@@ -2691,8 +3088,10 @@ async fn aci_session_ids_are_a_preforward_hard_allowlist() {
         e2ee: None,
     };
     let candidate = || ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "tee-a:gpt-test".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     };
 
@@ -3066,140 +3465,6 @@ async fn empty_candidates_returns_model_not_found() {
         .contains("no route available"));
 }
 
-// Behavior contract for finalizer failures relative to meter settle timing.
-//
-// Pre-settle: a downstream finalizer error during body consumption (the
-// response wrapper sets `downstream_abort` before the chain drops) must
-// settle as an internal gateway failure — 502 with error_source=gateway —
-// not as a client disconnect (499), and must not charge the serving route.
-#[tokio::test]
-async fn downstream_abort_before_settle_reports_gateway_failure_not_client_close() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let report = StreamReport {
-        control,
-        request_id: "r-abort".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: downstream_abort.clone(),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    // One chunk, then the stream stays open: the meter starts but never
-    // reaches a terminal marker.
-    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
-        vec![Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        ))];
-    let inner: ServiceResponseStream =
-        Box::pin(futures_util::stream::iter(events).chain(futures_util::stream::pending()));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    let first = metered.next().await;
-    assert!(first.is_some(), "meter must have started streaming");
-
-    // The downstream finalizer errors; the wrapper marks it, then the chain
-    // is dropped.
-    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(metered);
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-abort")).await;
-    assert_eq!(report["status"], json!(502), "internal failure, not 499");
-    assert_eq!(report["errorSource"], json!("gateway"));
-    assert!(report.get("userId").is_none());
-    assert!(report.get("organizationId").is_none());
-    assert!(report.get("workspaceId").is_none());
-    assert_eq!(
-        report["selectedRouteId"],
-        json!("openai:gpt"),
-        "route still recorded for traceability"
-    );
-}
-
-// Post-settle: once the meter settled Completed at a clean end-of-stream, a
-// later finalizer error (flag set just before the drop) must not emit a
-// second, conflicting usage report — the late failure is the response
-// wrapper's to report, not the meter's.
-#[tokio::test]
-async fn downstream_abort_after_settle_does_not_double_report() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let downstream_abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let settled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let report = StreamReport {
-        control,
-        request_id: "r-late".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: downstream_abort.clone(),
-        settled: settled.clone(),
-    };
-    let events: Vec<Result<Bytes, private_ai_gateway::aggregator::service::ServiceError>> =
-        vec![Ok(Bytes::from(
-            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-    assert!(
-        settled.load(std::sync::atomic::Ordering::Relaxed),
-        "clean EOF settles the meter"
-    );
-
-    // Receipt/E2EE finalization now fails; the wrapper marks the abort and
-    // the chain is dropped afterwards.
-    downstream_abort.store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(metered);
-
-    let first = wait_for_post(&posts, |r| r["requestId"] == json!("r-late")).await;
-    assert_eq!(first["status"], json!(200), "the settled outcome stands");
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let count = posts
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r["requestId"] == json!("r-late"))
-        .count();
-    assert_eq!(count, 1, "no second, conflicting report after settle");
-}
-
 // A mock upstream that answers each forward with the next status in a script,
 // recording every contacted route — the capacity-retry tests need "429 first,
 // 200 on the delayed second pass" to be observable per attempt. With
@@ -3214,6 +3479,14 @@ struct SequencedUpstream {
 
 #[async_trait]
 impl UpstreamBackend for SequencedUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "sequenced-upstream"
     }
@@ -3222,14 +3495,11 @@ impl UpstreamBackend for SequencedUpstream {
     }
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let route_id = req.target_route_id.clone().unwrap_or_default();
-        Ok(PreparedUpstreamRequest {
-            upstream_name: self.name().to_string(),
-            url_origin: self.url_origin().map(str::to_string),
-            model_id: "gpt-test".to_string(),
-            is_tee: Some(false),
-            route_id: Some(route_id),
-            request: req,
-        })
+        let mut prepared = prepare_mock_request(self, req, ProviderFormat::Openai)?;
+        prepared.model_id = "gpt-test".into();
+        prepared.is_tee = Some(false);
+        prepared.route_id = Some(route_id);
+        Ok(prepared)
     }
     async fn forward_prepared(
         &self,
@@ -3358,7 +3628,7 @@ fn build_sequenced_service_with(
 
 fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'static> {
     ChatCompletionRequest {
-        audio_form: None,
+        form: None,
         context: GatewayRequestContext {
             user_model: Some("gpt-test".to_string()),
             user_tier: user_tier.map(str::to_string),
@@ -3377,8 +3647,10 @@ fn capacity_retry_request(user_tier: Option<&str>) -> ChatCompletionRequest<'sta
 
 fn plain_candidate(route: &str) -> ForwardCandidate {
     ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: route.to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: br#"{"model":"gpt-test","messages":[]}"#.to_vec(),
     }
 }
@@ -3638,8 +3910,10 @@ async fn capacity_retry_tracks_candidates_by_index_not_route_id() {
     // replay the hard-failed twin too.
     let (service, forwarded, bodies) = build_sequenced_service(vec![500, 429, 200]);
     let twin = |body: &[u8]| ForwardCandidate {
+        format: private_ai_gateway::middleware::types::ProviderFormat::Openai,
         route_id: "dup:gpt-test".to_string(),
-        path: "/v1/chat/completions",
+        endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
+        wire_endpoint: private_ai_gateway::middleware::request_transform::Endpoint::ChatComplete,
         body: body.to_vec(),
     };
     let result = service
@@ -3873,6 +4147,14 @@ struct HangingUpstream;
 
 #[async_trait]
 impl UpstreamBackend for HangingUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "hang-upstream"
     }
@@ -3921,6 +4203,14 @@ struct TimingOutUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TimingOutUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "timeout-upstream"
     }
@@ -4061,61 +4351,6 @@ async fn upstream_timeout_is_recorded_as_504_per_attempt_and_summary() {
     assert_eq!(summary["selectedRouteId"], Value::Null);
 }
 
-#[tokio::test]
-async fn mid_stream_read_timeout_settles_504_as_upstream_timeout() {
-    // A streaming response that begins, then the upstream read deadline fires
-    // mid-body. The client already has 200 headers, so only the usage report
-    // carries the failure: 504, with the timeout's own words.
-    let (control_url, posts) = spawn_control_capturing(
-        200,
-        json!({ "allow": true, "candidates": [{ "routeId": "openai:gpt", "format": "openai" }] }),
-    )
-    .await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r-readtimeout".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, ServiceError>> = vec![
-        Ok(Bytes::from(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        )),
-        Err(ServiceError::Upstream(UpstreamError::Timeout(
-            "upstream timed out".to_string(),
-        ))),
-    ];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-readtimeout")).await;
-    assert_eq!(report["status"], json!(504));
-    assert_eq!(report["errorMessage"], json!("upstream_timeout"));
-}
-
 // A mock upstream that waits before returning a normal streaming success —
 // long enough for the pre-first-byte keep-alive to have committed the 200.
 struct SlowStreamUpstream {
@@ -4124,6 +4359,14 @@ struct SlowStreamUpstream {
 
 #[async_trait]
 impl UpstreamBackend for SlowStreamUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "slow-stream-upstream"
     }
@@ -4190,6 +4433,14 @@ async fn early_keepalive_receipt_keeps_committed_keyset_across_renewal() {
 
     #[async_trait]
     impl UpstreamBackend for PausedStreamUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "paused-stream"
         }
@@ -4372,6 +4623,14 @@ async fn assert_early_keepalive_rejects_expired_admission(delay: AdmissionDelay,
     }
     #[async_trait]
     impl UpstreamBackend for CountingUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "counting-upstream"
         }
@@ -4621,67 +4880,6 @@ async fn early_keepalive_turns_forward_failure_into_in_band_error() {
 }
 
 #[tokio::test]
-async fn unpolled_drop_is_a_client_disconnect_unless_the_pipeline_marked_itself() {
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let config = MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    };
-    let report_for = |id: &str, abort: &Arc<std::sync::atomic::AtomicBool>| StreamReport {
-        control: ControlClient::new(&config).unwrap(),
-        request_id: id.to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: abort.clone(),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let pending = || -> ServiceResponseStream { Box::pin(futures_util::stream::pending()) };
-
-    // Dropped unpolled with no abort mark: hyper never read the body because
-    // the client vanished right after the headers — a 499, not our failure.
-    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    drop(MeterStream::new(
-        pending(),
-        report_for("r-unpolled-client", &abort),
-        SseProtocol::OpenaiChat,
-    ));
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-client")).await;
-    assert_eq!(report["status"], json!(499));
-    assert!(report
-        .get("errorSource")
-        .map(Value::is_null)
-        .unwrap_or(true));
-
-    // Dropped unpolled with the abort mark set (the finalizer hand-off is the
-    // one internal point that drops an unpolled pipeline): a gateway failure.
-    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    drop(MeterStream::new(
-        pending(),
-        report_for("r-unpolled-gateway", &abort),
-        SseProtocol::OpenaiChat,
-    ));
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-unpolled-gateway")).await;
-    assert_eq!(report["status"], json!(502));
-    assert_eq!(report["errorSource"], json!("gateway"));
-    assert_eq!(report["selectedRouteId"], json!("openai:gpt"));
-}
-
-#[tokio::test]
 async fn aci_constrained_requests_are_never_committed_early() {
     // Even with the pre-upstream commit enabled, an `aci_verified` request must
     // keep HTTP semantics (refusal receipts, x-receipt-id): the gateway keeps
@@ -4719,6 +4917,14 @@ struct FailoverScriptedUpstream {
 
 #[async_trait]
 impl UpstreamBackend for FailoverScriptedUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "failover-scripted-upstream"
     }
@@ -4804,6 +5010,14 @@ struct TimeoutThenHangUpstream {
 
 #[async_trait]
 impl UpstreamBackend for TimeoutThenHangUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "timeout-then-hang-upstream"
     }
@@ -4872,6 +5086,14 @@ struct Always429StreamUpstream;
 
 #[async_trait]
 impl UpstreamBackend for Always429StreamUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "always-429-upstream"
     }
@@ -4976,48 +5198,23 @@ async fn streaming_upstream_error_text_stays_out_of_reports_and_logs() {
 #[tokio::test]
 async fn in_band_stream_error_settles_with_a_class_and_none_of_its_text() {
     captured_logs();
-    // A 200 stream failed by an in-band error event settles as
-    // `stream_inband_error`; the event's message appears nowhere in the report.
-    let (control_url, posts) = spawn_control_capturing(200, json!({})).await;
-    let control = ControlClient::new(&MiddlewareConfig {
-        control_url,
-        control_token: None,
-        control_timeout_ms: Some(2_000),
-        control_post_timeout_ms: Some(2_000),
-        sse_keepalive_ms: None,
-        send_request_features: None,
-        tee_only_domains: Vec::new(),
-    })
-    .unwrap();
-    let report = StreamReport {
-        control,
-        request_id: "r-inband".to_string(),
-        endpoint: "/v1/chat/completions".to_string(),
-        request_model: "gpt".to_string(),
-        pricing: None,
-        spend_mode: None,
-        tenant: TenantIdentity::default(),
-        virtual_key_id: None,
-        selected_route_id: Some("openai:gpt".to_string()),
-        attempt_index: 0,
-        upstream_status: 200,
-        prefix_hash: None,
-        session_kind: None,
-        started: std::time::Instant::now(),
-        downstream_abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        settled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    let events: Vec<Result<Bytes, ServiceError>> = vec![Ok(Bytes::from(format!(
-        "data: {{\"error\":{{\"message\":\"{CANARY} quoted prompt text\"}}}}\n\ndata: [DONE]\n\n",
-    )))];
-    let inner: ServiceResponseStream = Box::pin(futures_util::stream::iter(events));
-    let mut metered = MeterStream::new(inner, report, SseProtocol::OpenaiChat);
-    while metered.next().await.is_some() {}
-    drop(metered);
-
-    let report = wait_for_post(&posts, |r| r["requestId"] == json!("r-inband")).await;
-    assert_eq!(report["status"], json!(502));
-    assert_eq!(report["errorMessage"], json!("stream_inband_error"));
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"openai:gpt","format":"openai"}]}),
+    )
+    .await;
+    let (service, _) = build_recording_service(200, format!("data: {{\"error\":{{\"message\":\"{CANARY} quoted prompt text\"}}}}\n\ndata: [DONE]\n\n").into_bytes(), "text/event-stream");
+    let mut input = chat_input();
+    input.stream = true;
+    let _ = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, input)
+            .await,
+    )
+    .await;
+    let report = wait_for_post(&posts, |r| r["requestId"] == "req-1").await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_inband_error");
     assert_canary_absent(&posts, "probe-canary-inband");
 }
 
@@ -5027,6 +5224,14 @@ struct PartialUsageUpstream {
 
 #[async_trait]
 impl UpstreamBackend for PartialUsageUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "partial-usage-fixture"
     }
@@ -5137,6 +5342,70 @@ fn assert_admitted_receipt(
 }
 
 #[tokio::test]
+async fn tinfoil_enclave_header_is_recorded_in_buffered_and_streaming_receipts() {
+    use admission::{candidate, request, Attempt, Harness, RESPONSE};
+
+    let max_length = "a".repeat(256);
+    let over_limit = format!("{max_length}b");
+    for (streaming, provider, header, recorded) in [
+        (false, "tinfoil", max_length.as_str(), true),
+        (true, "tinfoil", "replica.example", true),
+        (false, "near-ai", "replica.example", false),
+        (false, "tinfoil", over_limit.as_str(), false),
+        (true, "tinfoil", over_limit.as_str(), false),
+    ] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 109,
+        }]);
+        h.verifier.0.lock().unwrap().provider_type = Some(provider.into());
+        h.backend
+            .response_headers
+            .lock()
+            .unwrap()
+            .insert("tinfoil-enclave".into(), header.into());
+        let journal = MiddlewareReceiptJournal::default();
+        let result = h
+            .service
+            .forward_chat_completion_for_middleware(
+                request(vec![]),
+                vec![candidate("first")],
+                streaming,
+                journal.clone(),
+            )
+            .await
+            .unwrap();
+        let (draft, body, content_type) = match result {
+            MiddlewareForwardResult::Forwarded(forwarded) => {
+                (forwarded.receipt, RESPONSE.to_vec(), "application/json")
+            }
+            MiddlewareForwardResult::Stream(mut forwarded) => {
+                let mut body = Vec::new();
+                while let Some(chunk) = forwarded.body.next().await {
+                    body.extend_from_slice(&chunk.unwrap());
+                }
+                (journal.take().unwrap(), body, "text/event-stream")
+            }
+            _ => panic!("expected an admitted upstream response"),
+        };
+        let receipt = h
+            .service
+            .finalize_middleware_receipt(draft, body, Some(content_type), None, None)
+            .unwrap()
+            .receipt
+            .document_json()
+            .unwrap();
+        let event = receipt["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "upstream.tinfoil_enclave");
+        let expected = json!({"type": "upstream.tinfoil_enclave", "enclave": header});
+        assert_eq!(event, recorded.then_some(&expected));
+    }
+}
+
+#[tokio::test]
 async fn delayed_buffered_finalization_and_retained_failover_preserve_admission() {
     use admission::{candidate, request, Attempt, Harness, RESPONSE};
     for retained in [false, true] {
@@ -5194,9 +5463,9 @@ async fn delayed_buffered_finalization_and_retained_failover_preserve_admission(
 }
 
 #[tokio::test]
-async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() {
+async fn streaming_journal_handoff_holds_admission_until_buffered_finalization() {
     use admission::{candidate, request, Attempt, Harness};
-    for streaming_finalizer in [false, true] {
+    {
         let h = Harness::new(vec![Attempt::Response {
             status: 200,
             at: 109,
@@ -5234,30 +5503,10 @@ async fn streaming_journal_handoff_holds_admission_until_delayed_finalization() 
                 .is_some(),
             "journal now owns the lease"
         );
-        if streaming_finalizer {
-            let source: ServiceResponseStream =
-                Box::pin(futures_util::stream::iter([Ok(Bytes::from(bytes))]));
-            let mut finalized = h
-                .service
-                .finalize_middleware_response_stream(
-                    journal,
-                    source,
-                    "/v1/chat/completions",
-                    Some("text/event-stream"),
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
-            while let Some(chunk) = finalized.body.next().await {
-                chunk.unwrap();
-            }
-        } else {
-            let draft = journal.take().unwrap();
-            h.service
-                .finalize_middleware_receipt(draft, bytes, Some("text/event-stream"), None, None)
-                .unwrap();
-        }
+        let draft = journal.take().unwrap();
+        h.service
+            .finalize_middleware_receipt(draft, bytes, Some("text/event-stream"), None, None)
+            .unwrap();
         let receipt = h
             .service
             .get_receipt_by_receipt_id(&forwarded.receipt_id)
@@ -5435,7 +5684,7 @@ async fn dropping_the_last_journal_owner_releases_a_completed_pending_draft() {
 fn images_input() -> CompletionInput {
     let params = json!({"model":"gpt-test","prompt":"a blue circle","n":1,"size":"512x512","quality":"low","user":"alice","safety_identifier":"hashed-user","style":"vivid"});
     CompletionInput {
-        audio_form: None,
+        form: None,
         upload_permit: None,
         endpoint: Endpoint::ImagesGenerations,
         endpoint_path: "/v1/images/generations",
@@ -5569,10 +5818,11 @@ async fn images_opt_in_consult_schema_cost_and_post_usage() {
             report["images"],
             json!({"count":returned,"size":"512x512","quality":"low"})
         );
+        assert!(!report["usage"].to_string().contains("private"));
         assert_eq!(
             report["usage"],
             if with_usage {
-                upstream["usage"].clone()
+                json!({"input_tokens":2,"output_tokens":3,"input_tokens_details":{"text_tokens":2},"output_tokens_details":{"image_tokens":3}})
             } else {
                 Value::Null
             }
@@ -5613,25 +5863,6 @@ async fn images_cost_overflow_omits_display_cost_and_preserves_billable_report()
     );
     assert_eq!(report["usage"], upstream_usage);
     assert_eq!(report["pricing"], pricing);
-}
-
-#[tokio::test]
-async fn images_no_opt_in_candidate_returns_model_not_found() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
-    let (status, _, body) = response_parts(
-        middleware(url)
-            .handle_completion(&service, images_input())
-            .await,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert_eq!(body["error"]["type"], "model_not_found");
-    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -5718,10 +5949,12 @@ fn audio_input() -> CompletionInput {
         endpoint_path: "/v1/audio/transcriptions",
         params,
         received_body: bytes::Bytes::from_static(b"raw multipart request bytes"),
-        audio_form: Some(Arc::new(private_ai_gateway::middleware::audio::AudioForm {
-            file: bytes::Bytes::from_static(b"sensitive audio"),
-            extension: "wav".into(),
-        })),
+        form: Some(Arc::new(
+            private_ai_gateway::middleware::media::MediaForm::Transcription {
+                file: bytes::Bytes::from_static(b"sensitive audio"),
+                extension: "wav".into(),
+            },
+        )),
         request_id: "req-audio".into(),
         ..chat_input()
     }
@@ -5744,6 +5977,7 @@ fn audio_policy_service() -> (Arc<AciService>, Arc<Mutex<Vec<RecordedRequest>>>)
     use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
     let requests = Arc::new(Mutex::new(Vec::new()));
     let backend = Arc::new(RecordingUpstream {
+        format: ProviderFormat::Openai,
         requests: requests.clone(),
         status: 200,
         body: br#"{"text":"hello","duration":2.965}"#.to_vec(),
@@ -5914,7 +6148,9 @@ async fn audio_success_reports_ceil_duration_prices_and_sanitizes_nested_output(
         .await
         .unwrap();
         assert_eq!(fields["response_format"], "json");
-        assert_eq!(form.file, "sensitive audio");
+        assert!(
+            matches!(form.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "sensitive audio")
+        );
         let receipt = service
             .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
             .unwrap();
@@ -5987,25 +6223,754 @@ async fn audio_invalid_duration_is_502_without_billing_or_retranscription() {
 }
 
 #[tokio::test]
-async fn audio_requires_endpoint_opt_in() {
-    let (url, _) = spawn_control_capturing(
-        200,
-        json!({"allow":true,"candidates":[
-            {"routeId":"near:model","format":"openai","supportedEndpoints":[]}
-        ]}),
-    )
-    .await;
-    let (service, requests) = build_recording_service(
-        200,
-        br#"{"text":"hello","duration":2.1}"#.to_vec(),
-        "application/json",
-    );
-    let (status, _, _) = response_parts(
-        middleware(url)
-            .handle_completion(&service, audio_input())
+async fn typed_pipeline_meters_multiline_data_and_preserves_named_failures() {
+    let cases: &[(&str, &[u8], u16, bool)] = &[
+        ("openai", b"data: {\"choices\":[],\ndata: \"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3}}\n\ndata: [DONE]\n\n", 200, true),
+        ("anthropic", b"event: error\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"private failure\"}}\n\n", 502, false),
+        ("openai", b"data: \xff\n\n", 502, false),
+    ];
+    for (format, wire, expected_status, has_usage) in cases {
+        let (control_url, posts) = spawn_control_capturing(
+            200,
+            json!({
+                "allow": true, "candidates": [{"routeId":"fixture:typed", "format":format}],
+                "pricing": {"inputCostPerToken":"1", "outputCostPerToken":"2"}
+            }),
+        )
+        .await;
+        let (service, _) = build_recording_service(200, wire.to_vec(), "text/event-stream");
+        let mut input = chat_input();
+        input.stream = true;
+        let (_, body) = raw_body(
+            middleware(control_url)
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        let report = wait_for_post(&posts, |r| r["selectedRouteId"] == "fixture:typed").await;
+        assert_eq!(report["status"], *expected_status, "{format}: {body}");
+        assert!(
+            report.get("errorSource").is_none_or(Value::is_null),
+            "upstream failures stay upstream: {report}"
+        );
+        if *has_usage {
+            assert_eq!(report["usage"]["prompt_tokens"], 2);
+            assert_eq!(report["usage"]["completion_tokens"], 3);
+            assert!(
+                sse_events(&body)
+                    .iter()
+                    .any(|e| !e["usage"]["cost"].is_null()),
+                "{body}"
+            );
+        } else {
+            assert!(body.contains("\"error\""), "{body}");
+            assert!(!report.to_string().contains("private failure"), "{report}");
+        }
+        assert_eq!(
+            posts.lock().unwrap().len(),
+            1,
+            "one response owner settles once"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sanitized_response_error_retains_failure_after_renaming() {
+    let (control_url, posts) = spawn_control_capturing(200, json!({
+        "allow": true, "candidates": [{"routeId":"fixture:responses", "format":"openai", "supportedEndpoints":["/v1/responses"]}]
+    })).await;
+    let (service, _) = build_recording_service(200,
+        b"event: response.error\ndata: {\"type\":\"response.error\",\"error\":{\"message\":\"private failure\"}}\n\n".to_vec(), "text/event-stream");
+    let (_, body) = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, responses_input(true))
             .await,
     )
     .await;
-    assert_eq!(status, 404);
+    assert!(body.starts_with("event: error\n"), "{body}");
+    let report = wait_for_post(&posts, |r| r["selectedRouteId"] == "fixture:responses").await;
+    assert_eq!(report["status"], 502);
+    assert_eq!(report["errorMessage"], "stream_inband_error");
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn client_disconnect_after_early_commit_while_forward_pending_preserves_class() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"mock:hang","format":"openai"}]}),
+    )
+    .await;
+    let mw = middleware_with_keepalive(control_url, 10);
+    let service = build_service_with_backend(Arc::new(HangingUpstream));
+    let mut input = chat_input();
+    input.stream = true;
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        mw.handle_completion(&service, input),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), ": PROCESSING\n\n");
+    drop(body);
+    let report = wait_for_post(&posts, |r| r["status"] == 499).await;
+    assert_eq!(report["selectedRouteId"], "mock:hang");
+    assert_eq!(report["attemptIndex"], 0);
+    assert_eq!(report["errorMessage"], "client_disconnected");
+    assert!(report["errorSource"].is_null());
+    assert!(report["ttftMs"].is_null());
+    assert!(report["usage"].is_null());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn declared_non_sse_over_event_cap_fails_as_upstream_transport() {
+    let source = vec![b'x'; 16 * 1024 * 1024 + 1];
+    let (service, _) = build_recording_service(200, source, "application/json");
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({"allow":true,"candidates":[{"routeId":"mock:model","format":"openai"}],"pricing":{"inputCostPerToken":"1","outputCostPerToken":"2"}}),
+    ).await;
+    let mw = middleware_with_keepalive(control_url, 0);
+    let mut input = chat_input();
+    input.stream = true;
+    let response = mw.handle_completion(&service, input).await;
+    assert_eq!(response.status(), 200);
+    let output = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(output.is_empty());
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 502);
+    assert!(report["usage"].is_null());
+    assert!(report["ttftMs"].is_null());
+    assert!(report["errorSource"].is_null());
+    assert_eq!(report["errorMessage"], "upstream_transport");
+    assert_eq!(posts.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn buffered_non_success_reports_filtered_source_usage() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({
+            "allow":true, "candidates":[{"routeId":"openai:gpt", "format":"openai"}]
+        }),
+    )
+    .await;
+    let (service, _) = build_recording_service(429,
+        serde_json::to_vec(&json!({"error":{"type":"rate_limit_error","message":"Too many requests"},
+            "usage":{"prompt_tokens":2,"completion_tokens":3,"provider_trace":"PRIVATE_UPSTREAM_DETAIL"}})).unwrap(), "application/json");
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    let (status, _, _) = response_parts(response).await;
+    assert_eq!(status, 429);
+    let report = wait_for_post(&posts, |_| true).await;
+    assert_eq!(report["status"], 429);
+    assert_eq!(
+        report["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3})
+    );
+    assert!(report["errorSource"].is_null());
+}
+
+const CHAT_SUCCESS_BODY: &[u8] = br#"{"id":"7bdaaade50304502b0fe7e66e9a4bec2","object":"chat.completion","model":"vendor-model-int","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+
+async fn single_candidate_control() -> (String, Arc<Mutex<Vec<Value>>>) {
+    spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [{ "routeId": "acme:model-a", "format": "openai" }] }),
+    )
+    .await
+}
+
+// The usage report names the upstream's own request id, from its response
+// header; the client still sees neither that header nor the upstream's body id.
+#[tokio::test]
+async fn usage_report_carries_the_upstream_request_id_header() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        CHAT_SUCCESS_BODY.to_vec(),
+        LEAKY_UPSTREAM_HEADERS.to_vec(),
+    );
+    let (status, headers, body) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_no_upstream_headers(&headers);
+    assert_eq!(body["id"], json!("req-1"));
+
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(
+        report["upstreamRequestId"],
+        json!("fa57b5a8-4967-4e5c-9ab8-103a9feeeb14")
+    );
+}
+
+// With no request-id header, a success body's own id stands in, buffered and
+// streamed alike.
+#[tokio::test]
+async fn usage_report_falls_back_to_the_success_body_id() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream(200, CHAT_SUCCESS_BODY.to_vec());
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(
+        report["upstreamRequestId"],
+        json!("7bdaaade50304502b0fe7e66e9a4bec2")
+    );
+
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        b"data: {\"id\":\"b4fa5a1dc59c4b41\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n".to_vec(),
+        vec![("content-type", "text/event-stream")],
+    );
+    let mut input = chat_input();
+    input.stream = true;
+    let (_, body) = raw_body(
+        middleware(control_url)
+            .handle_completion(&service, input)
+            .await,
+    )
+    .await;
+    assert!(!body.contains("b4fa5a1dc59c4b41"), "{body}");
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert_eq!(report["upstreamRequestId"], json!("b4fa5a1dc59c4b41"));
+}
+
+// A value that is not a plain identifier is left out, and the field with it.
+#[tokio::test]
+async fn usage_report_omits_an_upstream_request_id_that_is_not_an_identifier() {
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream_headers(
+        200,
+        br#"{"id":"not an identifier","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#.to_vec(),
+        vec![("x-request-id", "served by acme, see https://acme.example")],
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let report = wait_for_post(&posts, |r| r["status"] == 200).await;
+    assert!(report.get("upstreamRequestId").is_none(), "{report}");
+}
+
+// Every attempt that got an answer reports the id that answer carried: the one
+// failed over and the one finally returned. An error body's id is never read.
+#[tokio::test]
+async fn failed_attempts_report_their_upstream_request_id() {
+    let (control_url, posts) = spawn_control_capturing(
+        200,
+        json!({ "allow": true, "candidates": [
+            { "routeId": "a:gpt-test", "format": "openai" },
+            { "routeId": "b:gpt-test", "format": "openai" }
+        ] }),
+    )
+    .await;
+    let service = build_service_with_upstream_headers(
+        503,
+        br#"{"id":"error-body-id","error":"unavailable"}"#.to_vec(),
+        vec![("x-acme-request-id", "req_9c1f")],
+    );
+    let (status, _, _) = response_parts(
+        middleware(control_url)
+            .handle_completion(&service, chat_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 503);
+    for index in [0, 1] {
+        let report = wait_for_post(&posts, |r| r["attemptIndex"].as_i64() == Some(index)).await;
+        assert_eq!(report["status"], 503, "{report}");
+        assert_eq!(report["upstreamRequestId"], json!("req_9c1f"), "{report}");
+    }
+
+    let (control_url, posts) = single_candidate_control().await;
+    let service = build_service_with_upstream(
+        503,
+        br#"{"id":"error-body-id","error":"unavailable"}"#.to_vec(),
+    );
+    let response = middleware(control_url)
+        .handle_completion(&service, chat_input())
+        .await;
+    assert_eq!(response.status(), 503);
+    let report = wait_for_post(&posts, |r| r["status"] == 503).await;
+    assert!(report.get("upstreamRequestId").is_none(), "{report}");
+}
+
+fn receipt_event<'a>(document: &'a Value, kind: &str) -> &'a Value {
+    document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == kind)
+        .unwrap()
+}
+
+fn rerank_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","query":"q","documents":["a",{"text":"b"}],"top_n":1,"return_documents":true,"user":"alice"});
+    CompletionInput {
+        endpoint: Endpoint::Rerank,
+        endpoint_path: "/v1/rerank",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-rerank".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn rerank_opt_in_sanitizes_before_pricing_and_reporting() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}],
+        "pricing":{"inputCostPerToken":"0.01","outputCostPerToken":"99"}}))
+    .await;
+    let (service, requests) = build_recording_service(200, serde_json::to_vec(&json!({
+        "id":"private","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"private":true}],
+        "usage":{"prompt_tokens":5,"total_tokens":5,"completion_tokens":100,"cost":99,"private":"private"},"private":true
+    })).unwrap(), "application/json");
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, rerank_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["usage"],
+        json!({"prompt_tokens":5,"total_tokens":5,"cost":0.05})
+    );
+    assert_eq!(
+        body["results"],
+        json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}])
+    );
+    assert_eq!(body["model"], "gpt-test");
+    assert!(body.get("private").is_none());
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/rerank");
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+        assert!(calls[0].body.get("user").is_none());
+        assert_eq!(calls[0].body["documents"], json!(["a", "b"]));
+    }
+    assert!(service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .is_some());
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-rerank").await;
+    assert_eq!(report["selectedRouteId"], "rank:model");
+    assert_eq!(report["usage"], json!({"prompt_tokens":5,"total_tokens":5}));
+}
+
+fn image_edits_input() -> CompletionInput {
+    CompletionInput {
+        endpoint: Endpoint::ImagesEdits,
+        endpoint_path: "/v1/images/edits",
+        params: json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","user":"alice","provider":{"order":["near"]}}),
+        received_body: bytes::Bytes::from_static(b"raw multipart image bytes"),
+        form: Some(Arc::new(
+            private_ai_gateway::middleware::media::MediaForm::ImageEdit {
+                images: vec![private_ai_gateway::middleware::media::ImageFile {
+                    data: bytes::Bytes::from_static(b"\xff\xd8\xffimage"),
+                    format: private_ai_gateway::middleware::media::ImageFormat::Jpeg,
+                }],
+                overlay: None,
+            },
+        )),
+        request_id: "req-edits".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn image_edits_opt_in_shared_encoder_receipt_and_returned_count_pricing() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"generation:model","format":"openai","supportedEndpoints":["/v1/images/generations"]},
+        {"routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}],
+        "pricing":{"imageCostPerImage":"0.012"}})).await;
+    let (service, requests) = build_recording_service(
+        200,
+        br#"{"id":"private","file_path":"private","data":[{"b64_json":"image","url":"private"}]}"#
+            .to_vec(),
+        "application/json",
+    );
+    let (status, headers, body) = response_parts(
+        middleware(url)
+            .handle_completion(&service, image_edits_input())
+            .await,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["usage"]["cost"], 0.012);
+    assert!(!body.to_string().contains("private"));
+    let forwarded = requests.lock().unwrap()[0].clone();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+    let (params, image) = private_ai_gateway::middleware::image_edits::parse(
+        forwarded.raw_body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        params,
+        json!({"model":"gpt-test","prompt":"make it blue","size":"512x512","response_format":"b64_json"})
+    );
+    assert!(
+        matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\xff\xd8\xffimage".as_slice())
+    );
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/images/edits");
+    assert_eq!(
+        pres.lock().unwrap()[0]["provider"],
+        json!({"order":["near"]})
+    );
+    assert!(!pres.lock().unwrap()[0].to_string().contains("make it blue"));
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let forwarded_event = receipt_event(&document, "request.forwarded");
+    assert_eq!(
+        forwarded_event["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(&forwarded.raw_body)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+    assert_eq!(report["selectedRouteId"], "edit:model");
+    assert_eq!(
+        report["images"],
+        json!({"count":1,"size":"512x512","quality":"auto"})
+    );
+    assert!(report["usage"].is_null());
+}
+
+#[tokio::test]
+async fn image_edits_meter_only_returned_images_within_requested_count() {
+    for (requested, returned, expected) in [(10, 2, 200), (10, 11, 502)] {
+        let (url, posts) = spawn_control_capturing(
+            200,
+            json!({"allow":true,"candidates":[{
+            "routeId":"edit:model","format":"openai","supportedEndpoints":["/v1/images/edits"]
+        }],"pricing":{"imageCostPerImage":"0.012"}}),
+        )
+        .await;
+        let (service, requests) = build_recording_service(
+            200,
+            serde_json::to_vec(&json!({"data":vec![json!({"b64_json":"image"}); returned]}))
+                .unwrap(),
+            "application/json",
+        );
+        let mut input = image_edits_input();
+        input.params["n"] = json!(requested);
+        let (status, headers, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, expected, "n={requested}, returned={returned}");
+        let request = requests.lock().unwrap()[0].clone();
+        let (params, _) = private_ai_gateway::middleware::image_edits::parse(
+            request.raw_body,
+            request.content_type.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(params["n"], requested);
+        assert!(service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .is_some());
+        let report = wait_for_post(&posts, |p| p["requestId"] == "req-edits").await;
+        assert_eq!(report["status"], expected);
+        assert!(report["usage"].is_null());
+        if expected == 200 {
+            assert_eq!(body["data"].as_array().unwrap().len(), returned);
+            assert_eq!(report["images"]["count"], returned);
+            assert_eq!(body["usage"]["cost"], json!(returned as f64 * 0.012));
+        } else {
+            assert!(report.get("images").is_none());
+            assert!(body["usage"]["cost"].is_null());
+        }
+    }
+}
+
+#[tokio::test]
+async fn image_edits_http_carrier_reaches_consult_and_enforces_session_pins() {
+    use private_ai_gateway::aci::upstream::{ModelRoute, ModelRouterBackend};
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"near:model","format":"openai","supportedEndpoints":["/v1/images/edits"]}]})).await;
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingUpstream {
+        format: ProviderFormat::Openai,
+        requests: requests.clone(),
+        status: 200,
+        body: br#"{"data":[{"b64_json":"image"}]}"#.to_vec(),
+        content_type: "application/json",
+    });
+    let mut router = ModelRouterBackend::new("image-edits-policy");
+    router
+        .add_route(
+            ModelRoute::new("gpt-test", "flux", backend, "near:model")
+                .unwrap()
+                .with_is_tee(Some(true)),
+        )
+        .unwrap();
+    let service = build_service_with_backend(Arc::new(router));
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    let raw = common::image_edit_request("gpt-test", 1);
+    let request = |provider: Value| {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/images/edits")
+            .header("authorization", "Bearer tenant-key")
+            .header("host", "gateway.example")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            .header("x-aci-provider", provider.to_string())
+            .body(axum::body::Body::from(raw.clone()))
+            .unwrap()
+    };
+    let (status, headers, _) = response_parts(
+        app.clone()
+            .oneshot(request(json!({"aci_verified":true})))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    let document = receipt.document_json().unwrap();
+    let session = document["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "upstream.verified")
+        .unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (pin, expected) in [(session, 200), ("ab".repeat(32), 412)] {
+        let provider = json!({"aci_session_ids":[pin]});
+        let (status, _, _) = response_parts(
+            app.clone()
+                .oneshot(request(provider.clone()))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, expected);
+        assert_eq!(pres.lock().unwrap().last().unwrap()["provider"], provider);
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    for request in requests.lock().unwrap().iter() {
+        assert!(!request.headers.contains_key("x-aci-provider"));
+        assert_eq!(request.body["model"], "flux");
+    }
+}
+
+#[tokio::test]
+async fn rerank_aliases_share_canonical_opt_in_forwarding_receipts_and_metrics() {
+    use tower::ServiceExt;
+    let (url, pres, _) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[{"routeId":"rank:model","format":"openai","supportedEndpoints":["/v1/rerank"]}]})).await;
+    let (service, requests) = build_recording_service(200, br#"{"results":[{"index":0,"relevance_score":1}],"usage":{"prompt_tokens":5,"total_tokens":5}}"#.to_vec(), "application/json");
+    let (_directory, app) = audio_policy_router(service.clone(), middleware(url));
+    for path in ["/v2/rerank", "/rerank"] {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&rerank_input().params).unwrap(),
+            ))
+            .unwrap();
+        let (status, headers, _) =
+            response_parts(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, 200);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert_eq!(receipt.document_json().unwrap()["endpoint"], "/v1/rerank");
+    }
+    let pres = pres.lock().unwrap();
+    assert_eq!(pres.len(), 2);
+    assert!(pres.iter().all(|pre| pre["endpoint"] == "/v1/rerank"));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path.as_deref() == Some("/v1/rerank")));
+    let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+    assert!(metrics.lines().any(
+        |line| line.starts_with("private_ai_gateway_requests_total{")
+            && line.contains("endpoint=\"/v1/rerank\"")
+            && line.ends_with(" 2")
+    ));
+    assert!(!metrics.contains("endpoint=\"/v2/rerank\""));
+    assert!(!metrics.contains("endpoint=\"/rerank\""));
+}
+
+fn speech_input() -> CompletionInput {
+    let params = json!({"model":"gpt-test","input":"界🙂e\u{301}","voice":"ryan","speed":1.2,"stream_format":"audio"});
+    CompletionInput {
+        endpoint: Endpoint::AudioSpeech,
+        endpoint_path: "/v1/audio/speech",
+        received_body: serde_json::to_vec(&params).unwrap().into(),
+        params,
+        request_id: "req-speech".into(),
+        ..chat_input()
+    }
+}
+
+#[tokio::test]
+async fn speech_opt_in_preserves_binary_and_reports_character_usage() {
+    let (url, pres, posts) = spawn_control_capturing_pre(json!({"allow":true,"candidates":[
+        {"routeId":"plain:model","format":"openai"},
+        {"routeId":"tts:model","format":"openai","supportedEndpoints":["/v1/audio/speech"]}],
+        "pricing":{"speechCostPerCharacter":"0.01"}}))
+    .await;
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    let (service, requests) = build_recording_service(200, audio.to_vec(), "audio/wav; rate=24000");
+    let response = middleware(url)
+        .handle_completion(&service, speech_input())
+        .await;
+    assert_eq!(response.status(), 200);
+    let headers = response.headers().clone();
+    assert_eq!(headers["content-type"], "audio/wav");
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), audio);
+    assert_eq!(pres.lock().unwrap()[0]["endpoint"], "/v1/audio/speech");
+    assert!(!pres.lock().unwrap()[0].to_string().contains("input"));
+    {
+        let calls = requests.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+        assert!(calls[0].body.get("stream_format").is_none());
+    }
+    let receipt = service
+        .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let document = receipt.document_json().unwrap();
+    let usage = receipt_event(&document, "usage.reported");
+    assert_eq!(usage["usage"], json!({"type":"characters","characters":4}));
+    let returned = receipt_event(&document, "response.returned");
+    assert_eq!(
+        returned["body_hash"],
+        private_ai_gateway::aci::digest::sha256_hex(audio)
+    );
+    let report = wait_for_post(&posts, |p| p["requestId"] == "req-speech").await;
+    assert_eq!(report["usage"], json!({"type":"characters","characters":4}));
+    assert_eq!(report["pricing"]["speechCostPerCharacter"], "0.01");
+    assert_eq!(report["selectedRouteId"], "tts:model");
+}
+
+#[tokio::test]
+async fn speech_invalid_requests_never_consult_or_forward() {
+    let (url, pres, _) = spawn_control_capturing_pre(
+        json!({"allow":true,"candidates":[{"routeId":"plain:model","format":"openai"}]}),
+    )
+    .await;
+    let (service, requests) = build_recording_service(200, b"audio".to_vec(), "audio/wav");
+    for patch in [json!({"stream_format":"sse"}), json!({"input":""})] {
+        let mut input = speech_input();
+        input
+            .params
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let (status, _, _) = response_parts(
+            middleware(url.clone())
+                .handle_completion(&service, input)
+                .await,
+        )
+        .await;
+        assert_eq!(status, 400);
+    }
+    assert!(pres.lock().unwrap().is_empty());
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn malformed_native_responses_keep_receipts_without_billable_usage() {
+    for (input, upstream_status, content_type, body, expected) in [
+        (
+            rerank_input(),
+            200,
+            "application/json",
+            br#"{"results":[{"index":0,"relevance_score":1}]}"#.as_slice(),
+            502,
+        ),
+        (speech_input(), 200, "audio/wav", b"".as_slice(), 502),
+        (
+            speech_input(),
+            200,
+            "application/json",
+            b"private".as_slice(),
+            502,
+        ),
+        (
+            speech_input(),
+            400,
+            "application/json",
+            br#"{"error":{"message":"bad voice private"},"usage":{"prompt_tokens":99}}"#.as_slice(),
+            400,
+        ),
+    ] {
+        let (url, posts) = spawn_control_capturing(200, json!({"allow":true,"candidates":[{"routeId":"tts:model","format":"openai","supportedEndpoints":[input.endpoint_path]}]})).await;
+        let (service, _) = build_recording_service(upstream_status, body.to_vec(), content_type);
+        let request_id = input.request_id.clone();
+        let (status, headers, _) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, expected);
+        let receipt = service
+            .get_receipt_by_receipt_id(headers["x-receipt-id"].to_str().unwrap())
+            .unwrap();
+        assert!(!receipt.document_json().unwrap()["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "usage.reported"));
+        let report = wait_for_post(&posts, |p| p["requestId"] == request_id).await;
+        assert_eq!(report["status"], expected);
+        assert!(report["usage"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn buffered_native_endpoints_require_explicit_opt_in() {
+    let (service, requests) = build_recording_service(200, b"{}".to_vec(), "application/json");
+    for (input, endpoints) in [
+        (images_input(), json!([])),
+        (audio_input(), json!([])),
+        (rerank_input(), json!([])),
+        (image_edits_input(), json!(["/v1/images/generations"])),
+        (speech_input(), json!([])),
+        (speech_input(), json!(["/v1/audio/transcriptions"])),
+    ] {
+        let (url, _) = spawn_control_capturing(
+            200,
+            json!({"allow":true,"candidates":[
+                {"routeId":"plain:model","format":"openai"},
+                {"routeId":"near:model","format":"openai","supportedEndpoints":endpoints}
+            ]}),
+        )
+        .await;
+        let (status, _, body) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, 404);
+        assert_eq!(body["error"]["type"], "model_not_found");
+    }
     assert!(requests.lock().unwrap().is_empty());
 }

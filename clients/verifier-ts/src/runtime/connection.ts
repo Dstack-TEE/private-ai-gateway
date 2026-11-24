@@ -297,7 +297,9 @@ class RuntimeAciConnection implements AciConnection {
     if (this.closed || !this.transport) {
       throw new AciConnectionError('closed', 'ACI connection is closed');
     }
-    await this.ensureFreshIdentity();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    signal?.throwIfAborted();
+    await this.ensureFreshIdentity(signal);
     const transport = this.transport;
     if (!transport) throw new AciConnectionError('closed', 'ACI connection is closed');
     const identity = this.identity;
@@ -329,13 +331,17 @@ class RuntimeAciConnection implements AciConnection {
     return response;
   }
 
-  private async ensureFreshIdentity(): Promise<void> {
+  private async ensureFreshIdentity(signal?: AbortSignal | null): Promise<void> {
     const expired = ![...this.members.values()].some((member) => Date.now() < member.expiresAt);
     if (!this.pendingDigest && !expired) return;
     let rotated: boolean;
     try {
-      rotated = await this.refreshIdentity();
+      rotated = await raceAbortSignal(this.refreshIdentity(), signal);
     } catch (error) {
+      // A caller-side abort must surface as-is so cancellable callers (e.g.
+      // streaming clients) can unwind promptly instead of waiting out the
+      // full inline re-verification.
+      if (isAbortError(error)) throw error;
       throw new AciConnectionError(
         expired ? 'identity_expired' : 'attestation_verification',
         expired
@@ -374,6 +380,8 @@ class RuntimeAciConnection implements AciConnection {
     identity: VerifiedAciIdentity,
     members: ReadonlyMap<string, VerifiedAciIdentity>,
   ): void {
+    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
+    if (cap === 0) return;
     const entry: InternalExchange = {
       receiptId,
       method: prepared.request.method,
@@ -397,7 +405,6 @@ class RuntimeAciConnection implements AciConnection {
       entry.responseComplete = true;
     });
     this.exchanges.push(entry);
-    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
     if (this.exchanges.length > cap) this.exchanges.splice(0, this.exchanges.length - cap);
   }
 
@@ -489,6 +496,51 @@ function digestBytes(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * Await a shared in-flight operation while staying responsive to a caller's
+ * AbortSignal. The underlying operation keeps running (other callers may
+ * still benefit from it), but this waiter rejects as soon as the signal
+ * aborts.
+ */
+async function raceAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+  // The promise is typically the deduplicated connection refresh; keep it
+  // handled even when the caller aborts before it settles.
+  void promise.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
 function publicExchange(exchange: InternalExchange): RecordedAciExchange {
   return {
     receiptId: exchange.receiptId,
@@ -516,10 +568,10 @@ function citedSessionId(receipt: ReceiptEnvelope): string | undefined {
 
 function validateOptions(options: ConnectAciOptions): void {
   const cap = options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
-  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1_000) {
+  if (!Number.isSafeInteger(cap) || cap < 0 || cap > 1_000) {
     throw new AciConnectionError(
       'invalid_policy',
-      'receiptHistorySize must be an integer between 1 and 1000',
+      'receiptHistorySize must be an integer between 0 and 1000',
     );
   }
   for (const [name, value] of [
@@ -708,20 +760,86 @@ async function timedFetch(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
   }
+  const deadlineError = () =>
+    new AciConnectionError('attestation_fetch', `ACI request exceeded the ${timeoutMs}ms deadline`);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let expired = false;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const timeout = setTimeout(() => {
+    expired = true;
+    controller.abort(deadlineError());
+    if (bodyController) {
+      try {
+        bodyController.error(deadlineError());
+      } catch {
+        // The wrapped stream already settled.
+      }
+    }
+    void bodyReader?.cancel().catch(() => {});
+  }, timeoutMs);
   timeout.unref();
+  const callerSignal = init.signal ?? null;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) onCallerAbort();
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal });
+    const response = await fetchImpl(input, { ...init, signal: controller.signal });
+    if (!response.body) {
+      clearTimeout(timeout);
+      return response;
+    }
+    // The deadline covers the whole response, not just its headers: keep the
+    // timer armed until the body is consumed, and surface body-read stalls
+    // as the same deadline failure.
+    const reader = response.body.getReader();
+    bodyReader = reader;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+        if (expired) controller.error(deadlineError());
+      },
+      async pull(controller) {
+        if (expired) {
+          controller.error(deadlineError());
+          return;
+        }
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            clearTimeout(timeout);
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          clearTimeout(timeout);
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        clearTimeout(timeout);
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(stream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
+    clearTimeout(timeout);
     if (error instanceof AciConnectionError) throw error;
+    if (expired) throw deadlineError();
     throw new AciConnectionError(
       'attestation_fetch',
       `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   } finally {
-    clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
   }
 }
 

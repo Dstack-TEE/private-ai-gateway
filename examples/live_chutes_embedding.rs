@@ -1,7 +1,7 @@
 //! Live end-to-end probe for the Chutes `/v1/embeddings` E2EE path.
 //!
 //! Drives the production `ChutesProviderBackend` against `api.chutes.ai`
-//! using the real Qwen/Qwen3-Embedding-8B-TEE chute. Builds a verified
+//! using a TEE embeddings chute you can access. Builds a verified
 //! event manually from the chute's live `/e2e/instances/{chute_id}`
 //! response, then runs the ML-KEM-768 / HKDF / ChaCha20-Poly1305 invoke
 //! against the chute and decrypts the embedding.
@@ -11,8 +11,11 @@
 //! can run as a one-shot probe from a developer workstation:
 //!
 //! ```text
-//! CHUTES_API_KEY=<your-cpk_...> cargo run --example live_chutes_embedding
+//! CHUTES_EMBEDDING_MODEL=<model-id> CHUTES_EMBEDDING_CHUTE_ID=<chute-uuid> \
+//!   cargo run --example live_chutes_embedding
 //! ```
+//!
+//! Set `CHUTES_API_KEY` in your environment before running the probe.
 //!
 //! Exit code 0 means: encrypted request reached the chute, the chute
 //! decrypted it, returned an OpenAI-shape embeddings JSON, and we
@@ -31,8 +34,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const CHUTES_API_BASE: &str = "https://api.chutes.ai";
-const MODEL: &str = "Qwen/Qwen3-Embedding-8B-TEE";
-const CHUTE_ID: &str = "21822836-bfa6-5426-b27e-dd5fdda1249e";
 const CHUTES_MLKEM_768_ALGORITHM: &str = "chutes-ml-kem-768";
 
 #[derive(Debug, Deserialize)]
@@ -56,17 +57,31 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    let model = env::var("CHUTES_EMBEDDING_MODEL")
+        .map_err(|_| "CHUTES_EMBEDDING_MODEL must be set in the environment".to_string())?;
+    if model.trim().is_empty() {
+        return Err("CHUTES_EMBEDDING_MODEL must contain a model ID".to_string());
+    }
+    let chute_id = env::var("CHUTES_EMBEDDING_CHUTE_ID")
+        .map_err(|_| "CHUTES_EMBEDDING_CHUTE_ID must be set in the environment".to_string())?;
+    if !chute_id.split('-').map(str::len).eq([8, 4, 4, 4, 12])
+        || !chute_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err("CHUTES_EMBEDDING_CHUTE_ID must contain a chute UUID".to_string());
+    }
     let api_key = env::var("CHUTES_API_KEY")
         .map_err(|_| "CHUTES_API_KEY must be set in the environment".to_string())?;
 
-    eprintln!("[1/4] Fetching live instance discovery for chute {CHUTE_ID}...");
+    eprintln!("[1/4] Fetching live instance discovery...");
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| format!("reqwest builder: {e}"))?;
     let discovery: ChutesInstancesResponse = client
-        .get(format!("{CHUTES_API_BASE}/e2e/instances/{CHUTE_ID}"))
+        .get(format!("{CHUTES_API_BASE}/e2e/instances/{chute_id}"))
         .bearer_auth(&api_key)
         .send()
         .await
@@ -103,12 +118,13 @@ async fn run() -> Result<(), String> {
         // Live-probe bypass, not a real attestation — leave the provider type
         // unset so the session does not synthesize hardware-proven claims.
         provider_type: None,
-        model_id: MODEL.to_string(),
+        model_id: model.clone(),
         url_origin: Some(CHUTES_API_BASE.to_string()),
         verifier_id: "live-probe/bypass/v1".to_string(),
         result: VerificationResult::Verified,
         required: true,
-        reason: None,
+        failure: Default::default(),
+        diagnostic: None,
         evidence: None,
         channel_bindings: vec![ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),
@@ -122,14 +138,15 @@ async fn run() -> Result<(), String> {
     let backend = ChutesProviderBackend::new_with_timeouts(CHUTES_API_BASE, 10, 120)
         .map_err(|e| format!("backend init: {e}"))?
         .with_bearer_token(api_key)
-        .with_chute_ids([(MODEL.to_string(), CHUTE_ID.to_string())]);
+        .with_chute_ids([(model.clone(), chute_id)]);
 
     let body = serde_json::to_vec(&serde_json::json!({
-        "model": MODEL,
+        "model": model,
         "input": "the quick brown fox jumps over the lazy dog"
     }))
     .map_err(|e| format!("serialize body: {e}"))?;
     let request = UpstreamRequest {
+        cache_salt: None,
         form: None,
         content_type: None,
         body: body.into(),

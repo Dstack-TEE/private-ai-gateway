@@ -5,8 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-// This helper runs in the OIDC publish job, which intentionally installs no
-// dependencies, so it only uses Node built-ins.
+// Registry lookups in the OIDC publish job only need Node built-ins.
 const scriptPath = fileURLToPath(import.meta.url);
 const npmPackageName = "private-ai-proxy";
 

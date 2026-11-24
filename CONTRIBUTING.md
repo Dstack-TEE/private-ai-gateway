@@ -4,11 +4,11 @@ Private AI Gateway is a security-sensitive reference implementation. Changes to 
 
 ## Development setup
 
-[Local development](docs/getting-started.md) covers prerequisites, dependency installation, the dstack SDK socket, and a first gateway run.
+[Local development](docs/local-development.md) covers prerequisites, dependency installation, the dstack SDK socket, and a first gateway run.
 
 ## Required checks
 
-Before opening a change, run the [repository checks](docs/getting-started.md#run-the-repository-checks). Run the TypeScript client checks listed there as well when you change `clients/` or a shared ACI construction.
+Before opening a change, run the [repository checks](docs/local-development.md#run-the-repository-checks). Run the TypeScript client checks listed there as well when you change `clients/` or a shared ACI construction.
 
 Live-provider tests consume credentials and quota, so they are not part of credential-free CI. Use [Run the live end-to-end suite](docs/live-e2e-test-suite.md) for provider adapter, attestation, and forwarding changes.
 
@@ -26,6 +26,8 @@ Update the specification, implementation, and test vectors together when a chang
 - keyset expiry and rotation behavior.
 
 Do not add a compatibility shortcut to the canonical `/v1/aci/*` artifacts. Keep legacy behavior on the explicitly documented legacy routes and test the two surfaces separately.
+
+Streaming and buffering changes must keep the [streaming wire characterization](tests/streaming/README.md) corpus passing; it records the exact bytes, receipts, and reports each path produces.
 
 ### Provider verification
 
@@ -73,6 +75,7 @@ Update the living page that owns a behavior in the same change as the code:
 | Middleware decisions | [Control-plane contract](docs/control-plane-contract.md) |
 | Verifier claims and limitations | The provider's `verification.md` under [`docs/providers/`](docs/providers/README.md) |
 | Runnable validation | [Live end-to-end suite](docs/live-e2e-test-suite.md) |
+| A new guide or reference | A row in the [documentation index](docs/README.md) |
 
 ## Documentation standard
 
@@ -87,7 +90,7 @@ Living documentation must describe the current code, not an intended design. Fol
 - Use repository-relative commands and links.
 - Remove placeholders and private workstation paths.
 
-After changing Markdown, check local links and search for stale source paths or renamed fields.
+After changing Markdown, run `python3 scripts/check_docs.py`, which checks that every page is reachable from the README and that relative links and anchors resolve. Also search for stale source paths or renamed fields.
 
 ## Commit scope
 

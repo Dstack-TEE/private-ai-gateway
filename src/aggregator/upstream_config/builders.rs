@@ -1,16 +1,17 @@
 //! Backend/verifier construction from upstream config.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::dynamic::EmptyUpstreamBackend;
-use super::validation::validate_config;
+use super::validation::{validate_config, verification_refresh_seconds};
 use super::{
     ConfiguredUpstreams, ProviderSessionRegistry, UpstreamConfig, UpstreamConfigError,
     UpstreamProvider, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use crate::aci::digest;
 use crate::aci::upstream::{
-    ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
+    CacheSaltField, ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
     OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
     UpstreamBackend, ZeroGProviderBackend,
 };
@@ -63,6 +64,7 @@ fn build_model_router(
                     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
                     .with_path(cfg.path.clone())
                     .with_streaming_usage(cfg.streaming_usage)
+                    .with_cache_salt_field(provider_cache_salt_field(cfg.provider))
                     // NEAR's native JSON contains only text, without duration.
                     .with_force_verbose_json(cfg.provider == UpstreamProvider::NearAi)
                     .with_is_tee(Some(provider_is_tee(cfg.provider))),
@@ -71,6 +73,26 @@ fn build_model_router(
         }
     }
     Ok(router)
+}
+
+/// Cache controls are an explicit provider capability, not inferred from an
+/// OpenAI-compatible wire format. Tags match `UpstreamProvider`'s serde names.
+pub(super) fn provider_cache_salt_field(provider: UpstreamProvider) -> Option<CacheSaltField> {
+    match provider {
+        UpstreamProvider::Chutes => Some(CacheSaltField::CacheSalt("chutes")),
+        UpstreamProvider::Privatemode => Some(CacheSaltField::CacheSalt("privatemode")),
+        UpstreamProvider::Tinfoil => Some(CacheSaltField::UserCacheSecret("tinfoil")),
+        UpstreamProvider::PhalaDirect => Some(CacheSaltField::CacheSalt("phala-direct")),
+        UpstreamProvider::NearAi => Some(CacheSaltField::CacheSalt("near-ai")),
+        UpstreamProvider::ArmetAi => Some(CacheSaltField::CacheSalt("armet-ai")),
+        UpstreamProvider::ZeroGPrivateComputer => {
+            Some(CacheSaltField::CacheSalt("0g-private-computer"))
+        }
+        UpstreamProvider::OpenAiCompatible
+        | UpstreamProvider::Anthropic
+        | UpstreamProvider::AciService
+        | UpstreamProvider::SecretAi => None,
+    }
 }
 
 /// Whether a provider route may serve `provider.aci_verified` requests. Plain
@@ -177,12 +199,13 @@ fn build_provider_backend(
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
             .with_name(cfg.name.clone())
             .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
-            if let Some(token) = &cfg.bearer_token {
-                backend = if cfg.provider == UpstreamProvider::Anthropic {
-                    backend.with_anthropic_api_key(token.clone())
-                } else {
-                    backend.with_bearer_token(token.clone())
-                };
+            if cfg.provider == UpstreamProvider::Anthropic {
+                backend = backend.with_anthropic_protocol();
+                if let Some(token) = &cfg.bearer_token {
+                    backend = backend.with_anthropic_api_key(token.clone());
+                }
+            } else if let Some(token) = &cfg.bearer_token {
+                backend = backend.with_bearer_token(token.clone());
             }
             backend = backend.with_basic_auth(cfg.basic_auth);
             Ok(Arc::new(backend))
@@ -281,24 +304,33 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            UpstreamProvider::Tinfoil => Arc::new(TinfoilProviderVerifier::new_with_cache(
-                request_timeout_seconds,
-                cache_seconds,
-            )),
+            UpstreamProvider::Tinfoil => Arc::new(
+                TinfoilProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                    .with_accepted_subjects(cfg.accepted_subjects.as_deref().unwrap_or_default()),
+            ),
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
+                if let Some(period) = verification_refresh_seconds(cfg, options) {
+                    verifier = verifier.with_refresh_lead(Duration::from_secs(
+                        cache_seconds.saturating_sub(period),
+                    ));
+                }
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_api_key(token.clone());
                 }
                 Arc::new(verifier)
             }
             UpstreamProvider::SecretAi => {
+                let accepted_subjects = cfg.accepted_subjects.as_deref().unwrap_or_default();
+                if accepted_subjects.is_empty() {
+                    tracing::warn!(upstream = %cfg.name, "SecretAI has no accepted_subjects workload pin configured");
+                }
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
+                .with_accepted_subjects(accepted_subjects.iter().cloned());
                 Arc::new(verifier)
             }
             UpstreamProvider::Privatemode => Arc::new(
@@ -315,7 +347,8 @@ pub(super) fn build_verifier(
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
-                );
+                )
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
                 }

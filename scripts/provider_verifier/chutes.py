@@ -8,11 +8,15 @@ import hashlib
 import json
 import secrets
 import time
-import urllib.request
+from collections.abc import Callable
+from concurrent.futures import Future
+from threading import Thread
 from typing import Any
 
+import jwt
+import requests
+
 from .common import (
-    tdx_session_material,
     emit,
     evidence_bundle,
     failed,
@@ -24,7 +28,17 @@ from .common import (
     response_content_type,
     sha256_base64_key,
     tdx_debug_enabled,
+    tdx_session_material,
 )
+
+NRAS_ORIGIN = "https://nras.attestation.nvidia.com"
+NRAS_JWKS_URL = f"{NRAS_ORIGIN}/.well-known/jwks.json"
+NRAS_ATTEST_URL = f"{NRAS_ORIGIN}/v3/attest/gpu"
+NRAS_JWKS_TIMEOUT_SECONDS = 5
+NRAS_POST_TIMEOUT_SECONDS = 5
+NRAS_GPU_BUDGET_SECONDS = 10
+NRAS_GPU_CONCURRENCY = 8
+VERIFIER_EXIT_MARGIN_SECONDS = 2
 
 
 def chutes_headers(api_key: str, basic_auth: bool = False) -> dict[str, str]:
@@ -60,8 +74,6 @@ def chutes_resolve_id(
         if not is_uuid_like(pinned):
             raise ValueError(f"configured chute_id for {model_id} is not UUID-like")
         return pinned
-
-    import requests
 
     response = requests.get(
         f"{api_base}/chutes/",
@@ -129,54 +141,63 @@ def chutes_measurement_name(
     for profile in measurements:
         if str(profile.get("mrtd") or "").lower() != mrtd:
             continue
-        expected = profile.get("runtime_rtmrs") or {}
-        if all(str(expected.get(k) or "").lower() == v for k, v in rtmrs.items()):
+        if "runtime_rtmrs" in profile:
+            expected = profile["runtime_rtmrs"]
+        else:
+            expected = {k: profile.get(k.lower()) for k in rtmrs}
+        if isinstance(expected, dict) and all(
+            str(expected.get(k) or "").lower() == v for k, v in rtmrs.items()
+        ):
             return str(profile.get("name") or "unnamed")
     return None
+
+
+def chutes_fetch_measurements(api_base: str, timeout: int) -> tuple[str, requests.Response]:
+    url = f"{api_base}/servers/tdx/measurements"
+    response = requests.get(url, timeout=timeout)
+    if response.status_code in (404, 405, 410, 501):
+        url = f"{api_base}/servers/tee/measurements"
+        response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return url, response
+
+
+def chutes_fetch_nras_keys() -> dict[str, jwt.PyJWK]:
+    jwks = jwt.PyJWKClient(NRAS_JWKS_URL, timeout=NRAS_JWKS_TIMEOUT_SECONDS)
+    return {key.key_id: key for key in jwks.get_signing_keys() if key.key_id is not None}
+
+
+def chutes_gpu_metadata(gpu_evidence: Any) -> dict[str, Any]:
+    first = gpu_evidence[0] if isinstance(gpu_evidence, list) and gpu_evidence else None
+    return {
+        "gpu_evidence_present": bool(gpu_evidence),
+        "gpu_verified": False,
+        "gpu_evidence_nonce_matched": None,
+        "gpu_arch": first.get("arch") if isinstance(first, dict) else None,
+    }
 
 
 def chutes_verify_gpu(
     gpu_evidence: list[Any],
     expected_report_data: str,
-    timeout: int,
+    signing_keys: dict[str, jwt.PyJWK],
 ) -> dict[str, Any]:
-    """Check the NVIDIA confidential-computing GPU evidence as SUPPLEMENTAL
-    metadata, never a gate (mirrors the PhalaDirect verifier).
-
-    Record the existing outcome, including nonce matching. This path decodes
-    NRAS JWTs without signature verification and does not bind a GPU identity
-    to the serving CPU. It supplies no authenticated device or continuity claim.
-    Missing/invalid GPU results remain supplemental; the CPU quote, report_data
-    binding, debug bit and measurement match remain the hard gates.
-    """
-    result: dict[str, Any] = {
-        "gpu_evidence_present": bool(gpu_evidence),
-        "gpu_verified": False,
-        "gpu_evidence_nonce_matched": None,
-        "gpu_arch": None,
-    }
-    if not gpu_evidence:
-        return result
-
-    import jwt
-    import requests
-
-    first = gpu_evidence[0]
-    arch = first.get("arch") if isinstance(first, dict) else None
-    result["gpu_arch"] = arch
+    """Record NVIDIA's signed, nonce-bound platform verdict as supplemental evidence."""
+    result = chutes_gpu_metadata(gpu_evidence)
+    arch = result["gpu_arch"]
     if not arch:
         return result
 
     try:
         response = requests.post(
-            "https://nras.attestation.nvidia.com/v3/attest/gpu",
+            NRAS_ATTEST_URL,
             json={
                 "evidence_list": gpu_evidence,
                 "nonce": expected_report_data,
                 "arch": arch,
             },
             headers={"accept": "application/json", "content-type": "application/json"},
-            timeout=timeout,
+            timeout=NRAS_POST_TIMEOUT_SECONDS,
         )
         if response.status_code != 200:
             return result
@@ -186,19 +207,68 @@ def chutes_verify_gpu(
         platform = tokens[0]
         if not isinstance(platform, list) or len(platform) < 2 or platform[0] != "JWT":
             return result
+        token = platform[1]
+        signing_key = signing_keys.get(jwt.get_unverified_header(token).get("kid"))
+        if signing_key is None:
+            return result
         claims = jwt.decode(
-            platform[1],
-            options={"verify_signature": False},
-            algorithms=["RS256", "ES256", "ES384", "PS256"],
+            token,
+            signing_key,
+            algorithms=["ES384"],
+            issuer=NRAS_ORIGIN,
+            subject="NVIDIA-PLATFORM-ATTESTATION",
+            options={"require": ["exp", "sub"]},
         )
         nonce_matched = claims.get("eat_nonce") == expected_report_data
         result["gpu_evidence_nonce_matched"] = nonce_matched
         result["gpu_verified"] = (
             claims.get("x-nvidia-overall-att-result") is True and nonce_matched
         )
-    except Exception:  # noqa: BLE001 - supplemental; a GPU error is never fatal
+    except Exception:  # noqa: BLE001 - GPU failures must remain supplemental
         return result
     return result
+
+
+async def _run_gpu_io[T](operation: Callable[[], T]) -> T:
+    # The default executor joins its threads on asyncio.run() shutdown. A stalled
+    # supplemental request must allow the verifier process to exit on time.
+    future: Future[T] = Future()
+
+    def run() -> None:
+        if future.set_running_or_notify_cancel():
+            try:
+                future.set_result(operation())
+            except Exception as exc:
+                future.set_exception(exc)
+
+    Thread(target=run, daemon=True).start()
+    return await asyncio.wrap_future(future)
+
+
+async def chutes_apply_gpu_checks(
+    jobs: list[tuple[dict[str, Any], list[Any], str]], verifier_deadline: float
+) -> None:
+    now = asyncio.get_running_loop().time()
+    deadline = min(now + NRAS_GPU_BUDGET_SECONDS, verifier_deadline)
+    if not jobs or deadline <= now:
+        return
+
+    try:
+        async with asyncio.timeout_at(deadline):
+            async with asyncio.timeout(NRAS_JWKS_TIMEOUT_SECONDS):
+                signing_keys = await _run_gpu_io(chutes_fetch_nras_keys)
+
+            slots = asyncio.Semaphore(NRAS_GPU_CONCURRENCY)
+
+            async def check(instance: dict[str, Any], evidence: list[Any], nonce: str) -> None:
+                async with slots:
+                    instance["gpu"] = await _run_gpu_io(
+                        lambda: chutes_verify_gpu(evidence, nonce, signing_keys)
+                    )
+
+            await asyncio.gather(*(check(*job) for job in jobs), return_exceptions=True)
+    except Exception:  # noqa: BLE001 - keep the CPU bindings and completed GPU results
+        pass
 
 
 async def chutes_verify_instance(
@@ -206,8 +276,7 @@ async def chutes_verify_instance(
     nonce: str,
     e2e_pubkey: str,
     measurements: list[dict[str, Any]],
-    timeout: int,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     import dcap_qvl
 
     instance_id = evidence.get("instance_id")
@@ -234,54 +303,44 @@ async def chutes_verify_instance(
     if not measurement:
         raise ValueError("Chutes quote measurements do not match a public profile")
 
-    gpu = await asyncio.to_thread(
-        chutes_verify_gpu,
-        evidence.get("gpu_evidence") or [],
-        expected_report_data,
-        timeout,
-    )
-
-    return {
+    instance = {
         **tdx_session_material(quote_bytes),
         "advisory_ids": sorted(set(verified_report.advisory_ids)),
         "instance_id": instance_id,
         "measurement": measurement,
         "public_key_sha256": sha256_base64_key(e2e_pubkey),
         "tcb_status": tcb_status,
-        "gpu": gpu,
+        "gpu": chutes_gpu_metadata(evidence.get("gpu_evidence") or []),
     }
+    return instance, expected_report_data
 
 
 async def verify_chutes(request: dict[str, Any]) -> None:
+    started_at = asyncio.get_running_loop().time()
     provider = "chutes"
     options = provider_options(request)
     api_key = (options.get("chutes_api_key") or "").strip()
     basic_auth = options.get("chutes_basic_auth", "false").lower() == "true"
     api_base = chutes_api_base(options)
     if not api_key:
-        measurements_url = f"{api_base}/servers/tee/measurements"
         evidence = None
         try:
-            with urllib.request.urlopen(measurements_url, timeout=15) as response:
-                body = response.read()
-                json.loads(body.decode("utf-8"))
-                evidence = evidence_bundle(
-                    body,
-                    measurements_url,
-                    response_content_type(response),
-                )
-        except Exception:
+            measurements_url, response = chutes_fetch_measurements(api_base, 15)
+            body = response.content
+            json.loads(body)
+            evidence = evidence_bundle(body, measurements_url, response_content_type(response))
+        except (requests.RequestException, ValueError):
             pass
         failed(
             provider,
-            "Chutes bearer_token is required to fetch per-instance E2EE attestation evidence",
+            "Chutes bearer_token is required to fetch per-instance E2EE public keys",
+            failure="verifier_misconfigured",
             evidence=evidence,
         )
         return
 
-    import requests
-
     timeout = request_timeout_seconds(request, 60)
+    gpu_deadline = started_at + timeout - VERIFIER_EXIT_MARGIN_SECONDS
     headers = chutes_headers(api_key, basic_auth)
     chute_id = chutes_resolve_id(
         request["model_id"],
@@ -292,16 +351,13 @@ async def verify_chutes(request: dict[str, Any]) -> None:
     )
     attestation_url = f"{api_base}/chutes/{chute_id}/evidence"
 
-    measurements_response = requests.get(
-        f"{api_base}/servers/tee/measurements", timeout=timeout
-    )
-    measurements_response.raise_for_status()
+    measurements_url, measurements_response = chutes_fetch_measurements(api_base, timeout)
     measurements_body = measurements_response.content
     measurements = json.loads(measurements_body.decode("utf-8"))
     raw_items = [
         raw_http_item(
             "chutes.measurements",
-            f"{api_base}/servers/tee/measurements",
+            measurements_url,
             response_content_type(measurements_response),
             measurements_body,
         )
@@ -387,6 +443,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         failed(
             provider,
             "Chutes did not return any E2EE public keys for this chute",
+            failure="evidence_invalid",
             evidence=raw_http_bundle_evidence(
                 raw_items,
                 source_url=f"{api_base}/e2e/instances/{chute_id}",
@@ -394,20 +451,39 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         )
         return
 
-    tasks = []
+    eligible = []
     skipped_without_key = []
     for evidence in evidence_items:
+        # Older Chutes deployments return TDX evidence without a type tag.
+        tee_type = evidence.get("tee_type")
+        if tee_type is not None and (not isinstance(tee_type, str) or tee_type.lower() != "tdx"):
+            continue
         instance_id = evidence.get("instance_id")
         e2e_pubkey = pubkeys.get(instance_id)
         if not e2e_pubkey:
             if instance_id:
                 skipped_without_key.append(instance_id)
             continue
-        tasks.append(chutes_verify_instance(evidence, nonce, e2e_pubkey, measurements, timeout))
+        eligible.append((evidence, e2e_pubkey))
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    verified = [result for result in results if isinstance(result, dict)]
-    errors = [str(result) for result in results if isinstance(result, Exception)]
+    results = await asyncio.gather(
+        *(
+            chutes_verify_instance(evidence, nonce, e2e_pubkey, measurements)
+            for evidence, e2e_pubkey in eligible
+        ),
+        return_exceptions=True,
+    )
+    verified = []
+    errors = []
+    gpu_jobs = []
+    for (evidence, _), result in zip(eligible, results, strict=True):
+        if isinstance(result, tuple):
+            instance, expected_report_data = result
+            verified.append(instance)
+            if instance["gpu"]["gpu_arch"]:
+                gpu_jobs.append((instance, evidence["gpu_evidence"], expected_report_data))
+        elif isinstance(result, Exception):
+            errors.append(str(result))
     bindings = [
         {
             "type": "e2ee_public_key_sha256",
@@ -423,12 +499,14 @@ async def verify_chutes(request: dict[str, Any]) -> None:
             provider,
             "Chutes verification did not produce any verified E2EE key binding"
             + (f": {'; '.join(errors)}" if errors else ""),
+            failure="no_channel_binding",
             evidence=raw_http_bundle_evidence(
                 raw_items,
                 source_url=attestation_url,
             ),
         )
         return
+    await chutes_apply_gpu_checks(gpu_jobs, gpu_deadline)
     # Surface per-instance TDX TCB status and a single fleet-level status for the
     # tri-state tcb_up_to_date claim: UpToDate only if every verified instance is
     # UpToDate, otherwise a representative stale status so the claim refutes.
@@ -442,7 +520,7 @@ async def verify_chutes(request: dict[str, Any]) -> None:
         fleet_tcb_status = next((s for s in present_statuses if s != "UpToDate"), None)
     # GPU evidence is supplemental metadata, never a trust gate (see
     # chutes_verify_gpu). Surface a per-instance map and a fleet summary so the
-    # deep audit sees the outcome; the typed gpu_attested claim stays Unknown.
+    # session layer can report each instance's own outcome.
     instance_gpu = {item["instance_id"]: item.get("gpu") for item in verified}
     gpus = [g for g in instance_gpu.values() if isinstance(g, dict)]
     # Per-instance measurement profile (stable hardware identity, no nonce) so a
