@@ -69,10 +69,11 @@ pub const MAX_RECEIPT_BYTES: usize = 64 * 1024;
 /// Generous bounds for attestation and session artifacts. These are large
 /// enough for quote collateral and evidence in normal deployments while
 /// preventing an untrusted service from making the CLI buffer indefinitely.
-// Observed live: 54 KB attestation, 162 KB listing (97 sessions), 6.7 MB GPU session records.
-pub const MAX_ATTESTATION_BYTES: usize = 4 * 1024 * 1024;
-pub const MAX_SESSION_LIST_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
+/// Observed live: Chutes evidence reaches roughly 1.7–4.2 MB per session, with larger fleet bundles.
+/// Keep each JSON evidence bound at the gateway's 64 MiB default operator limit.
+pub const MAX_ATTESTATION_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SESSION_LIST_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_SESSION_BYTES: usize = 64 * 1024 * 1024;
 /// Total time for one artifact's connection, response headers, and body.
 const ARTIFACT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);

@@ -62,8 +62,8 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
-Attestation, receipt, and session responses are size-bounded: 4 MiB for
-attestation documents, 16 MiB for session listings, 32 MiB for session records,
+Attestation, receipt, and session responses are size-bounded: 64 MiB for
+attestation documents, 64 MiB for session listings, 64 MiB for session records,
 and 64 KiB for receipts. Each attestation, session, and receipt response must
 arrive within 30 seconds, including headers and body. Session audits may take
 longer in total when there are many sessions; `send`'s session fetch uses the
@@ -131,6 +131,10 @@ need assurance about the OS image should verify the quote, event log, and VM
 configuration with an independent dstack verifier.
 
 ### Offline audit
+
+Report, receipt, and session files use the same size limits as live artifact
+fetches: 64 MiB, 64 KiB, and 64 MiB respectively. Oversized files are rejected
+before JSON parsing.
 
 `pap audit` receipt-only options (`--request-body`, `--response-body`,
 `--session`, `--require-claim`, `--pin`, and `--require-verified`) require
