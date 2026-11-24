@@ -643,8 +643,7 @@ impl Projector {
             status.connected = false;
             status.authorized = false;
             status.attention = Some(
-                "This connection uses an outdated credential helper path or command. Disconnect, \
-                 then Connect again to update it."
+                "The configuration settings changed or this connection uses an outdated credential helper path or command. Disconnect, then Connect again to update it."
                     .to_string(),
             );
         } else if !managed {
