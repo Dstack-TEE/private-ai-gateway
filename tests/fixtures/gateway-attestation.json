@@ -1,0 +1,191 @@
+{
+  "attestation": {
+    "source_provenance": {
+      "repo_url": "https://github.com/Dstack-TEE/private-ai-gateway.git",
+      "repo_commit": "1212121212121212121212121212121212121212"
+    },
+    "workload_keyset": {
+      "tls_public_keys": [
+        {
+          "spki_sha256": "951885459fbd27cad038c40a198e6a1fb63f4d18dd5d5a24d408d5d951488ffe",
+          "domain": "tee.redpill.ai"
+        },
+        {
+          "spki_sha256": "32a2825658a7377a37d6b6e854627dd16bdd8abd82353259884eac7866229ea7",
+          "domain": "inference.phala.com"
+        },
+        {
+          "spki_sha256": "8a90181d3d9e5a0538e1c753b9459b385d9f064567c60abd086a2ee8d9fa30c8",
+          "domain": "api.redpill.ai"
+        }
+      ]
+    },
+    "evidence": {
+      "quote": "04000000810000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f06dfda6dce1cf904d4e2bab1dc370634cf95cefa2ceb2de2eee127c9382698090d7a4a13e14c536ec6c9c3c8fa8707700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000046a83f6bbbeaa274aaf04861ef47d7e8898d4e699126b642f72f582e8d7f5349cb266a188bbabf619940d4fece06594b07e6f51aa763abfe75c3ddfbf4f425fe3f0ceff66d807a75e049303dce9addf68e7218729bd419638af63a370f65878cdf67e467e60edc1737bcf8e682d48131bfb427f523226aa7f197a7608e9b3784783fa759ef5b28191fa12f9ddb36b85866fa58af79e929716de4a776a37e136cf6d19ac8b32ed566f7928f9f25c3b3629a6d4afc14833f4ade3cea80ee757b5a00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "event_log": [
+        {
+          "imr": 0,
+          "event_type": 2147483659,
+          "digest": "5fe4f9ee465a361d077a6892f6bc4d19a82b272fea2e3c2c1ef9c33b4d9050115fca0c6dc7a7f68f91c623de38c48226"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483658,
+          "digest": "344bc51c980ba621aaa00da3ed7436f7d6e549197dfe699515dfa2c6583d95e6412af21c097d473155875ffd561d6790"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483649,
+          "digest": "9dc3a1f80bcec915391dcda5ffbb15e7419f77eab462bbf72b42166fb70d50325e37b36f93537a863769bcf9bedae6fb"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483649,
+          "digest": "6f2e3cbc14f9def86980f5f66fd85e99d63e69a73014ed8a5633ce56eca5b64b692108c56110e22acadcef58c3250f1b"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483649,
+          "digest": "d607c0efb41c0d757d69bca0615c3a9ac0b1db06c557d992e906c6b7dee40e0e031640c7bfd7bcd35844ef9edeadc6f9"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483649,
+          "digest": "08a74f8963b337acb6c93682f934496373679dd26af1089cb4eaf0c30cf260a12e814856385ab8843e56a9acea19e127"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483649,
+          "digest": "18cc6e01f0c6ea99aa23f8a280423e94ad81d96d0aeb5180504fc0f7a40cb3619dd39bd6a95ec1680a86ed6ab0f9828d"
+        },
+        {
+          "imr": 0,
+          "event_type": 4,
+          "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0"
+        },
+        {
+          "imr": 0,
+          "event_type": 10,
+          "digest": "febfba94a148ef74278a30ed690856a468636b51f619d44025c4f9dc0212068369895d35c67157ccd2149cd049f3761c"
+        },
+        {
+          "imr": 0,
+          "event_type": 10,
+          "digest": "5427470ec5de45a3ad085101e7567c7f0b4aa4b0147d9aa583f067fdcb15155fc52a22bd23fd8ea10d045751f8e52337"
+        },
+        {
+          "imr": 0,
+          "event_type": 10,
+          "digest": "2194a807023a3ce948e26538252c046bce7c76293a3750ac22a41d1c2a3584bd53cc95bbdbde2d0c9f3a906f2663840f"
+        },
+        {
+          "imr": 1,
+          "event_type": 2147483651,
+          "digest": "90e278aa4d688f4f05bf76f1786fea174abcea0d6b44e81cea5b3327f3f211e5c465a9c34b513283bed2512bca6d4a19"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483650,
+          "digest": "1dd6f7b457ad880d840d41c961283bab688e94e4b59359ea45686581e90feccea3c624b1226113f824f315eb60ae0a7c"
+        },
+        {
+          "imr": 0,
+          "event_type": 2147483650,
+          "digest": "23ada07f5261f12f34a0bd8e46760962d6b4d576a416f1fea1c64bc656b1d28eacf7047ae6e967c58fd2a98bfa74c298"
+        },
+        {
+          "imr": 1,
+          "event_type": 2147483655,
+          "digest": "77a0dab2312b4e1e57a84d865a21e5b2ee8d677a21012ada819d0a98988078d3d740f6346bfe0abaa938ca20439a8d71"
+        },
+        {
+          "imr": 1,
+          "event_type": 4,
+          "digest": "394341b7182cd227c5c6b07ef8000cdfd86136c4292b8e576573ad7ed9ae41019f5818b4b971c9effc60e1ad9f1289f0"
+        },
+        {
+          "imr": 2,
+          "event_type": 6,
+          "digest": "9c824b958dbbef07ec732fd79727e995d5eca309dbc6d62e4fd2840f267c5e87108b5fe25c7997c67801ff391fb67ffc"
+        },
+        {
+          "imr": 2,
+          "event_type": 6,
+          "digest": "5eb4f34f2ec49071551c5562ebaab9f86408f4a0eadaa3d7f05157e37ab04a1f040a82eaae94015d628a7ea4aa482cd2"
+        },
+        {
+          "imr": 1,
+          "event_type": 2147483655,
+          "digest": "214b0bef1379756011344877743fdc2a5382bac6e70362d624ccf3f654407c1b4badf7d8f9295dd3dabdef65b27677e0"
+        },
+        {
+          "imr": 1,
+          "event_type": 2147483655,
+          "digest": "0a2e01c85deae718a530ad8c6d20a84009babe6c8989269e950d8cf440c6e997695e64d455c4174a652cd080f6230b74"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "f9974020ef507068183313d0ca808e0d1ca9b2d1ad0c61f5784e7157c362c06536f5ddacdad4451693f48fcc72fff624"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "8562fc3980258ea5119a31356844547c42ba696d73f6ecdc7d29732beef0083f22674ce14349a8a1400254466e851407",
+          "event": "app-id",
+          "event_payload": "fdb7a14e5a6675f752e2cb69c9067a98ca402918"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "d6da803127162c698382ec48ad162a6aa5316653f4ca84995d44168ab1cddff5ed15d64c7c5290b48eaae5f38421bfda",
+          "event": "compose-hash",
+          "event_payload": "a8475d40f523b41efa03fe5a752c3b926e5ce2070e27b28db0bdad1bc618532f"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "0d960b12e9bec593293851da3ca48f4dedf8f4ec6f21e06cb3b9f235c6b8c7a8b37ecae482dd19a8d4ea31d36391c799"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "98bd7e6bd3952720b65027fd494834045d06b4a714bf737a06b874638b3ea00ff402f7f583e3e3b05e921c8570433ac6"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "7892c43fa0e234de8cb3776511ee4ea04eca566b87847d153edd67146660e75a20d699a054cd54964948d015b0447729"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "c936f709860155a455c519b505fe29bde21d1b778534a8f0b41b706b0f789eae2ea899e224fedb2331c18324aab4db93",
+          "event": "os-image-hash",
+          "event_payload": "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "83368b43a0fc6f824f5a9220592df85fd30e2d405ecbd253a5c6354af63e6c9b41aec557c38a38e348ab87f9ac8fc68c",
+          "event": "key-provider",
+          "event_payload": "7b226e616d65223a226b6d73222c226964223a223330353933303133303630373261383634386365336430323031303630383261383634386365336430333031303730333432303030343838343465623432636364663863353266643466313734663336326663623962626431396334356664343866316564656332643866316361323335333665633161373430323162346365653631306330373466383239346434333162326237666565326333396535333333666461663061343532326434336662313539643966227d"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "ba51104636900268b0e059fa3d266419d079d1e94aea26fb9fcbb8d764bf4c89a67ac271b8a0d1a3989945132a111fc7"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "1a76b2a80a0be71eae59f80945d876351a7a3fb8e9fd1ff1cede5734aa84ea11fd72b4edfbb6f04e5a85edd114c751bd",
+          "event": "system-ready",
+          "event_payload": ""
+        }
+      ],
+      "vm_config": "{\"os_image_hash\":\"bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033\",\"cpu_count\":32,\"memory_size\":34359738368,\"image\":\"dstack-0.5.9-bd369a8c\"}",
+      "app_compose": "{\"docker_compose_file\":\"services:\\n  launcher:\\n    image: ghcr.io/redpill-ai/private-ai-launcher@sha256:c083ff9e6a5ddf10f6c9e9bb1f74cc618deebecfea5208b563c574399db4637c\\n    environment:\\n      - PRIVATE_AI_GATEWAY_REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git\\n      - PRIVATE_AI_GATEWAY_REPO_COMMIT=1212121212121212121212121212121212121212\\n\",\"manifest_version\":2}"
+    }
+  }
+}

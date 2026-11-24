@@ -55,6 +55,7 @@ For operators deploying and configuring a gateway.
 | Build the gateway, run the repository checks, and start it locally | [Local development](local-development.md) | Tutorial |
 | Configure runtime policy and upstreams | [Configuration reference](configuration-reference.md) | Reference |
 | Deploy the gateway in dstack | [Deploy with git-launcher](../deploy/README.md) | How-to |
+| Extract release values and monitor deployment drift | [Gateway release measurements](gateway-measurements.md) | How-to and reference |
 | Deploy the gateway with the Privatemode proxy | [Deploy with the Privatemode proxy](../deploy/privatemode.md) | How-to |
 | Add a private Chutes route | [Configure a private Chutes route](providers/chutes/configuration.md) | How-to |
 | Add an audio-transcription upstream | [Audio transcription example](../examples/audio/README.md) | Example |
