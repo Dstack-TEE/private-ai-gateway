@@ -21,11 +21,12 @@ and `gpt-oss:120b` configuration.
 
 ### Current verdict
 
-SecretAI JEDI remains **acceptable with conditions** as a direct-instance
-provider. Configure `accepted_subjects` with a reviewed workload ID wherever
-known serving software is required, and review each compose change before
-updating the allowlist. Source and platform provenance remain open for strict
-inclusion. RYTN was unreachable during this review.
+The reviewed JEDI deployment remains **acceptable with conditions** for
+direct-instance use. Configure `accepted_subjects` with a reviewed workload ID
+wherever known serving software is required, and review each compose change
+before updating the allowlist. Source and platform provenance remain open for
+strict inclusion. RYTN was unreachable during this review, and its current
+deployment remains unverified.
 
 ### Live checks (2026-11-23 20:07–20:11 PST)
 
@@ -76,9 +77,10 @@ inclusion. RYTN was unreachable during this review.
   unavailable during the check. The guest OS measurement matched SCRT's
   artifact registry.
 - **Auth and metering transport.** The compose sets `SKIP_SSL_VALIDATION=true`
-  for Caddy, uses `lcd.secret.adrius.starshell.net` for key validation, and
-  sends metering to `https://secretai.scrtlabs.com`. This raises concerns for
-  key validation integrity and metering metadata.
+  for Caddy. What the flag disables could not be confirmed without the deployed
+  Caddy source. If it disables certificate validation on the key-validation and
+  metering calls, their integrity depends on the network path. Request content
+  is not involved.
 - **Public usage metadata.** `/metrics` and `/gpu-status` responded without
   authentication, exposing aggregate request and token counts, key counts,
   and GPU load.
