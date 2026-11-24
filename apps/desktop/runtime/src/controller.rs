@@ -51,6 +51,7 @@ const CATALOG_REFRESH: std::time::Duration = std::time::Duration::from_secs(10 *
 pub struct RuntimeOptions {
     pub launcher: Arc<dyn VerifierLauncher>,
     pub helper_path: PathBuf,
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     pub staged_helper: Option<PathBuf>,
     pub task_runtime: Handle,
     pub agent_configuration: bool,
@@ -87,6 +88,7 @@ pub struct DesktopRuntime {
     exiting: AtomicBool,
     recovery: crate::recovery::Recovery,
     helper_path: PathBuf,
+    #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
     staged_helper: Option<PathBuf>,
     agent_configuration: bool,
     agent_access_error: Option<String>,
@@ -236,6 +238,7 @@ impl DesktopRuntime {
         let RuntimeOptions {
             launcher,
             helper_path,
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             mut staged_helper,
             task_runtime,
             agent_configuration,
@@ -340,6 +343,7 @@ impl DesktopRuntime {
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
             helper_path,
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             staged_helper,
             agent_configuration,
             agent_access_error,

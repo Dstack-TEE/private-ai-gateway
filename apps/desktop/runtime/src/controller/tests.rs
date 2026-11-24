@@ -21,6 +21,7 @@ fn launch_requires_instance_ownership_before_initialization() {
         let result = DesktopRuntime::launch(RuntimeOptions {
             launcher: Arc::new(NoVerifier),
             helper_path: app_data_dir().unwrap().join("helper"),
+            #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
             staged_helper: None,
             task_runtime: executor.handle().clone(),
             agent_configuration: true,
@@ -116,6 +117,7 @@ fn test_runtime_with(
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         staged_helper: Some(directory.join("helper")),
         agent_configuration: true,
         agent_access_error: None,
