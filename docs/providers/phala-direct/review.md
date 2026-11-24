@@ -30,9 +30,11 @@ trust boundary remains the per-model dstack CVM.
 
 ### Verdict
 
-Still **acceptable with conditions**. The June version 2 condition is met.
-Strict inclusion requires review of PIG source, runtime policy and log
-handling, reviewed compose and image pins, enforced TCB and OS policy, and
+Phala Direct is **acceptable with conditions** for version 2 TLS channel
+binding. Strict confidential-inference admission is withheld until log
+handling is shown to keep request content inside the TEE and the runtime
+policy is reviewed. Strict inclusion also requires PIG source review,
+reviewed Compose and image pins, enforced TCB and OS policy, and
 model-weight provenance.
 
 ### Live check (20:08–20:20 PST)
@@ -54,13 +56,19 @@ model-weight provenance.
 1. **Producer review.** PIG's version 2 binding matches the adapter's
    requirements. The broader producer and ingress source review remains open.
    [PIG attestation source](https://github.com/Phala-Network/phala-inference-guard/blob/v0.12.41/internal/runtime/attestation/report.go)
-2. **Log handling (criterion 5).** Strict inclusion requires evidence that
-   log handling keeps request content inside the TEE.
+2. **Log handling (criterion 5).** The measured production Compose exports
+   container and kernel logs to a collector outside the CVM with
+   credential-only redaction. PIG documents that it logs no request bodies.
+   The serving-engine logs were not reviewed, so whether request content
+   reaches the collector remains unverified.
+   [PIG logging documentation](https://github.com/Phala-Network/phala-inference-guard/blob/v0.12.41/docs/OBSERVABILITY.md)
 3. **Compose and image provenance (criteria 6, 7 and 13).** The adapter checks
-   compose integrity. The runtime policy of the measured production Compose
-   was not reviewed, and not every measured image digest was mapped to a
-   published release. Strict inclusion still requires a reviewed allowlist
-   and public pre-rollout publication of measurements.
+   Compose integrity. Phala publishes no measurements ahead of rollout. A
+   partial read of the measured Compose found settings that need review,
+   including privileged serving containers. The full runtime policy was not
+   reviewed. Some measured image digests remain unmapped to a published
+   release. Strict inclusion still requires a reviewed allowlist and public
+   pre-rollout publication of measurements.
 4. **TCB and OS policy (criterion 14).** The adapter records both claims.
    Strict inclusion requires enforcing them.
 5. **Model weights.** Weight provenance remains unknown to the gateway.

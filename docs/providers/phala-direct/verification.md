@@ -104,7 +104,7 @@ The adapter records the classification and does not enforce it. A relying party 
 - A non-current TCB state is recorded rather than rejected by the bridge.
 - Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
 - The compose check proves the compose was measured. The adapter does not compare the compose or image digests with an operator allowlist.
-- The adapter does not assess log content or verify that request content stays inside the CVM when logs are exported.
+- The measured production Compose exports container and kernel logs outside the CVM with credential-only redaction. Whether the exported logs carry request content is outside the scope of adapter verification.
 - GPU evidence is an online existence and nonce check. It is not hardware-bound to the serving CPU TEE and does not prove which GPU served a request.
 - Model weights are not measured into the accepted identity.
 - The producer (PIG or dstack-vllm-proxy) and the external dstack verifier are additional trust and availability dependencies.
