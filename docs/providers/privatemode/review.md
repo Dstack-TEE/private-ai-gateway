@@ -16,11 +16,10 @@ through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
 > release. The GHCR `v1.64.0` and `latest` tags both resolve to the pinned
 > digest above.
 >
-> The production replica reached through `tee.redpill.ai` passed `pap verify`
-> checks `id-1` through `id-4` and `id-6` with a fresh nonce and TDX TCB status
-> `UpToDate`. The verifier skipped `id-5` because the command supplied no
-> custody policy. The attested gateway commit was `3147f871` and the measured
-> Compose hash was
+> A fresh-nonce attestation from the production gateway passed `pap verify`
+> checks `id-1` through `id-4` and `id-6`, with TDX TCB status `UpToDate`.
+> The verifier skipped `id-5` because the command supplied no custody policy.
+> The measured production Compose hash was
 > `261760d004c92eab0b6bed59a55cf3214c65d2cb543a1bed6dff371cd2650a7a`.
 > The production Compose pins the v1.64.0 proxy digest with
 > `--api-key-fallback=always`, `--disable-prompt-cache=false`,
@@ -28,7 +27,7 @@ through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
 > `--nvidia-ocsp-revoked-grace-period=0`.
 >
 > The check found no change to the deployed trust boundary, session binding,
-> or adapter. It covered gateway attestation on one replica only. The latest
+> or adapter. It covered production gateway attestation. The latest
 > per-session Privatemode receipt evidence is from the 2026-11-14 run below.
 > The verdict remains **acceptable with conditions**.
 
