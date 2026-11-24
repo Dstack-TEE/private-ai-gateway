@@ -18,7 +18,7 @@ write .config/opencode/opencode.json (600) sha256:db7f631510da
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenCode provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
 # opencode refuses an OpenCode 2 provider
 write .config/opencode/opencode.json (600) sha256:35fcebb6700e
-connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's merged config changes the gateway-owned field /providers/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json without changing unrelated providers, or Disconnect to restore the original config.
+connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: The OpenCode provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting
 # opencode refuses an OpenCode 2 provider in another layer
 write .config/opencode/opencode.jsonc (600) sha256:626f0280629a
 connect opencode model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenCode's merged config changes the gateway-owned field /providers/private-ai-proxy. Access is disabled. Review $HOME/.config/opencode/opencode.json, $HOME/.config/opencode/opencode.jsonc without changing unrelated providers, or Disconnect to restore the original config.

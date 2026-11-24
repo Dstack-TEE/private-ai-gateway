@@ -285,19 +285,15 @@ fn opencode_process_overrides_follow_official_merge_order() {
                 "{\"model\":\"private-ai-proxy/test\",}",
             );
         }
-        let result = sandbox.projector.check_opencode_merge(&expected, true);
+        let result = sandbox.projector.check_opencode_merge(&expected);
         assert_eq!(
             result.is_ok(),
-            matches!(case.as_str(), "explicit" | "directory"),
+            matches!(
+                case.as_str(),
+                "global" | "explicit" | "directory" | "content"
+            ),
             "{case}: {result:?}"
         );
-        if case == "global" {
-            // A default model is not owned when the user did not select one.
-            assert!(sandbox
-                .projector
-                .check_opencode_merge(&expected, false)
-                .is_ok());
-        }
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -341,6 +337,85 @@ fn opencode_process_overrides_follow_official_merge_order() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn opencode_policies_use_the_last_matching_provider_rule() {
+    let sandbox = sandbox("opencode-policies");
+    let provider = serde_json::json!({
+        "private-ai-proxy": {"name": PRODUCT_NAME}
+    });
+    let config = |policies| {
+        ConfigDoc::Json(serde_json::json!({"provider": provider, "policies": policies}).to_string())
+    };
+    assert!(sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "*", "effect": "deny"},
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "allow"}
+        ])))
+        .is_ok());
+    let refusal = sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "*", "effect": "allow"},
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "deny"}
+        ])))
+        .unwrap_err();
+    assert!(refusal.contains("policies deny provider.use"));
+    let refusal = sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "allow"},
+            {"action": "provider.use", "resource": "private-*", "effect": "deny"}
+        ])))
+        .unwrap_err();
+    assert!(refusal.contains("policies deny provider.use"));
+}
+
+#[test]
+fn audit_opencode_v2_projection_uses_native_provider_keys() {
+    let sandbox = sandbox("audit-opencode-v2-projection");
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"providers":{"other":{"name":"User provider"}},"model":{"providerID":"other","model":"native"}}"#,
+    );
+    let catalog = catalog();
+    let preview =
+        sandbox
+            .projector
+            .preview(Agent::OpenCode, true, Some(&catalog), &claude_options());
+    assert!(preview.is_ok(), "{preview:?}");
+    let preview = preview.unwrap();
+    let result = sandbox.projector.apply(
+        Agent::OpenCode,
+        true,
+        &preview.revision,
+        Some(&catalog),
+        &claude_options(),
+    );
+    assert!(result.is_ok(), "{result:?}");
+    let status = result.unwrap();
+    assert!(status.authorized, "{status:?}");
+    let config = doc(&sandbox, Agent::OpenCode);
+    assert!(config.contains(&["providers", "private-ai-proxy"]));
+    assert!(!config.contains(&["provider", "private-ai-proxy"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_agent_config_is_refused_at_preview() {
+    let sandbox = sandbox("symlink-preview");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let target = path.with_file_name("target.json");
+    write(&target, "{}");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let error = sandbox
+        .projector
+        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+        .unwrap_err();
+    assert!(error.to_string().contains("symlinked"));
 }
 
 #[test]

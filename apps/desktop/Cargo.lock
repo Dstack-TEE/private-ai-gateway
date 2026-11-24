@@ -5017,6 +5017,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-util",
+ "glob",
  "hex",
  "jsonc-parser",
  "libc",

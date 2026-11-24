@@ -4,7 +4,7 @@
 //! model-registry.ts gives them precedence over stored auth.
 
 use super::*;
-use serde_json::json;
+use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
@@ -88,13 +88,189 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
     if doc.contains(PROVIDER_PATH)
         && !prior.is_some_and(|record| {
             record.fields.iter().any(|field| {
-                field.path == owned(PROVIDER_PATH) && field.value == doc.get_value(PROVIDER_PATH)
+                field.path == owned(PROVIDER_PATH) && holds_managed_field(Agent::OhMyPi, doc, field)
             })
         })
     {
         return Err("The Oh My Pi private-ai-proxy provider already exists outside this connection; it will not be overwritten".into());
     }
     Ok(())
+}
+
+pub(super) fn validate_settings(
+    path: &Path,
+    projection: &ConfigDoc,
+    catalog: Option<&Catalog>,
+) -> Result<Option<String>, String> {
+    let Some(settings) = selection::omp_settings(path)? else {
+        return Ok(None);
+    };
+    let disabled = filter_array(&settings, "disabledProviders");
+    let (global, scoped) = filter_values(&disabled, "providers");
+    if global.contains(&PROVIDER) {
+        return Err("Oh My Pi disabledProviders excludes private-ai-proxy; resolve that filter before connecting".into());
+    }
+    if scoped.iter().any(|scope| scope.contains(&PROVIDER)) {
+        return Ok(Some(
+            "Oh My Pi disabledProviders excludes private-ai-proxy in a path-scoped configuration."
+                .into(),
+        ));
+    }
+
+    let enabled = filter_array(&settings, "enabledModels");
+    let (global, scoped) = filter_values(&enabled, "models");
+    if global.is_empty() && scoped.is_empty() {
+        return Ok(None);
+    }
+    let ids = chat_model_ids(projection, catalog);
+    if let Some(reason) = model_filter_notice(&global, &ids, false) {
+        return Ok(Some(format!("Oh My Pi enabledModels {reason}.")));
+    }
+    // A scope adds to the global list. When a global selector matches a PAP
+    // model, further selectors cannot exclude it.
+    Ok(scoped
+        .iter()
+        .find_map(|scope| model_filter_notice(scope, &ids, !global.is_empty()))
+        .map(|reason| format!("Oh My Pi path-scoped enabledModels {reason}.")))
+}
+
+fn filter_array(settings: &ConfigDoc, key: &str) -> Vec<Value> {
+    match settings.get_value(&[key]).map(|value| value.to_json()) {
+        Some(Value::Array(entries)) => entries,
+        _ => Vec::new(),
+    }
+}
+
+// settings.ts@v19.1.1 resolvePathScopedArray adds applicable scoped strings
+// to the unscoped strings. PAP has no Oh My Pi session cwd, so it reports a
+// possible scope conflict without treating it as a global provider block.
+fn filter_values<'a>(entries: &'a [Value], value_key: &str) -> (Vec<&'a str>, Vec<Vec<&'a str>>) {
+    let mut global = Vec::new();
+    let mut scoped = Vec::new();
+    for entry in entries {
+        if let Some(id) = entry.as_str() {
+            global.push(id);
+        } else if ["path", "paths", "pathPrefix", "pathPrefixes"]
+            .iter()
+            .any(|key| value_strings(entry.get(key)).next().is_some())
+        {
+            let values: Vec<_> = ["values", "items", value_key]
+                .iter()
+                .flat_map(|key| value_strings(entry.get(key)))
+                .collect();
+            if !values.is_empty() {
+                scoped.push(values);
+            }
+        }
+    }
+    (global, scoped)
+}
+
+fn value_strings(value: Option<&Value>) -> impl Iterator<Item = &str> {
+    value.and_then(Value::as_str).into_iter().chain(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str),
+    )
+}
+
+fn chat_model_ids(projection: &ConfigDoc, catalog: Option<&Catalog>) -> Vec<String> {
+    if let Some(catalog) = catalog {
+        return catalog
+            .models
+            .iter()
+            .filter(|model| model.supports(Surface::ChatCompletions))
+            .map(|model| model.id().to_lowercase())
+            .collect();
+    }
+    // Token-only scans have no remote catalog. The native projection has chat rows.
+    let Some(ConfigValue::Json(Value::Array(rows))) =
+        projection.get_value(&["providers", PROVIDER, "models"])
+    else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .map(str::to_lowercase)
+        .collect()
+}
+
+// model-resolver.ts@v19.1.1 matches both full and bare IDs, including a
+// thinking suffix. Unsupported selector syntax is advisory.
+fn model_filter_notice(
+    patterns: &[&str],
+    ids: &[String],
+    global_match: bool,
+) -> Option<&'static str> {
+    let mut matched = global_match;
+    for pattern in patterns {
+        let (base, literal_first) = split_thinking_suffix(pattern);
+        let result = (|| {
+            if literal_first && pattern_matches(pattern, ids, false)? {
+                return Some(true);
+            }
+            pattern_matches(base, ids, true)
+        })();
+        match result {
+            Some(value) => matched |= value,
+            None => return Some("uses a selector Private AI Proxy cannot evaluate"),
+        }
+    }
+    (!patterns.is_empty() && !matched).then_some("appears to exclude all Private AI Proxy models")
+}
+
+// model-selector.ts and thinking.ts@v19.1.1 accept exact thinking levels
+// and unambiguous prefixes. Let literal IDs or globs ending in :max or
+// :auto match first, as model-resolver.ts does.
+fn split_thinking_suffix(pattern: &str) -> (&str, bool) {
+    let Some((base, suffix)) = pattern.rsplit_once(':') else {
+        return (pattern, false);
+    };
+    let levels = [
+        "inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+    ];
+    let mut matching = levels
+        .iter()
+        .filter(|level| suffix.len() >= 2 && level.starts_with(suffix));
+    match (matching.next(), matching.next()) {
+        (Some(level), None) => (base, *level == "max"),
+        _ if suffix == "auto" => (base, true),
+        _ => (pattern, false),
+    }
+}
+
+fn pattern_matches(pattern: &str, ids: &[String], fuzzy: bool) -> Option<bool> {
+    // Bun supports syntax outside the Rust glob crate's grammar.
+    if pattern.starts_with(['!', '@'])
+        || pattern.contains(['{', '}', '\\'])
+        || ["?(", "*(", "+(", "@(", "!(", "[^"]
+            .iter()
+            .any(|part| pattern.contains(part))
+    {
+        return None;
+    }
+    let pattern = pattern.to_lowercase();
+    if !pattern.contains(['*', '?', '[']) {
+        return Some(ids.iter().any(|id| {
+            id == &pattern
+                || pattern
+                    .strip_prefix(PROVIDER)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    == Some(id.as_str())
+                || (fuzzy && !pattern.is_empty() && !pattern.contains('/') && id.contains(&pattern))
+        }));
+    }
+    let pattern = glob::Pattern::new(&pattern).ok()?;
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..glob::MatchOptions::new()
+    };
+    Some(ids.iter().any(|id| {
+        pattern.matches_with(id, options)
+            || pattern.matches_with(&format!("{PROVIDER}/{id}"), options)
+    }))
 }
 
 pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
@@ -110,6 +286,12 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             cost: Cost::Complete,
         },
     );
+    let models: Vec<_> = models
+        .into_iter()
+        .zip(&catalog.models)
+        .filter_map(|(row, model)| model.supports(Surface::ChatCompletions).then_some(row))
+        .collect();
+    let count = models.len();
     Ok(vec![generated_catalog(
         PROVIDER_PATH,
         json!({
@@ -118,7 +300,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
             "apiKey":format!("!{}", inputs.credential_command(Agent::OhMyPi)?),
             "models":models,
         }),
-        catalog.models.len(),
+        count,
     )])
 }
 

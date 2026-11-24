@@ -257,6 +257,25 @@ unlocked OS keychain for a process running as you.
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
+- **Agent model choices stay user-owned.** Changing an agent's model keeps its
+  connection authorized. An unavailable model or one from another provider
+  can show a notice. Changing routing or credential settings inside the
+  Private AI Proxy provider pauses that agent without restoring its file
+  while protection is running. Reconnect projects the recorded settings again,
+  and Disconnect or stopping protection restores the saved configuration.
+  OpenCode 2 configurations use the native `providers` provider shape when
+  their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
+  shape. In Oh My Pi's companion `config.yml` or `config.yaml`, a global
+  `disabledProviders` entry for Private AI Proxy pauses access. Path-scoped
+  provider filters and `enabledModels` restrictions can show a notice while
+  the connection stays authorized.
+  Adding a Claude Code provider switch pauses access. Reconnect to restore
+  Private AI Proxy routing.
+- **Agent integration limits.** Claude Code project `.claude/settings.json` and
+  `.claude/settings.local.json` can override `ANTHROPIC_BASE_URL`. Codex's
+  `managed_config.toml` is outside this integration. Oh My Pi project config
+  and non-default roles such as `smol`, `slow`, `plan` and `commit` are not
+  routed by this connection.
 - Clients do not check whether the gateway runs a production or development dstack
   OS image. A development image permits operator access to the gateway. Users who
   need assurance about the OS image should verify the quote, event log, and VM

@@ -259,6 +259,7 @@ impl ConfigDoc {
     pub fn as_json(&self) -> Option<Value> {
         match self {
             Self::Json(text) => json_value(text, true).ok(),
+            Self::Json5(text) => json_value(text, false).ok(),
             _ => None,
         }
     }

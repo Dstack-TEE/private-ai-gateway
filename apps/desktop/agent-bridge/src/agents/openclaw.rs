@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["models", "providers", PROVIDER];
 const SECRET_PATH: &[&str] = &["secrets", "providers", PROVIDER];
-const PRIMARY_PATH: &[&str] = &["agents", "defaults", "model", "primary"];
 
 pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
     let catalog = inputs
@@ -81,7 +80,10 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         },
     ];
     if let Some(id) = selected {
-        result.push(set(PRIMARY_PATH, format!("{PROVIDER}/{id}")));
+        result.push(set(
+            model_selection_paths(Agent::OpenClaw)[0].path,
+            format!("{PROVIDER}/{id}"),
+        ));
     }
     Ok(result)
 }
@@ -119,7 +121,8 @@ pub(super) fn validate_config(doc: &ConfigDoc, prior: Option<&Connection>) -> Re
             if index + 1 == path.len() {
                 let ours = prior.is_some_and(|record| {
                     record.fields.iter().any(|field| {
-                        field.path == owned(path) && field.value == doc.get_value(path)
+                        field.path == owned(path)
+                            && holds_managed_field(Agent::OpenClaw, doc, field)
                     })
                 });
                 if !ours {
@@ -190,9 +193,36 @@ pub(super) fn validate_selection(doc: &ConfigDoc, options: &ConnectOptions) -> R
 }
 
 pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {
-    doc.get_str(PRIMARY_PATH)?
+    doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)?
         .strip_prefix(&format!("{PROVIDER}/"))
         .map(str::to_owned)
+}
+
+// types.agents-shared.ts@78d8fcf defines a string or an object with optional
+// primary and fallbacks. An entry can override only the fallbacks.
+pub(super) fn entry_models(doc: &ConfigDoc) -> Vec<String> {
+    let Some(ConfigValue::Json(root)) = doc.get_value(&[]) else {
+        return Vec::new();
+    };
+    root.pointer("/agents/entries")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|entries| entries.values())
+        .filter_map(|entry| entry.get("model"))
+        .flat_map(|model| {
+            let primary = model
+                .as_str()
+                .or_else(|| model.get("primary").and_then(Value::as_str));
+            let fallbacks = model
+                .get("fallbacks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            primary.into_iter().chain(fallbacks)
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
@@ -355,8 +385,18 @@ fn validate_command_text(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), String> {
-    let command = helper_path(source, token_path)?;
+    let staged = helper_path(source, token_path)?;
+    validate_staged_helper(source, &staged, token_path)
+}
+
+pub(super) fn validate_staged_helper(
+    source: &Path,
+    staged: &Path,
+    token_path: &Path,
+) -> Result<(), String> {
+    let command = helper_path(staged, token_path)?;
     validate_command_text(path_text(&command)?)?;
     #[cfg(unix)]
     {
@@ -375,7 +415,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
     }
     #[cfg(windows)]
     windows::validate_helper(&command)?;
-    if source != command
+    if source != staged
         && !same_content(source, &command)
             .map_err(|_| "Cannot verify the staged OpenClaw helper against this installation")?
     {
@@ -655,18 +695,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            normal.get_str(PRIMARY_PATH).as_deref(),
+            normal
+                .get_str(model_selection_paths(Agent::OpenClaw)[0].path)
+                .as_deref(),
             Some("external/original")
         );
-        doc.set_value(PRIMARY_PATH, &ConfigValue::Str("external/new".into()))
-            .unwrap();
+        doc.set_value(
+            model_selection_paths(Agent::OpenClaw)[0].path,
+            &ConfigValue::Str("external/new".into()),
+        )
+        .unwrap();
         doc.set_value(
             &["agents", "defaults", "model", "fallbacks"],
             &ConfigValue::List(vec!["external/new-fallback".into()]),
         )
         .unwrap();
         restore(&mut doc, &record, &crate::secrets::MemoryStore::default()).unwrap();
-        assert_eq!(doc.get_str(PRIMARY_PATH).as_deref(), Some("external/new"));
+        assert_eq!(
+            doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)
+                .as_deref(),
+            Some("external/original")
+        );
         assert_eq!(
             doc.get_value(&["agents", "defaults", "model", "fallbacks"]),
             Some(ConfigValue::List(vec!["external/new-fallback".into()]))

@@ -115,6 +115,16 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
         .contains("DEEPSEEK_API_KEY: sk-user"));
     assert_eq!(fs::read_to_string(&profile).unwrap(), profile_text);
 
+    let edited =
+        ConfigDoc::parse(Format::YamlList, &fs::read_to_string(&files.patch).unwrap()).unwrap();
+    edited
+        .entry(&EntryKey::id("agent-default-model"))
+        .unwrap()
+        .unwrap()
+        .set_str(&["config", "model"], "user-model")
+        .unwrap();
+    write(&files.patch, &edited.render().unwrap());
+
     disconnect(&sandbox, Agent::Dsh);
     assert_eq!(fs::read_to_string(&files.patch).unwrap(), patch);
     assert_eq!(fs::read_to_string(&files.credentials).unwrap(), credentials);

@@ -1,5 +1,12 @@
 use super::*;
 
+pub(super) const CLAUDE_PROVIDER_SWITCHES: &[&str] = &[
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_MANTLE",
+];
+
 /// Everything a projection is computed from.
 pub(super) struct Inputs<'a> {
     pub(super) file_credentials: bool,
@@ -88,7 +95,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 number(&provider(&["auth", "refresh_interval_ms"]), 0),
             ];
             if let Some(model) = default_model {
-                fields.push(set(&["model"], model));
+                fields.push(set(model_selection_paths(Agent::Codex)[0].path, model));
             }
             fields
         }
@@ -117,9 +124,15 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 ),
                 absent(&["env", "ANTHROPIC_AUTH_TOKEN"]),
                 absent(&["env", "ANTHROPIC_API_KEY"]),
+                absent(&["env", "ANTHROPIC_MODEL"]),
             ];
+            fields.extend(
+                CLAUDE_PROVIDER_SWITCHES
+                    .iter()
+                    .map(|key| absent(&["env", key])),
+            );
             if let Some(model) = default_model {
-                fields.push(set(&["env", "ANTHROPIC_MODEL"], model));
+                fields.push(set(model_selection_paths(Agent::ClaudeCode)[0].path, model));
             }
             fields
         }
@@ -132,7 +145,10 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                 catalog.models.len(),
             )];
             if let Some(model) = default_model {
-                fields.push(set(&["model"], format!("{provider}/{model}")));
+                fields.push(set(
+                    model_selection_paths(Agent::OpenCode)[0].path,
+                    format!("{provider}/{model}"),
+                ));
             }
             fields
         }
@@ -162,10 +178,12 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                         .map_err(AgentError::ConfigurationConflict)?,
                 ),
                 set(&["model", "provider"], format!("custom:{provider}")),
+                absent(&["model", "base_url"]),
+                absent(&["model", "api_mode"]),
             ];
             if let Some(model) = default_model {
-                fields.push(set(&["providers", provider, "default_model"], model));
-                fields.push(set(&["model", "default"], model));
+                fields.push(set(model_selection_paths(Agent::Hermes)[1].path, model));
+                fields.push(set(model_selection_paths(Agent::Hermes)[0].path, model));
             }
             fields
         }
@@ -204,6 +222,32 @@ pub(super) fn opencode_provider(
         },
         "models": serde_json::Value::Object(models),
     }))
+}
+
+pub(super) fn opencode_provider_v2(provider: &serde_json::Value) -> serde_json::Value {
+    let mut native = serde_json::Map::new();
+    if let Some(package) = provider.get("npm") {
+        native.insert("package".into(), package.clone());
+    }
+    if let Some(name) = provider.get("name") {
+        native.insert("name".into(), name.clone());
+    }
+    if let Some(options) = provider
+        .get("options")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut settings = serde_json::Map::new();
+        for key in ["baseURL", "apiKey", "headers", "body"] {
+            if let Some(value) = options.get(key) {
+                settings.insert(key.into(), value.clone());
+            }
+        }
+        native.insert("settings".into(), serde_json::Value::Object(settings));
+    }
+    if let Some(models) = provider.get("models") {
+        native.insert("models".into(), models.clone());
+    }
+    serde_json::Value::Object(native)
 }
 
 /// OpenCode's `{file:<path>}` substitution, which no library writes. It ends

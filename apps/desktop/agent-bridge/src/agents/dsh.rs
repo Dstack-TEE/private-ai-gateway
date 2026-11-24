@@ -115,11 +115,11 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         )
         .in_entry(PI_AI),
         set(&["config", "provider"], PROVIDER).in_entry(DEFAULT_MODEL),
-        set(&["config", "model"], model).in_entry(DEFAULT_MODEL),
+        set(model_selection_paths(Agent::Dsh)[0].path, model).in_entry(DEFAULT_MODEL),
         // An effort chosen for another provider does not apply to these models.
         absent(&["config", "reasoningEffort"]).in_entry(DEFAULT_MODEL),
         set(&["config", "provider"], PROVIDER).in_entry(ACP),
-        set(&["config", "model"], model).in_entry(ACP),
+        set(model_selection_paths(Agent::Dsh)[1].path, model).in_entry(ACP),
         boolean(&["disabled"], true).in_entry(WEB_SEARCH),
         boolean(&["disabled"], false).in_entry(CREDENTIALS),
     ])
@@ -128,7 +128,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
 pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {
     let item = doc.entry(&key(DEFAULT_MODEL)).ok().flatten()?;
     (item.get_str(&["config", "provider"]).as_deref() == Some(PROVIDER))
-        .then(|| item.get_str(&["config", "model"]))
+        .then(|| item.get_str(model_selection_paths(Agent::Dsh)[0].path))
         .flatten()
 }
 

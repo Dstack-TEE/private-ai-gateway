@@ -60,6 +60,73 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
 }
 
 #[test]
+fn pi_default_model_edit_restores_when_provider_still_belongs_to_pap() {
+    let sandbox = sandbox("pi-selector-restore");
+    let config = Agent::Pi.config_path(&sandbox.home, false);
+    write(&config, "{}");
+    let settings = config.with_file_name("settings.json");
+    write(
+        &settings,
+        r#"{"defaultProvider":"original","defaultModel":"native"}"#,
+    );
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::Pi, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Json, &fs::read_to_string(&settings).unwrap()).unwrap();
+    doc.set_str(&["defaultModel"], "user-choice").unwrap();
+    write(&settings, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::Pi);
+    assert_eq!(
+        ConfigDoc::parse(Format::Json, &fs::read_to_string(&settings).unwrap())
+            .unwrap()
+            .get_str(&["defaultModel"])
+            .as_deref(),
+        Some("native")
+    );
+}
+
+#[test]
+fn omp_default_role_edit_restores_private_model_on_disconnect() {
+    let sandbox = sandbox("omp-selector-restore");
+    let config = Agent::OhMyPi.config_path(&sandbox.home, false);
+    write(&config, "{}");
+    let settings = config.with_file_name("config.yml");
+    write(&settings, "modelRoles:\n  default: original/native\n");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OhMyPi, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&settings).unwrap()).unwrap();
+    doc.set_str(&["modelRoles", "default"], "private-ai-proxy/user-choice")
+        .unwrap();
+    write(&settings, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::OhMyPi);
+    assert_eq!(
+        ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&settings).unwrap())
+            .unwrap()
+            .get_str(&["modelRoles", "default"])
+            .as_deref(),
+        Some("original/native")
+    );
+}
+
+#[test]
+fn hermes_disconnect_restores_pap_model_endpoint_overrides() {
+    let sandbox = sandbox("hermes-model-endpoint-restore");
+    let config = Agent::Hermes.config_path(&sandbox.home, false);
+    write(&config, "model:\n  default: original\n");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::Hermes, &catalog, &claude_options());
+    let mut doc = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&config).unwrap()).unwrap();
+    doc.set_str(&["model", "base_url"], "http://127.0.0.1:4180/v1")
+        .unwrap();
+    doc.set_str(&["model", "api_mode"], "chat_completions")
+        .unwrap();
+    write(&config, &doc.render().unwrap());
+    disconnect(&sandbox, Agent::Hermes);
+    let restored = ConfigDoc::parse(Format::Yaml, &fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(restored.get_str(&["model", "base_url"]), None);
+    assert_eq!(restored.get_str(&["model", "api_mode"]), None);
+}
+
+#[test]
 fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     let sandbox = sandbox("link-restore-retry");
     let agent = Agent::ClaudeCode;
@@ -72,7 +139,7 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(!sandbox.projector.load_store().unwrap()[agent.id()]
         .fields
         .is_empty());
-    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_some());
     write(&config, &managed);
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
@@ -88,7 +155,72 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
-        Some(ConfigValue::Str("user-choice".into()))
+        Some(ConfigValue::Str("original".into()))
+    );
+}
+
+#[test]
+fn disconnect_restores_original_opencode_model_after_private_model_edit() {
+    let sandbox = sandbox("restore-private-opencode-model");
+    let agent = Agent::OpenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"model":"other/original","provider":{"other":{"name":"User provider"}}}"#,
+    );
+    let catalog = catalog();
+    apply_connect(&sandbox, agent, &catalog, &claude_options());
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["model"], "private-ai-proxy/phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+        Some("other/original")
+    );
+}
+
+#[test]
+fn reconnect_after_endpoint_drift_preserves_original_value() {
+    let sandbox = sandbox("reconnect-endpoint-drift");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid"}}"#,
+    );
+    let catalog = catalog();
+    connect(&sandbox);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["env", "ANTHROPIC_BASE_URL"], "https://drift.invalid")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let preview = sandbox
+        .projector
+        .preview(agent, true, Some(&catalog), &claude_options())
+        .unwrap();
+    assert!(
+        sandbox
+            .projector
+            .apply(
+                agent,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap()
+            .authorized
+    );
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent)
+            .get_str(&["env", "ANTHROPIC_BASE_URL"])
+            .as_deref(),
+        Some("https://original.invalid")
     );
 }
 
@@ -208,15 +340,15 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
         doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
         Some(ENDPOINT)
     );
+    assert_eq!(doc.get_str(&["env", "ANTHROPIC_MODEL"]), None);
     assert_eq!(
-        doc.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
+        doc.get_str(&["model"]).as_deref(),
         Some("openai/gpt-oss-20b")
     );
     assert!(doc
         .get_str(&["apiKeyHelper"])
         .unwrap()
         .contains("--agent-token claude-code"));
-    assert_eq!(doc.get_str(&["model"]).as_deref(), Some("opus"));
     let settings: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(settings["modelPicker"]["replaceBuiltInOptions"], true);
@@ -282,13 +414,11 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
         .unwrap();
     assert!(!sandbox.projector.scan(None).unwrap().1.is_empty());
 
-    // Make the config unwritable (a symlink target is refused) so the
-    // restore step fails after the record was tombstoned.
-    let dir = path.parent().unwrap().to_path_buf();
+    // Make the config invalid so the restore step fails after the record was
+    // tombstoned.
     let original = fs::read_to_string(&path).unwrap();
     fs::remove_file(&path).unwrap();
-    fs::write(dir.join("elsewhere.json"), &original).unwrap();
-    std::os::unix::fs::symlink(dir.join("elsewhere.json"), &path).unwrap();
+    fs::write(&path, "invalid json").unwrap();
     let options = ConnectOptions::default();
     let preview = sandbox
         .projector
@@ -318,8 +448,7 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
         .is_err());
 
     // Repair the config and retry: idempotent cleanup completes.
-    fs::remove_file(&path).unwrap();
-    fs::rename(dir.join("elsewhere.json"), &path).unwrap();
+    fs::write(&path, &original).unwrap();
     let preview = sandbox
         .projector
         .preview(Agent::ClaudeCode, false, None, &options)
@@ -504,4 +633,150 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
         .set_sync_parent(private_fs::sync_dir);
     disconnect(&sandbox, Agent::ClaudeCode);
     assert!(sandbox.projector.load_store().unwrap().is_empty());
+}
+
+#[test]
+fn claude_stop_restores_an_edited_owned_model_picker_and_start_regenerates_it() {
+    let sandbox = sandbox("claude-stop-edited-picker");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    let original_picker = config.get_value(&["modelPicker"]).unwrap();
+    config
+        .set_value(&["modelPicker"], &ConfigValue::Json(json!({"options": []})))
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    let stopped = doc(&sandbox, agent);
+    let failures = sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(stopped.get_value(&["modelPicker"]), None);
+    assert_eq!(
+        doc(&sandbox, agent).get_value(&["modelPicker"]),
+        Some(original_picker)
+    );
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+}
+
+#[test]
+fn dsh_disconnect_removes_an_appended_entry_with_only_its_model_edited() {
+    let sandbox = sandbox("dsh-disconnect-edited-model");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    config
+        .entry(&entry)
+        .unwrap()
+        .unwrap()
+        .set_str(&["config", "model"], "phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, agent);
+    assert!(doc(&sandbox, agent).entry(&entry).unwrap().is_none());
+}
+
+#[test]
+fn dsh_stop_removes_an_appended_entry_with_only_its_model_edited_and_start_reprojects() {
+    let sandbox = sandbox("dsh-stop-edited-model");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    config
+        .entry(&entry)
+        .unwrap()
+        .unwrap()
+        .set_str(&["config", "model"], "phala/qwen")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    let stopped = doc(&sandbox, agent);
+    let failures = sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(stopped.entry(&entry).unwrap().is_none());
+    assert_eq!(
+        dsh::selected_model(&doc(&sandbox, agent)).as_deref(),
+        Some("phala/qwen")
+    );
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+}
+
+#[test]
+fn dsh_disconnect_keeps_an_appended_entry_with_unrelated_user_edits() {
+    let sandbox = sandbox("dsh-keep-edited-entry");
+    let catalog = catalog();
+    let agent = Agent::Dsh;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent.config_path(&sandbox.home, false);
+    let config = doc(&sandbox, agent);
+    let entry = EntryKey::id("agent-default-model");
+    let mut item = config.entry(&entry).unwrap().unwrap();
+    item.set_str(&["config", "model"], "phala/qwen").unwrap();
+    item.set_str(&["config", "reasoningEffort"], "max").unwrap();
+    write(&path, &config.render().unwrap());
+    let expected = item.get_value(&[]);
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent)
+            .entry(&entry)
+            .unwrap()
+            .unwrap()
+            .get_value(&[]),
+        expected
+    );
+}
+
+#[test]
+fn openclaw_disconnect_prunes_only_empty_selector_containers_created_by_pap() {
+    let agent = Agent::OpenClaw;
+    let catalog = catalog();
+    for (original, after, edit) in [
+        (json!({}), None, false),
+        (
+            json!({"agents":{"entries":{"main":{}}}}),
+            Some(json!({"entries":{"main":{}}})),
+            false,
+        ),
+        (
+            json!({"agents":{"defaults":{"model":{}}}}),
+            Some(json!({"defaults":{"model":{}}})),
+            false,
+        ),
+        (
+            json!({}),
+            Some(json!({"defaults":{"model":{"fallbacks":["other/model"]}}})),
+            true,
+        ),
+    ] {
+        let sandbox = sandbox("openclaw-owned-selector-containers");
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, &original.to_string());
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        if edit {
+            let mut config = doc(&sandbox, agent);
+            config
+                .set_value(
+                    &["agents", "defaults", "model", "fallbacks"],
+                    &ConfigValue::List(vec!["other/model".into()]),
+                )
+                .unwrap();
+            write(&path, &config.render().unwrap());
+        }
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        disconnect(&sandbox, agent);
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["agents"]),
+            after.map(ConfigValue::Json),
+            "{original}"
+        );
+    }
 }

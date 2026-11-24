@@ -164,6 +164,15 @@ fn agents(value: &Value) -> String {
                 "Not connected"
             };
             let mut line = format!("{}  {}  {state}", text(&agent["id"]), text(&agent["name"]));
+            if let Some(path) = agent["configPath"].as_str().filter(|path| !path.is_empty()) {
+                line.push_str(&format!("\n  Config: {}", safe(path)));
+            }
+            if let Some(source) = agent["configPathSource"]
+                .as_str()
+                .filter(|source| !source.is_empty())
+            {
+                line.push_str(&format!(" (from {})", safe(source)));
+            }
             if let Some(attention) = agent["attention"].as_str().filter(|s| !s.is_empty()) {
                 line.push_str(&format!("\n  {}", safe(attention)));
             }

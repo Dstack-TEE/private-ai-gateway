@@ -109,6 +109,8 @@ async fn run() -> Result<(), String> {
     let options = RuntimeOptions {
         launcher,
         helper_path: directory.join(name("private-ai-proxy-helper")),
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        staged_helper: None,
         task_runtime: tokio::runtime::Handle::current(),
         agent_configuration,
         agent_access_error,

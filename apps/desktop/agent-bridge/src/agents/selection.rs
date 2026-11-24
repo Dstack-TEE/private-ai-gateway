@@ -173,6 +173,15 @@ fn read(path: &Path) -> Result<Option<String>, String> {
     }
 }
 
+pub(super) fn omp_settings(config: &Path) -> Result<Option<ConfigDoc>, String> {
+    let Some((file, path)) = location(Agent::OhMyPi, config, None)? else {
+        return Err("Missing Oh My Pi settings path".into());
+    };
+    read(&path)?
+        .map(|text| ConfigDoc::parse(file.format(), &text))
+        .transpose()
+}
+
 pub(super) fn fingerprint(
     agent: Agent,
     config: &Path,
@@ -300,7 +309,41 @@ pub(super) fn restoration(
         return Ok(None);
     };
     let mut doc = ConfigDoc::parse(journal.file.format(), &text)?;
-    let edit = restore(&mut doc, &journal.record(), secrets).map_err(|error| error.to_string())?;
+    let mut record = journal.record();
+    match journal.file {
+        File::Pi => {
+            let provider_holds = record
+                .fields
+                .iter()
+                .find(|field| field.path == ["defaultProvider".to_string()])
+                .is_some_and(|field| field.holds(doc.get_value(&["defaultProvider"]).as_ref()));
+            if provider_holds {
+                if let Some(field) = record
+                    .fields
+                    .iter_mut()
+                    .find(|field| field.path == ["defaultModel".to_string()])
+                {
+                    field.value = doc.get_value(&["defaultModel"]);
+                }
+            }
+        }
+        File::OmpYml | File::OmpYaml => {
+            if doc
+                .get_str(&["modelRoles", "default"])
+                .is_some_and(|model| model.starts_with("private-ai-proxy/"))
+            {
+                if let Some(field) = record
+                    .fields
+                    .iter_mut()
+                    .find(|field| field.path == ["modelRoles".to_string(), "default".to_string()])
+                {
+                    field.value = doc.get_value(&["modelRoles", "default"]);
+                }
+            }
+        }
+        File::DshCredentials => {}
+    }
+    let edit = restore(&mut doc, &record, secrets).map_err(|error| error.to_string())?;
     let after = doc.render()?;
     Ok(Some(Edit {
         path,

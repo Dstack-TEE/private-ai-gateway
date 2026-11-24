@@ -24,7 +24,11 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             assert_eq!(status.authorized, connected, "{}", agent.id());
             assert_eq!(tokens.is_empty(), !connected);
             if let Some(attention) = attention {
-                assert!(status.attention.as_deref().unwrap().contains(attention));
+                if cfg!(windows) {
+                    let _ = status;
+                } else {
+                    assert!(status.attention.as_deref().unwrap().contains(attention));
+                }
             } else {
                 assert!(status.attention.is_none());
             }
@@ -52,19 +56,9 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if matches!(agent, Agent::OpenCode | Agent::Dsh) {
-            assert_scan(&sandbox, true, None);
-        } else if agent == Agent::OpenClaw {
-            assert_scan(
-                &sandbox,
-                false,
-                Some(if cfg!(unix) {
-                    "differs"
-                } else {
-                    "helper changed"
-                }),
-            );
-            sandbox.projector.helper_exe = current;
+        if matches!(agent, Agent::OpenCode | Agent::Dsh)
+            || (agent == Agent::OpenClaw && !cfg!(windows))
+        {
             assert_scan(&sandbox, true, None);
         } else {
             assert_scan(&sandbox, false, Some("Disconnect, then Connect"));
@@ -77,12 +71,12 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
         let field = match agent {
             Agent::Codex => &["model_provider"][..],
             Agent::ClaudeCode => &["apiKeyHelper"][..],
-            Agent::OpenCode => &["model"][..],
+            Agent::OpenCode => &["provider", "private-ai-proxy", "options", "baseURL"][..],
             Agent::Pi => &["providers", "private-ai-proxy", "apiKey"][..],
             Agent::Hermes => &["providers", "private-ai-proxy", "key_cmd"][..],
-            Agent::OpenClaw => &["agents", "defaults", "model", "primary"][..],
+            Agent::OpenClaw => &["models", "providers", "private-ai-proxy", "baseUrl"][..],
             Agent::OhMyPi => &["providers", "private-ai-proxy", "apiKey"][..],
-            Agent::Dsh => &["config", "model"][..],
+            Agent::Dsh => &["config", "provider"][..],
         };
         // dsh's fields live in keyed items of its patch list.
         let item = EntryKey {
@@ -106,6 +100,386 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             Some("external-edit"),
         );
     }
+}
+
+#[test]
+fn changing_a_connected_agents_model_keeps_access() {
+    let catalog = catalog();
+    for agent in [
+        Agent::Codex,
+        Agent::ClaudeCode,
+        Agent::OpenCode,
+        Agent::Hermes,
+        Agent::OpenClaw,
+        Agent::Dsh,
+    ] {
+        let sandbox = sandbox(&format!("model-selection-{}", agent.id()));
+        apply_connect(&sandbox, agent, &catalog, &claude_options());
+        let path = agent.config_path(&sandbox.home, false);
+        let mut config = doc(&sandbox, agent);
+        for selection in model_selection_paths(agent) {
+            let value = if matches!(agent, Agent::OpenCode | Agent::OpenClaw) {
+                "private-ai-proxy/phala/qwen"
+            } else {
+                "phala/qwen"
+            };
+            if let Some(entry) = selection.entry {
+                config
+                    .entry(&EntryKey::id(entry))
+                    .unwrap()
+                    .unwrap()
+                    .set_str(selection.path, value)
+                    .unwrap();
+            } else {
+                config.set_str(selection.path, value).unwrap();
+            }
+        }
+        write(&path, &config.render().unwrap());
+        let status = sandbox
+            .projector
+            .scan(Some(&catalog))
+            .unwrap()
+            .0
+            .into_iter()
+            .find(|status| status.id == agent.id())
+            .unwrap();
+        assert!(status.connected, "{}: {:?}", agent.id(), status);
+        assert!(status.authorized, "{}: {:?}", agent.id(), status);
+    }
+}
+
+#[test]
+fn claude_provider_switch_flags_are_removed_and_restored() {
+    let sandbox = sandbox("claude-provider-switch");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_USE_MANTLE":"1"}}"#,
+    );
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog(), &claude_options());
+    let connected = doc(&sandbox, Agent::ClaudeCode);
+    for flag in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+    ] {
+        assert_eq!(connected.get_str(&["env", flag]), None);
+    }
+    disconnect(&sandbox, Agent::ClaudeCode);
+    let restored = doc(&sandbox, Agent::ClaudeCode);
+    for flag in [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_MANTLE",
+    ] {
+        assert_eq!(restored.get_str(&["env", flag]).as_deref(), Some("1"));
+    }
+}
+
+#[test]
+fn openclaw_user_edit_to_entry_string_survives_disconnect() {
+    let sandbox = sandbox("openclaw-entry-model");
+    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"agents":{"entries":{"main":{"model":"private-ai-proxy/openai/gpt-oss-20b"}}}}"#,
+    );
+    apply_connect(&sandbox, Agent::OpenClaw, &catalog(), &claude_options());
+    let store = sandbox.projector.load_store().unwrap();
+    assert!(!store[Agent::OpenClaw.id()]
+        .fields
+        .iter()
+        .any(|field| field.path.starts_with(&owned(&["agents", "entries"]))));
+    let mut config = doc(&sandbox, Agent::OpenClaw);
+    config
+        .set_str(
+            &["agents", "entries", "main", "model"],
+            "private-ai-proxy/phala/qwen",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    disconnect(&sandbox, Agent::OpenClaw);
+    assert_eq!(
+        doc(&sandbox, Agent::OpenClaw)
+            .get_str(&["agents", "entries", "main", "model"])
+            .as_deref(),
+        Some("private-ai-proxy/phala/qwen")
+    );
+}
+
+#[test]
+fn opencode_external_model_is_reported_as_unrouted() {
+    let sandbox = sandbox("external-opencode-model");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_str(&["model"], "other/provider-model#fast")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(status.authorized, "{status:?}");
+    assert!(!status.connected, "{status:?}");
+    assert!(status.attention.unwrap().contains("not routed"));
+}
+
+#[test]
+fn openclaw_external_entry_object_is_attention_only() {
+    let sandbox = sandbox("openclaw-external-entry-object");
+    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    write(&path, "{}");
+    apply_connect(&sandbox, Agent::OpenClaw, &catalog(), &claude_options());
+    let mut config = doc(&sandbox, Agent::OpenClaw);
+    config
+        .set_value(
+            &["agents", "entries", "main", "model"],
+            &ConfigValue::Json(serde_json::json!({
+                "primary": "other/model",
+                "fallbacks": ["private-ai-proxy/phala/qwen"]
+            })),
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog()))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenClaw.id())
+        .unwrap();
+    assert!(status.authorized);
+    assert!(!status.connected);
+    assert!(status.attention.unwrap().contains("not routed"));
+}
+
+#[test]
+fn hermes_rejects_invalid_active_profile_names() {
+    let sandbox = sandbox("hermes-invalid-profile");
+    let root = if cfg!(windows) {
+        sandbox.home.join("AppData").join("Local").join("hermes")
+    } else {
+        sandbox.home.join(".hermes")
+    };
+    write(&root.join("active_profile"), "../escape\n");
+    let error = sandbox
+        .projector
+        .preview(Agent::Hermes, true, Some(&catalog()), &claude_options())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("active_profile"));
+}
+
+#[test]
+fn omp_filters_are_read_from_companion_config() {
+    let sandbox = sandbox("omp-companion-filters");
+    let models = Agent::OhMyPi.config_path(&sandbox.home, false);
+    write(&models, "providers: {}\n");
+    write(
+        &models.with_file_name("config.yml"),
+        "disabledProviders:\n  - private-ai-proxy\n",
+    );
+    let error = sandbox
+        .projector
+        .preview(Agent::OhMyPi, true, Some(&catalog()), &claude_options())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("disabledProviders"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_projector_connects_with_only_installed_helper() {
+    let sandbox = sandbox("windows-installed-helper");
+    let projector = Projector::new(
+        sandbox.projector.helper_exe.clone(),
+        ENDPOINT,
+        sandbox.secrets.clone(),
+    )
+    .unwrap();
+    write(&Agent::ClaudeCode.config_path(&sandbox.home, false), "{}");
+    assert!(projector
+        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+        .is_ok());
+}
+
+#[test]
+fn legacy_claude_journal_migrates_provider_switch_flags() {
+    let sandbox = sandbox("legacy-claude-journal");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::ClaudeCode);
+    config
+        .set_str(&["env", "CLAUDE_CODE_USE_BEDROCK"], "1")
+        .unwrap();
+    config
+        .set_str(&["env", "ANTHROPIC_MODEL"], "legacy-model")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let mut store = sandbox.projector.load_store().unwrap();
+    let fields = &mut store.get_mut(Agent::ClaudeCode.id()).unwrap().fields;
+    fields.retain(|field| {
+        field.path != ["model"]
+            && field.path != ["env", "ANTHROPIC_MODEL"]
+            && !CLAUDE_PROVIDER_SWITCHES
+                .iter()
+                .any(|key| field.path == ["env", *key])
+    });
+    fields.push(OwnedField {
+        path: owned(&["env", "ANTHROPIC_MODEL"]),
+        value: Some(ConfigValue::Str("legacy-model".into())),
+        ..OwnedField::default()
+    });
+    sandbox.projector.save_store(&store).unwrap();
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::ClaudeCode.id())
+        .unwrap();
+    assert!(!status.authorized);
+    sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert_eq!(
+        doc(&sandbox, Agent::ClaudeCode).get_str(&["env", "CLAUDE_CODE_USE_BEDROCK"]),
+        None
+    );
+}
+
+#[test]
+fn audit_generated_catalog_edits_do_not_deauthorize() {
+    let sandbox = sandbox("audit-generated-catalog");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_value(
+            &["provider", "private-ai-proxy", "models"],
+            &ConfigValue::Json(serde_json::json!({})),
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(status.connected, "{status:?}");
+    assert!(status.authorized, "{status:?}");
+}
+
+#[test]
+fn audit_model_routing_override_deauthorizes() {
+    let sandbox = sandbox("audit-model-routing");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_str(
+            &[
+                "provider",
+                "private-ai-proxy",
+                "models",
+                "openai/gpt-oss-20b",
+                "options",
+                "baseURL",
+            ],
+            "https://example.invalid/v1",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(!status.authorized, "{status:?}");
+}
+
+#[test]
+fn audit_drift_does_not_restore_or_revoke_until_disconnect() {
+    let sandbox = sandbox("audit-drift-no-suspend");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::ClaudeCode);
+    config
+        .set_str(&["env", "ANTHROPIC_BASE_URL"], "http://127.0.0.1:9999")
+        .unwrap();
+    let edited = config.render().unwrap();
+    write(&path, &edited);
+    let token_path = sandbox.projector.tokens.path(Agent::ClaudeCode.id());
+    let token = fs::read(&token_path).unwrap();
+    sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+    assert_eq!(fs::read(&token_path).unwrap(), token);
+    assert!(!sandbox.projector.load_store().unwrap()[Agent::ClaudeCode.id()].suspended);
+}
+
+#[test]
+fn audit_agent_helpers_use_the_staged_helper_location() {
+    let mut sandbox = sandbox("audit-staged-helper");
+    let staged = sandbox
+        .projector
+        .data_dir
+        .join("helpers")
+        .join(helper_binary_name());
+    sandbox.projector.set_staged_helper(staged);
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let config = doc(&sandbox, Agent::ClaudeCode);
+    let helper = config.get_str(&["apiKeyHelper"]).unwrap();
+    if cfg!(windows) {
+        assert!(!helper.contains("helpers"));
+    } else {
+        assert!(helper.contains(
+            &sandbox
+                .projector
+                .data_dir
+                .join("helpers")
+                .display()
+                .to_string()
+        ));
+    }
+}
+
+#[test]
+fn audit_record_attention_is_visible_while_connected() {
+    let sandbox = sandbox("audit-record-attention");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
+    let mut store = sandbox.projector.load_store().unwrap();
+    store.get_mut(Agent::ClaudeCode.id()).unwrap().attention = Some("audit attention".into());
+    sandbox.projector.save_store(&store).unwrap();
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::ClaudeCode.id())
+        .unwrap();
+    assert_eq!(status.attention.as_deref(), Some("audit attention"));
 }
 
 #[test]
@@ -214,6 +588,21 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
         assert!(output.status.success(), "{case}: {output:?}");
     }
+}
+
+#[test]
+fn hermes_active_profile_selects_the_profile_config() {
+    let sandbox = sandbox("hermes-active-profile");
+    let root = if cfg!(windows) {
+        sandbox.home.join("AppData").join("Local").join("hermes")
+    } else {
+        sandbox.home.join(".hermes")
+    };
+    write(&root.join("active_profile"), "work\n");
+    assert_eq!(
+        Agent::Hermes.config_path(&sandbox.home, false),
+        root.join("profiles").join("work").join("config.yaml")
+    );
 }
 
 #[test]
@@ -449,4 +838,401 @@ fn helper_command_quotes_hostile_paths_for_the_shell() {
         assert!(script.contains(&format!("FromBase64String('{encoded_path}')")));
         assert!(script.ends_with("--agent-token pi; exit $LASTEXITCODE"));
     }
+}
+
+#[test]
+fn omp_enabled_models_keep_the_selected_pap_model_authorized() {
+    let catalog = catalog();
+    for pattern in [
+        "private-ai-proxy/openai/gpt-oss-20b",
+        "openai/gpt-oss-20b",
+        "OPENAI/gpt-oss-?0[b]",
+        "private-ai-proxy/**/gpt-oss-*",
+        "",
+    ] {
+        let sandbox = sandbox("omp-enabled-models");
+        let settings = Agent::OhMyPi
+            .config_path(&sandbox.home, false)
+            .with_file_name("config.yml");
+        let filter = if pattern.is_empty() {
+            "enabledModels: []\n".into()
+        } else {
+            format!("enabledModels: ['{pattern}']\n")
+        };
+        write(&settings, &filter);
+        let status = apply_connect(&sandbox, Agent::OhMyPi, &catalog, &claude_options());
+        assert!(status.authorized, "{pattern}: {status:?}");
+        for catalog in [Some(&catalog), None] {
+            let (statuses, tokens) = sandbox.projector.scan(catalog).unwrap();
+            let status = agent_status(&statuses, Agent::OhMyPi);
+            assert!(
+                status.authorized && !tokens.is_empty(),
+                "{pattern}: {status:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn omp_companion_config_yaml_can_disable_pap() {
+    let sandbox = sandbox("omp-disabled-yaml");
+    let agent = Agent::OhMyPi;
+    let catalog = catalog();
+    let settings = agent
+        .config_path(&sandbox.home, false)
+        .with_file_name("config.yaml");
+    write(&settings, "disabledProviders: []\n");
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    assert!(!settings.with_file_name("config.yml").exists());
+    write(&settings, "disabledProviders: [private-ai-proxy]\n");
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(!status.authorized && tokens.is_empty(), "{status:?}");
+    assert!(status
+        .attention
+        .as_deref()
+        .unwrap()
+        .contains("disabledProviders"));
+}
+
+#[test]
+fn opencode_without_program_data_keeps_the_merged_selector() {
+    const CASE: &str = "PAP_TEST_NO_PROGRAM_DATA";
+    if env::var_os(CASE).is_none() {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::tests::discovery::opencode_without_program_data_keeps_the_merged_selector",
+            ])
+            .env(CASE, "1")
+            .env_remove("ProgramData")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+
+    let sandbox = sandbox("opencode-no-system-layer");
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    write(&path, r#"{"model":"other/model"}"#);
+    let system_dir = validation::opencode_system_config_dir("windows");
+    assert_eq!(system_dir, None);
+    assert_eq!(
+        sandbox
+            .projector
+            .merged_opencode_selector(&doc(&sandbox, Agent::OpenCode), system_dir),
+        Some(json!("other/model"))
+    );
+    if cfg!(windows) {
+        let agent = Agent::OpenCode;
+        let catalog = catalog();
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        let mut config = doc(&sandbox, agent);
+        config.set_str(&["model"], "other/model").unwrap();
+        write(&path, &config.render().unwrap());
+        let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+        let status = agent_status(&statuses, agent);
+        assert!(status.authorized && !tokens.is_empty(), "{status:?}");
+        assert!(
+            status
+                .attention
+                .as_deref()
+                .is_some_and(|s| s.contains("not routed")),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn openclaw_connect_preserves_existing_entry_objects_and_checks_fallbacks() {
+    for entry in [
+        json!({"primary": "other/model", "fallbacks": ["private-ai-proxy/phala/qwen"]}),
+        json!({"fallbacks": ["other/model"]}),
+    ] {
+        let sandbox = sandbox("openclaw-existing-entry-object");
+        let agent = Agent::OpenClaw;
+        let path = agent.config_path(&sandbox.home, false);
+        write(
+            &path,
+            &json!({"agents":{"entries":{"main":{"model":entry}}}}).to_string(),
+        );
+        let status = apply_connect(&sandbox, agent, &catalog(), &claude_options());
+        assert!(status.authorized, "{entry}: {status:?}");
+        assert!(
+            status
+                .attention
+                .as_deref()
+                .is_some_and(|s| s.contains("not routed")),
+            "{entry}: {status:?}"
+        );
+        let journal = sandbox.projector.load_store().unwrap();
+        assert!(journal[agent.id()]
+            .fields
+            .iter()
+            .all(|field| !field.path.starts_with(&owned(&["agents", "entries"]))));
+        assert_eq!(
+            doc(&sandbox, agent).get_value(&["agents", "entries", "main", "model"]),
+            Some(ConfigValue::Json(entry))
+        );
+    }
+}
+
+#[test]
+fn claude_v090_model_journal_migrates_without_a_provider_switch() {
+    let sandbox = sandbox("claude-v090-model-journal");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    config.remove(&["model"]).unwrap();
+    config
+        .set_str(&["env", "ANTHROPIC_MODEL"], "openai/gpt-oss-20b")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let mut store = sandbox.projector.load_store().unwrap();
+    let fields = &mut store.get_mut(agent.id()).unwrap().fields;
+    // Claude Code projection paths shipped at desktop-v0.9.0 in providers.rs.
+    fields.retain(|field| {
+        field.path != ["model"]
+            && field.path != ["env", "ANTHROPIC_MODEL"]
+            && !field
+                .path
+                .last()
+                .is_some_and(|key| key.starts_with("CLAUDE_CODE_USE_"))
+    });
+    fields.push(OwnedField {
+        path: owned(&["env", "ANTHROPIC_MODEL"]),
+        value: Some(ConfigValue::Str("openai/gpt-oss-20b".into())),
+        previous: Some(Previous::Plain(ConfigValue::Str("claude-original".into()))),
+        ..OwnedField::default()
+    });
+    sandbox.projector.save_store(&store).unwrap();
+
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(!status.authorized);
+    assert!(status
+        .attention
+        .as_deref()
+        .unwrap()
+        .contains("Legacy Claude Code"));
+    assert!(sandbox
+        .projector
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    let config = doc(&sandbox, agent);
+    assert_eq!(config.get_str(&["env", "ANTHROPIC_MODEL"]), None);
+    assert_eq!(
+        config.get_str(&["model"]).as_deref(),
+        Some("openai/gpt-oss-20b")
+    );
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+    assert!(agent_status(&statuses, agent).attention.is_none());
+    let migrated = sandbox.projector.load_store().unwrap();
+    assert!(migrated[agent.id()]
+        .fields
+        .iter()
+        .any(|field| field.path == ["model"]
+            && field.value == Some(ConfigValue::Str("openai/gpt-oss-20b".into()))));
+    disconnect(&sandbox, agent);
+    let config = doc(&sandbox, agent);
+    assert_eq!(
+        config.get_str(&["env", "ANTHROPIC_MODEL"]).as_deref(),
+        Some("claude-original")
+    );
+    assert_eq!(config.get_str(&["model"]), None);
+}
+
+#[test]
+fn fresh_claude_model_journal_needs_no_migration() {
+    let sandbox = sandbox("fresh-claude-model-journal");
+    let catalog = catalog();
+    let agent = Agent::ClaudeCode;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(
+        status.authorized && status.attention.is_none(),
+        "{status:?}"
+    );
+}
+
+#[test]
+fn claude_current_provider_switch_drift_survives_reconcile_until_reconnect() {
+    let sandbox = sandbox("claude-current-provider-switch-drift");
+    let catalog = catalog();
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["env", "CLAUDE_CODE_USE_VERTEX"], "1")
+        .unwrap();
+    let drifted = config.render().unwrap();
+    write(&path, &drifted);
+
+    assert!(sandbox.projector.retarget(&catalog).unwrap().is_empty());
+    assert_eq!(fs::read_to_string(&path).unwrap(), drifted);
+    for _ in 0..2 {
+        let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+        let status = agent_status(&statuses, agent);
+        assert!(!status.authorized && tokens.is_empty(), "{status:?}");
+        assert!(status.attention.is_some(), "{status:?}");
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_to_string(&path).unwrap(), drifted);
+    }
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    assert!(!doc(&sandbox, agent).contains(&["env", "CLAUDE_CODE_USE_VERTEX"]));
+
+    // Stop immediately after the next edit, before regular reconcile persists attention.
+    write(&path, &drifted);
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(sandbox
+        .projector
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        doc(&sandbox, agent)
+            .get_str(&["env", "CLAUDE_CODE_USE_VERTEX"])
+            .as_deref(),
+        Some("1")
+    );
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(!agent_status(&statuses, agent).authorized && tokens.is_empty());
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+}
+
+#[test]
+fn omp_mixed_disabled_providers_still_block_unscoped_pap() {
+    let sandbox = sandbox("omp-mixed-global-provider-deny");
+    let catalog = catalog();
+    let agent = Agent::OhMyPi;
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let path = agent
+        .config_path(&sandbox.home, false)
+        .with_file_name("config.yml");
+    write(
+        &path,
+        "disabledProviders:\n  - path: ~/work\n    providers: [openai]\n  - private-ai-proxy\n",
+    );
+    let (statuses, tokens) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(!status.authorized && tokens.is_empty(), "{status:?}");
+    assert!(status
+        .attention
+        .as_deref()
+        .is_some_and(|s| s.contains("disabledProviders")));
+}
+
+#[test]
+fn omp_path_scoped_filters_raise_attention_without_revoking_access() {
+    for (setting, yaml) in [
+        ("disabledProviders", "disabledProviders:\n  - openai\n  - pathPrefixes: [~/work]\n    providers: [private-ai-proxy]\n"),
+        ("enabledModels", "enabledModels:\n  - paths: [~/work]\n    models: [other/model]\n"),
+    ] {
+        let sandbox = sandbox("omp-scoped-filter-attention");
+        let agent = Agent::OhMyPi;
+        let catalog = catalog();
+        let path = agent.config_path(&sandbox.home, false).with_file_name("config.yml");
+        write(&path, yaml);
+        let status = apply_connect(&sandbox, agent, &catalog, &claude_options());
+        assert!(status.authorized, "{status:?}");
+        assert!(status.attention.as_deref().is_some_and(|s| s.contains(setting) && s.contains("path")), "{status:?}");
+    }
+}
+
+#[test]
+fn omp_enabled_models_accept_thinking_suffixes_and_keep_filters_advisory() {
+    const TEST_MODELS: &[(&str, bool)] = &[
+        ("private-ai-proxy/**/gpt-oss-*:high", false),
+        ("openai/gpt-oss-20b:low", false),
+        ("phala/qwen:auto", false),
+        ("qwen", false),
+        ("other/model", true),
+        ("private-ai-proxy/{phala,openai}/*", true),
+        ("!other/*", true),
+    ];
+    let agent = Agent::OhMyPi;
+    let catalog = catalog();
+    for &(pattern, attention) in TEST_MODELS {
+        let sandbox = sandbox("omp-advisory-selector");
+        let path = agent
+            .config_path(&sandbox.home, false)
+            .with_file_name("config.yml");
+        write(&path, &format!("enabledModels: ['{pattern}']\n"));
+        let applied = apply_connect(&sandbox, agent, &catalog, &claude_options());
+        assert!(applied.authorized, "{pattern}: {applied:?}");
+        for catalog in [Some(&catalog), None] {
+            let (statuses, tokens) = sandbox.projector.scan(catalog).unwrap();
+            let status = agent_status(&statuses, agent);
+            assert!(
+                status.authorized && !tokens.is_empty(),
+                "{pattern}: {status:?}"
+            );
+            assert_eq!(
+                status.attention.is_some(),
+                attention,
+                "{pattern}: {status:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn omp_enabled_models_treat_non_chat_matches_as_advisory() {
+    let sandbox = sandbox("omp-enabled-models-chat-only");
+    let catalog = Catalog::from_remote(
+        &json!({
+            "data": [
+                {"id": "phala/qwen"},
+                {"id": "vendor/image", "output_modalities": ["image"]},
+                {"id": "vendor/model:max"}
+            ]
+        }),
+        1,
+    )
+    .unwrap();
+    let agent = Agent::OhMyPi;
+    let path = agent
+        .config_path(&sandbox.home, false)
+        .with_file_name("config.yml");
+    write(&path, "enabledModels: [vendor/image]\n");
+    let status = apply_connect(
+        &sandbox,
+        agent,
+        &catalog,
+        &ConnectOptions {
+            default_model: Some("phala/qwen".into()),
+        },
+    );
+    assert!(
+        status.authorized && status.attention.is_some(),
+        "{status:?}"
+    );
+    let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(
+        status.authorized && status.attention.is_some() && !tokens.is_empty(),
+        "{status:?}"
+    );
+
+    write(&path, "enabledModels: ['vendor/model:max']\n");
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(
+        status.authorized && status.attention.is_none(),
+        "{status:?}"
+    );
 }

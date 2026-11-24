@@ -83,6 +83,339 @@ pub(super) fn owned(path: &[&str]) -> Vec<String> {
     path.iter().map(|key| key.to_string()).collect()
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ModelSelectionPath {
+    pub(super) path: &'static [&'static str],
+    pub(super) entry: Option<&'static str>,
+}
+
+const CODEX_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["model"],
+    entry: None,
+};
+const CLAUDE_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["model"],
+    entry: None,
+};
+const OPENCODE_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["model"],
+    entry: None,
+};
+const HERMES_MODELS: [ModelSelectionPath; 2] = [
+    ModelSelectionPath {
+        path: &["model", "default"],
+        entry: None,
+    },
+    ModelSelectionPath {
+        path: &["providers", "private-ai-proxy", "default_model"],
+        entry: None,
+    },
+];
+const OPENCLAW_MODEL: ModelSelectionPath = ModelSelectionPath {
+    path: &["agents", "defaults", "model", "primary"],
+    entry: None,
+};
+const DSH_MODELS: [ModelSelectionPath; 2] = [
+    ModelSelectionPath {
+        path: &["config", "model"],
+        entry: Some("agent-default-model"),
+    },
+    ModelSelectionPath {
+        path: &["config", "model"],
+        entry: Some("acp"),
+    },
+];
+
+pub(super) fn model_selection_paths(agent: Agent) -> &'static [ModelSelectionPath] {
+    match agent {
+        Agent::Codex => std::slice::from_ref(&CODEX_MODEL),
+        Agent::ClaudeCode => std::slice::from_ref(&CLAUDE_MODEL),
+        Agent::OpenCode => std::slice::from_ref(&OPENCODE_MODEL),
+        Agent::Hermes => &HERMES_MODELS,
+        Agent::OpenClaw => std::slice::from_ref(&OPENCLAW_MODEL),
+        Agent::Dsh => &DSH_MODELS,
+        Agent::Pi | Agent::OhMyPi => &[],
+    }
+}
+
+pub(super) fn is_model_selection_field(agent: Agent, field: &OwnedField) -> bool {
+    if agent == Agent::OpenClaw
+        && field.path.len() == 4
+        && field.path.starts_with(&owned(&["agents", "entries"]))
+        && field.path.last().is_some_and(|key| key == "model")
+    {
+        return true;
+    }
+    model_selection_paths(agent).iter().any(|selection| {
+        field.path == owned(selection.path)
+            && field.entry.as_ref().map(|entry| entry.key.id.as_str()) == selection.entry
+    })
+}
+
+pub(super) fn is_any_model_selection_field(field: &OwnedField) -> bool {
+    Agent::ALL
+        .iter()
+        .copied()
+        .any(|agent| is_model_selection_field(agent, field))
+}
+
+pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedField) -> bool {
+    if is_model_selection_field(agent, field) {
+        return true;
+    }
+    if agent == Agent::ClaudeCode && field.path == owned(&["modelPicker"]) {
+        return true;
+    }
+    if agent == Agent::Codex && field.path == owned(&["model_catalog_json"]) {
+        return true;
+    }
+    if is_regenerable_field(agent, field) {
+        let Some(mut expected) = field.value.clone() else {
+            return field.holds(owned_value(doc, field).as_ref());
+        };
+        let Some(mut current) = owned_value(doc, field) else {
+            return false;
+        };
+        normalize_regenerable_values(agent, &mut expected, &mut current);
+        return expected == current;
+    }
+    if let Some(path) = dsh_appended_model_path(field) {
+        let Some(ConfigValue::Json(mut expected)) = field.value.clone() else {
+            return field.holds(owned_value(doc, field).as_ref());
+        };
+        let Some(ConfigValue::Json(mut current)) = owned_value(doc, field) else {
+            return false;
+        };
+        remove_json_path(&mut expected, path);
+        remove_json_path(&mut current, path);
+        return expected == current;
+    }
+    field.holds(owned_value(doc, field).as_ref())
+}
+
+// Appended dsh items journal the whole config instead of each leaf.
+fn dsh_appended_model_path(field: &OwnedField) -> Option<&'static [&'static str]> {
+    let entry = field.entry.as_ref()?;
+    if !entry.created || field.path != ["config"] {
+        return None;
+    }
+    model_selection_paths(Agent::Dsh)
+        .iter()
+        .find(|selection| selection.entry == Some(entry.key.id.as_str()))
+        .map(|selection| &selection.path[1..])
+}
+
+fn is_regenerable_field(agent: Agent, field: &OwnedField) -> bool {
+    match agent {
+        Agent::Codex => field.path == owned(&["model_catalog_json"]),
+        Agent::ClaudeCode => field.path == owned(&["modelPicker"]),
+        Agent::OpenCode => {
+            field.path == owned(&["provider", "private-ai-proxy"])
+                || field.path == owned(&["providers", "private-ai-proxy"])
+        }
+        Agent::Pi | Agent::OhMyPi => field.path == owned(&["providers", "private-ai-proxy"]),
+        Agent::OpenClaw => field.path == owned(&["models", "providers", "private-ai-proxy"]),
+        Agent::Dsh => {
+            field.path == owned(&["config"])
+                && field
+                    .entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.key.id == "llm-pi-ai")
+        }
+        Agent::Hermes => false,
+    }
+}
+
+fn normalize_regenerable_values(
+    agent: Agent,
+    expected: &mut ConfigValue,
+    current: &mut ConfigValue,
+) {
+    let (ConfigValue::Json(expected), ConfigValue::Json(current)) = (expected, current) else {
+        return;
+    };
+    match agent {
+        Agent::Codex => {}
+        Agent::ClaudeCode => {
+            *current = expected.clone();
+        }
+        Agent::OpenCode | Agent::Pi | Agent::OhMyPi | Agent::OpenClaw => {
+            normalize_model_map(expected, current)
+        }
+        Agent::Dsh => {
+            let expected = json_path_mut(expected, &["providers", "private-ai-proxy", "models"]);
+            let current = json_path_mut(current, &["providers", "private-ai-proxy", "models"]);
+            if let (Some(expected), Some(current)) = (expected, current) {
+                normalize_model_map(expected, current);
+            }
+        }
+        Agent::Hermes => {}
+    }
+}
+
+fn normalize_model_map(expected: &mut serde_json::Value, current: &mut serde_json::Value) {
+    if expected
+        .get("models")
+        .is_some_and(serde_json::Value::is_array)
+        || current
+            .get("models")
+            .is_some_and(serde_json::Value::is_array)
+    {
+        normalize_model_rows(expected, current);
+        return;
+    }
+    let (Some(expected), Some(current)) = (expected.as_object_mut(), current.as_object_mut())
+    else {
+        return;
+    };
+    let expected_models = expected
+        .remove("models")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let current_models = current
+        .remove("models")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut expected_routing = serde_json::Map::new();
+    let mut routing = serde_json::Map::new();
+    for id in current_models.keys() {
+        let Some(current_model) = current_models.get(id) else {
+            continue;
+        };
+        let Some(expected_model) = expected_models.get(id) else {
+            let value = routing_value(current_model);
+            if !value.as_object().is_some_and(serde_json::Map::is_empty) {
+                routing.insert(id.clone(), value);
+            }
+            continue;
+        };
+        if current_model != expected_model {
+            expected_routing.insert(id.clone(), routing_value(expected_model));
+            routing.insert(id.clone(), routing_value(current_model));
+        }
+    }
+    for id in expected_models.keys() {
+        if !current_models.contains_key(id) {
+            continue;
+        }
+        if current_models.get(id) != expected_models.get(id) {
+            expected_routing
+                .entry(id.clone())
+                .or_insert_with(|| routing_value(expected_models.get(id).unwrap()));
+        }
+    }
+    expected.insert("models".into(), serde_json::Value::Object(expected_routing));
+    current.insert("models".into(), serde_json::Value::Object(routing));
+}
+
+fn normalize_model_rows(expected: &mut serde_json::Value, current: &mut serde_json::Value) {
+    let (Some(expected_root), Some(current_root)) =
+        (expected.as_object_mut(), current.as_object_mut())
+    else {
+        return;
+    };
+    let expected_rows = expected_root
+        .remove("models")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let current_rows = current_root
+        .remove("models")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut expected_routing = Vec::new();
+    let mut current_routing = Vec::new();
+    for row in &current_rows {
+        let id = row.get("id");
+        let expected_row = expected_rows
+            .iter()
+            .find(|candidate| id.is_some() && candidate.get("id") == id);
+        let Some(expected_row) = expected_row else {
+            let value = routing_value(row);
+            if !value.as_object().is_some_and(serde_json::Map::is_empty) {
+                current_routing.push(value);
+            }
+            continue;
+        };
+        if row != expected_row {
+            expected_routing.push(routing_value(expected_row));
+            current_routing.push(routing_value(row));
+        }
+    }
+    expected_root.insert("models".into(), serde_json::Value::Array(expected_routing));
+    current_root.insert("models".into(), serde_json::Value::Array(current_routing));
+}
+
+fn routing_value(value: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = value.as_object() else {
+        return serde_json::Value::Null;
+    };
+    let mut routing = serde_json::Map::new();
+    if let Some(provider) = object.get("provider") {
+        if let Some(provider) = provider.as_object() {
+            let mut selected = serde_json::Map::new();
+            for key in ["npm", "api"] {
+                if let Some(value) = provider.get(key) {
+                    selected.insert(key.into(), value.clone());
+                }
+            }
+            routing.insert("provider".into(), serde_json::Value::Object(selected));
+        } else {
+            routing.insert("provider".into(), provider.clone());
+        }
+    }
+    for key in ["package", "body", "baseUrl", "api"] {
+        if let Some(value) = object.get(key) {
+            routing.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(options) = object.get("options").and_then(serde_json::Value::as_object) {
+        if let Some(base_url) = options.get("baseURL") {
+            routing.insert("options".into(), serde_json::json!({"baseURL": base_url}));
+        }
+    }
+    if let Some(settings) = object
+        .get("settings")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut selected = serde_json::Map::new();
+        for key in ["baseURL", "package", "body", "headers"] {
+            if let Some(value) = settings.get(key) {
+                selected.insert(key.into(), value.clone());
+            }
+        }
+        if !selected.is_empty() {
+            routing.insert("settings".into(), serde_json::Value::Object(selected));
+        }
+    }
+    if let Some(headers) = object.get("headers") {
+        routing.insert("headers".into(), headers.clone());
+    }
+    serde_json::Value::Object(routing)
+}
+
+fn json_path_mut<'a>(
+    value: &'a mut serde_json::Value,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Value> {
+    let mut value = value;
+    for key in path {
+        value = value.get_mut(*key)?;
+    }
+    Some(value)
+}
+
+fn remove_json_path(value: &mut serde_json::Value, path: &[&str]) {
+    if let Some((key, rest)) = path.split_first() {
+        if rest.is_empty() {
+            if let Some(object) = value.as_object_mut() {
+                object.remove(*key);
+            }
+        } else if let Some(next) = value.get_mut(*key) {
+            remove_json_path(next, rest);
+        }
+    }
+}
+
 /// POSIX command syntax. The quoting test validates `sh`, not the Windows
 /// Claude CLI's choice of shell; that compatibility remains unverified.
 pub(super) fn helper_command(exe: &Path, agent: &str) -> Result<String, String> {
@@ -269,6 +602,12 @@ pub(super) fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue>
             let mut value = value.clone();
             if let Some(object) = value.as_object_mut() {
                 object.remove("apiKey");
+                if let Some(settings) = object
+                    .get_mut("settings")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    settings.remove("apiKey");
+                }
                 if let Some(options) = object
                     .get_mut("options")
                     .and_then(serde_json::Value::as_object_mut)
@@ -343,6 +682,24 @@ pub(super) fn project(
     }
     for field in fields.iter().filter(|field| !field.exact) {
         let path = refs(&field.path);
+        if agent == Agent::OpenClaw && path == model_selection_paths(agent)[0].path {
+            // Record newly created JSON5 parents without taking over existing
+            // mappings. The shared restore pass removes them when empty.
+            for depth in 1..path.len() {
+                let parent = &field.path[..depth];
+                if !doc.contains(&path[..depth])
+                    || prior
+                        .iter()
+                        .any(|field| field.container && field.path == parent)
+                {
+                    owned_fields(&mut edit).push(OwnedField {
+                        path: parent.to_vec(),
+                        container: true,
+                        ..OwnedField::default()
+                    });
+                }
+            }
+        }
         let sensitive = is_sensitive(&field.path);
         let current = doc.get_value(&path);
         let still_ours = prior
@@ -353,11 +710,23 @@ pub(super) fn project(
         if matches!(field.value, Some(ConfigValue::Json(_)))
             && doc.contains(&path)
             && still_ours.is_none()
+            && !prior.iter().any(|recorded| {
+                recorded.path == field.path
+                    || (agent == Agent::OpenCode
+                        && ((recorded.path == owned(&["provider", "private-ai-proxy"])
+                            && field.path == owned(&["providers", "private-ai-proxy"]))
+                            || (recorded.path == owned(&["providers", "private-ai-proxy"])
+                                && field.path == owned(&["provider", "private-ai-proxy"]))))
+            })
         {
             return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));
         }
         let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
+            None if prior.iter().any(|owned| owned.path == field.path) => prior
+                .iter()
+                .find(|owned| owned.path == field.path)
+                .and_then(|owned| owned.previous.clone()),
             None => match current.clone() {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
@@ -493,20 +862,30 @@ fn project_entry(
     Ok(())
 }
 
-/// Whether an item the connection appended still holds exactly what it wrote,
-/// with nothing the user added.
+/// Whether an appended item still matches the journal, ignoring its model
+/// selection while preserving any other user edits.
 fn appended_intact(item: &ConfigDoc, key: &EntryKey, fields: &[&OwnedField]) -> bool {
+    let Some(ConfigValue::Json(mut actual)) = item.get_value(&[]) else {
+        return false;
+    };
     let mut expected = serde_json::Map::new();
     expected.insert(key.key.clone(), serde_json::Value::String(key.id.clone()));
     for field in fields {
-        match (&field.entry, &field.value) {
-            (Some(entry), Some(value)) if entry.created && field.path.len() == 1 => {
-                expected.insert(field.path[0].clone(), value.to_json());
+        let (Some(OwnedEntry { created: true, .. }), Some(value), [name]) =
+            (&field.entry, &field.value, field.path.as_slice())
+        else {
+            return false;
+        };
+        let mut value = value.to_json();
+        if let Some(path) = dsh_appended_model_path(field) {
+            remove_json_path(&mut value, path);
+            if let Some(current) = actual.get_mut(name) {
+                remove_json_path(current, path);
             }
-            _ => return false,
         }
+        expected.insert(name.clone(), value);
     }
-    item.get_value(&[]) == Some(ConfigValue::Json(serde_json::Value::Object(expected)))
+    actual == serde_json::Value::Object(expected)
 }
 
 /// Exact fields only add keys or replace scalars. In an item the connection
@@ -635,8 +1014,13 @@ fn project_exact(
     let still_ours = prior
         .iter()
         .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
+    let recorded = prior.iter().find(|owned| owned.path == field.path);
     let (previous, source) = match (still_ours, &current) {
         (Some(owned), _) => (owned.previous.clone(), owned.source.clone()),
+        (None, Some(_)) if recorded.is_some() => {
+            let recorded = recorded.unwrap();
+            (recorded.previous.clone(), recorded.source.clone())
+        }
         (None, None) => (None, None),
         (None, Some(ConfigValue::List(_) | ConfigValue::Json(_))) => {
             return Err(format!(
@@ -718,20 +1102,26 @@ pub(super) fn restore(
         .fields
         .iter()
         .filter(|field| {
-            matches!(
-                field.path.last().map(String::as_str),
-                Some(
-                    "apiKeyHelper"
-                        | "ANTHROPIC_BASE_URL"
-                        | "base_url"
-                        | "baseURL"
-                        | "command"
-                        | "args"
-                        | "model_provider"
+            !is_any_model_selection_field(field)
+                && matches!(
+                    field.path.last().map(String::as_str),
+                    Some(
+                        "apiKeyHelper"
+                            | "ANTHROPIC_BASE_URL"
+                            | "base_url"
+                            | "baseURL"
+                            | "baseUrl"
+                            | "command"
+                            | "args"
+                            | "model_provider"
+                            | "provider"
+                            | "api"
+                            | "apiKey"
+                            | "key_cmd"
+                    )
                 )
-            )
         })
-        .all(|field| doc.get_value(&refs(&field.path)) == field.value);
+        .all(|field| field.holds(owned_value(doc, field).as_ref()));
     if !routing_unchanged
         && record.fields.iter().any(|field| {
             is_sensitive(&field.path)
@@ -790,13 +1180,15 @@ pub(super) fn restore(
                     .entry(&entry.key)
                     .map_err(AgentError::ConfigurationConflict)?
                 {
-                    Some(mut item) => restore_exact(&mut item, field)?.map(|mut change| {
-                        change.key = format!("{}.{}", entry.key.id, change.key);
-                        change
-                    }),
+                    Some(mut item) => {
+                        restore_exact(&mut item, field, routing_unchanged)?.map(|mut change| {
+                            change.key = format!("{}.{}", entry.key.id, change.key);
+                            change
+                        })
+                    }
                     None => None,
                 },
-                None => restore_exact(doc, field)?,
+                None => restore_exact(doc, field, routing_unchanged)?,
             };
             changes.extend(change);
             continue;
@@ -824,7 +1216,14 @@ pub(super) fn restore(
         if let Some(Previous::Secret { secret_ref }) = &field.previous {
             consumed_secrets.push(secret_ref.clone());
         }
-        if !field.holds(current.as_ref()) {
+        // The owned Claude model picker is regenerated on start. Restore it
+        // even after edits so the next projection can take ownership again.
+        if !field.holds(current.as_ref())
+            && !is_regenerable_field(Agent::ClaudeCode, field)
+            && !(is_any_model_selection_field(field)
+                && (routing_unchanged || private_model_selection(current.as_ref())))
+            && !hermes_model_override(field, current.as_ref(), record)
+        {
             continue;
         }
         let sensitive = is_sensitive(&field.path);
@@ -887,15 +1286,55 @@ pub(super) fn restore(
     })
 }
 
+fn hermes_model_override(
+    field: &OwnedField,
+    current: Option<&ConfigValue>,
+    record: &Connection,
+) -> bool {
+    if field.value.is_some()
+        || (field.path != owned(&["model", "base_url"])
+            && field.path != owned(&["model", "api_mode"]))
+    {
+        return false;
+    }
+    match field.path.last().map(String::as_str) {
+        Some("api_mode") => current == Some(&ConfigValue::Str("chat_completions".into())),
+        Some("base_url") => {
+            let Some(endpoint) = record.endpoint.as_deref() else {
+                return false;
+            };
+            let Ok(api) = desktop_core::endpoint(endpoint, &["v1"]) else {
+                return false;
+            };
+            current == Some(&ConfigValue::Str(api.to_string()))
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn private_model_selection(value: Option<&ConfigValue>) -> bool {
+    match value {
+        Some(ConfigValue::Str(value)) => value.starts_with("private-ai-proxy/"),
+        Some(ConfigValue::Json(value)) => {
+            value.get("providerID").and_then(serde_json::Value::as_str) == Some("private-ai-proxy")
+        }
+        _ => false,
+    }
+}
+
 /// Put an exact field back: remove the key it added, or the scalar source it
 /// replaced. A field the user changed since is left alone.
 fn restore_exact(
     target: &mut ConfigDoc,
     field: &OwnedField,
+    routing_unchanged: bool,
 ) -> Result<Option<ConfigChange>, AgentError> {
     let path = refs(&field.path);
     let current = target.get_value(&path);
-    if !field.holds(current.as_ref()) {
+    if !field.holds(current.as_ref())
+        && !(is_any_model_selection_field(field)
+            && (routing_unchanged || private_model_selection(current.as_ref())))
+    {
         return Ok(None);
     }
     let restored = match &field.previous {
@@ -917,6 +1356,7 @@ fn restore_exact(
 }
 
 pub(super) const MANAGED_CREDENTIAL: &str = "Managed local credential";
+pub(super) const PREFERRED_DEFAULT_MODEL: &str = "deepseek/deepseek-v4.1-flash-1017";
 
 /// A change to a credential: its values are never shown.
 pub(super) fn secret_change(
@@ -986,29 +1426,50 @@ pub(super) fn connection_options(
     } else {
         current.or(saved)
     };
+    let preferred_default = catalog.is_some_and(|catalog| {
+        catalog
+            .get(PREFERRED_DEFAULT_MODEL)
+            .is_some_and(|model| model.supports(agent.surface()))
+    });
     ConnectOptions {
-        default_model: preferred.or_else(|| {
-            catalog
-                .and_then(|catalog| {
-                    catalog
-                        .models
-                        .iter()
-                        .find(|model| model.supports(agent.surface()))
-                })
-                .map(|model| model.id().to_string())
-        }),
+        default_model: preferred
+            .or_else(|| preferred_default.then(|| PREFERRED_DEFAULT_MODEL.to_string()))
+            .or_else(|| {
+                catalog
+                    .and_then(|catalog| {
+                        catalog
+                            .models
+                            .iter()
+                            .find(|model| model.supports(agent.surface()))
+                    })
+                    .map(|model| model.id().to_string())
+            }),
     }
 }
 
 pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<String> {
     let doc = doc?;
     match agent {
-        Agent::Codex => doc.get_str(&["model"]),
-        Agent::ClaudeCode => doc.get_str(&["env", "ANTHROPIC_MODEL"]),
-        Agent::OpenCode => doc
-            .get_str(&["model"])
-            .and_then(|value| value.strip_prefix("private-ai-proxy/").map(str::to_string)),
-        Agent::Hermes => doc.get_str(&["model", "default"]),
+        Agent::Codex => doc.get_str(model_selection_paths(agent)[0].path),
+        Agent::ClaudeCode => doc.get_str(model_selection_paths(agent)[0].path),
+        Agent::OpenCode => match doc.get_value(model_selection_paths(agent)[0].path)? {
+            ConfigValue::Str(value) => value.strip_prefix("private-ai-proxy/").map(|value| {
+                value
+                    .split_once('#')
+                    .map_or(value, |(model, _)| model)
+                    .to_string()
+            }),
+            ConfigValue::Json(value) => {
+                let object = value.as_object()?;
+                (object.get("providerID")?.as_str() == Some("private-ai-proxy"))
+                    .then(|| object.get("model")?.as_str().map(str::to_string))
+                    .flatten()
+            }
+            _ => None,
+        },
+        Agent::Hermes => doc
+            .get_str(model_selection_paths(agent)[0].path)
+            .or_else(|| doc.get_str(model_selection_paths(agent)[1].path)),
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::Pi | Agent::OhMyPi => None,
         Agent::Dsh => dsh::selected_model(doc),
