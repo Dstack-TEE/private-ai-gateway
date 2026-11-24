@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 mod protocol;
 
-use protocol::{seal_chat_request, verify_signature, ChatSignature, ResponseOpener};
+use protocol::{seal_chat_request, verify_signature, ChatSignature, ProtocolError, ResponseOpener};
 
 use super::{
     forwarding_client, read_buffered_upstream_response, readiness_client, transport_error,
@@ -353,7 +353,7 @@ impl UpstreamBackend for ZeroGProviderBackend {
             &read_buffered_upstream_response(response, self.max_buffered_response_bytes).await?,
         )
         .map_err(rejected)?;
-        let body = opener.open_frame(frame)?;
+        let body = open_frame(&mut opener, frame, &check.provider)?;
         check.verify(&opener.signed_text(false)?).await?;
         Ok(UpstreamResponse {
             status_code: 200,
@@ -389,13 +389,40 @@ impl UpstreamBackend for ZeroGProviderBackend {
         let raw = response
             .bytes_stream()
             .map(|chunk| chunk.map_err(transport_error));
+        let response_binding = opener.requires_response_binding();
+        let mut body = verified_event_stream(raw, opener, check);
+        if response_binding {
+            // The caller can reverify only before it receives a stream. Peek
+            // in PSK mode and put any regular stream item back for delivery.
+            if let Some(first) = body.next().await {
+                match first {
+                    Err(error @ UpstreamError::ResponseBindingMismatch { .. }) => {
+                        return Err(error)
+                    }
+                    first => body = Box::pin(futures_util::stream::iter([first]).chain(body)),
+                }
+            }
+        }
         Ok(UpstreamStreamResponse {
             status_code: 200,
             headers: HashMap::from([("content-type".to_string(), content_type.to_string())]),
-            body: verified_event_stream(raw, opener, check),
+            body,
             served_instance_id,
         })
     }
+}
+
+fn open_frame(
+    opener: &mut ResponseOpener,
+    frame: Map<String, Value>,
+    instance_id: &str,
+) -> Result<Map<String, Value>, UpstreamError> {
+    opener.open_frame(frame).map_err(|err| match err {
+        ProtocolError::FirstBoundFrame => UpstreamError::ResponseBindingMismatch {
+            instance_id: instance_id.to_string(),
+        },
+        err => err.into(),
+    })
 }
 
 /// Opens each SSE frame as it arrives. `[DONE]` is emitted only after the
@@ -420,7 +447,7 @@ fn verified_event_stream(
                 crate::sse::Payload::Json(Value::Object(frame)) => Ok(frame),
                 _ => Err(rejected("invalid SSE frame JSON")),
             }?;
-            let opened = opener.open_frame(frame)?;
+            let opened = open_frame(&mut opener, frame, &check.provider)?;
             // Opening removes unbound fields; an otherwise empty frame carries
             // no authenticated value for the caller.
             if opened.values().all(is_empty) {

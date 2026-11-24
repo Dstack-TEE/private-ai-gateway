@@ -55,6 +55,11 @@ pub(super) struct VerifiedCandidate {
     pub evidence: Value,
 }
 
+struct CachedModel {
+    candidates: Vec<VerifiedCandidate>,
+    result: CachedProviderEvent,
+}
+
 #[derive(Deserialize)]
 struct PreviewResponse {
     #[serde(default)]
@@ -74,7 +79,7 @@ pub struct ZeroGProviderVerifier {
     accepted_subjects: Vec<String>,
     client: reqwest::Client,
     cache_ttl_seconds: u64,
-    cache: RwLock<HashMap<String, CachedProviderEvent>>,
+    cache: RwLock<HashMap<String, CachedModel>>,
     verify_lock: tokio::sync::Mutex<()>,
     #[cfg(test)]
     quote_status: Option<QuoteStatusCheck>,
@@ -122,8 +127,8 @@ impl ZeroGProviderVerifier {
         self
     }
 
-    async fn verify_model(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let mut event = UpstreamVerifiedEvent {
+    fn empty_event(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
             upstream_name: request.upstream_name.clone(),
             provider_type: Some(ZERO_G_PROVIDER.to_string()),
             model_id: request.model_id.clone(),
@@ -131,50 +136,37 @@ impl ZeroGProviderVerifier {
             verifier_id: "0g-private-computer/native-e2ee/v1".to_string(),
             required: request.required,
             ..Default::default()
-        };
-        let candidates = match self.preview(&request.model_id).await {
-            Ok(candidates) => candidates,
-            Err(reason) => {
-                event.failure = VerificationFailure::EvidenceUnavailable;
-                event.diagnostic = Some(reason);
-                return event;
-            }
-        };
-        let mut instances = Map::new();
-        let mut evidence = Vec::new();
-        let mut rejected = Vec::new();
-        for candidate in candidates {
-            match self.verify_candidate(&candidate, &request.model_id).await {
-                Ok(verified) => {
-                    let address = verified.provider.provider_address.clone();
-                    event
-                        .channel_bindings
-                        .push(ChannelBinding::E2eePublicKeySha256 {
-                            provider: ZERO_G_PROVIDER.to_string(),
-                            key_id: Some(address.clone()),
-                            algorithm: ZERO_G_E2EE_ALGORITHM.to_string(),
-                            public_key_sha256: hex::encode(Sha256::digest(verified.enc_pub)),
-                        });
-                    let mut instance = json!(verified.provider);
-                    instance
-                        .as_object_mut()
-                        .expect("a struct serializes to an object")
-                        .extend(verified.claims);
-                    instances.insert(address, instance);
-                    evidence.push(verified.evidence);
-                }
-                Err(reason) => {
-                    tracing::warn!(target: "zero_g", provider = %candidate.address, %reason, "0G candidate rejected before sealing");
-                    rejected.push(format!("{}: {reason}", candidate.address));
-                }
-            }
         }
-        if instances.is_empty() {
-            event.diagnostic = Some(format!(
-                "no 0G private-tier candidate passed verification ({})",
-                rejected.join("; ")
-            ));
+    }
+
+    fn verified_event(
+        &self,
+        request: &UpstreamVerificationRequest,
+        candidates: &[VerifiedCandidate],
+    ) -> UpstreamVerifiedEvent {
+        let mut event = self.empty_event(request);
+        if candidates.is_empty() {
             return event;
+        }
+        let mut instances = Map::new();
+        let mut evidence = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let address = &candidate.provider.provider_address;
+            event
+                .channel_bindings
+                .push(ChannelBinding::E2eePublicKeySha256 {
+                    provider: ZERO_G_PROVIDER.to_string(),
+                    key_id: Some(address.clone()),
+                    algorithm: ZERO_G_E2EE_ALGORITHM.to_string(),
+                    public_key_sha256: hex::encode(Sha256::digest(candidate.enc_pub)),
+                });
+            let mut instance = json!(candidate.provider);
+            instance
+                .as_object_mut()
+                .expect("a struct serializes to an object")
+                .extend(candidate.claims.clone());
+            instances.insert(address.clone(), instance);
+            evidence.push(&candidate.evidence);
         }
         let evidence = serde_json::to_vec(&evidence).unwrap_or_default();
         event.result = VerificationResult::Verified;
@@ -187,6 +179,40 @@ impl ZeroGProviderVerifier {
             "instances": instances,
         }));
         event
+    }
+
+    async fn verify_model(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> (Vec<VerifiedCandidate>, UpstreamVerifiedEvent) {
+        let candidates = match self.preview(&request.model_id).await {
+            Ok(candidates) => candidates,
+            Err(reason) => {
+                let mut event = self.empty_event(request);
+                event.failure = VerificationFailure::EvidenceUnavailable;
+                event.diagnostic = Some(reason);
+                return (Vec::new(), event);
+            }
+        };
+        let mut verified = Vec::new();
+        let mut rejected = Vec::new();
+        for candidate in candidates {
+            match self.verify_candidate(&candidate, &request.model_id).await {
+                Ok(candidate) => verified.push(candidate),
+                Err(reason) => {
+                    tracing::warn!(target: "zero_g", provider = %candidate.address, %reason, "0G candidate rejected before sealing");
+                    rejected.push(format!("{}: {reason}", candidate.address));
+                }
+            }
+        }
+        let mut event = self.verified_event(request, &verified);
+        if verified.is_empty() {
+            event.diagnostic = Some(format!(
+                "no 0G private-tier candidate passed verification ({})",
+                rejected.join("; ")
+            ));
+        }
+        (verified, event)
     }
 
     async fn preview(&self, model: &str) -> Result<Vec<PreviewCandidate>, String> {
@@ -370,8 +396,10 @@ impl ZeroGProviderVerifier {
         let cache = self.cache.read().expect("0G verifier cache poisoned");
         cache
             .get(model)
-            .filter(|cached| Instant::now() < cached.expires_at)
-            .cloned()
+            .filter(|cached| {
+                !cached.candidates.is_empty() && Instant::now() < cached.result.expires_at
+            })
+            .map(|cached| cached.result.clone())
     }
 
     async fn verify_and_cache(
@@ -379,16 +407,19 @@ impl ZeroGProviderVerifier {
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
         let started = Instant::now();
-        let event = self.verify_model(&request).await;
+        let (candidates, event) = self.verify_model(&request).await;
         if self.cache_ttl_seconds > 0 && event.result == VerificationResult::Verified {
             self.cache
                 .write()
                 .expect("0G verifier cache poisoned")
                 .insert(
                     request.model_id,
-                    CachedProviderEvent {
-                        expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
-                        event: event.clone(),
+                    CachedModel {
+                        candidates,
+                        result: CachedProviderEvent {
+                            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
+                            event: event.clone(),
+                        },
                     },
                 );
         }
@@ -423,6 +454,68 @@ impl UpstreamVerifier for ZeroGProviderVerifier {
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let _verify_guard = self.verify_lock.lock().await;
         self.verify_and_cache(request).await
+    }
+
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        let provider: VerifiedProvider = serde_json::from_value(
+            previous
+                .provider_claims
+                .as_ref()?
+                .get("instances")?
+                .get(instance_id)?
+                .clone(),
+        )
+        .ok()?;
+        if provider.provider_address != instance_id
+            || provider.model != request.model_id
+            || !provider.response_binding
+        {
+            return None;
+        }
+        let _verify_guard = self.verify_lock.lock().await;
+        // Remove only the rejected broker. Preserve the other brokers'
+        // evidence, order, and expiry even if the fresh quote fails.
+        let slot = {
+            let mut cache = self.cache.write().expect("0G verifier cache poisoned");
+            cache.get_mut(&request.model_id).and_then(|entry| {
+                let index = entry
+                    .candidates
+                    .iter()
+                    .position(|candidate| candidate.provider.provider_address == instance_id)?;
+                entry.candidates.remove(index);
+                entry.result.event = self.verified_event(&request, &entry.candidates);
+                Some(index)
+            })
+        };
+        let candidate = PreviewCandidate {
+            address: provider.provider_address,
+            provider_identity: provider.provider_identity,
+            model_id: provider.model,
+        };
+        let verified = match self.verify_candidate(&candidate, &request.model_id).await {
+            Ok(verified) => verified,
+            Err(reason) => {
+                let mut event = self.empty_event(&request);
+                event.diagnostic = Some(reason);
+                return Some(event);
+            }
+        };
+        let event = self.verified_event(&request, std::slice::from_ref(&verified));
+        // A concurrent whole-model invalidation may have removed the entry.
+        // In that case this verification is still usable for this retry.
+        if let Some(index) = slot {
+            let mut cache = self.cache.write().expect("0G verifier cache poisoned");
+            if let Some(entry) = cache.get_mut(&request.model_id) {
+                entry.candidates.insert(index, verified);
+                entry.result.event = self.verified_event(&request, &entry.candidates);
+            }
+        }
+        Some(event)
     }
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {

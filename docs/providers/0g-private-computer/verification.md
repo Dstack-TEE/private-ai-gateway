@@ -42,7 +42,7 @@ Per configured model, cached for `verifier_cache_seconds` (verified results only
 4. Verify the TDX quote to Intel's root with `dcap-qvl` (`pccs_url`, default Phala PCCS), which refuses invalid TCB statuses and debug TDs.
 5. Require the quote's boot chain to be one of the route's `accepted_subjects`.
 6. Require `report_data` = `enc_pub(32) ‖ signer(20) ‖ version 1 ‖ zero(8)` and the signer to equal the on-chain `teeSignerAddress`.
-7. Read `e2ee_features` from the broker's direct HTTPS quote reply and enable response binding for that provider when the array contains `"resp-bind"`.
+7. Read `e2ee_features` from the broker's direct HTTPS quote reply and enable response binding for that provider when the array contains `"resp-bind"`. The feature list is HTTPS metadata outside the signed quote.
 
 A failing candidate is skipped and logged under target `zero_g`. With none left, the result is `failed`, no prompt is sent, and the request is refused like any other verification failure (503 `upstream_verification_failed` with a refusal receipt), whether or not the caller required verification.
 
@@ -85,6 +85,8 @@ Middleware injects a per-user `cache_salt` and the adapter seals it. Source read
 Every frame must be sealed, seal `choices`, not seal `usage` or `model`, not unbind `usage`, and decrypt to exactly its declared fields. Frames open in order under one HPKE context, so reordering, dropping or tampering fails.
 
 For a provider that advertises `resp-bind`, the gateway derives `_bind` from the response ephemeral private key, seals it in the request and requires §7.6 HPKE PSK mode on the response. The first frame must authenticate under that key before any chunk is released. Other providers use HPKE base mode.
+
+If the first PSK frame fails authentication, the gateway invalidates the selected broker's cached verification and can retry a gateway-managed request once through the channel-binding reverification path, before the gateway starts the client response. An early SSE heartbeat also precludes retry. It looks up that broker on-chain again and verifies a fresh quote directly. The retry uses base mode only if the fresh quote reply omits the advertisement. Sibling brokers keep their cached evidence and expiry. A later frame failure ends the stream without retrying.
 
 Only the decrypted fields and the bound cleartext reach the caller. A field named in a frame's `unbound_fields` is outside the AAD and the §8 binding, so an intermediary can set it undetected (§5.2; §8.2: "a router-injected `x_0g_trace` is unauthenticated by construction"). Every unbound field is therefore dropped when the frame opens, after its AEAD and binding checks, and the §8 signature still covers the frames as received. In round 1, live frames declared `["model", "x_0g_trace"]` unbound. `x_0g_trace` carried the router's billing amounts and provider address. 0G unbinds `model` so the router can restore its alias (§5.2), so the caller gets the `model` this request bound, which is the configured on-chain id. A streamed frame left with no value to deliver is not emitted. In round 1, the last live frame carried only `x_0g_trace` and an empty sealed `choices`.
 
@@ -136,7 +138,7 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 
 - `src/aci/upstream/zero_g/tests.rs`:
   - base-mode and response-bound interop from 0G's Go protocol library at the pinned release, plus the broker signature known-answer test. See [fixture provenance](../../../tests/fixtures/0g-private-computer/README.md).
-  - tampered, reordered, truncated and unsealed frames, and base-mode responses refused when binding was requested;
+  - tampered, reordered, truncated and unsealed frames, and base-mode responses refused when binding was requested. Gateway tests cover the single retry after a fresh quote, persistent mismatch, and a later frame failure without retrying;
   - a mock router and broker covering header pinning, wrong signer, missing signature, router errors, stream truncation, reorder and tamper, sealed non-cleartext fields (`response_format`, reasoning controls, `user`, `metadata`, …) with cleartext fields bound, unbound fields dropped while bound fields and `usage` survive, and stale-key conflict classification.
 - `src/aci/verifier/tests/zero_g.rs` uses a dstack 0.6.5 quote fixture. It covers admission failures, Compose claim extraction for both layouts, omission of the v3 claim when evidence fails to match, and recording an advertised response-binding capability.
 - `tests/0g_private_computer_live.rs`: an ignored authenticated live test for the reviewed boot chains, including a sealed JSON-mode request with `reasoning_effort`. See [Live E2E test suite](../../live-e2e-test-suite.md).

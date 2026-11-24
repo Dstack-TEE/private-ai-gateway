@@ -1,4 +1,6 @@
 //! Terminal publication requires an accepted source terminal or clean EOF.
+use std::sync::atomic::AtomicUsize;
+
 use super::*;
 
 static PATCHES: std::sync::LazyLock<HashMap<String, Value>> = std::sync::LazyLock::new(|| {
@@ -989,4 +991,123 @@ async fn publication_failure_withholds_native_terminal_on_normal_early_and_encry
     assert!(!snapshot["wire"].as_str().unwrap().contains("[DONE]"));
     assert_eq!(snapshot["reports"].as_array().unwrap().len(), 1);
     assert_eq!(snapshot["reports"][0]["status"], 502);
+}
+
+struct ResponseBindingVerifier {
+    initial: BoundVerifier,
+    remove_advertisement: bool,
+    delay_initial: bool,
+    refreshes: AtomicUsize,
+}
+
+#[async_trait]
+impl UpstreamVerifier for ResponseBindingVerifier {
+    async fn verify(
+        &self,
+        request: UpstreamVerificationRequest,
+    ) -> crate::aci::receipt::UpstreamVerifiedEvent {
+        if self.delay_initial {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        self.initial.verify(request).await
+    }
+
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &crate::aci::receipt::UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<crate::aci::receipt::UpstreamVerifiedEvent> {
+        self.refreshes.fetch_add(1, Ordering::Relaxed);
+        let mut event = self.initial.verify(request).await;
+        assert_eq!(
+            previous.provider_claims.as_ref().unwrap()["instances"][instance_id]
+                ["response_binding"],
+            true
+        );
+        if self.remove_advertisement {
+            event.provider_claims.as_mut().unwrap()["instances"][instance_id]
+                .as_object_mut()
+                .unwrap()
+                .remove("response_binding");
+        }
+        Some(event)
+    }
+}
+
+#[tokio::test]
+async fn zero_g_response_binding_retries_once_before_delivering_content() {
+    use crate::aci::upstream::{
+        tests::{ZeroGTerminalFixture as TerminalFixture, ZeroGTerminalMode as TerminalMode},
+        ModelRoute, ModelRouterBackend,
+    };
+
+    for (mode, buffered, early, remove_advertisement, sends, refreshes, success) in [
+        (TerminalMode::Ok, false, false, true, 2, 1, true),
+        (TerminalMode::Ok, true, false, true, 2, 1, true),
+        (TerminalMode::Ok, false, false, false, 2, 1, false),
+        (TerminalMode::Ok, true, false, false, 2, 1, false),
+        (TerminalMode::Ok, false, true, true, 1, 0, false),
+        (
+            TerminalMode::BoundTampered,
+            false,
+            false,
+            false,
+            1,
+            0,
+            false,
+        ),
+    ] {
+        let mut fixture = TerminalFixture::failure(mode, "fixture-model").await;
+        for instance in fixture.event.provider_claims.as_mut().unwrap()["instances"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            instance["response_binding"] = true.into();
+        }
+        let verifier = Arc::new(ResponseBindingVerifier {
+            initial: BoundVerifier(fixture.event.clone()),
+            remove_advertisement,
+            delay_initial: early,
+            refreshes: AtomicUsize::new(0),
+        });
+        let mut router = ModelRouterBackend::new("response-binding-test");
+        router
+            .add_route(
+                ModelRoute::new(
+                    "fixture-model",
+                    "fixture-model",
+                    fixture.backend.clone(),
+                    "fixture:model",
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut case = Case::new("zero_g_binding_retry", Endpoint::ChatComplete, "", "openai");
+        case.buffered = buffered;
+        case.early = early;
+        let snapshot =
+            capture_with_upstream(&case, Some((Arc::new(router), verifier.clone()))).await;
+        assert_eq!(fixture.request_calls(), sends, "{mode:?}: {snapshot}");
+        assert_eq!(verifier.refreshes.load(Ordering::Relaxed), refreshes);
+        assert_eq!(fixture.signature_calls(), usize::from(success));
+        assert_eq!(
+            snapshot["reports"][0]["status"],
+            if success { 200 } else { 502 }
+        );
+        assert_eq!(snapshot["signature_valid"], success);
+        if !buffered {
+            let wire = snapshot["wire"].as_str().unwrap();
+            assert!(
+                wire.contains(if success { "[DONE]" } else { r#""error""# }),
+                "{mode:?}: {wire}"
+            );
+            assert_eq!(wire.contains(": PROCESSING"), early);
+            assert_eq!(
+                wire.contains(r#""content":"o""#),
+                success || mode == TerminalMode::BoundTampered
+            );
+        }
+    }
 }

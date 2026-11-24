@@ -184,6 +184,8 @@ struct Mock {
     origin: String,
     preview: Mutex<Vec<&'static str>>,
     preview_requests: Mutex<Vec<(HeaderMap, Value)>>,
+    quote_requests: Mutex<Vec<String>>,
+    a_quote_features: Mutex<Option<Value>>,
 }
 
 async fn preview(
@@ -214,7 +216,8 @@ async fn rpc(State(mock): State<Arc<Mock>>, Json(call): Json<Value>) -> Json<Val
     Json(json!({"jsonrpc": "2.0", "id": 1, "result": service_record(&mock.origin, name)}))
 }
 
-async fn broker_quote(Path(name): Path<String>) -> Response {
+async fn broker_quote(State(mock): State<Arc<Mock>>, Path(name): Path<String>) -> Response {
+    mock.quote_requests.lock().unwrap().push(name.clone());
     if name == "g" {
         return (
             StatusCode::TEMPORARY_REDIRECT,
@@ -222,7 +225,13 @@ async fn broker_quote(Path(name): Path<String>) -> Response {
         )
             .into_response();
     }
-    Json(quote(&name)).into_response()
+    let mut reply = quote(&name);
+    if name == "a" {
+        if let Some(features) = mock.a_quote_features.lock().unwrap().as_ref() {
+            reply["e2ee_features"] = features.clone();
+        }
+    }
+    Json(reply).into_response()
 }
 
 async fn fixture() -> (
@@ -369,6 +378,42 @@ async fn binds_only_verified_candidates_and_fails_closed_without_one() {
     assert_eq!(event.result, VerificationResult::Failed);
     assert!(event.channel_bindings.is_empty());
     assert!(verifier.cached(&request()).is_none());
+    server.abort();
+}
+
+#[tokio::test]
+async fn scoped_reverification_updates_only_the_failed_broker() {
+    let (mock, verifier, server) = fixture().await;
+    *mock.preview.lock().unwrap() = vec!["a", "j"];
+    let event = verifier.verify(request()).await;
+    let instances = &event.provider_claims.as_ref().unwrap()["instances"];
+    assert_eq!(instances[address("a")]["response_binding"], true);
+    let expiry = verifier.cache_remaining(&request()).unwrap();
+
+    *mock.a_quote_features.lock().unwrap() = Some(json!([]));
+    let refreshed = verifier
+        .reverify_instance(request(), &event, &address("a"))
+        .await
+        .unwrap();
+    assert_eq!(refreshed.result, VerificationResult::Verified);
+    assert_eq!(refreshed.channel_bindings, event.channel_bindings[..1]);
+    let refreshed_instances = &refreshed.provider_claims.unwrap()["instances"];
+    assert!(refreshed_instances[address("a")]
+        .get("response_binding")
+        .is_none());
+    assert!(refreshed_instances.get(address("j")).is_none());
+
+    let cached = verifier.cached(&request()).unwrap();
+    assert_eq!(cached.channel_bindings, event.channel_bindings);
+    let cached_instances = &cached.provider_claims.unwrap()["instances"];
+    assert_eq!(
+        cached_instances[address("a")],
+        refreshed_instances[address("a")]
+    );
+    assert_eq!(cached_instances[address("j")], instances[address("j")]);
+    assert!(verifier.cache_remaining(&request()).unwrap() <= expiry);
+    assert_eq!(*mock.quote_requests.lock().unwrap(), ["a", "j", "a"]);
+    assert_eq!(mock.preview_requests.lock().unwrap().len(), 1);
     server.abort();
 }
 

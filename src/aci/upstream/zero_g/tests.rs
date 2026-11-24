@@ -310,6 +310,7 @@ pub(crate) enum Mode {
     RouterError,
     Conflict(&'static str),
     Bound,
+    BoundTampered,
     Truncated,
     TruncatedLine,
     Reordered,
@@ -385,7 +386,7 @@ impl Fixture {
             model: MODEL.into(),
             signing_address: signer(2).1,
             e2ee_public_key: hex::encode(enc_pub),
-            response_binding: mode == Mode::Bound,
+            response_binding: matches!(mode, Mode::Bound | Mode::BoundTampered),
         };
         let event = UpstreamVerifiedEvent {
             provider_type: Some(ZERO_G_PROVIDER.into()),
@@ -533,7 +534,7 @@ async fn chat(
             .into_response();
     }
     let (request, client_key, request_hash) = open_request(&broker.secret, &object(&body)).unwrap();
-    let psk = if broker.mode == Mode::Bound {
+    let psk = if matches!(broker.mode, Mode::Bound | Mode::BoundTampered) {
         assert!(body.get(BIND).is_none());
         Some(decode(request[BIND].as_str().unwrap()).unwrap())
     } else {
@@ -562,7 +563,7 @@ async fn chat(
             frames.pop();
         }
         Mode::Reordered => frames.swap(0, 1),
-        Mode::Tampered => frames[1]["id"] = "forged".into(),
+        Mode::Tampered | Mode::BoundTampered => frames[1]["id"] = "forged".into(),
         _ => {}
     }
     let mut response = if stream {
@@ -724,9 +725,14 @@ async fn advertised_response_binding_requires_psk_before_releasing_chunks() {
     let mut base = Fixture::new(Mode::Ok).await;
     base.event.provider_claims.as_mut().unwrap()["instances"][ADDRESS]["response_binding"] =
         true.into();
-    let events = base.stream().await;
-    assert_eq!(events.len(), 1);
-    assert!(events[0].is_err());
+    assert!(matches!(
+        base.buffered().await,
+        Err(UpstreamError::ResponseBindingMismatch { instance_id }) if instance_id == ADDRESS
+    ));
+    assert!(matches!(
+        base.backend.forward_stream_verified_prepared(base.chat(true), &base.event).await,
+        Err(UpstreamError::ResponseBindingMismatch { instance_id }) if instance_id == ADDRESS
+    ));
     assert_eq!(base.signature_calls(), 0);
 }
 
