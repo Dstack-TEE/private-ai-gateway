@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::aci::verifier::TinfoilProviderVerifier;
+
 use super::{
     ConfiguredUpstreams, UpstreamConfig, UpstreamConfigError, UpstreamConfigSnapshot,
     UpstreamProvider, UpstreamRuntimeOptions,
@@ -231,6 +233,21 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
+        }
+        if upstream.provider == UpstreamProvider::Tinfoil {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            for pin in subjects.iter().filter_map(|subject| {
+                subject.strip_prefix(TinfoilProviderVerifier::RELEASE_SUBJECT_PREFIX)
+            }) {
+                if !pin.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                }) {
+                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                        "upstream {:?} provider tinfoil accepted_subjects release pins must be tinfoil-release:sha256:<64 lowercase hex>",
+                        upstream.name
+                    )));
+                }
+            }
         }
         if upstream.provider == UpstreamProvider::ArmetAi {
             if !valid_root_https_origin(&upstream.base_url) {

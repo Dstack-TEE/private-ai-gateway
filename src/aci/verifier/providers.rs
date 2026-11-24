@@ -157,6 +157,8 @@ pub struct TinfoilProviderVerifier {
 }
 
 impl TinfoilProviderVerifier {
+    pub(crate) const RELEASE_SUBJECT_PREFIX: &str = "tinfoil-release:";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -170,6 +172,18 @@ impl TinfoilProviderVerifier {
                 cache_ttl_seconds,
             ),
         }
+    }
+
+    pub(crate) fn with_accepted_subjects(mut self, subjects: &[String]) -> Self {
+        for subject in subjects
+            .iter()
+            .filter(|subject| subject.starts_with(Self::RELEASE_SUBJECT_PREFIX))
+        {
+            self.verifier = self
+                .verifier
+                .with_option(format!("tinfoil_accepted_subject:{subject}"), "true");
+        }
+        self
     }
 
     #[cfg(test)]

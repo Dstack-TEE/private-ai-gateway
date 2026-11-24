@@ -229,6 +229,7 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
     pub forwarded_body: &'a [u8],
     pub recorded_event: UpstreamVerifiedEvent,
     pub recorded: Option<String>,
+    pub upstream_headers: &'a HashMap<String, String>,
 }
 
 impl AciService {
@@ -249,6 +250,7 @@ impl AciService {
             forwarded_body,
             recorded_event,
             recorded,
+            upstream_headers,
         } = inputs;
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
@@ -265,7 +267,12 @@ impl AciService {
         builder.add_request_forwarded(forwarded_body)?;
         // A direct service has no upstream hop, so §7.5's event does not apply.
         if !self.serves_directly() {
-            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &recorded_event,
+                recorded,
+                upstream_headers,
+            )?;
         }
         Ok(builder)
     }
@@ -321,6 +328,7 @@ impl AciService {
             forwarded_body: &forwarded_body,
             recorded_event: admission.event,
             recorded,
+            upstream_headers: &response.headers,
         })?;
         // The session is keyed on the requested (routed) model; record the
         // exact upstream-served model in the receipt's upstream.verified.
@@ -789,6 +797,7 @@ impl AciService {
                             forwarded_body: &forwarded_body,
                             recorded_event: admission.event,
                             recorded,
+                            upstream_headers: &upstream_headers,
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
