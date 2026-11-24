@@ -16,9 +16,11 @@ use crate::aci::e2ee::{
     is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
     E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V1, E2EE_VERSION_V2,
 };
-use crate::aci::identity::{attestation_statement, report_data};
+use crate::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
 use crate::aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
 use crate::aci::types::{AttestationEnvelope, AttestationReport};
+
+const E2EE_TIMESTAMP_WINDOW_SECONDS: u64 = 300;
 
 impl AciService {
     pub async fn attestation_report(
@@ -36,10 +38,11 @@ impl AciService {
         nonce: Option<String>,
         domain: Option<&str>,
     ) -> Result<AttestationReport, ServiceError> {
-        let statement = attestation_statement(self.keyset.digest(), nonce.as_deref())?;
+        let keyset = self.current_keyset();
+        let statement = attestation_statement(keyset.digest(), nonce.as_deref())?;
         let rd = report_data(&statement);
         let quote = self.quoter.get_quote(rd).await?;
-        self.assemble_report(&rd, quote, domain)
+        self.assemble_report(&keyset, &rd, quote, domain)
     }
 
     /// Legacy dstack-vllm-proxy compatibility report. The quote binds
@@ -60,7 +63,7 @@ impl AciService {
     ) -> Result<AttestationReport, ServiceError> {
         let rd = self.legacy_report_data(signing_algo, version, nonce, domain)?;
         let quote = self.quoter.get_quote_raw(rd).await?;
-        self.assemble_report(&rd, quote, domain)
+        self.assemble_report(&self.current_keyset(), &rd, quote, domain)
     }
 
     /// Build `identity(32) ‖ nonce(32)`. The nonce is the raw 32 bytes when it
@@ -147,10 +150,12 @@ impl AciService {
     /// (v2 cannot be produced without one — matching the proxy).
     fn legacy_tls_spki_fingerprint(&self, domain: Option<&str>) -> Result<[u8; 32], ServiceError> {
         let key_err = |msg: String| ServiceError::Key(crate::aci::keys::KeyError::Crypto(msg));
+        let keyset = self.current_keyset();
         let spki_hex = domain
             .and_then(normalize_downstream_domain)
             .and_then(|domain| {
-                self.keyset()
+                keyset
+                    .keyset()
                     .tls_public_keys
                     .iter()
                     .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -171,6 +176,7 @@ impl AciService {
 
     fn assemble_report(
         &self,
+        keyset: &SealedWorkloadKeyset,
         report_data_bytes: &[u8],
         quote: crate::aci::keys::Quote,
         domain: Option<&str>,
@@ -205,10 +211,10 @@ impl AciService {
 
         Ok(AttestationReport {
             api_version: "aci/1".to_string(),
-            workload_keyset_digest: self.keyset.digest().to_string(),
+            workload_keyset_digest: keyset.digest().to_string(),
             attestation: AttestationEnvelope {
                 tee_type: self.config.tee_type.clone(),
-                workload_keyset: self.keyset.to_value(),
+                workload_keyset: keyset.to_value(),
                 report_data_hex: hex::encode(report_data_bytes),
                 source_provenance: self.config.source_provenance.clone(),
                 evidence,
@@ -219,7 +225,8 @@ impl AciService {
 
     pub(super) fn downstream_tls_binding(&self, domain: &str) -> Option<Value> {
         let domain = normalize_downstream_domain(domain)?;
-        self.keyset()
+        self.current_keyset()
+            .keyset()
             .tls_public_keys
             .iter()
             .find(|key| key.domain.as_deref() == Some(domain.as_str()))
@@ -232,7 +239,8 @@ impl AciService {
     }
 
     fn requires_host_for_downstream_tls_binding(&self) -> bool {
-        self.keyset()
+        self.current_keyset()
+            .keyset()
             .tls_public_keys
             .iter()
             .any(|key| key.domain.is_some())
@@ -261,16 +269,15 @@ impl AciService {
         let timestamp = timestamp
             .parse::<u64>()
             .map_err(|_| E2eeError::InvalidTimestamp)?;
-        let now = self.clock.now_secs();
-        if now.abs_diff(timestamp) > 300 {
+        if self.clock.now_secs().abs_diff(timestamp) > E2EE_TIMESTAMP_WINDOW_SECONDS {
             return Err(E2eeError::InvalidTimestamp);
         }
 
         // The client selects an E2EE v2 §4 suite by the `algo` of the keyset
         // entry it encrypts to (§7). Match `X-Model-Pub-Key` against each suite entry
         // under that suite's own normalization; the first match fixes the suite.
-        let selected_key = self
-            .keyset
+        let keyset = self.current_keyset();
+        let selected_key = keyset
             .keyset()
             .e2ee_public_keys
             .iter()
@@ -292,12 +299,6 @@ impl AciService {
         let mut payload: Value =
             serde_json::from_slice(body).map_err(|_| E2eeError::DecryptionFailed)?;
         let request_model = validate_aci_payload_model(&payload)?;
-        self.claim_e2ee_replay(
-            client_public_key_hex.clone(),
-            model_public_key_hex.clone(),
-            nonce.to_ascii_lowercase(),
-            now,
-        )?;
         let crypto = E2eeFieldCrypto {
             keys: self.keys.as_ref(),
             decryptor: E2eeDecryptor::AciV2 {
@@ -310,6 +311,7 @@ impl AciService {
             timestamp: Some(timestamp),
         };
         decrypt_request_payload(&crypto, endpoint_path, &mut payload)?;
+        self.claim_e2ee_replay(model_public_key_hex, nonce.to_ascii_lowercase(), timestamp)?;
         let decrypted_body =
             serde_json::to_vec(&payload).map_err(|_| E2eeError::DecryptionFailed)?;
         Ok(E2eePreparedRequest {
@@ -409,25 +411,28 @@ impl AciService {
 
     pub(super) fn claim_e2ee_replay(
         &self,
-        client_public_key_hex: String,
         model_public_key_hex: String,
         nonce: String,
-        now: u64,
+        timestamp: u64,
     ) -> Result<(), E2eeError> {
         let mut guard = self
             .e2ee_replay
             .write()
             .expect("E2EE replay cache poisoned");
-        guard.retain(|_, expires_at| *expires_at > now);
+        let now = self.clock.now_secs();
+        if now.abs_diff(timestamp) > E2EE_TIMESTAMP_WINDOW_SECONDS {
+            return Err(E2eeError::InvalidTimestamp);
+        }
+        guard.retain(|_, accepted_through| *accepted_through >= now);
         let key = E2eeReplayKey {
-            client_public_key_hex,
             model_public_key_hex,
             nonce,
         };
         if guard.contains_key(&key) {
             return Err(E2eeError::ReplayDetected);
         }
-        guard.insert(key, now.saturating_add(300));
+        // Retain through the inclusive timestamp acceptance boundary.
+        guard.insert(key, timestamp.saturating_add(E2EE_TIMESTAMP_WINDOW_SECONDS));
         Ok(())
     }
 }

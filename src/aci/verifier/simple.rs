@@ -31,7 +31,7 @@ impl StaticUpstreamVerifier {
         })
     }
 
-    /// Convenience: build a `failed` event tagged with a fixed reason.
+    /// Convenience: build a `failed` event with a fixed diagnostic.
     pub fn failed(verifier_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self::new(UpstreamVerifiedEvent {
             upstream_name: String::new(),
@@ -39,30 +39,38 @@ impl StaticUpstreamVerifier {
             verifier_id: verifier_id.into(),
             result: VerificationResult::Failed,
             required: true,
-            reason: Some(reason.into()),
+            diagnostic: Some(reason.into()),
             ..Default::default()
         })
     }
-}
 
-#[async_trait]
-impl UpstreamVerifier for StaticUpstreamVerifier {
-    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         // Populate the vendor / model_id / url_origin fields from the
         // request when the static event left them blank, so a static
         // configuration does not erase per-request context that helps
         // downstream verifiers.
         let mut event = self.event.clone();
         if event.upstream_name.is_empty() {
-            event.upstream_name = request.upstream_name;
+            event.upstream_name = request.upstream_name.clone();
         }
         if event.model_id.is_empty() {
-            event.model_id = request.model_id;
+            event.model_id = request.model_id.clone();
         }
         if event.url_origin.is_none() {
-            event.url_origin = request.url_origin;
+            event.url_origin = request.url_origin.clone();
         }
         event
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for StaticUpstreamVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.event_for(&request)
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        Some(self.event_for(request))
     }
 }
 
@@ -82,19 +90,27 @@ impl PreverifiedUpstreamVerifier {
             verifier_id: verifier_id.into(),
         }
     }
-}
 
-#[async_trait]
-impl UpstreamVerifier for PreverifiedUpstreamVerifier {
-    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
+            upstream_name: request.upstream_name.clone(),
+            model_id: request.model_id.clone(),
+            url_origin: request.url_origin.clone(),
             verifier_id: self.verifier_id.clone(),
             result: VerificationResult::Verified,
             required: request.required,
             ..Default::default()
         }
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for PreverifiedUpstreamVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.event_for(&request)
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        Some(self.event_for(request))
     }
 }

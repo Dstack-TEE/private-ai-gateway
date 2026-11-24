@@ -111,7 +111,7 @@ impl OsKeychain {
     /// [`STORE_TIMEOUT`]. An operation still waiting after that (a prompt
     /// nobody answers) is abandoned and the store counts as unavailable. The
     /// Secret Service backend also needs the plain thread: it uses zbus's
-    /// blocking API, which creates a Tokio runtime internally.
+    /// blocking API, which must not run on an async worker thread.
     fn run<T: Send + 'static>(
         operation: impl FnOnce() -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
@@ -164,7 +164,6 @@ fn store_error(error: keyring::Error) -> String {
 struct ServiceSettings {
     active_profile_id: String,
     profiles: Vec<ConfidentialProfile>,
-    require_production_os: bool,
 }
 
 /// 0.1.x `preferences.json`.
@@ -298,7 +297,6 @@ fn settings_from(
         ..Config::default()
     };
     if let Some(service) = service {
-        config.require_production_os = service.require_production_os;
         for profile in service.profiles {
             config.profiles.insert(
                 profile.id,

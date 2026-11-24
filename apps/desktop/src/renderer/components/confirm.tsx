@@ -92,7 +92,7 @@ export function ConfirmProvider({ children }: PropsWithChildren) {
       <AlertDialogContent ref={popup} initialFocus={request?.kind === "confirm" && request.destructive ? cancel : action} finalFocus={() => opener.current?.isConnected ? opener.current : false}>
         <AlertDialogHeader>
           <AlertDialogTitle>{request?.title}</AlertDialogTitle>
-          <AlertDialogDescription className="whitespace-pre-line">{request?.message}</AlertDialogDescription>
+          <AlertDialogDescription className="select-text whitespace-pre-line">{request?.message}</AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           {request?.kind === "alert"

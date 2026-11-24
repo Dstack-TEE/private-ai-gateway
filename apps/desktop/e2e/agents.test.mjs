@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { parse as parseYaml, parseDocument } from "yaml";
 
+import { classifyReplyFailure, latestReplyUsage, repeatedOutput } from "./reply-failure.mjs";
+
 const MODEL = "z-ai/glm-5.3-flash";
 const PROMPT = "Reply with exactly: PAP-OK";
 const REPLY = "PAP-OK";
@@ -212,7 +214,7 @@ async function step(row, name, check) {
     row[name] = "ok";
     return value;
   } catch (error) {
-    row[name] = "FAIL";
+    row[name] = error.upstream ? "UPSTREAM" : "FAIL";
     throw error;
   }
 }
@@ -311,18 +313,38 @@ function localApi(token, pathname, body) {
 // but not a different reply.
 const normalizeReply = (line) => line.trim().replace(/^[*`"'“”‘’]+|[*`"'“”‘’.,;:!?]+$/g, "");
 
+// Every usage record matching the filter, newest first.
+function usageRecords(...filter) {
+  const records = [];
+  let cursor;
+  do {
+    const page = papJson("usage", "list", ...filter, "--limit", "100", ...(cursor ? ["--cursor", cursor] : []));
+    records.push(...page.items);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return records;
+}
+
+const agentUsage = (agent) => usageRecords("--agent", agent.id);
+
 function assertReply(agent) {
   const [command, ...args] = agent.prompt;
-  const since = nowSeconds();
-  const { error, status, signal, stdout, stderr } = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  let previousIds;
+  let snapshotError;
+  try {
+    previousIds = new Set(agentUsage(agent).map(({ id }) => id));
+  } catch (error) {
+    snapshotError = error;
+  }
+  const result = spawn(command, args, { env: AGENT_ENV, timeout: REPLY_TIMEOUT });
+  const { error, stdout, stderr } = result;
   if (!error && stdout.split("\n").some((line) => normalizeReply(line) === REPLY)) return;
 
-  let reason = `exited ${status ?? signal} without replying ${REPLY}`;
-  if (error?.code === "ETIMEDOUT") reason = `timed out after ${REPLY_TIMEOUT / 1000} s`;
-  else if (error) reason = `did not finish: ${error.message}`;
+  let record;
   let usage = "none since the prompt";
   try {
-    const [record] = papJson("usage", "list", "--agent", agent.id, "--since", String(since), "--limit", "1").items;
+    if (snapshotError) throw snapshotError;
+    record = latestReplyUsage(agentUsage(agent), previousIds);
     if (record) {
       const { method, path: requestPath, status: httpStatus, verified, leftDevice, detail } = record;
       usage = `${method} ${requestPath}: HTTP ${httpStatus}, verified ${verified}, left device ${leftDevice}: ${detail}`;
@@ -330,8 +352,11 @@ function assertReply(agent) {
   } catch (usageError) {
     usage = `unreadable: ${usageError.message}`;
   }
+  const { reason, upstream } = classifyReplyFailure({ ...result, record, model: MODEL, reply: REPLY, timeout: REPLY_TIMEOUT });
+  const repetition = repeatedOutput(`${stdout ?? ""}\n${stderr ?? ""}`);
   const report = [
     `${agent.id} ${reason}`,
+    ...(repetition ? [`output contains ${repetition.length.toLocaleString("en-US")} consecutive ${JSON.stringify(repetition.character)} characters`] : []),
     `--- stdout (last 40 lines)`,
     tail(stdout),
     `--- stderr (last 40 lines)`,
@@ -339,7 +364,7 @@ function assertReply(agent) {
     `--- latest usage record`,
     usage,
   ];
-  assert.fail(redact(report.join("\n")));
+  throw Object.assign(new assert.AssertionError({ message: redact(report.join("\n")) }), { upstream });
 }
 
 // Receipt audits finish after delivery, so wait for every record to settle.
@@ -379,6 +404,7 @@ async function verifyDsh() {
   const headless = dshTree("--profile", "headless", "--dump-config");
   assert.deepEqual(headless("agent-default-model").config, connected);
   assert.equal(headless("web-search-deepseek").disabled, true, "DeepSeek web search is still enabled");
+  assert.equal(headless("credentials").disabled, false, "dsh's headless credential store is disabled");
   const provider = headless("llm-pi-ai").config.providers["private-ai-proxy"];
 
   const bodies = [];
@@ -487,7 +513,6 @@ test("fails closed while the network is down", async (t) => {
     connected.set(agent.id, { original, files: readFiles(agent), token: readToken(agent) });
   }
   const clientToken = pap(["token", "show", "--yes"]).trim();
-  const since = nowSeconds();
 
   await setNetwork("down");
   pap(["profiles", "use", "redpill-alt", "--yes"]);
@@ -495,6 +520,11 @@ test("fails closed while the network is down", async (t) => {
     const current = protection();
     return !["protected", "verifying"].includes(current) && current;
   });
+  // Only requests recorded once verification has failed count. The switch
+  // starts a new verifier generation, and the backend discards events from the
+  // old one, so a request still in flight from before the outage is never
+  // recorded after this point.
+  const before = new Set(usageRecords().map(({ id }) => id));
 
   await check(t, "outage phase", () => assert.ok(OUTAGE_PHASES.includes(phase), `phase ${phase}`));
   await check(t, "configs kept", () => {
@@ -515,9 +545,10 @@ test("fails closed while the network is down", async (t) => {
     assert.deepEqual(answer, { status: 503, code: "gateway_not_verified" });
   });
   await check(t, "nothing forwarded", () => {
-    const { items } = papJson("usage", "list", "--since", String(since), "--limit", "100");
-    const forwarded = items.filter(({ leftDevice }) => leftDevice);
-    assert.equal(forwarded.length, 0, `forwarded: ${forwarded.map(({ path: p }) => p).join(", ")}`);
+    const forwarded = usageRecords().filter(({ id, leftDevice }) => leftDevice && !before.has(id));
+    const describe = ({ agent, method, path: p, status, at, detail }) =>
+      `${agent ?? "Local API client"} ${method} ${p}: HTTP ${status} at ${new Date(at * 1000).toISOString()}: ${detail}`;
+    assert.equal(forwarded.length, 0, redact(`forwarded during the outage:\n${forwarded.map(describe).join("\n")}`));
   });
 });
 

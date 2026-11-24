@@ -8,6 +8,7 @@
 //!
 //! Cost injection is a separate metering pass.
 
+use std::borrow::Cow;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
@@ -20,24 +21,40 @@ use super::errors::{
 use super::request_transform::{effective_responses_tools, Endpoint, ResponsesToolMap};
 use super::types::ProviderFormat;
 use crate::error_payload::envelope;
+use crate::sse_protocol::SseProtocol;
 
 const STRICT_OPENAI_COMPLIANCE: bool = true;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseTransformError(&'static str);
+
+impl std::fmt::Display for ResponseTransformError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ResponseTransformError {}
+
 /// Transform a 2xx upstream body for `format`/`endpoint` into the client surface,
 /// applying OpenAI compatibility normalization before any format conversion.
-pub fn transform_response(format: ProviderFormat, endpoint: Endpoint, mut body: Value) -> Value {
+pub fn transform_response(
+    format: ProviderFormat,
+    endpoint: Endpoint,
+    mut body: Value,
+) -> Result<Value, ResponseTransformError> {
     if format == ProviderFormat::Openai {
         normalize_reasoning_usage(&mut body);
     }
     use Endpoint::*;
     use ProviderFormat::*;
     match (format, endpoint) {
-        (Anthropic, ChatComplete) => anthropic_chat_to_openai(body, STRICT_OPENAI_COMPLIANCE),
-        (Anthropic, Complete) => anthropic_complete_to_openai(body),
+        (Anthropic, ChatComplete) => Ok(anthropic_chat_to_openai(body, STRICT_OPENAI_COMPLIANCE)),
+        (Anthropic, Complete) => Ok(anthropic_complete_to_openai(body)),
         (Openai, Messages) => openai_to_anthropic_messages(body),
         // Native passthrough: openai chat/complete/embed, anthropic messages,
         // responses (createModelResponse).
-        _ => body,
+        _ => Ok(body),
     }
 }
 
@@ -79,7 +96,8 @@ pub(super) fn normalize_reasoning_usage_value(usage: &mut Value) -> Option<bool>
 ///
 /// Must cover every field the canonical schema treats as reasoning output — the
 /// allowlist keeps them all, so any this misses would survive an opt-out.
-pub fn exclude_reasoning(body: &mut Value) {
+pub fn exclude_reasoning(body: &mut Value) -> bool {
+    let mut changed = false;
     for choice in body
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -95,11 +113,12 @@ pub fn exclude_reasoning(body: &mut Value) {
                     "thinking_blocks",
                     "reasoning_items",
                 ] {
-                    object.remove(key);
+                    changed |= object.remove(key).is_some();
                 }
             }
         }
     }
+    changed
 }
 
 /// What the client is told about who served the request: our own request id and
@@ -139,21 +158,25 @@ pub struct ResponseIdentity {
 /// Only ever *replaces* `id`/`model`, never adds them: an Anthropic
 /// `content_block_delta` legitimately carries neither, and inventing them would
 /// corrupt the event.
-pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
+pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     match object.get("type").and_then(Value::as_str) {
         // Anthropic streaming: identity is in `message_start`'s `message`.
         Some("message_start") => {
             if let Some(message) = object.get_mut("message").and_then(Value::as_object_mut) {
-                rewrite_id_and_model(message, identity);
+                rewrite_id_and_model(message, identity)
+            } else {
+                false
             }
         }
         // Responses API streaming: lifecycle events nest identity in `response`.
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                rewrite_id_and_model(inner, identity);
+                rewrite_id_and_model(inner, identity)
+            } else {
+                false
             }
         }
         // Everything else — the buffered body (OpenAI chat/completion/responses, or
@@ -167,13 +190,24 @@ pub fn rewrite_identity(body: &mut Value, identity: &ResponseIdentity) {
 
 /// Replace `id`/`model` where they already exist, on whichever object carries
 /// the response identity.
-fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &ResponseIdentity) {
-    if object.contains_key("id") {
-        object.insert("id".to_string(), Value::String(identity.request_id.clone()));
+fn rewrite_id_and_model(
+    object: &mut serde_json::Map<String, Value>,
+    identity: &ResponseIdentity,
+) -> bool {
+    let mut changed = false;
+    if let Some(id) = object.get_mut("id") {
+        if id.as_str() != Some(&identity.request_id) {
+            *id = Value::String(identity.request_id.clone());
+            changed = true;
+        }
     }
-    if let (true, Some(model)) = (object.contains_key("model"), identity.user_model.as_ref()) {
-        object.insert("model".to_string(), Value::String(model.clone()));
+    if let (Some(model), Some(target)) = (object.get_mut("model"), identity.user_model.as_ref()) {
+        if model.as_str() != Some(target) {
+            *model = Value::String(target.clone());
+            changed = true;
+        }
     }
+    changed
 }
 
 // ── Canonical output schema (allowlist) ──────────────────────────────────────
@@ -185,7 +219,7 @@ fn rewrite_id_and_model(object: &mut serde_json::Map<String, Value>, identity: &
 // leaks nothing by construction: a field the schema does not name never reaches
 // the client, whether or not we have seen it.
 //
-// This is why `rewrite_identity` no longer strips engine fields —
+// `rewrite_identity` handles values; canonicalization removes engine fields —
 // `matched_stop` and its kind are simply not on the allowlist. Identity that is
 // a *value*, not a field (`id`/`model`), is still rewritten there; the allowlist
 // only decides which fields survive.
@@ -264,6 +298,20 @@ const CHAT_USAGE: &[&str] = &[
     "reasoning_tokens",
     "server_tool_use",
     "server_tool_use_details",
+    "cost",
+    "cost_details",
+];
+// Messages counters plus the token-detail fallbacks understood by pricing.
+const MESSAGES_USAGE: &[&str] = &[
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "prompt_tokens_details",
+    "input_tokens_details",
     "cost",
     "cost_details",
 ];
@@ -581,6 +629,9 @@ const RESPONSES_USAGE: &[&str] = &[
     "cost_details",
 ];
 
+const SYSTEMONE_TOP: &[&str] = &["model", "answers", "usage", "error"];
+const SYSTEMONE_USAGE: &[&str] = &["input_tokens", "output_tokens", "cost"];
+
 /// Reduce a response to the gateway's documented output schema for `endpoint`,
 /// dropping every field the schema does not name. Runs last, after
 /// `rewrite_identity` and cost injection, on both a buffered body and a single
@@ -594,29 +645,93 @@ const RESPONSES_USAGE: &[&str] = &[
 /// event — the gateway's error tail carries it, and a rebuilt upstream error
 /// must be indistinguishable from it (and stay correlatable with the receipt).
 pub fn canonicalize(body: &mut Value, endpoint: Endpoint, request_id: Option<&str>) {
+    canonicalize_body(body, endpoint, request_id, true);
+}
+
+fn canonicalize_body(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+    filter_usage_fields: bool,
+) -> bool {
     match endpoint {
-        Endpoint::ChatComplete => canonicalize_chat_completion(body),
-        Endpoint::Complete => canonicalize_text_completion(body),
-        Endpoint::CreateModelResponse => canonicalize_responses(body),
+        Endpoint::ChatComplete => canonicalize_chat_completion(body, filter_usage_fields),
+        Endpoint::Complete => canonicalize_text_completion(body, filter_usage_fields),
+        Endpoint::CreateModelResponse => canonicalize_responses(body, filter_usage_fields),
         Endpoint::Messages => canonicalize_messages(body, request_id),
-        Endpoint::Embed => {}
+        Endpoint::Embed => false,
+        Endpoint::Rerank => {
+            super::rerank::canonicalize(body);
+            true
+        }
+        Endpoint::SystemOne => canonicalize_systemone(body, filter_usage_fields),
+        // Buffered audio is already validated and sanitized by audio::sanitize_response.
+        Endpoint::AudioTranscriptions | Endpoint::AudioSpeech => false,
+        Endpoint::ImagesGenerations | Endpoint::ImagesEdits => {
+            super::images::canonicalize(body);
+            true
+        }
     }
+}
+
+/// Sanitation follows the payload schema even for unknown SSE event names.
+/// Ingress metadata remains authoritative for protocol identity and outcome.
+/// Streaming usage is filtered by accounting, including on failed turns.
+pub(crate) fn canonicalize_stream(
+    body: &mut Value,
+    endpoint: Endpoint,
+    request_id: Option<&str>,
+) -> bool {
+    match endpoint {
+        Endpoint::Messages => false,
+        _ => canonicalize_body(body, endpoint, request_id, false),
+    }
+}
+
+fn canonicalize_systemone(body: &mut Value, filter_usage_fields: bool) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    if object.get("type").and_then(Value::as_str) == Some("error")
+        && object.get("error").is_none_or(Value::is_null)
+    {
+        changed = true;
+        object.insert("error".into(), Value::Object(object.clone()));
+    }
+    if object.get("error").is_some_and(Value::is_null) {
+        changed = true;
+        object.remove("error");
+    }
+    changed |= retain_allowed(object, SYSTEMONE_TOP);
+    changed |= sanitize_error(object.get_mut("error"));
+    if filter_usage_fields {
+        changed |= filter_systemone_usage(object.get_mut("usage"));
+    }
+    changed
 }
 
 /// The Messages surface is left as the upstream (or the format conversion)
 /// shaped it, except for the in-band `error` event, which carries
 /// upstream-controlled kind and prose. It is rebuilt in the shape
-/// `stream_error_tail` emits for this protocol, dropping everything beside
+/// the response owner emits for this protocol, dropping everything beside
 /// `type`/`message` by construction; the rebuilt event keeps `type: "error"`
-/// and a non-null `error` member, which the meter and the framing observer
-/// classify a failed stream by.
-fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
+/// and a non-null `error` member. Classified failure evidence stays with the
+/// record while the response owner sanitizes its representation.
+fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     if object.get("type").and_then(Value::as_str) != Some("error") {
-        return;
+        return false;
     }
+    sanitize_messages_error_event(object, request_id)
+}
+
+pub(crate) fn sanitize_messages_error_event(
+    object: &mut serde_json::Map<String, Value>,
+    request_id: Option<&str>,
+) -> bool {
     // The same kind resolution and the same suppressed-status rules as every
     // other surface: read code-first, and let the account check outrank the
     // kind. Reading the `type` slot alone would relay an unpaid provider as a
@@ -637,19 +752,23 @@ fn canonicalize_messages(body: &mut Value, request_id: Option<&str>) {
         )
     };
     if let Value::Object(event) = envelope(Surface::Anthropic, &kind, &message, request_id) {
-        *object = event;
+        let before = std::mem::replace(object, event);
+        before != *object
+    } else {
+        false
     }
 }
 
-fn canonicalize_text_completion(body: &mut Value) {
+fn canonicalize_text_completion(body: &mut Value, filter_usage_fields: bool) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
-    retain_allowed(object, COMPLETION_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
+    let mut changed = false;
+    changed |= retain_allowed(object, COMPLETION_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
     }
-    sanitize_error(object.get_mut("error"));
+    changed |= sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -657,10 +776,11 @@ fn canonicalize_text_completion(body: &mut Value) {
         .flatten()
     {
         if let Some(choice) = choice.as_object_mut() {
-            retain_allowed(choice, COMPLETION_CHOICE);
-            sanitize_error(choice.get_mut("error"));
+            changed |= retain_allowed(choice, COMPLETION_CHOICE);
+            changed |= sanitize_error(choice.get_mut("error"));
         }
     }
+    changed
 }
 
 /// The Responses API is the one surface whose streaming events do *not* share
@@ -669,9 +789,8 @@ fn canonicalize_text_completion(body: &mut Value) {
 /// `{"type":"response.completed","response":{…}}`, `{"type":"error",…}`), while
 /// the buffered body *is* the response object (`{"object":"response",…}`, no
 /// top-level `type`). Applying the final-object allowlist to an event envelope
-/// would empty it and destroy the stream — and, because metering keys on the
-/// envelope's `type`/`response.status`/`error`, misreport a successful stream as
-/// failed. So dispatch on the envelope `type`:
+/// would empty it and destroy the client-visible stream. Choose the sanitation
+/// schema from the envelope `type`, independently of ingress control meaning:
 /// - No `type`: the buffered response object — canonicalize it directly.
 /// - `response.*` lifecycle: the full object is nested under `response` — that is
 ///   the only identity-bearing part; canonicalize it and leave the envelope's
@@ -682,38 +801,39 @@ fn canonicalize_text_completion(body: &mut Value) {
 ///   envelope carrying no response object and nothing upstream-authored beyond
 ///   content — pass through verbatim. There is no schema to filter an envelope
 ///   against, and applying the final-object allowlist would empty it.
-fn canonicalize_responses(body: &mut Value) {
+fn canonicalize_responses(body: &mut Value, filter_usage_fields: bool) -> bool {
     let Some(object) = body.as_object_mut() else {
-        return;
+        return false;
     };
     match object.get("type").and_then(Value::as_str) {
         // `response.error` must be matched before the lifecycle prefix: it
         // carries the error at the top level with no `response` member, so the
         // lifecycle arm would pass it through verbatim. Rebuilt as the
-        // canonical `error` event, which metering also classifies by.
+        // canonical `error` event without changing its ingress meaning.
         Some("error" | "response.error") => sanitize_responses_error_event(object),
         Some(t) if t.starts_with("response.") => {
             if let Some(inner) = object.get_mut("response").and_then(Value::as_object_mut) {
-                canonicalize_responses_object(inner);
+                canonicalize_responses_object(inner, filter_usage_fields)
+            } else {
+                false
             }
         }
-        Some(_) => {}
-        None => canonicalize_responses_object(object),
+        Some(_) => false,
+        None => canonicalize_responses_object(object, filter_usage_fields),
     }
 }
 
 /// Rebuild a Responses in-band `error` event as the gateway's own.
 ///
 /// This is the one non-`response.*` event with a gateway-side canonical shape:
-/// `stream_error_tail` already emits it when the gateway ends a broken
+/// The response owner already emits it when the gateway ends a broken
 /// Responses stream itself, and a client should not be able to tell the two
 /// apart. Two upstream shapes arrive — the documented flat event, and an
 /// `error` object nested under the envelope — and both collapse into that one
 /// shape. `sequence_number` is preserved: the protocol numbers its events, and
-/// the framing observer continues that numbering when it appends a tail of its
-/// own. The rebuilt event keeps `type: "error"`, which the meter and the
-/// framing observer classify a failed stream by.
-fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
+/// response owner continues that numbering when it appends an error tail.
+/// Rebuilding the representation preserves the ingress failure classification.
+pub(crate) fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) -> bool {
     let nested = object.get("error");
     // Prefer the nested object's fields over the envelope's. The kind is the
     // `code`, falling back to the nested `type`; the top-level `type` is the
@@ -757,18 +877,26 @@ fn sanitize_responses_error_event(object: &mut serde_json::Map<String, Value>) {
         )
     };
     if let Value::Object(event) = event {
-        *object = event;
+        let before = std::mem::replace(object, event);
+        before != *object
+    } else {
+        false
     }
 }
 
-fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
-    retain_allowed(object, RESPONSES_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, RESPONSES_USAGE);
+fn canonicalize_responses_object(
+    object: &mut serde_json::Map<String, Value>,
+    filter_usage_fields: bool,
+) -> bool {
+    let mut changed = false;
+    changed |= retain_allowed(object, RESPONSES_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiResponses);
     }
     // `output[]` items are content (message/reasoning/function_call, …) and left
     // intact; the identifying fields ride at the top level, dropped above.
-    sanitize_responses_error_field(object.get_mut("error"));
+    changed |= sanitize_responses_error_field(object.get_mut("error"));
+    changed
 }
 
 /// The response object's `error` field is `{code, message}` — string code,
@@ -779,11 +907,11 @@ fn canonicalize_responses_object(object: &mut serde_json::Map<String, Value>) {
 /// kind keeps its name and its scrubbed message; a suppressed kind becomes the
 /// gateway's own vocabulary; no kind at all relays the scrubbed message under
 /// the generic code.
-fn sanitize_responses_error_field(error: Option<&mut Value>) {
-    let Some(error) = error else { return };
+pub(crate) fn sanitize_responses_error_field(error: Option<&mut Value>) -> bool {
+    let Some(error) = error else { return false };
     let (code, message) = match &*error {
         // A null error is the healthy value; there is nothing to rebuild.
-        Value::Null => return,
+        Value::Null => return false,
         // A bare-string error (some providers send one) becomes the object.
         Value::String(text) => (
             responses_gateway_code(502).to_string(),
@@ -821,26 +949,50 @@ fn sanitize_responses_error_field(error: Option<&mut Value>) {
             upstream_message(502).to_string(),
         ),
     };
-    *error = json!({ "code": code, "message": message });
+    let before = std::mem::replace(error, json!({ "code": code, "message": message }));
+    before != *error
 }
 
-fn retain_allowed(object: &mut serde_json::Map<String, Value>, allowed: &[&str]) {
+fn retain_allowed(object: &mut serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    let before = object.len();
     object.retain(|key, _| allowed.contains(&key.as_str()));
+    object.len() != before
 }
 
-fn canonicalize_chat_completion(body: &mut Value) {
-    let Some(object) = body.as_object_mut() else {
-        return;
+pub(crate) fn filter_usage(usage: Option<&mut Value>, protocol: SseProtocol) -> bool {
+    let allowed = match protocol {
+        SseProtocol::OpenaiChat => CHAT_USAGE,
+        SseProtocol::OpenaiResponses => RESPONSES_USAGE,
+        SseProtocol::AnthropicMessages => MESSAGES_USAGE,
     };
-    retain_allowed(object, CHAT_TOP);
-    if let Some(usage) = object.get_mut("usage").and_then(Value::as_object_mut) {
-        retain_allowed(usage, CHAT_USAGE);
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, allowed)
+    } else {
+        false
     }
-    // The allowlist keeps the `error` field (so the client sees an in-band error
-    // and metering classifies the stream), but the error object's interior is
+}
+
+pub(crate) fn filter_systemone_usage(usage: Option<&mut Value>) -> bool {
+    if let Some(usage) = usage.and_then(Value::as_object_mut) {
+        retain_allowed(usage, SYSTEMONE_USAGE)
+    } else {
+        false
+    }
+}
+
+fn canonicalize_chat_completion(body: &mut Value, filter_usage_fields: bool) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    changed |= retain_allowed(object, CHAT_TOP);
+    if filter_usage_fields {
+        changed |= filter_usage(object.get_mut("usage"), SseProtocol::OpenaiChat);
+    }
+    // The allowlist keeps the client-visible `error` field, but its interior is
     // upstream-controlled — filter it to the standard fields and scrub its
     // message, so no `metadata.provider_name`/`raw` or unknown sub-field leaks.
-    sanitize_error(object.get_mut("error"));
+    changed |= sanitize_error(object.get_mut("error"));
     for choice in object
         .get_mut("choices")
         .and_then(Value::as_array_mut)
@@ -850,15 +1002,16 @@ fn canonicalize_chat_completion(body: &mut Value) {
         let Some(choice) = choice.as_object_mut() else {
             continue;
         };
-        retain_allowed(choice, CHAT_CHOICE);
-        sanitize_error(choice.get_mut("error"));
+        changed |= retain_allowed(choice, CHAT_CHOICE);
+        changed |= sanitize_error(choice.get_mut("error"));
         // A buffered choice carries `message`; a streaming choice carries `delta`.
         for container in ["message", "delta"] {
             if let Some(part) = choice.get_mut(container).and_then(Value::as_object_mut) {
-                retain_allowed(part, CHAT_MESSAGE);
+                changed |= retain_allowed(part, CHAT_MESSAGE);
             }
         }
     }
+    changed
 }
 
 /// Make an in-band error client-safe. An object whose kind is not relayable is
@@ -868,30 +1021,30 @@ fn canonicalize_chat_completion(body: &mut Value) {
 /// `{message, type, param, code}` object (a client indexing those keys must
 /// never miss one) with its message scrubbed; a bare-string error becomes the
 /// same object; any other non-null shape folds into the generic error.
-fn sanitize_error(error: Option<&mut Value>) {
-    let Some(error) = error else { return };
+pub(crate) fn sanitize_error(error: Option<&mut Value>) -> bool {
+    let Some(error) = error else { return false };
     if error.is_null() {
-        return;
+        return false;
     }
     // A bare-string error (some providers send one) becomes the standard
     // object — a client parsing that shape must never meet a string.
     if let Value::String(text) = error {
         let mut generic = chat_gateway_error(502);
         generic["message"] = Value::String(client_safe_error_text(text));
-        *error = generic;
-        return;
+        let before = std::mem::replace(error, generic);
+        return before != *error;
     }
     let Some(object) = error.as_object() else {
         // Any other non-null shape (an array, a number, a boolean) claims
         // nothing parseable and its interior is upstream-controlled — fold it
         // rather than relay it.
-        *error = chat_gateway_error(502);
-        return;
+        let before = std::mem::replace(error, chat_gateway_error(502));
+        return before != *error;
     };
     if !is_relayable_error(object) {
         let status = suppressed_status_for(object, object.get("type"));
-        *error = chat_gateway_error(status);
-        return;
+        let before = std::mem::replace(error, chat_gateway_error(status));
+        return before != *error;
     }
     // Relayable: rebuild rather than filter, so every key is present. `code`
     // is always the numeric status on this surface — aggregator-style clients
@@ -914,15 +1067,19 @@ fn sanitize_error(error: Option<&mut Value>) {
         _ => client_safe_error_text(""),
     };
     let param = client_error_param(object.get("param"));
-    *error = json!({
-        "message": message,
-        "type": error_kind,
-        "param": param,
-        "code": code,
-    });
+    let before = std::mem::replace(
+        error,
+        json!({
+            "message": message,
+            "type": error_kind,
+            "param": param,
+            "code": code,
+        }),
+    );
+    before != *error
 }
 
-pub(super) fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -936,19 +1093,11 @@ pub(super) fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// The cache counters of a Chat usage object: tokens read from cache, under
-/// either name an upstream uses, and tokens written to it.
+/// The cache counters of a Chat usage object: tokens read from and written
+/// to the cache, each under either name an upstream uses.
 pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
-    // Read as the control plane reads a counter: a numeric string counts, and
-    // anything unreadable, negative included, is absent rather than zero, so
-    // the other name for the same bucket is still consulted.
-    let counter = |value: Option<&Value>| {
-        let number = match value? {
-            Value::String(text) => text.trim().parse::<f64>().ok()?,
-            other => other.as_f64()?,
-        };
-        (number.is_finite() && number >= 0.0).then_some(number as i64)
-    };
+    // Use the pricing parser: invalid counters are absent, while zero wins.
+    let counter = |value: Option<&Value>| value.and_then(super::pricing::usage_counter);
     let cache_read = counter(usage.get("cache_read_input_tokens")).or_else(|| {
         counter(
             usage
@@ -956,9 +1105,46 @@ pub(super) fn chat_cache_tokens(usage: &Value) -> (Option<i64>, Option<i64>) {
                 .and_then(|details| details.get("cached_tokens")),
         )
     });
-    (
+    let cache_creation = counter(usage.get("cache_creation_input_tokens")).or_else(|| {
+        counter(
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens")),
+        )
+    });
+    (cache_read, cache_creation)
+}
+
+/// Chat usage for the input counts from Messages and the latest output count.
+pub(super) fn chat_usage(start: Option<&Value>, output: i64) -> Value {
+    let mut usage = json!({"completion_tokens": output});
+    let mut prompt = 0;
+    if let Some(start) = start {
+        let read = i64_field(start, "cache_read_input_tokens");
+        let creation = i64_field(start, "cache_creation_input_tokens");
+        prompt = i64_field(start, "input_tokens") + read + creation;
+        usage["prompt_tokens"] = json!(prompt);
+        if read != 0 || creation != 0 {
+            for key in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+                if let Some(value) = start.get(key) {
+                    usage[key] = value.clone();
+                }
+            }
+        }
+    }
+    usage["total_tokens"] = json!(prompt + output);
+    usage
+}
+
+/// Anthropic usage for a Chat usage object.
+pub(super) fn messages_usage(usage: Option<&Value>) -> Value {
+    let usage = usage.unwrap_or(&Value::Null);
+    let (cache_read, cache_creation) = chat_cache_tokens(usage);
+    anthropic_usage(
+        i64_field(usage, "prompt_tokens"),
+        i64_field(usage, "completion_tokens"),
         cache_read,
-        counter(usage.get("cache_creation_input_tokens")),
+        cache_creation,
     )
 }
 
@@ -1012,13 +1198,53 @@ pub(super) fn transform_finish_reason(stop_reason: Option<&str>, strict: bool) -
     .to_string()
 }
 
-// OpenAI finish_reason -> Anthropic stop_reason (downstream surface).
-pub(super) fn map_finish_reason(finish_reason: Option<&str>) -> &'static str {
-    match finish_reason {
-        Some("length") => "max_tokens",
-        Some("tool_calls") | Some("function_call") => "tool_use",
-        // stop, content_filter, missing, and anything else collapse to end_turn.
-        _ => "end_turn",
+/// How a Chat choice ended, read once for every surface the bridges serve.
+/// The OpenAI vocabulary (in any case, with the `max_tokens` some upstreams
+/// say for `length`) is mapped explicitly and anything else — none, or a
+/// vendor's own reason — ends the turn normally, as LiteLLM maps it. Failure
+/// is reported by an `error` payload, not guessed from a reason's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChatFinish {
+    /// Includes `tool_calls`: whether a turn called a tool is decided by the
+    /// calls it carries, not by what the upstream called its finish.
+    Stop,
+    Length,
+    ContentFilter,
+}
+
+impl ChatFinish {
+    pub(super) fn parse(reason: Option<&str>) -> Self {
+        match reason.map(str::to_ascii_lowercase).as_deref() {
+            Some("length" | "max_tokens") => Self::Length,
+            Some("content_filter") => Self::ContentFilter,
+            _ => Self::Stop,
+        }
+    }
+
+    /// Cut off before the model finished, so a tool call in flight may be
+    /// partial rather than malformed.
+    pub(super) fn truncated(self) -> bool {
+        matches!(self, Self::Length | Self::ContentFilter)
+    }
+
+    /// The Anthropic stop reason.
+    pub(super) fn stop_reason(self, has_tool_calls: bool) -> &'static str {
+        match self {
+            Self::Length => "max_tokens",
+            Self::ContentFilter => "refusal",
+            _ if has_tool_calls => "tool_use",
+            _ => "end_turn",
+        }
+    }
+
+    /// The Responses `status` and the `incomplete_details` saying why a cut-off
+    /// response stopped.
+    pub(super) fn responses_status(self) -> (&'static str, Value) {
+        match self {
+            Self::Length => ("incomplete", json!({ "reason": "max_output_tokens" })),
+            Self::ContentFilter => ("incomplete", json!({ "reason": "content_filter" })),
+            _ => ("completed", Value::Null),
+        }
     }
 }
 
@@ -1163,123 +1389,102 @@ pub fn responses_echo(params: &Value) -> Value {
 }
 
 /// Rebuild a chat completion as the Responses object answering the client:
-/// the first choice's reasoning, text (or refusal) and tool calls become
+/// the first choice's reasoning, text and refusal, and tool calls become
 /// output items in that order, `finish_reason` becomes `status`, and the
 /// usage buckets take their Responses names. `echo` supplies the request
-/// fields the object repeats.
-pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
+/// fields the object repeats; `id` is the gateway's id for the response.
+///
+/// Only a body with no answer — no message, an upstream error, a finished
+/// turn whose tool calls none can be run — fails the response. Tool calls are read by
+/// [`chat_tool_calls`]; malformed arguments are delivered as written.
+pub fn openai_chat_to_responses(response: Value, echo: &Value, id: &str) -> Value {
     let tool_map = ResponsesToolMap::from_echo(echo);
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .cloned();
+        .and_then(|choices| choices.first());
     let message = choice
-        .as_ref()
         .and_then(|choice| choice.get("message"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let id = match response.get("id").and_then(Value::as_str) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => format!("resp_{}", now_millis()),
-    };
+        .filter(|message| message.is_object());
+    let finish = ChatFinish::parse(
+        choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str),
+    );
 
     let mut output: Vec<Value> = Vec::new();
-    let mut invalid_tool_arguments = false;
-    let mut invalid_tool_call_identity = false;
-    if let Some(text) = reasoning_text(&message) {
-        let item_id = item_id("rs", &id, output.len());
-        output.push(reasoning_item(&item_id, text, "completed"));
-    }
-    if choice.is_some() {
-        let text = message.get("content").and_then(Value::as_str).unwrap_or("");
-        let refusal = message
-            .get("refusal")
-            .and_then(Value::as_str)
-            .filter(|refusal| !refusal.is_empty());
-        let tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let part = match refusal {
-            Some(refusal) => Some(refusal_part(refusal)),
-            // A turn with neither text nor tool calls is still an (empty) message.
-            None if !text.is_empty() || tool_calls.is_empty() => Some(output_text_part(text)),
-            None => None,
-        };
-        if let Some(part) = part {
-            let item_id = item_id("msg", &id, output.len());
-            output.push(message_item(&item_id, part, "completed"));
-        }
-        for call in &tool_calls {
-            let function = call.get("function");
-            let call_id = call.get("id").and_then(Value::as_str).unwrap_or("");
-            let name = function
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let arguments = function
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if call_id.trim().is_empty() || name.trim().is_empty() {
-                invalid_tool_call_identity = true;
-                continue;
-            }
-            if tool_map.is_custom(name) {
-                let Some(input) = custom_tool_input(arguments) else {
-                    invalid_tool_arguments = true;
-                    continue;
-                };
-                output.push(custom_tool_call_item(call_id, name, &input, "completed"));
-            } else {
-                let Some(arguments) = normalize_function_call_arguments(arguments) else {
-                    invalid_tool_arguments = true;
-                    continue;
-                };
-                let namespace = tool_map.namespace(name);
-                output.push(function_call_item(
-                    call_id,
-                    namespace.map_or(name, |tool| tool.name.as_str()),
-                    namespace.map(|tool| tool.namespace.as_str()),
-                    &arguments,
-                    "completed",
-                ));
-            }
-        }
-    }
-
-    let upstream_error = response
+    let mut error = response
         .get("error")
         .filter(|error| !error.is_null())
-        .cloned();
-    let (status, incomplete_details, error) = match upstream_error {
+        .cloned()
+        .or_else(|| message.is_none().then(malformed_response_error));
+    let message = message.unwrap_or(&Value::Null);
+    let reasoning = reasoning_text(message);
+    if let Some(text) = reasoning {
+        output.push(reasoning_item(
+            &item_id("rs", id, output.len()),
+            text,
+            "completed",
+        ));
+    }
+    let text = chat_text(message.get("content"));
+    let refusal = chat_text(message.get("refusal"));
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut parts = Vec::new();
+    // A turn with nothing else to say is still an (empty) message.
+    if !text.is_empty() || (refusal.is_empty() && tool_calls.is_empty() && reasoning.is_none()) {
+        parts.push(output_text_part(
+            &text,
+            responses_annotations(message.get("annotations")),
+        ));
+    }
+    if !refusal.is_empty() {
+        parts.push(refusal_part(&refusal));
+    }
+    if !parts.is_empty() && !message.is_null() {
+        output.push(message_item(
+            &item_id("msg", id, output.len()),
+            parts,
+            "completed",
+        ));
+    }
+    // The turn was cut off in its last text, unless calls followed it.
+    if finish.truncated() && tool_calls.is_empty() {
+        if let Some(item) = output.last_mut() {
+            item["status"] = json!("incomplete");
+        }
+    }
+    let calls = chat_tool_calls(tool_calls, id);
+    if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
+        error.get_or_insert_with(unusable_tool_calls_error);
+    }
+    for call in calls {
+        output.push(
+            match responses_call_value(&tool_map, call.name, call.arguments, finish.truncated()) {
+                Some(value) => {
+                    responses_call_item(&tool_map, &call.id, call.name, &value, "completed")
+                }
+                None => responses_call_item(&tool_map, &call.id, call.name, "", "incomplete"),
+            },
+        );
+    }
+
+    let (status, incomplete_details, error) = match error {
         Some(error) => ("failed", Value::Null, error),
         None => {
-            let terminal = responses_terminal(
-                choice
-                    .as_ref()
-                    .and_then(|choice| choice.get("finish_reason"))
-                    .and_then(Value::as_str),
-            );
-            match terminal {
-                None => ("failed", Value::Null, invalid_finish_reason_error()),
-                Some(("completed", _)) if invalid_tool_call_identity => {
-                    ("failed", Value::Null, invalid_tool_call_identity_error())
-                }
-                Some(("completed", _)) if invalid_tool_arguments => {
-                    ("failed", Value::Null, invalid_tool_call_arguments_error())
-                }
-                Some((status, details)) => (status, details, Value::Null),
-            }
+            let (status, details) = finish.responses_status();
+            (status, details, Value::Null)
         }
     };
     responses_object(
         echo,
         ResponsesHead {
-            id: &id,
-            created_at: now_secs(),
+            id,
+            created_at: chat_created(&response),
             model: response.get("model").cloned().unwrap_or(Value::Null),
             status,
             incomplete_details,
@@ -1288,6 +1493,107 @@ pub fn openai_chat_to_responses(response: Value, echo: &Value) -> Value {
         output,
         Some(responses_usage(response.get("usage"))),
     )
+}
+
+/// A Chat tool call a client can run.
+pub(super) struct ChatToolCall<'a> {
+    pub id: String,
+    pub name: &'a str,
+    pub arguments: &'a str,
+}
+
+/// The tool calls of a Chat message that a client can run. A call without a
+/// name cannot be, and is left out, as CC-Switch leaves it out; one without an
+/// id gets the id new-api gives it, from the response id and its index.
+pub(super) fn chat_tool_calls<'a>(calls: &'a [Value], response_id: &str) -> Vec<ChatToolCall<'a>> {
+    calls
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| {
+            let field = |key| {
+                call.get("function")
+                    .and_then(|function| function.get(key))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            };
+            let name = field("name").trim();
+            (!name.is_empty()).then(|| ChatToolCall {
+                id: match call.get("id").and_then(Value::as_str) {
+                    Some(id) if !id.trim().is_empty() => id.to_string(),
+                    _ => synthesized_call_id(response_id, index),
+                },
+                name,
+                arguments: field("arguments"),
+            })
+        })
+        .collect()
+}
+
+pub(super) fn synthesized_call_id(response_id: &str, index: usize) -> String {
+    format!("call_{response_id}_{index}")
+}
+
+/// A Chat tool call as the Responses item the client declared: a tool search,
+/// or a function or custom tool call restored to its namespace.
+pub(super) fn responses_call_item(
+    tool_map: &ResponsesToolMap,
+    call_id: &str,
+    name: &str,
+    value: &str,
+    status: &str,
+) -> Value {
+    if tool_map.is_tool_search(name) {
+        // Codex runs the search it asked for, as CC-Switch restores the call.
+        let arguments = serde_json::from_str::<Value>(value)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        return json!({
+            "id": format!("tsc_{call_id}"),
+            "type": "tool_search_call",
+            "call_id": call_id,
+            "status": status,
+            "execution": "client",
+            "arguments": arguments,
+        });
+    }
+    let namespace = tool_map.namespace(name);
+    let (kind, prefix, key) = if tool_map.is_custom(name) {
+        ("custom_tool_call", "ctc", "input")
+    } else {
+        ("function_call", "fc", "arguments")
+    };
+    let mut item = json!({
+        "id": format!("{prefix}_{call_id}"),
+        "type": kind,
+        "call_id": call_id,
+        "name": namespace.map_or(name, |tool| tool.name.as_str()),
+        key: value,
+        "status": status,
+    });
+    if let Some(tool) = namespace {
+        item["namespace"] = json!(tool.namespace);
+    }
+    item
+}
+
+/// What the client runs for a Chat tool call: a custom tool's raw input or a
+/// function's JSON-object arguments. A malformed call from a model that
+/// finished is delivered as the model wrote it — the client's own parser
+/// reports the problem back to the model, as for a native malformed call.
+/// `None` for a call cut off mid-way, which is reported incomplete.
+pub(super) fn responses_call_value(
+    tool_map: &ResponsesToolMap,
+    name: &str,
+    arguments: &str,
+    truncated: bool,
+) -> Option<String> {
+    let value = if tool_map.is_custom(name) {
+        custom_tool_input(arguments)
+    } else {
+        function_call_arguments(arguments).map(str::to_string)
+    };
+    value.or_else(|| (!truncated).then(|| arguments.to_string()))
 }
 
 /// The per-response fields of a Responses object, beside the echoed request
@@ -1334,12 +1640,39 @@ pub(super) fn item_id(kind: &str, response_id: &str, output_index: usize) -> Str
     format!("{kind}_{response_id}_{output_index}")
 }
 
+/// The text of a Chat message's or delta's content or refusal. Some upstreams
+/// send it as parts; their text is the answer.
+pub(super) fn chat_text(value: Option<&Value>) -> Cow<'_, str> {
+    match value {
+        Some(Value::String(text)) => Cow::Borrowed(text),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => Cow::Borrowed(""),
+    }
+}
+
+/// When a Chat response was created, or now when it does not say.
+pub(super) fn chat_created(response: &Value) -> u64 {
+    response
+        .get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(now_secs)
+}
+
 /// The reasoning a chat message or delta carries, under either wire spelling.
 pub(super) fn reasoning_text(message: &Value) -> Option<&str> {
     ["reasoning_content", "reasoning"]
         .into_iter()
         .find_map(|key| message.get(key).and_then(Value::as_str))
         .filter(|text| !text.is_empty())
+}
+
+/// A thinking block for reasoning a Chat model produced. It has no signature:
+/// only Anthropic can sign thinking, and a Chat upstream replays it unsigned.
+pub(super) fn thinking_block(thinking: &str) -> Value {
+    json!({ "type": "thinking", "thinking": thinking, "signature": "" })
 }
 
 pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
@@ -1352,59 +1685,44 @@ pub(super) fn reasoning_item(id: &str, text: &str, status: &str) -> Value {
     })
 }
 
-pub(super) fn message_item(id: &str, part: Value, status: &str) -> Value {
+pub(super) fn message_item(id: &str, content: Vec<Value>, status: &str) -> Value {
     json!({
         "id": id,
         "type": "message",
         "role": "assistant",
         "status": status,
-        "content": [part],
+        "content": content,
     })
 }
 
-pub(super) fn output_text_part(text: &str) -> Value {
-    json!({ "type": "output_text", "text": text, "annotations": [] })
+pub(super) fn output_text_part(text: &str, annotations: Vec<Value>) -> Value {
+    json!({ "type": "output_text", "text": text, "annotations": annotations })
+}
+
+/// The Responses annotations for a Chat message's or delta's citations: a
+/// `url_citation` keeps its fields, flattened, as relaykit carries them.
+pub(super) fn responses_annotations(annotations: Option<&Value>) -> Vec<Value> {
+    annotations
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|annotation| annotation["type"] == "url_citation")
+        .filter_map(|annotation| {
+            let mut citation = annotation.get("url_citation")?.as_object()?.clone();
+            citation.insert("type".into(), json!("url_citation"));
+            Some(Value::Object(citation))
+        })
+        .collect()
 }
 
 pub(super) fn refusal_part(refusal: &str) -> Value {
     json!({ "type": "refusal", "refusal": refusal })
 }
 
-pub(super) fn function_call_item(
-    call_id: &str,
-    name: &str,
-    namespace: Option<&str>,
-    arguments: &str,
-    status: &str,
-) -> Value {
-    let mut item = json!({
-        "id": format!("fc_{call_id}"),
-        "type": "function_call",
-        "call_id": call_id,
-        "name": name,
-        "arguments": arguments,
-        "status": status,
-    });
-    if let Some(namespace) = namespace {
-        item["namespace"] = json!(namespace);
-    }
-    item
-}
-
-pub(super) fn custom_tool_call_item(call_id: &str, name: &str, input: &str, status: &str) -> Value {
-    json!({
-        "id": format!("ctc_{call_id}"),
-        "type": "custom_tool_call",
-        "call_id": call_id,
-        "name": name,
-        "input": input,
-        "status": status,
-    })
-}
-
-/// Decode only the wrapper we advertised upstream. Invalid or truncated JSON
-/// must never become executable custom-tool input.
-pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
+/// The input inside the wrapper we advertised upstream, when the model
+/// produced it; [`responses_call_value`] decides what becomes of one it did
+/// not.
+fn custom_tool_input(arguments: &str) -> Option<String> {
     serde_json::from_str::<Value>(arguments)
         .ok()?
         .as_object()?
@@ -1413,50 +1731,36 @@ pub(super) fn custom_tool_input(arguments: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Normalize Chat function arguments for a Responses function-call item.
-/// Empty arguments mean an empty object; every other value must be a JSON
-/// object so a later Responses history replay remains valid.
-pub(super) fn normalize_function_call_arguments(arguments: &str) -> Option<String> {
+/// Chat function-call arguments as the JSON object Responses function calls
+/// and Anthropic tool inputs require. Empty arguments are the no-argument call
+/// some upstreams send as nothing at all; anything else must already be an
+/// object, so a malformed or truncated call is never guessed into one.
+pub(super) fn function_call_arguments(arguments: &str) -> Option<&str> {
     if arguments.trim().is_empty() {
-        return Some("{}".to_string());
+        return Some("{}");
     }
-    matches!(
-        serde_json::from_str::<Value>(arguments),
-        Ok(Value::Object(_))
-    )
-    .then(|| arguments.to_string())
+    serde_json::from_str::<Value>(arguments)
+        .ok()?
+        .is_object()
+        .then_some(arguments)
 }
 
-pub(super) fn invalid_tool_call_arguments_error() -> Value {
+/// Tool calls none of which a client can run, from a turn that finished:
+/// ending it as if the model had answered would leave an agent stopped for
+/// no reason. A turn cut off by a limit reports that instead, as CC-Switch
+/// does.
+pub(super) fn unusable_tool_calls_error() -> Value {
     json!({
         "code": "server_error",
-        "message": "The upstream provider returned invalid tool-call arguments",
+        "message": "The upstream provider returned tool calls without a name",
     })
 }
 
-pub(super) fn invalid_tool_call_identity_error() -> Value {
+pub(super) fn malformed_response_error() -> Value {
     json!({
         "code": "server_error",
-        "message": "The upstream provider returned a tool call without a valid id or name",
+        "message": "The upstream provider returned a malformed response",
     })
-}
-
-pub(super) fn invalid_finish_reason_error() -> Value {
-    json!({
-        "code": "server_error",
-        "message": "The upstream provider ended without a valid finish reason",
-    })
-}
-
-/// How a chat `finish_reason` ends a response: the `status`, and the
-/// `incomplete_details` that say why a cut-off one stopped.
-pub(super) fn responses_terminal(finish_reason: Option<&str>) -> Option<(&'static str, Value)> {
-    match finish_reason {
-        Some("stop" | "tool_calls") => Some(("completed", Value::Null)),
-        Some("length") => Some(("incomplete", json!({ "reason": "max_output_tokens" }))),
-        Some("content_filter") => Some(("incomplete", json!({ "reason": "content_filter" }))),
-        _ => None,
-    }
 }
 
 /// Responses `usage` from chat `usage`: the token buckets renamed, with the
@@ -1465,11 +1769,7 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
     let usage = usage.unwrap_or(&Value::Null);
     let input = i64_field(usage, "prompt_tokens");
     let output = i64_field(usage, "completion_tokens");
-    let cached = usage
-        .get("prompt_tokens_details")
-        .map(|details| i64_field(details, "cached_tokens"))
-        .filter(|cached| *cached != 0)
-        .unwrap_or_else(|| i64_field(usage, "cache_read_input_tokens"));
+    let cached = chat_cache_tokens(usage).0.unwrap_or(0);
     let reasoning = usage
         .get("completion_tokens_details")
         .map(|details| i64_field(details, "reasoning_tokens"))
@@ -1487,65 +1787,84 @@ pub(super) fn responses_usage(usage: Option<&Value>) -> Value {
     })
 }
 
-fn openai_to_anthropic_messages(response: Value) -> Value {
+/// Rebuild a chat completion as an Anthropic message: reasoning becomes a
+/// thinking block (the client only receives reasoning it asked for), then
+/// text, then tool calls. Only a body with no answer — an `error`, no
+/// message, or a finished turn whose tool calls none can be run — is an
+/// upstream error. Tool calls are read by [`chat_tool_calls`]; malformed
+/// arguments become an empty input, as
+/// CLIProxyAPI, CC-Switch and new-api make them, and a call cut off by a token
+/// or content limit is dropped as Anthropic drops an unfinished one.
+fn openai_to_anthropic_messages(response: Value) -> Result<Value, ResponseTransformError> {
+    if response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(ResponseTransformError("chat response reports an error"));
+    }
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .cloned()
-        .unwrap_or(Value::Null);
-    let message = choice.get("message").cloned().unwrap_or(Value::Null);
+        .and_then(|choices| choices.first());
+    let message = choice
+        .and_then(|choice| choice.get("message"))
+        .filter(|message| message.is_object())
+        .ok_or(ResponseTransformError("chat response requires a message"))?;
+    let finish = ChatFinish::parse(
+        choice
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str),
+    );
+    let id = match response.get("id").and_then(Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => format!("msg_{}", now_millis()),
+    };
 
     let mut content: Vec<Value> = Vec::new();
-    if let Some(text) = message.get("content").and_then(Value::as_str) {
+    if let Some(thinking) = reasoning_text(message) {
+        content.push(thinking_block(thinking));
+    }
+    for key in ["content", "refusal"] {
+        let text = chat_text(message.get(key));
         if !text.is_empty() {
             content.push(json!({ "type": "text", "text": text }));
         }
     }
-    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for call in tool_calls {
-            let arguments = call
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let input: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
-            content.push(json!({
-                "type": "tool_use",
-                "id": call.get("id").cloned().unwrap_or(Value::Null),
-                "name": call.get("function").and_then(|f| f.get("name")).cloned().unwrap_or(Value::Null),
-                "input": input,
-            }));
+    let tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let calls = chat_tool_calls(tool_calls, &id);
+    if calls.is_empty() && !tool_calls.is_empty() && !finish.truncated() {
+        return Err(ResponseTransformError(
+            "chat response has tool calls, none of them with a name",
+        ));
+    }
+    let mut has_tool_calls = false;
+    for call in calls {
+        let input = function_call_arguments(call.arguments);
+        if input.is_none() && finish.truncated() {
+            continue;
         }
+        let input = input
+            .and_then(|input| serde_json::from_str::<Value>(input).ok())
+            .unwrap_or_else(|| json!({}));
+        content
+            .push(json!({ "type": "tool_use", "id": call.id, "name": call.name, "input": input }));
+        has_tool_calls = true;
     }
     if content.is_empty() {
         content.push(json!({ "type": "text", "text": "" }));
     }
 
-    let response_usage = response.get("usage").unwrap_or(&Value::Null);
-    let (cache_read, cache_creation) = chat_cache_tokens(response_usage);
-    let usage = anthropic_usage(
-        i64_field(response_usage, "prompt_tokens"),
-        i64_field(response_usage, "completion_tokens"),
-        cache_read,
-        cache_creation,
-    );
-
-    let id = match response.get("id").and_then(Value::as_str) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => format!("msg_{}", now_millis()),
-    };
-    let stop_reason = map_finish_reason(choice.get("finish_reason").and_then(Value::as_str));
-    json!({
+    Ok(json!({
         "id": id,
         "type": "message",
         "role": "assistant",
         "content": content,
         "model": response.get("model").cloned().unwrap_or(Value::Null),
-        "stop_reason": stop_reason,
+        "stop_reason": finish.stop_reason(has_tool_calls),
         "stop_sequence": Value::Null,
-        "usage": usage,
-    })
+        "usage": messages_usage(response.get("usage")),
+    }))
 }
 
 #[cfg(test)]
@@ -1935,6 +2254,83 @@ mod identity_tests {
         );
     }
 
+    #[test]
+    fn canonicalize_systemone_suppresses_private_account_errors() {
+        let mut body = json!({
+            "model": "kev-4b",
+            "error": {
+                "type": "billing_error",
+                "message": "secret-provider account credit balance too low",
+                "raw": "private account detail"
+            }
+        });
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(
+            body["error"],
+            json!({
+                "type": "upstream_error",
+                "message": "The upstream provider returned an error",
+                "param": null,
+                "code": 502
+            })
+        );
+    }
+
+    #[test]
+    fn canonicalize_systemone_preserves_nested_answers() {
+        let mut body = json!({
+            "model": "kev-4b",
+            "answers": {
+                "kind": {
+                    "type": "choice",
+                    "choice": "platform",
+                    "probabilities": { "platform": 0.9, "billing": 0.1 },
+                    "confidence": 0.8,
+                    "vendor_detail": "keep nested content"
+                }
+            },
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cost": 0.01,
+                "provider_trace": "drop"
+            },
+            "provider": "drop",
+            "id": "drop"
+        });
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(body["model"], "kev-4b");
+        assert_eq!(
+            body["answers"]["kind"]["vendor_detail"],
+            "keep nested content"
+        );
+        assert_eq!(body["usage"]["input_tokens"], 10);
+        assert_eq!(body["usage"]["output_tokens"], 4);
+        assert_eq!(body["usage"]["cost"], 0.01);
+        assert!(body.get("provider").is_none());
+        assert!(body["usage"].get("provider_trace").is_none());
+    }
+
+    #[test]
+    fn canonicalize_systemone_preserves_wire_answer_order() {
+        let mut body: Value = serde_json::from_str(
+            r#"{"model":"kev-4b","answers":{"2":{"type":"choice","probabilities":{"2":0.9,"10":0.1}},"10":{"type":"noul","noul":0.5}},"provider":"drop"}"#,
+        )
+        .unwrap();
+
+        canonicalize(&mut body, Endpoint::SystemOne, None);
+
+        assert_eq!(
+            body["answers"].to_string(),
+            r#"{"2":{"type":"choice","probabilities":{"2":0.9,"10":0.1}},"10":{"type":"noul","noul":0.5}}"#
+        );
+        assert!(body.get("provider").is_none());
+    }
+
     /// `/v1/responses` streaming: a lifecycle event carries the response object
     /// nested under `response`. Its identity is rewritten and its interior
     /// canonicalized, while the envelope's own control fields (`type`,
@@ -1997,7 +2393,7 @@ mod identity_tests {
     /// message would survive the scrubber's shape checks yet still leak who
     /// served the request and blame the caller's quota for ours. An actionable
     /// kind (the documented flat shape) is relayed. `sequence_number` survives
-    /// either way; the framing observer continues the numbering from it.
+    /// either way; the response owner continues error-tail numbering from it.
     #[test]
     fn canonicalize_responses_rebuilds_an_in_band_error() {
         let mut body = json!({
@@ -2066,7 +2462,7 @@ mod identity_tests {
         assert_eq!(body["code"], "rate_limit_exceeded");
         assert_eq!(
             body["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
 
         let mut body = json!({
@@ -2127,7 +2523,7 @@ mod identity_tests {
         assert_eq!(body["error"]["code"], 429);
         assert_eq!(
             body["error"]["message"],
-            "Rate limit exceeded. Please retry after some time."
+            "The model is at capacity right now. Please retry shortly."
         );
 
         // A precise code outranks a generic type: relayed on the code (as its
@@ -2380,6 +2776,131 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A cut-off turn is reported as cut off even when its only tool call
+    /// never got a name; an explicit error fails the turn even with a
+    /// message beside it.
+    #[test]
+    fn truncation_and_errors_win_over_tool_call_repair() {
+        let body = |finish_reason: &str, error: Value, call: Value| {
+            json!({
+                "id": "c",
+                "error": error,
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "partial",
+                        "tool_calls": [call]
+                    },
+                    "finish_reason": finish_reason
+                }]
+            })
+        };
+        let nameless = json!({ "id": "call_1", "function": { "arguments": "{\"a\":" } });
+        let cut = body("length", Value::Null, nameless);
+        let message =
+            transform_response(ProviderFormat::Openai, Endpoint::Messages, cut.clone()).unwrap();
+        assert_eq!(message["stop_reason"], "max_tokens");
+        assert_eq!(
+            message["content"],
+            json!([{ "type": "text", "text": "partial" }])
+        );
+        let response = openai_chat_to_responses(cut, &json!({}), "resp");
+        assert_eq!(response["status"], "incomplete");
+
+        // A runnable call beside the error: only the error can fail the turn.
+        let runnable = json!({ "id": "call_1", "function": { "name": "f", "arguments": "{}" } });
+        let failed = body("error", json!({ "message": "engine failed" }), runnable);
+        assert!(
+            transform_response(ProviderFormat::Openai, Endpoint::Messages, failed.clone()).is_err()
+        );
+        let response = openai_chat_to_responses(failed, &json!({}), "resp");
+        assert_eq!(response["status"], "failed");
+    }
+
+    #[test]
+    fn responses_tool_search_call_is_restored() {
+        let echo = json!({ "tools": [{ "type": "tool_search" }] });
+        let out = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [{
+                            "id": "ts_1",
+                            "function": { "name": "tool_search", "arguments": "{\"query\":\"mail\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &echo,
+            "resp",
+        );
+        assert_eq!(
+            out["output"],
+            json!([{
+                "id": "tsc_ts_1", "type": "tool_search_call", "call_id": "ts_1",
+                "status": "completed", "execution": "client", "arguments": { "query": "mail" }
+            }])
+        );
+        // Without the tool declared, a function of that name stays a function.
+        let plain = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": { "tool_calls": [{ "id": "c", "function": { "name": "tool_search", "arguments": "{}" } }] },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &json!({}),
+            "resp",
+        );
+        assert_eq!(plain["output"][0]["type"], "function_call");
+    }
+
+    /// A namespaced tool whose flattened name an earlier function already took
+    /// was never offered to the model, so a call by that name is the function.
+    #[test]
+    fn colliding_tool_names_restore_to_the_declared_tool() {
+        let tools = json!([
+            { "type": "function", "name": "mail__search", "parameters": { "type": "object" } },
+            {
+                "type": "namespace", "name": "mail",
+                "tools": [{ "type": "function", "name": "search", "parameters": { "type": "object" } }]
+            }
+        ]);
+        let chat = crate::middleware::request_transform::responses_to_chat_params(&json!({
+            "model": "m", "input": "hi", "tools": tools
+        }))
+        .unwrap();
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 1);
+        let out = openai_chat_to_responses(
+            json!({
+                "choices": [{
+                    "message": { "tool_calls": [{ "id": "c", "function": { "name": "mail__search", "arguments": "{}" } }] },
+                    "finish_reason": "tool_calls"
+                }]
+            }),
+            &json!({ "tools": tools }),
+            "resp",
+        );
+        assert_eq!(out["output"][0]["name"], "mail__search");
+        assert!(out["output"][0].get("namespace").is_none());
+    }
+
+    #[test]
+    fn responses_bridge_fails_bodies_without_a_message() {
+        for body in [
+            Value::Null,
+            json!({}),
+            json!({ "choices": [] }),
+            json!({ "choices": [{ "finish_reason": "stop" }] }),
+        ] {
+            let out = openai_chat_to_responses(body.clone(), &json!({}), "resp");
+            assert_eq!(out["status"], "failed", "{body}");
+            assert_eq!(out["output"], json!([]), "{body}");
+        }
+    }
+
     #[test]
     fn openai_messages_empty_content_gets_placeholder() {
         let body = json!({
@@ -2387,9 +2908,118 @@ mod tests {
             "choices": [{ "message": { "role": "assistant" }, "finish_reason": "stop" }],
             "usage": { "prompt_tokens": 1, "completion_tokens": 0 }
         });
-        let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body);
+        let out = transform_response(ProviderFormat::Openai, Endpoint::Messages, body).unwrap();
         assert_eq!(out["content"], json!([{ "type": "text", "text": "" }]));
         assert_eq!(out["stop_reason"], json!("end_turn"));
+    }
+
+    #[test]
+    fn openai_messages_repair_tool_calls_and_fail_only_without_an_answer() {
+        let response = |tool_call: Value, finish_reason: &str| {
+            json!({
+                "id": "c",
+                "model": "gpt-4",
+                "choices": [{
+                    "message": { "role": "assistant", "tool_calls": [tool_call] },
+                    "finish_reason": finish_reason
+                }]
+            })
+        };
+        for body in [
+            json!({ "choices": [{ "finish_reason": "stop" }] }),
+            json!({ "choices": [] }),
+            // Tool calls, none of which a client can run.
+            response(
+                json!({ "id": "call_1", "function": { "arguments": "{}" } }),
+                "tool_calls",
+            ),
+        ] {
+            assert!(transform_response(ProviderFormat::Openai, Endpoint::Messages, body).is_err());
+        }
+
+        let repaired = |tool_call: Value| {
+            transform_response(
+                ProviderFormat::Openai,
+                Endpoint::Messages,
+                response(tool_call, "tool_calls"),
+            )
+            .unwrap()
+        };
+        let garbled =
+            repaired(json!({ "id": "call_1", "function": { "name": "f", "arguments": "{" } }));
+        assert_eq!(garbled["content"][0]["input"], json!({}));
+        assert_eq!(garbled["stop_reason"], "tool_use");
+        let anonymous = repaired(json!({ "function": { "name": "f", "arguments": "{}" } }));
+        assert_eq!(anonymous["content"][0]["id"], "call_c_0");
+
+        let truncated = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::Messages,
+            response(
+                json!({ "type": "function", "id": "call_1", "function": { "name": "f", "arguments": "{" } }),
+                "length",
+            ),
+        )
+        .unwrap();
+        assert_eq!(truncated["stop_reason"], "max_tokens");
+        assert_eq!(
+            truncated["content"],
+            json!([{ "type": "text", "text": "" }])
+        );
+
+        let stopped_with_call = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::Messages,
+            response(
+                json!({
+                    "type": "function", "id": "call_1",
+                    "function": { "name": "f", "arguments": "{}" }
+                }),
+                "stop",
+            ),
+        )
+        .unwrap();
+        assert_eq!(stopped_with_call["stop_reason"], "tool_use");
+
+        // Reasons outside the OpenAI vocabulary end the turn; a no-argument
+        // call arrives with empty arguments; reasoning becomes thinking.
+        let lenient = transform_response(
+            ProviderFormat::Openai,
+            Endpoint::Messages,
+            json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "plan",
+                        "tool_calls": [{ "id": "call_1", "function": { "name": "now", "arguments": "" } }]
+                    },
+                    "finish_reason": "eos"
+                }]
+            }),
+        )
+        .unwrap();
+        assert_eq!(lenient["stop_reason"], "tool_use");
+        assert_eq!(
+            lenient["content"],
+            json!([
+                { "type": "thinking", "thinking": "plan", "signature": "" },
+                { "type": "tool_use", "id": "call_1", "name": "now", "input": {} }
+            ])
+        );
+    }
+
+    #[test]
+    fn function_call_arguments_must_be_json_objects() {
+        for arguments in ["{}", r#"{"x":1}"#, " { } "] {
+            assert_eq!(function_call_arguments(arguments), Some(arguments));
+        }
+        // No arguments at all is the empty object a no-argument call means.
+        for arguments in ["", " "] {
+            assert_eq!(function_call_arguments(arguments), Some("{}"));
+        }
+        for arguments in ["null", "[]", "true", "{"] {
+            assert_eq!(function_call_arguments(arguments), None);
+        }
     }
 
     #[test]
@@ -2465,7 +3095,7 @@ mod tests {
                 "completion_tokens_details": null
             }
         });
-        let out = transform_response(ProviderFormat::Openai, Endpoint::ChatComplete, body);
+        let out = transform_response(ProviderFormat::Openai, Endpoint::ChatComplete, body).unwrap();
         assert_eq!(
             out["usage"]["completion_tokens_details"]["reasoning_tokens"],
             128
@@ -2484,7 +3114,8 @@ mod tests {
                     }
                 }
             }),
-        );
+        )
+        .unwrap();
         assert_eq!(
             canonical["usage"]["completion_tokens_details"]["reasoning_tokens"],
             7

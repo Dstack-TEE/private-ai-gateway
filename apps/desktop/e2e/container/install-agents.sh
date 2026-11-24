@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs as the test user: installs each agent under test (PAP_E2E_AGENTS, or
-# every agent when empty) with its official installer at the version pinned in
-# versions.env, then runs it once. Its first run creates the configuration
+# every agent when empty) with its official installer at the version resolved
+# by run.sh, then runs it once. Its first run creates the configuration
 # folder that Private AI Proxy detects the agent by.
 set -euo pipefail
 export PATH="$AGENT_PATH:$PATH"
@@ -76,7 +76,11 @@ for agent in claude-code codex dsh opencode pi oh-my-pi openclaw hermes; do
       pi --list-models >/dev/null
       ;;
     oh-my-pi)
-      from_script oh-my-pi https://omp.sh/install --binary --ref "v$OH_MY_PI_VERSION"
+      # OMP's npm package is a Bun CLI; install Bun where AGENT_PATH finds it.
+      BUN_INSTALL="$HOME/.local" from_script bun https://bun.sh/install "bun-v$BUN_VERSION"
+      export PATH="$HOME/.local/bin:$PATH"
+      pinned "$BUN_VERSION" bun --version
+      logged oh-my-pi npm install --global --ignore-scripts "@oh-my-pi/pi-coding-agent@$OH_MY_PI_VERSION"
       pinned "$OH_MY_PI_VERSION" omp --version
       omp config list >/dev/null
       ;;

@@ -9,11 +9,12 @@ use serde_json::Value;
 
 use super::tls::{pinned_spki_client, response_headers};
 use super::{
-    transport_error, PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest,
-    UpstreamResponse, UpstreamStreamResponse, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+    read_buffered_upstream_response, transport_error, PreparedUpstreamRequest, SseProtocol,
+    UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent};
+use crate::endpoint::Endpoint;
 
 /// Version header required by the native Anthropic API on every request.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -40,9 +41,11 @@ enum UpstreamAuth {
 /// elsewhere and emit `upstream.verified` with its result; this
 /// object is the forwarding plumbing only.
 pub struct OpenAICompatibleBackend {
+    pub(super) max_buffered_response_bytes: usize,
     name: String,
     base_url: String,
     path: String,
+    messages_protocol: Option<SseProtocol>,
     auth: Option<UpstreamAuth>,
     client: reqwest::Client,
     pinned_client: PinnedClientCache,
@@ -110,15 +113,22 @@ impl OpenAICompatibleBackend {
             .build()
             .map_err(|e| UpstreamError::Transport(e.to_string()))?;
         Ok(Self {
+            max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
             name: "openai-compatible".to_string(),
             base_url: base,
             path: "/v1/chat/completions".to_string(),
+            messages_protocol: None,
             auth: None,
             client,
             pinned_client: PinnedClientCache::default(),
             connect_timeout_seconds,
             read_timeout_seconds,
         })
+    }
+
+    pub fn with_max_buffered_response_bytes(mut self, limit: usize) -> Self {
+        self.max_buffered_response_bytes = limit;
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -145,12 +155,22 @@ impl OpenAICompatibleBackend {
         self
     }
 
+    pub(crate) fn with_anthropic_protocol(mut self) -> Self {
+        self.messages_protocol = Some(SseProtocol::AnthropicMessages);
+        self
+    }
+
     pub fn with_basic_auth(mut self, enabled: bool) -> Self {
         if enabled {
             if let Some(UpstreamAuth::Bearer(token)) = self.auth.take() {
                 self.auth = Some(UpstreamAuth::Basic(token));
             }
         }
+        self
+    }
+
+    pub(super) fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
         self
     }
 
@@ -183,9 +203,9 @@ pub(super) fn rewrite_request_model(
     upstream_model_id: &str,
 ) -> Result<Vec<u8>, UpstreamError> {
     let mut parsed: Value = serde_json::from_slice(body)
-        .map_err(|e| UpstreamError::Routing(format!("invalid JSON request body: {e}")))?;
+        .map_err(|e| UpstreamError::InvalidRequest(format!("invalid JSON request body: {e}")))?;
     let Some(obj) = parsed.as_object_mut() else {
-        return Err(UpstreamError::Routing(
+        return Err(UpstreamError::InvalidRequest(
             "request body must be a JSON object".to_string(),
         ));
     };
@@ -194,7 +214,7 @@ pub(super) fn rewrite_request_model(
             *model = Value::String(upstream_model_id.to_string());
         }
         _ => {
-            return Err(UpstreamError::Routing(
+            return Err(UpstreamError::InvalidRequest(
                 "request body must contain a string model field".to_string(),
             ));
         }
@@ -212,7 +232,22 @@ impl UpstreamBackend for OpenAICompatibleBackend {
         Some(&self.base_url)
     }
 
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        match operation {
+            Endpoint::ChatComplete => Some(SseProtocol::OpenaiChat),
+            Endpoint::Messages => self.messages_protocol,
+            Endpoint::Complete => Some(SseProtocol::OpenaiChat),
+            Endpoint::CreateModelResponse => Some(SseProtocol::OpenaiResponses),
+            _ => None,
+        }
+    }
+
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
+        let path = req.path.as_deref();
         let resp = self
             .request_builder(&self.client, &req, "application/json")
             .body(req.body)
@@ -221,7 +256,9 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body =
+            super::body::read_response_for_path(resp, path, self.max_buffered_response_bytes)
+                .await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -264,6 +301,7 @@ impl UpstreamBackend for OpenAICompatibleBackend {
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
         let client = self.client_for_event(event)?;
+        let path = req.request.path.as_deref();
         let resp = self
             .request_builder(&client, &req.request, "application/json")
             .body(req.request.body)
@@ -272,7 +310,9 @@ impl UpstreamBackend for OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body =
+            super::body::read_response_for_path(resp, path, self.max_buffered_response_bytes)
+                .await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -339,6 +379,12 @@ impl OpenAICompatibleBackend {
                         self.name
                     )));
                 }
+                ChannelBinding::ProxyImageSha256 { provider, .. } => {
+                    return Err(UpstreamError::Transport(format!(
+                        "backend {} cannot enforce {provider} proxy-image binding",
+                        self.name
+                    )));
+                }
             }
         }
         if !self.base_url.starts_with("https://") {
@@ -370,7 +416,7 @@ impl OpenAICompatibleBackend {
             .map_err(transport_error)?;
         let status = resp.status().as_u16();
         let headers = response_headers(&resp);
-        let body = resp.bytes().await.map_err(transport_error)?.to_vec();
+        let body = read_buffered_upstream_response(resp, self.max_buffered_response_bytes).await?;
         Ok(UpstreamResponse {
             status_code: status,
             body,
@@ -390,7 +436,10 @@ impl OpenAICompatibleBackend {
         let url = format!("{}{}", self.base_url, path);
         let mut builder = client
             .post(&url)
-            .header("content-type", "application/json")
+            .header(
+                "content-type",
+                req.content_type.as_deref().unwrap_or("application/json"),
+            )
             .header("accept", accept);
         for (k, v) in req.headers.iter() {
             builder = builder.header(k, v);

@@ -1,17 +1,11 @@
 use serde_json::Value;
 
-use super::AciService;
 use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::verifier::{
+    AciServiceUpstreamVerifier, ChutesProviderVerifier, NearAiProviderVerifier,
+    PhalaDirectProviderVerifier, PrivatemodeProviderVerifier,
+};
 use crate::aggregator::session::{Claim, ClaimSource, SessionClaims};
-use crate::aggregator::upstream_config::UpstreamSessionSink;
-
-impl UpstreamSessionSink for AciService {
-    fn record_session(&self, event: &UpstreamVerifiedEvent) {
-        if let Err(err) = self.record_attested_upstream_session(event) {
-            tracing::warn!(error = %err, "failed to record attested session from verification");
-        }
-    }
-}
 
 /// Maps a verified `UpstreamVerifiedEvent` onto the typed claim vocabulary for
 /// one provider. Each provider implements it, so the honesty rules for a
@@ -24,20 +18,23 @@ pub(super) trait ProviderClaimMapper {
 }
 
 /// Route a provider *type* to its claim mapper; an absent/unknown type gets
-/// the generic mapper. This is the only place that branches on the provider
-/// type string — the per-provider logic lives in the `ProviderClaimMapper` impls.
+/// the generic mapper. Typed per-provider logic lives in the
+/// `ProviderClaimMapper` implementations.
 pub(super) fn claim_mapper(provider_type: Option<&str>) -> &'static dyn ProviderClaimMapper {
     match provider_type {
         Some("tinfoil") => &TinfoilClaims,
         Some("secret-ai") => &SecretAiClaims,
-        Some("near-ai") | Some("chutes") | Some("phala-direct") => &IntelTdxClaims,
+        Some("armet-ai") => &ArmetAiClaims,
+        Some("near-ai") | Some("chutes") | Some("phala-direct") | Some("0g-private-computer") => {
+            &IntelTdxClaims
+        }
         _ => &GenericClaims,
     }
 }
 
 /// Build the typed claim set for a verified event. Raw `provider_claims` are
-/// always preserved verbatim in `claims.extra` so a deep auditor sees the full
-/// provider scope, typed or not.
+/// preserved in `claims.extra` so a deep auditor sees the provider scope.
+/// NEAR AI's model candidate facts apply only to response-bound sessions.
 pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> SessionClaims {
     let mut claims = if event.result == VerificationResult::Verified {
         claim_mapper(event.provider_type.as_deref()).claims(event)
@@ -46,184 +43,98 @@ pub(super) fn session_claims_for_event(event: &UpstreamVerifiedEvent) -> Session
     };
     if let Some(Value::Object(map)) = event.provider_claims.as_ref() {
         for (key, value) in map {
+            if event.provider_type.as_deref() == Some("near-ai")
+                && key == "model_enclave_candidates"
+            {
+                continue;
+            }
             claims.extra.insert(key.clone(), value.clone());
         }
     }
     claims
 }
 
-/// NEAR AI model-enclave signers the verifier proved for this event (lowercase
-/// addresses). Empty for any other provider, or when no enclave verified.
-pub(super) fn near_verified_signers(event: &UpstreamVerifiedEvent) -> Vec<String> {
-    if event.provider_type.as_deref() != Some("near-ai") {
-        return Vec::new();
-    }
-    event
-        .provider_claims
-        .as_ref()
-        .and_then(|c| c.get("verified_signers"))
-        .and_then(Value::as_array)
-        .map(|signers| {
-            signers
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_ascii_lowercase)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn near_event_with_claims(
-    event: &UpstreamVerifiedEvent,
-    provider_claims: serde_json::Map<String, Value>,
-) -> UpstreamVerifiedEvent {
-    UpstreamVerifiedEvent {
-        provider_type: event.provider_type.clone(),
-        verifier_id: event.verifier_id.clone(),
-        result: event.result,
-        provider_claims: Some(Value::Object(provider_claims)),
-        ..Default::default()
-    }
-}
-
-/// UpToDate only when both are UpToDate; otherwise the stale one, so the
-/// tri-state claim refutes. An absent status on either side stays absent.
-fn worse_tcb_status(a: Option<&Value>, b: Option<&Value>) -> Option<Value> {
-    let (Some(a), Some(b)) = (a.and_then(Value::as_str), b.and_then(Value::as_str)) else {
-        return None;
-    };
-    Some(Value::String(
-        if a.eq_ignore_ascii_case("uptodate") {
-            b
-        } else {
-            a
-        }
-        .to_string(),
-    ))
-}
-
-/// The shared NEAR session: the router TEE and its TLS key only. A response is
-/// bound to a model enclave only through that enclave's signature, so this
-/// session asserts nothing about the enclaves.
-pub(super) fn near_router_session_claims(event: &UpstreamVerifiedEvent) -> SessionClaims {
-    let empty = serde_json::Map::new();
-    let full = event
-        .provider_claims
-        .as_ref()
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let mut pc = serde_json::Map::new();
-    pc.insert(
-        "trust_boundary".to_string(),
-        Value::String("near-ai-gateway".to_string()),
-    );
-    for key in [
-        "gateway_verified",
-        "gateway_tls_spki_sha256",
-        "canonical_model_id",
-        "model_enclaves_verified",
-    ] {
-        if let Some(value) = full.get(key) {
-            pc.insert(key.to_string(), value.clone());
-        }
-    }
-    if let Some(status) = full.get("gateway_tcb_status") {
-        pc.insert("tcb_status".to_string(), status.clone());
-    }
-    if let Some(production) = full.get("gateway_production_os_image") {
-        pc.insert("production_os_image".to_string(), production.clone());
-    }
-    session_claims_for_event(&near_event_with_claims(event, pc))
-}
-
-/// One verified NEAR enclave's session: its own TCB, GPU and OS verdicts. The
-/// router relays the traffic, so its TCB and OS verdicts fold in: a stale router
-/// TCB or a dev router image refutes the enclave session's claim too.
+/// Combine the selected NEAR enclave's claims with the router's TCB and OS.
 pub(super) fn near_enclave_session_claims(
     event: &UpstreamVerifiedEvent,
     signer: &str,
+    candidate: &Value,
 ) -> SessionClaims {
-    let empty = serde_json::Map::new();
-    let full = event
+    let gateway_tcb = event
         .provider_claims
         .as_ref()
-        .and_then(Value::as_object)
-        .unwrap_or(&empty);
-    let per = |map: &str| full.get(map).and_then(|m| m.get(signer)).cloned();
-    let mut pc = serde_json::Map::new();
-    pc.insert(
-        "trust_boundary".to_string(),
-        Value::String("near-ai-model-enclave".to_string()),
-    );
-    pc.insert(
-        "evidence_scope".to_string(),
-        Value::String("model_instance".to_string()),
-    );
-    pc.insert(
-        "signing_address".to_string(),
-        Value::String(signer.to_string()),
-    );
-    for key in [
-        "canonical_model_id",
-        "gateway_verified",
-        "gateway_tls_spki_sha256",
-        "gateway_tcb_status",
-    ] {
-        if let Some(value) = full.get(key) {
-            pc.insert(key.to_string(), value.clone());
-        }
-    }
-    let instance_tcb = per("instance_tcb_statuses");
-    // The enclave's own status, kept beside the folded one so a reader can tell
-    // whether the router or the enclave refutes `tcb_up_to_date`.
-    if let Some(status) = &instance_tcb {
-        pc.insert("instance_tcb_status".to_string(), status.clone());
-    }
-    if let Some(status) = worse_tcb_status(full.get("gateway_tcb_status"), instance_tcb.as_ref()) {
-        pc.insert("tcb_status".to_string(), status);
-    }
-    if let Some(Value::Object(gpu)) = per("instance_gpu") {
-        for key in [
-            "gpu_verified",
-            "gpu_evidence_present",
-            "gpu_nonce_matched",
-            "gpu_arch",
-        ] {
-            if let Some(value) = gpu.get(key) {
-                pc.insert(key.to_string(), value.clone());
-            }
-        }
-    }
-    if let Some(Value::Object(workload)) = per("instance_workloads") {
-        for (key, value) in &workload {
-            if key != "production_os_image" {
-                pc.insert(key.clone(), value.clone());
-            }
-        }
-        let enclave_os = workload.get("production_os_image").and_then(Value::as_bool);
-        let router_os = full
-            .get("gateway_production_os_image")
-            .and_then(Value::as_bool);
-        let production = match (router_os, enclave_os) {
-            (Some(false), _) | (_, Some(false)) => Some(false),
-            (_, Some(true)) => enclave_os,
-            _ => None,
-        };
-        if let Some(production) = production {
-            pc.insert("production_os_image".to_string(), Value::Bool(production));
-        }
-    }
-    session_claims_for_event(&near_event_with_claims(event, pc))
+        .and_then(|claims| claims["tcb_status"].as_str());
+    let enclave_tcb = candidate["tcb_status"].as_str();
+    let tcb_status = [gateway_tcb, enclave_tcb]
+        .into_iter()
+        .flatten()
+        .find(|status| !status.eq_ignore_ascii_case("uptodate"))
+        .or_else(|| gateway_tcb.zip(enclave_tcb).map(|(status, _)| status));
+    let gateway_os = candidate["gateway_production_os_image"].as_bool();
+    let enclave_os = candidate["production_os_image"].as_bool();
+    let production_os = match (gateway_os, enclave_os) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    };
+    session_claims_for_event(&UpstreamVerifiedEvent {
+        provider_type: event.provider_type.clone(),
+        result: event.result,
+        provider_claims: Some(serde_json::json!({
+            "trust_boundary": "near-ai-model-enclave",
+            "canonical_model_id": event.model_id,
+            "signing_address": signer,
+            "gateway_tcb_status": gateway_tcb,
+            "instance_tcb_status": enclave_tcb,
+            "tcb_status": tcb_status,
+            "compose_hash": candidate["compose_hash"],
+            "compose_hash_verified": candidate["compose_hash_verified"],
+            "production_os_image": production_os,
+            "gpu_evidence_present": candidate["gpu_evidence_present"],
+            "gpu_verified": candidate["gpu_verified"],
+        })),
+        ..Default::default()
+    })
 }
 
-/// The Chutes instance id a binding attests, if this is a per-instance Chutes
-/// channel. Chutes seals one session per instance; every other provider has a
-/// single channel (None), so its claims/evidence apply to the event as a whole.
-pub(super) fn chutes_instance_id<'a>(
+/// Reviewed adapter capability, never inferred from a provider name alone.
+/// Shape validation does not authenticate facts: the configured verifier still
+/// owns that responsibility. Unknown/incomplete output remains usable with
+/// evidence-sensitive dedup, including legacy Chutes output.
+pub(crate) fn reviewed_session_material(event: &UpstreamVerifiedEvent, claims: &Value) -> bool {
+    let Some(provider) = event.provider_type.as_deref() else {
+        return false;
+    };
+    let expected_id = match provider {
+        "aci-service" => AciServiceUpstreamVerifier::VERIFIER_ID,
+        "near-ai" => NearAiProviderVerifier::VERIFIER_ID,
+        "phala-direct" => PhalaDirectProviderVerifier::VERIFIER_ID,
+        "chutes" => ChutesProviderVerifier::VERIFIER_ID,
+        "privatemode" => PrivatemodeProviderVerifier::VERIFIER_ID,
+        _ => return false,
+    };
+    if event.verifier_id != expected_id
+        || (provider == "aci-service" && event.aci_identity.is_none())
+        || claims["session_material_version"].as_str() != Some(format!("{provider}/1").as_str())
+    {
+        return false;
+    }
+    crate::aci::verifier::session_material::valid_profile(provider, claims)
+}
+
+pub(super) fn is_multi_instance(provider_type: Option<&str>) -> bool {
+    matches!(provider_type, Some("chutes") | Some("0g-private-computer"))
+}
+
+/// The instance a binding attests (a Chutes instance id or a 0G provider
+/// address). Those providers seal one session per instance; every other
+/// provider has a single channel (None), so its claims/evidence apply to the
+/// event as a whole.
+pub(super) fn instance_id<'a>(
     event: &UpstreamVerifiedEvent,
     binding: &'a ChannelBinding,
 ) -> Option<&'a str> {
-    if event.provider_type.as_deref() != Some("chutes") {
+    if !is_multi_instance(event.provider_type.as_deref()) {
         return None;
     }
     match binding {
@@ -255,18 +166,19 @@ pub(super) fn per_instance_session_claims(
 }
 
 /// One instance's slice of the Chutes `provider_claims` — that instance's own
-/// attestation facts, so its session binds its CPU and GPU evidence while staying
+/// attestation facts, so its session retains CPU material and GPU outcomes while staying
 /// stable under fleet churn. Everything fleet-shaped is dropped (the lists, the
 /// per-instance maps, and the *fleet-aggregate* GPU scalars — `all`/`any` over
 /// instances). What is kept is per-instance and nonce-free: the matched CPU
-/// measurement profile, this instance's TCB status, and this instance's GPU
-/// verification outcome (verified / arch). The raw nonce-bound quotes stay out.
+/// measurements and profile, this instance's TCB/advisories, and this instance's
+/// supplemental GPU outcome. The raw nonce-bound quotes stay out.
 fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Value {
     let mut pc = serde_json::Map::new();
     let Some(Value::Object(map)) = full else {
         return Value::Object(pc);
     };
     for key in [
+        "session_material_version",
         "trust_boundary",
         "evidence_scope",
         "chute_id",
@@ -292,6 +204,25 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
     {
         pc.insert("measurement".to_string(), measurement.clone());
     }
+    // 0G records each provider's facts under `instances`.
+    if let Some(Value::Object(instance)) = map
+        .get("instances")
+        .and_then(|instances| instances.get(instance_id))
+    {
+        pc.extend(instance.clone());
+    }
+    for (map_key, slice_key) in [
+        ("instance_tdx_reports", "tdx_report"),
+        ("instance_tdx_report_sha256", "tdx_report_sha256"),
+        ("instance_advisory_ids", "advisory_ids"),
+    ] {
+        if let Some(value) = map
+            .get(map_key)
+            .and_then(|instances| instances.get(instance_id))
+        {
+            pc.insert(slice_key.to_string(), value.clone());
+        }
+    }
     // This instance's own GPU outcome (NOT the fleet aggregate), lifted to the
     // top of the slice so `gpu_attested` reflects this instance and the slice
     // stays stable when a sibling instance's GPU does not.
@@ -299,7 +230,12 @@ fn per_instance_provider_claims(full: Option<&Value>, instance_id: &str) -> Valu
         .get("instance_gpu")
         .and_then(|instances| instances.get(instance_id))
     {
-        for key in ["gpu_verified", "gpu_arch", "gpu_evidence_present"] {
+        for key in [
+            "gpu_verified",
+            "gpu_arch",
+            "gpu_evidence_present",
+            "gpu_evidence_nonce_matched",
+        ] {
             if let Some(value) = gpu.get(key) {
                 pc.insert(key.to_string(), value.clone());
             }
@@ -378,6 +314,47 @@ impl ProviderClaimMapper for SecretAiClaims {
     }
 }
 
+/// armet-ai: a dcap-verified TDX quote whose report_data commits to the
+/// channel key, the exact GPU evidence and the model, with the measured TD
+/// (MRTD, RTMR0-3 and launch configuration) matching an operator pin, and a
+/// mandatory NRAS-signed GPU check. The pin covers firmware, kernel, command
+/// line and runtime, but it is an operator's acceptance of a measurement, not a
+/// reproducible build, so it asserts serving software only and leaves
+/// `os_known_good` Unknown.
+pub(super) struct ArmetAiClaims;
+impl ProviderClaimMapper for ArmetAiClaims {
+    fn claims(&self, event: &UpstreamVerifiedEvent) -> SessionClaims {
+        SessionClaims {
+            tee_attested: hardware_tee_attested(event),
+            tcb_up_to_date: tcb_up_to_date_claim(event),
+            serving_software_known_good: armet_ai_software_claim(event),
+            gpu_attested: nras_gpu_claim(
+                event,
+                "the TD commits to the exact GPU evidence in its report_data",
+            ),
+            ..SessionClaims::default()
+        }
+    }
+}
+
+pub(super) fn armet_ai_software_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    let subject = event
+        .provider_claims
+        .as_ref()
+        .and_then(|claims| claims.get("accepted_subject"))
+        .and_then(Value::as_str);
+    match subject {
+        Some(subject) => Claim::asserted(
+            ClaimSource::VerifierDerived,
+            format!(
+                "measured TD (MRTD, RTMR0-3, launch configuration) matches operator-configured \
+                 pin {subject}"
+            ),
+        ),
+        None => Claim::unknown(),
+    }
+}
+
 /// Generic verifier path: we only know it returned Verified with an enforceable
 /// channel binding.
 pub(super) struct GenericClaims;
@@ -447,13 +424,10 @@ pub(super) fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
-/// GPU attestation from the provider's NVIDIA confidential-computing evidence.
-/// When `gpu_verified` is set, the GPU's own attestation report was
-/// cryptographically verified and nonce-bound to this verification round, so we
-/// **assert** it — but as `VerifierDerived`, not `HardwareProven`: it attests a
-/// genuine CC GPU, not (on its own) that this GPU is bound to the CPU TEE that
-/// served the request. Absent GPU evidence (or a provider that doesn't supply
-/// it) leaves the claim Unknown — we never assert it by policy.
+/// Supplemental GPU check outcome, recorded as verifier-derived metadata.
+/// The Phala Direct path decodes NRAS JWTs without signature verification.
+/// These checks do not bind GPU identity to the serving CPU or establish
+/// continued use of a particular GPU.
 pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
     let claims = event.provider_claims.as_ref();
     let verified = claims
@@ -466,17 +440,17 @@ pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
                 .and_then(Value::as_str);
             let reason = match arch {
                 Some(arch) => format!(
-                    "NVIDIA confidential-computing GPU attestation verified and nonce-bound \
-                     (arch {arch}); attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                    "Supplemental NVIDIA GPU check accepted and nonce-matched \
+                     (arch {arch}); does not authenticate GPU identity or bind it to the serving CPU TEE"
                 ),
-                None => "NVIDIA confidential-computing GPU attestation verified and nonce-bound; \
-                         attests a genuine CC GPU, not its binding to the serving CPU TEE"
+                None => "Supplemental NVIDIA GPU check accepted and nonce-matched; \
+                         does not authenticate GPU identity or bind it to the serving CPU TEE"
                     .to_string(),
             };
             Claim::asserted(ClaimSource::VerifierDerived, reason)
         }
         // `false` is ambiguous (no evidence vs. a swallowed verify error), so we
-        // do not refute — only assert on a genuine, nonce-bound verification.
+        // do not refute — only record an accepted, nonce-matched outcome.
         _ => Claim::unknown(),
     }
 }
@@ -538,6 +512,12 @@ pub(super) fn secret_ai_os_claim(event: &UpstreamVerifiedEvent) -> Claim {
 }
 
 pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
+    nras_gpu_claim(event, "its nonce matches the CPU report_data")
+}
+
+/// A mandatory, NRAS-signed GPU gate. `binding` says how the verifier tied the
+/// GPU evidence to the CPU quote.
+fn nras_gpu_claim(event: &UpstreamVerifiedEvent, binding: &str) -> Claim {
     let claims = event.provider_claims.as_ref();
     let verified = claims
         .and_then(|claims| claims.get("gpu_verified"))
@@ -557,12 +537,12 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
                 .filter(|models| !models.is_empty());
             let reason = match models {
                 Some(models) => format!(
-                    "NVIDIA confidential-computing GPU attestation verified by NRAS and its nonce \
-                     matches the CPU report_data (signed models {models})"
+                    "NVIDIA confidential-computing GPU attestation verified by NRAS and \
+                     {binding} (signed models {models})"
                 ),
-                None => "NVIDIA confidential-computing GPU attestation verified by NRAS and its \
-                         nonce matches the CPU report_data"
-                    .to_string(),
+                None => format!(
+                    "NVIDIA confidential-computing GPU attestation verified by NRAS and {binding}"
+                ),
             };
             Claim::asserted(ClaimSource::VerifierDerived, reason)
         }
@@ -572,10 +552,7 @@ pub(super) fn secret_ai_gpu_claim(event: &UpstreamVerifiedEvent) -> Claim {
 
 #[cfg(test)]
 mod claim_mapping_tests {
-    use super::{
-        near_enclave_session_claims, near_router_session_claims, near_verified_signers,
-        session_claims_for_event,
-    };
+    use super::session_claims_for_event;
     use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
     use crate::aggregator::session::{ClaimSource, ClaimStatus};
     use serde_json::{json, Value};
@@ -599,6 +576,208 @@ mod claim_mapping_tests {
             }],
             provider_claims,
             ..Default::default()
+        }
+    }
+
+    fn reviewed_profile(provider: Option<&str>, verifier_id: &str, claims: &Value) -> bool {
+        let mut event = event(provider, VerificationResult::Verified, None);
+        event.verifier_id = verifier_id.to_string();
+        super::reviewed_session_material(&event, claims)
+    }
+
+    fn profiles() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/session_material.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_complete_matching_reviewed_profiles_are_eligible() {
+        for (provider, claims) in profiles().as_object().unwrap() {
+            let id = match provider.as_str() {
+                "near-ai" => "private-ai-verifier/near-ai-gateway/v1".to_string(),
+                "privatemode" => "privatemode-proxy/co-deployed-contrast/v1".to_string(),
+                _ => format!("private-ai-verifier/{provider}/v1"),
+            };
+            assert!(reviewed_profile(Some(provider), &id, claims), "{provider}");
+            let mut extended = claims.clone();
+            extended["unknown_top_level_claim"] = json!({"preserved": true});
+            assert!(reviewed_profile(Some(provider), &id, &extended));
+            assert!(!reviewed_profile(Some(provider), "custom/v1", claims));
+            for key in claims.as_object().unwrap().keys() {
+                let mut malformed = claims.clone();
+                malformed[key] = json!({"invalid": true});
+                assert!(
+                    !reviewed_profile(Some(provider), &id, &malformed),
+                    "{provider}: malformed {key}"
+                );
+                let mut incomplete = claims.clone();
+                incomplete.as_object_mut().unwrap().remove(key);
+                assert!(
+                    !reviewed_profile(Some(provider), &id, &incomplete),
+                    "{provider}: missing {key}"
+                );
+            }
+            let mut unknown = claims.clone();
+            unknown["session_material_version"] = json!(format!("{provider}/2"));
+            assert!(!reviewed_profile(Some(provider), &id, &unknown));
+            for wrong in ["armet-ai", "secret-ai", "custom"] {
+                assert!(!reviewed_profile(Some(wrong), &id, claims));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_tdx_projections_and_digests_cannot_enable_reuse() {
+        let base = profiles()["near-ai"].clone();
+        let id = "private-ai-verifier/near-ai-gateway/v1";
+        for key in base["tdx_report"].as_object().unwrap().keys() {
+            let mut changed = base.clone();
+            changed["tdx_report"][key] = json!("bad");
+            // Recompute so field validation, not just digest mismatch, is tested.
+            changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+            ));
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed), "{key}");
+        }
+        // Serde structs accept sequence input by default; the profile does not.
+        let report: crate::aci::verifier::session_material::TdxReportMaterial =
+            serde_json::from_value(base["tdx_report"].clone()).unwrap();
+        let report = serde_json::to_value(report).unwrap();
+        for (key, array) in [
+            (
+                "tdx_report",
+                json!(report.as_object().unwrap().values().collect::<Vec<_>>()),
+            ),
+            ("gateway_gpu_check", json!([false, false])),
+        ] {
+            let mut changed = base.clone();
+            changed[key] = array;
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed));
+        }
+        for value in [json!("22".repeat(16)), Value::Null] {
+            let mut changed = base.clone();
+            changed["tdx_report"]["tee_tcb_svn2"] = value;
+            changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+            ));
+            assert!(!reviewed_profile(Some("near-ai"), id, &changed));
+        }
+        let mut changed = base.clone();
+        changed["tdx_report_sha256"] = json!(format!("sha256:{}", "00".repeat(32)));
+        assert!(!reviewed_profile(Some("near-ai"), id, &changed));
+        changed = base.clone();
+        changed["tdx_report"]["report_format"] = json!("td15");
+        assert!(!reviewed_profile(Some("near-ai"), id, &changed));
+        changed["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
+        changed["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
+        changed["tdx_report_sha256"] = json!(crate::aci::digest::sha256_hex(
+            &crate::aci::digest::jcs_bytes(&changed["tdx_report"]).unwrap()
+        ));
+        assert!(reviewed_profile(Some("near-ai"), id, &changed));
+        for key in ["tee_tcb_svn2", "mr_service_td"] {
+            let mut malformed = changed.clone();
+            malformed["tdx_report"][key] = json!("zz");
+            assert!(!reviewed_profile(Some("near-ai"), id, &malformed));
+        }
+    }
+
+    #[test]
+    fn tdx_profiles_require_string_formats_and_digest_the_supplied_report() {
+        let digest = |report: &Value| {
+            json!(crate::aci::digest::sha256_hex(
+                &crate::aci::digest::jcs_bytes(report).unwrap()
+            ))
+        };
+        for provider in ["near-ai", "phala-direct", "chutes"] {
+            let verifier_id = if provider == "near-ai" {
+                "private-ai-verifier/near-ai-gateway/v1".to_string()
+            } else {
+                format!("private-ai-verifier/{provider}/v1")
+            };
+            for format in ["td10", "td15"] {
+                let mut claims = profiles()[provider].clone();
+                claims["tdx_report"]["report_format"] = json!(format);
+                if format == "td15" {
+                    claims["tdx_report"]["tee_tcb_svn2"] = json!("22".repeat(16));
+                    claims["tdx_report"]["mr_service_td"] = json!("22".repeat(48));
+                }
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // An externally tagged enum object must not be normalized to
+                // the string whose digest was supplied by the verifier.
+                claims["tdx_report"]["report_format"] = json!({(format): null});
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+
+                // A valid string report must hash its own supplied content,
+                // not another representation or another valid report.
+                claims["tdx_report"]["report_format"] = json!(format);
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report"]["rt_mr0"] = json!("ff".repeat(48));
+                assert!(!reviewed_profile(Some(provider), &verifier_id, &claims));
+                claims["tdx_report_sha256"] = digest(&claims["tdx_report"]);
+                assert!(reviewed_profile(Some(provider), &verifier_id, &claims));
+            }
+        }
+    }
+
+    #[test]
+    fn chutes_slice_keeps_own_security_state_and_ignores_sibling_churn() {
+        let own = profiles()["chutes"].clone();
+        let mut full = json!({
+            "session_material_version": "chutes/1", "trust_boundary": "model_instance",
+            "evidence_scope": "model_instance", "chute_id": "chute", "canonical_model_id": "model",
+            "instance_measurements": {"instance-a": own["measurement"]},
+            "instance_tcb_statuses": {"instance-a": own["tcb_status"]},
+            "instance_tdx_reports": {"instance-a": own["tdx_report"]},
+            "instance_tdx_report_sha256": {"instance-a": own["tdx_report_sha256"]},
+            "instance_advisory_ids": {"instance-a": own["advisory_ids"]},
+            "instance_gpu": {"instance-a": {
+                "gpu_verified": false, "gpu_arch": null, "gpu_evidence_present": false,
+                "gpu_evidence_nonce_matched": null,
+            }},
+        });
+        let slice = super::per_instance_provider_claims(Some(&full), "instance-a");
+        assert_eq!(slice, own);
+        full["instance_tdx_reports"]["sibling"] = json!({"mr_td": "changed"});
+        full["instance_gpu"]["sibling"] = json!({"gpu_verified": true});
+        full["failed_instance_ids"] = json!(["sibling"]);
+        full["nonce_expires_in"] = json!(10);
+        assert_eq!(
+            slice,
+            super::per_instance_provider_claims(Some(&full), "instance-a")
+        );
+        for (map, key, changed) in [
+            ("instance_tcb_statuses", None, json!("OutOfDate")),
+            (
+                "instance_tdx_reports",
+                Some("mr_td"),
+                json!("ff".repeat(48)),
+            ),
+            ("instance_gpu", Some("gpu_verified"), json!(true)),
+            (
+                "instance_gpu",
+                Some("gpu_evidence_nonce_matched"),
+                json!(false),
+            ),
+            ("instance_advisory_ids", None, json!(["SA-C"])),
+        ] {
+            let mut updated = full.clone();
+            match key {
+                Some(key) => updated[map]["instance-a"][key] = changed,
+                None => updated[map]["instance-a"] = changed,
+            }
+            assert_ne!(
+                slice,
+                super::per_instance_provider_claims(Some(&updated), "instance-a"),
+                "{map}/{key:?}"
+            );
         }
     }
 
@@ -725,6 +904,58 @@ mod claim_mapping_tests {
             claims.serving_software_known_good.status,
             ClaimStatus::Unknown
         );
+    }
+
+    #[test]
+    fn armet_ai_asserts_pinned_software_but_never_os_provenance() {
+        let subject = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+        let claims = session_claims_for_event(&event(
+            Some("armet-ai"),
+            VerificationResult::Verified,
+            Some(json!({
+                "accepted_subject": subject,
+                "tcb_status": "OutOfDate",
+                "gpu_verified": true,
+                "gpu_models": ["GH100"],
+                "gpu_count": 1,
+                // Even a verifier-supplied OS verdict must not be upgraded:
+                // a measurement pin is not a reviewed OS build.
+                "production_os_image": true,
+            })),
+        ));
+        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.tee_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+        assert_eq!(
+            claims.serving_software_known_good.status,
+            ClaimStatus::Asserted
+        );
+        assert_eq!(
+            claims.serving_software_known_good.source,
+            Some(ClaimSource::VerifierDerived)
+        );
+        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
+        let gpu_reason = claims.gpu_attested.reason.as_deref().unwrap_or_default();
+        assert!(
+            gpu_reason.contains("exact GPU evidence") && gpu_reason.contains("GH100"),
+            "{gpu_reason}"
+        );
+        assert_eq!(claims.os_known_good.status, ClaimStatus::Unknown);
+        assert_eq!(claims.model_weights_provenance.status, ClaimStatus::Unknown);
+
+        let unpinned = session_claims_for_event(&event(
+            Some("armet-ai"),
+            VerificationResult::Verified,
+            Some(json!({"tcb_status": "UpToDate"})),
+        ));
+        assert_eq!(
+            unpinned.serving_software_known_good.status,
+            ClaimStatus::Unknown
+        );
+        assert_eq!(unpinned.gpu_attested.status, ClaimStatus::Unknown);
     }
 
     #[test]
@@ -884,8 +1115,8 @@ mod claim_mapping_tests {
     }
 
     #[test]
-    fn chutes_instance_id_only_for_chutes_e2ee_bindings() {
-        use super::chutes_instance_id;
+    fn instance_id_only_for_per_instance_e2ee_bindings() {
+        use super::instance_id;
         let e2ee = ChannelBinding::E2eePublicKeySha256 {
             provider: "chutes".to_string(),
             key_id: Some("inst-1".to_string()),
@@ -898,9 +1129,15 @@ mod claim_mapping_tests {
         };
         let chutes = event(Some("chutes"), VerificationResult::Verified, None);
         let near = event(Some("near-ai"), VerificationResult::Verified, None);
-        assert_eq!(chutes_instance_id(&chutes, &e2ee), Some("inst-1"));
-        assert_eq!(chutes_instance_id(&chutes, &tls), None); // not an e2ee instance
-        assert_eq!(chutes_instance_id(&near, &e2ee), None); // not Chutes
+        let zero_g = event(
+            Some("0g-private-computer"),
+            VerificationResult::Verified,
+            None,
+        );
+        assert_eq!(instance_id(&chutes, &e2ee), Some("inst-1"));
+        assert_eq!(instance_id(&zero_g, &e2ee), Some("inst-1"));
+        assert_eq!(instance_id(&chutes, &tls), None); // not an e2ee instance
+        assert_eq!(instance_id(&near, &e2ee), None); // not per-instance
     }
 
     #[test]
@@ -960,77 +1197,21 @@ mod claim_mapping_tests {
         assert_eq!(c2.gpu_attested.status, ClaimStatus::Unknown);
     }
 
-    fn near_event(router_tcb: &str, router_production_os: bool) -> UpstreamVerifiedEvent {
-        event(
-            Some("near-ai"),
+    #[test]
+    fn zero_g_instance_claims_are_that_providers_entry() {
+        use super::per_instance_session_claims;
+        let pc = json!({"trust_boundary": "0g", "instances": {
+            "0xa": {"signing_address": "0x5a", "tcb_status": "UpToDate"},
+            "0xb": {"signing_address": "0x5b", "tcb_status": "OutOfDate"},
+        }});
+        let ev = event(
+            Some("0g-private-computer"),
             VerificationResult::Verified,
-            Some(json!({
-                "trust_boundary": "near-ai-model-enclave",
-                "canonical_model_id": "z-ai/glm-5.3-flash",
-                "gateway_verified": true,
-                "gateway_tls_spki_sha256": "aa".repeat(32),
-                "gateway_tcb_status": router_tcb,
-                "gateway_production_os_image": router_production_os,
-                "tcb_status": router_tcb,
-                "verified_signers": ["0xAbC"],
-                "instance_tcb_statuses": {"0xabc": "UpToDate"},
-                "instance_gpu": {"0xabc": {"gpu_verified": true, "gpu_evidence_present": true, "gpu_nonce_matched": true}},
-                "instance_workloads": {"0xabc": {
-                    "app_id": "2c0a", "compose_hash": "c82b", "os_image_hash": "a6ea",
-                    "compose_hash_verified": true, "production_os_image": true
-                }},
-                "gpu_verified": true,
-            })),
-        )
-    }
-
-    #[test]
-    fn near_signers_are_lowercased_and_only_for_near() {
-        assert_eq!(
-            near_verified_signers(&near_event("UpToDate", true)),
-            vec!["0xabc".to_string()]
+            Some(pc),
         );
-        let mut other = near_event("UpToDate", true);
-        other.provider_type = Some("chutes".to_string());
-        assert!(near_verified_signers(&other).is_empty());
-    }
-
-    #[test]
-    fn near_router_session_asserts_nothing_about_enclaves() {
-        let claims = near_router_session_claims(&near_event("OutOfDate", true));
-        assert_eq!(claims.gpu_attested.status, ClaimStatus::Unknown);
-        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
-        assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
-        assert_eq!(
-            claims.extra.get("trust_boundary"),
-            Some(&json!("near-ai-gateway"))
-        );
-        assert!(!claims.extra.contains_key("signing_address"));
-    }
-
-    #[test]
-    fn near_enclave_session_carries_its_evidence_and_the_router_tcb() {
-        // The enclave is UpToDate, but the router relays traffic: its stale TCB refutes.
-        let claims = near_enclave_session_claims(&near_event("OutOfDate", true), "0xabc");
-        assert_eq!(claims.tee_attested.status, ClaimStatus::Asserted);
-        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
-        assert_eq!(claims.tcb_up_to_date.status, ClaimStatus::Refuted);
-        assert_eq!(claims.os_known_good.status, ClaimStatus::Asserted);
-        assert_eq!(claims.extra.get("signing_address"), Some(&json!("0xabc")));
-        assert_eq!(claims.extra.get("compose_hash"), Some(&json!("c82b")));
-        assert_eq!(
-            claims.extra.get("instance_tcb_status"),
-            Some(&json!("UpToDate"))
-        );
-        assert_eq!(claims.extra.get("tcb_status"), Some(&json!("OutOfDate")));
-
-        let current = near_enclave_session_claims(&near_event("UpToDate", true), "0xabc");
-        assert_eq!(current.tcb_up_to_date.status, ClaimStatus::Asserted);
-    }
-
-    #[test]
-    fn near_dev_router_image_refutes_the_enclave_os_claim() {
-        let claims = near_enclave_session_claims(&near_event("UpToDate", false), "0xabc");
-        assert_eq!(claims.os_known_good.status, ClaimStatus::Refuted);
+        let a = per_instance_session_claims(&ev, "0xa");
+        assert_eq!(a.tcb_up_to_date.status, ClaimStatus::Asserted);
+        assert_eq!(a.extra.get("signing_address"), Some(&json!("0x5a")));
+        assert!(!a.extra.contains_key("instances"));
     }
 }

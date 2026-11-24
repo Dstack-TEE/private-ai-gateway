@@ -7,8 +7,11 @@
 //! legacy E2EE request paths.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
+use common::admission;
 mod common;
 
 use async_trait::async_trait;
@@ -16,7 +19,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::Router;
 use bytes::Bytes;
-use futures_util::stream;
+use futures_util::{stream, StreamExt};
 use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
@@ -26,19 +29,23 @@ use private_ai_gateway::aci::e2ee::{
 };
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
-    receipt_signing_input, SignedReceipt, UpstreamVerifiedEvent, VerificationResult,
+    receipt_signing_input, ChannelBinding, SignedReceipt, UpstreamVerifiedEvent,
+    VerificationFailure, VerificationResult, VerificationRound,
 };
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
+    MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
 };
 use private_ai_gateway::aggregator::service::{
-    AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore, UpstreamVerificationRequest,
-    UpstreamVerifier,
+    AciService, AciServiceConfig, Clock, FixedClock, InMemoryReceiptStore,
+    UpstreamVerificationRequest, UpstreamVerifier,
 };
-use private_ai_gateway::http::build_router;
+use private_ai_gateway::aggregator::session::EvidenceRef;
+use private_ai_gateway::http::{build_router, build_router_with_admin};
 use serde_json::Value;
+use tokio::time::Instant;
 use tower::ServiceExt;
 use x25519_dalek::StaticSecret as X25519SecretKey;
 
@@ -121,6 +128,7 @@ struct RecordingUpstream {
     /// is a candidate for a constrained request (§5.3).
     is_tee: Option<bool>,
     response_body: Vec<u8>,
+    response_content_type: &'static str,
     stream_status: u16,
     stream_headers: HashMap<String, String>,
     stream_chunks: Vec<Bytes>,
@@ -136,6 +144,7 @@ impl Default for RecordingUpstream {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 200,
             stream_headers,
             stream_chunks: vec![
@@ -189,6 +198,14 @@ impl RecordingUpstream {
 
 #[async_trait]
 impl UpstreamBackend for RecordingUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<Value>(&req.body)
             .ok()
@@ -219,7 +236,14 @@ impl UpstreamBackend for RecordingUpstream {
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(req);
         let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "application/json".to_string());
+        headers.insert(
+            "content-type".to_string(),
+            self.response_content_type.to_string(),
+        );
+        headers.insert(
+            "x-typesafe-request-id".to_string(),
+            "upstream-id".to_string(),
+        );
         Ok(UpstreamResponse {
             response_attestation: None,
             status_code: 200,
@@ -276,7 +300,7 @@ impl UpstreamVerifier for AlwaysVerified {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
             evidence: Some(serde_json::json!({
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:b30c37cf9f05fd749ffcb958a95794dc48e4cafad6316877c9e84b1e590c31dd",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3VyZmFjZS1ldmlkZW5jZSJ9",
             })),
             ..event_from_request(&request, VerificationResult::Verified)
@@ -292,9 +316,90 @@ impl UpstreamVerifier for AlwaysFailed {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             verifier_id: "surface-verifier/v1".to_string(),
-            reason: Some("quote verification failed".to_string()),
+            diagnostic: Some("quote verification failed".to_string()),
             ..event_from_request(&request, VerificationResult::Failed)
         }
+    }
+}
+
+/// A verifier that could not fetch the evidence and says so in its own words.
+struct EvidenceFetchFailed;
+
+const FETCH_DIAGNOSTIC: &str = "failed to fetch attestation report: \
+    HTTPSConnectionPool(host='surface-upstream.example', port=443): Read timed out.";
+
+#[async_trait]
+impl UpstreamVerifier for EvidenceFetchFailed {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            failure: VerificationFailure::EvidenceUnavailable,
+            diagnostic: Some(FETCH_DIAGNOSTIC.to_string()),
+            ..event_from_request(&request, VerificationResult::Failed)
+        }
+    }
+}
+
+type VerificationKey = (String, Option<String>, String);
+
+#[derive(Default)]
+struct RotatingVerifier {
+    verifications: AtomicUsize,
+    cache: Mutex<HashMap<VerificationKey, (Instant, UpstreamVerifiedEvent)>>,
+}
+
+impl RotatingVerifier {
+    fn key(request: &UpstreamVerificationRequest) -> VerificationKey {
+        (
+            request.upstream_name.clone(),
+            request.url_origin.clone(),
+            request.model_id.clone(),
+        )
+    }
+
+    fn cache_event(&self, request: &UpstreamVerificationRequest, event: UpstreamVerifiedEvent) {
+        self.cache.lock().unwrap().insert(
+            Self::key(request),
+            (Instant::now() + Duration::from_secs(300), event),
+        );
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for RotatingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        self.refresh(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cache = self.cache.lock().unwrap();
+        let (expires_at, event) = cache.get(&Self::key(request))?;
+        if Instant::now() >= *expires_at {
+            return None;
+        }
+        let mut event = event.clone();
+        event.required = request.required;
+        Some(event)
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let nonce = self.verifications.fetch_add(1, Ordering::Relaxed);
+        let event = UpstreamVerifiedEvent {
+            verifier_id: "surface-verifier/v1".to_string(),
+            evidence: Some(
+                serde_json::to_value(EvidenceRef::from_bytes(
+                    "application/json",
+                    nonce.to_string().as_bytes(),
+                ))
+                .unwrap(),
+            ),
+            ..event_from_request(&request, VerificationResult::Verified)
+        };
+        self.cache_event(&request, event.clone());
+        event
     }
 }
 
@@ -321,11 +426,26 @@ fn harness_with(
     verifier: Arc<dyn UpstreamVerifier>,
     enable_e2ee: bool,
 ) -> Harness {
+    harness_with_clock(
+        upstream,
+        verifier,
+        enable_e2ee,
+        Arc::new(FixedClock(1_700_000_000)),
+    )
+}
+
+fn harness_with_clock(
+    upstream: RecordingUpstream,
+    verifier: Arc<dyn UpstreamVerifier>,
+    enable_e2ee: bool,
+    clock: Arc<dyn Clock>,
+) -> Harness {
     let keys = Arc::new(StaticKeyProvider::default());
     let quoter = Arc::new(StubQuoter::default());
     let upstream_calls = upstream.calls();
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities = ServiceCapabilities {
+        supported_multipart_constraint_endpoints: vec!["/v1/audio/transcriptions".into()],
         supported_e2ee_versions: if enable_e2ee {
             vec!["2".to_string()]
         } else {
@@ -346,7 +466,7 @@ fn harness_with(
             verifier,
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
-            Arc::new(FixedClock(1_700_000_000)),
+            clock,
         )
         .unwrap(),
     );
@@ -357,6 +477,135 @@ fn harness_with(
         service,
         upstream_calls,
     }
+}
+
+fn harness_for_sessions(
+    verifier: Arc<dyn UpstreamVerifier>,
+    provider: &str,
+) -> (Harness, UpstreamVerificationRequest) {
+    let mut harness = harness_with(RecordingUpstream::default(), verifier, false);
+    let config = common::session_config(serde_json::json!([{
+        "name": "surface-upstream",
+        "provider": provider,
+        "base_url": "https://surface-upstream.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    harness.requester.app = build_router_with_admin(harness.service.clone(), config.clone(), None);
+    let request = config
+        .current_verification_requests(None, None, true)
+        .remove(0);
+    (harness, request)
+}
+
+#[tokio::test]
+async fn media_missing_authorization_refuses_streamed_uploads_before_consult() {
+    use private_ai_gateway::middleware::{Middleware, PrefixHashKey};
+    let consulted = Arc::new(AtomicUsize::new(0));
+    let calls = consulted.clone();
+    let control = Router::new().fallback(move || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, control).await.unwrap() });
+    for middleware in [false, true] {
+        let mut h = harness();
+        let mw = middleware.then(|| {
+            Arc::new(
+                Middleware::new(
+                    PrefixHashKey::new([7; 32]),
+                    private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
+                    &serde_json::from_value(
+                        serde_json::json!({"control_url":format!("http://{address}")}),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+        });
+        h.requester.app = if let Some(middleware) = mw {
+            private_ai_gateway::http::build_router_with_admin_and_middleware(
+                h.service.clone(),
+                common::session_config(serde_json::json!([])),
+                None,
+                middleware,
+            )
+        } else {
+            build_router(h.service.clone())
+        };
+        for path in ["/v1/images/generations", "/v1/audio/transcriptions"] {
+            assert_media_missing_authorization_upload_refusal(&h, path).await;
+        }
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    assert_eq!(consulted.load(Ordering::SeqCst), 0);
+}
+
+async fn assert_media_missing_authorization_upload_refusal(harness: &Harness, path: &str) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            harness.requester.app.clone(),
+        ),
+    );
+    let mut body = b"--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n".to_vec();
+    body.extend(vec![b'x'; 96 * 1024]);
+    body.extend_from_slice(b"\r\n--upload--\r\n");
+    for (chunked, expect) in [(false, false), (true, false), (false, true)] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let framing = if chunked {
+                "Transfer-Encoding: chunked\r\n".to_string()
+            } else {
+                format!("Content-Length: {}\r\n", body.len())
+            };
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=upload\r\n{framing}Connection: close\r\n{expect_header}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                for chunk in body.chunks(1024) {
+                    if chunked {
+                        socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+                    }
+                    socket.write_all(chunk).await.expect("401 must not reset an in-progress upload");
+                    if chunked {
+                        socket.write_all(b"\r\n").await.unwrap();
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                if chunked {
+                    socket.write_all(b"0\r\n\r\n").await.unwrap();
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("401 must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+        assert!(!response.contains("100 Continue"), "{response}");
+        let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+        let headers = headers.to_ascii_lowercase();
+        assert!(headers.contains("www-authenticate: bearer"), "{headers}");
+        assert!(
+            headers.contains("content-type: application/json"),
+            "{headers}"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(body).unwrap()["error"]["type"],
+            "unauthorized"
+        );
+    }
+    assert!(harness.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
 }
 
 fn harness_with_streaming_upstream_error() -> Harness {
@@ -371,6 +620,7 @@ fn harness_with_streaming_upstream_error() -> Harness {
             calls: Arc::new(Mutex::new(Vec::new())),
             is_tee: Some(true),
             response_body: CHAT_RESPONSE.to_vec(),
+            response_content_type: "application/json",
             stream_status: 400,
             stream_headers: headers,
             stream_chunks: vec![Bytes::from_static(
@@ -492,8 +742,17 @@ fn e2ee_chat_request(
     nonce: &str,
     stream: bool,
 ) -> (Vec<u8>, Vec<(&'static str, String)>) {
+    e2ee_chat_request_at(h, client_secret, nonce, stream, 1_700_000_000)
+}
+
+fn e2ee_chat_request_at(
+    h: &Harness,
+    client_secret: &k256::SecretKey,
+    nonce: &str,
+    stream: bool,
+    timestamp: u64,
+) -> (Vec<u8>, Vec<(&'static str, String)>) {
     let model = "aci-model";
-    let timestamp = 1_700_000_000u64;
     let model_key = &h.service.keyset().e2ee_public_keys[0];
     let aad = aci_request_aad(
         &model_key.algo,
@@ -641,6 +900,150 @@ fn legacy_ecdsa_request(
 }
 
 // ---------------------------------------------------------------------------
+// Buffered upstream limits
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn oversized_upstream_responses_return_502_in_direct_mode() {
+    for (path, status, stream, advertised_length) in [
+        ("/v1/chat/completions", StatusCode::OK, false, false),
+        ("/v1/chat/completions", StatusCode::BAD_REQUEST, true, false),
+        ("/v1/chat/completions", StatusCode::BAD_REQUEST, true, true),
+        ("/v1/messages", StatusCode::OK, false, true),
+        ("/v1/messages", StatusCode::BAD_REQUEST, true, true),
+    ] {
+        let fake_upstream = Router::new().route(
+            path,
+            axum::routing::post(move || async move {
+                if advertised_length {
+                    // The headers alone must trigger rejection, before any
+                    // body bytes arrive or the upstream read timeout expires.
+                    axum::http::Response::builder()
+                        .status(status)
+                        .header("content-length", MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES + 1)
+                        .body(Body::from_stream(stream::pending::<
+                            Result<Bytes, std::io::Error>,
+                        >()))
+                        .unwrap()
+                } else {
+                    let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+                    let chunks = (0..=MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES / chunk.len())
+                        .map(move |_| Ok::<_, std::io::Error>(chunk.clone()));
+                    axum::http::Response::builder()
+                        .status(status)
+                        .body(Body::from_stream(stream::iter(chunks)))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+        let upstream = OpenAICompatibleBackend::new(format!("http://{address}")).unwrap();
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(upstream),
+                Arc::new(InMemoryReceiptStore::default()),
+                AciServiceConfig::for_test(),
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service),
+        };
+        let request = serde_json::to_vec(&serde_json::json!({
+            "model": "aci-model", "messages": [], "stream": stream,
+        }))
+        .unwrap();
+        let response =
+            tokio::time::timeout(Duration::from_secs(2), requester.post(path, &request, &[])).await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+
+        let response = response.expect("reject an oversized response without waiting for its body");
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_GATEWAY,
+            "{status} stream={stream} advertised_length={advertised_length}"
+        );
+        let body: Value = serde_json::from_slice(&response.body).unwrap();
+        if path == "/v1/messages" {
+            assert_eq!(body["type"], "error");
+            assert_eq!(body["error"]["type"], "api_error");
+            assert!(body["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        } else {
+            assert_eq!(body["error"]["type"], "upstream_error");
+        }
+        assert!(!response.headers.contains_key("x-receipt-id"));
+    }
+}
+
+#[tokio::test]
+async fn configured_buffered_response_limit_allows_large_embedding_batches_and_rejects_overflow() {
+    let body = Bytes::from(common::large_embeddings_response());
+    assert!(body.len() > MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES);
+    let upstream_body = body.clone();
+    let upstream = Router::new().route(
+        "/v1/embeddings",
+        axum::routing::post(move || {
+            let body = upstream_body.clone();
+            async move { ([("content-type", "application/json")], body) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    for (limit, expected) in [
+        (
+            MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            StatusCode::BAD_GATEWAY,
+        ),
+        (2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES, StatusCode::OK),
+        (body.len() - 1, StatusCode::BAD_GATEWAY),
+    ] {
+        let upstream = OpenAICompatibleBackend::new(format!("http://{address}"))
+            .unwrap()
+            .with_max_buffered_response_bytes(limit);
+        let mut config = AciServiceConfig::for_test();
+        config.max_buffered_response_bytes = limit;
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(upstream),
+                Arc::new(InMemoryReceiptStore::default()),
+                config,
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service),
+        };
+        let response = requester
+            .post(
+                "/v1/embeddings",
+                br#"{"model":"aci-model","input":["test"],"encoding_format":"float"}"#,
+                &[],
+            )
+            .await;
+        assert_eq!(response.status, expected, "limit={limit}");
+        if expected == StatusCode::OK {
+            assert_eq!(response.body, body);
+            assert!(response.headers.contains_key("x-receipt-id"));
+        } else {
+            assert_eq!(json_body(&response)["error"]["type"], "upstream_error");
+        }
+    }
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+// ---------------------------------------------------------------------------
 // Reports
 // ---------------------------------------------------------------------------
 
@@ -670,7 +1073,7 @@ async fn aci_attestation_report_binds_nonce_and_serves_exact_keyset_bytes() {
 
     // report_data = sha256 of the §3.2 statement for the supplied nonce.
     let statement = private_ai_gateway::aci::identity::attestation_statement(
-        h.service.workload_keyset_digest(),
+        &h.service.workload_keyset_digest(),
         Some("9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0"),
     )
     .unwrap();
@@ -828,9 +1231,8 @@ async fn aci_receipt_endpoint_serves_signed_document() {
     assert!(document["event_log"].is_array());
     let signature = hex::decode(document["signature"].as_str().unwrap()).unwrap();
     let key_id = document["key_id"].as_str().unwrap();
-    let receipt_key = h
-        .service
-        .keyset()
+    let keyset = h.service.keyset();
+    let receipt_key = keyset
         .receipt_signing_keys
         .iter()
         .find(|key| key.key_id == key_id)
@@ -904,6 +1306,40 @@ async fn empty_tool_calls_are_stripped_and_visible_as_differing_hashes() {
 // Fail-closed refusal (§7.5)
 // ---------------------------------------------------------------------------
 
+/// A refusal and its signed receipt name the cause from the closed set. The
+/// verifier's own account, which quotes what failed, reaches neither.
+#[tokio::test]
+async fn refusal_names_the_cause_and_never_the_verifiers_own_words() {
+    let h = harness_with(
+        RecordingUpstream::default(),
+        Arc::new(EvidenceFetchFailed),
+        false,
+    );
+    let resp = h
+        .requester
+        .post(
+            "/v1/chat/completions",
+            CONSTRAINED_REQUEST,
+            &[("authorization", "Bearer requester-a")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+    let reason = "upstream verification failed: the upstream's attestation evidence could not \
+                  be obtained";
+    assert_eq!(json_body(&resp)["error"]["message"], reason);
+    assert_eq!(json_body(&resp)["error"]["code"], "evidence_unavailable");
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "upstream.verified")["reason"],
+        reason
+    );
+    assert!(!payload.to_string().contains("surface-upstream.example"));
+}
+
 #[tokio::test]
 async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let h = harness_with(RecordingUpstream::default(), Arc::new(AlwaysFailed), false);
@@ -936,10 +1372,10 @@ async fn failed_upstream_verification_returns_503_with_refusal_receipt() {
     let verified = payload_event(&payload, "upstream.verified");
     assert_eq!(verified["result"], "failed");
     assert_eq!(verified["required"], true);
-    assert!(verified["reason"]
-        .as_str()
-        .unwrap()
-        .contains("quote verification failed"));
+    assert_eq!(
+        verified["reason"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(verified.get("session_id").is_none());
     assert!(payload["event_log"]
         .as_array()
@@ -1023,7 +1459,7 @@ async fn e2ee_headers_are_rejected_when_service_advertises_no_e2ee_support() {
 async fn e2ee_v2_is_rejected_on_prompt_endpoints_without_a_v2_field_contract() {
     let h = harness_with_e2ee(RecordingUpstream::default());
 
-    for path in ["/v1/messages", "/v1/responses"] {
+    for path in ["/v1/messages", "/v1/responses", "/v1/systemone"] {
         let resp = h
             .requester
             .post(path, CHAT_REQUEST, &[("x-e2ee-version", "2")])
@@ -1424,6 +1860,198 @@ async fn e2ee_v2_replayed_nonce_tuple_is_rejected() {
 }
 
 #[tokio::test]
+async fn e2ee_v2_replay_detection_covers_the_full_timestamp_window() {
+    let now = 1_700_000_000;
+    for (timestamp_offset, replay_offsets) in [(0, &[300][..]), (300, &[300, 600][..])] {
+        let clock = Arc::new(admission::TestClock(AtomicU64::new(now)));
+        let h = harness_with_clock(
+            RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+            Arc::new(AlwaysVerified),
+            true,
+            clock.clone(),
+        );
+        let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+        let nonce = hex_nonce("nonce-window");
+        let timestamp = now + timestamp_offset;
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, timestamp);
+        let first = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(first.status, StatusCode::OK);
+
+        for replay_offset in replay_offsets {
+            clock.set(now + replay_offset);
+            let repeated = h
+                .requester
+                .post_owned_headers("/v1/chat/completions", &body, &headers)
+                .await;
+            assert_eq!(repeated.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error_type(&repeated), "e2ee_replay_detected");
+        }
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+
+        let after_window = timestamp + 301;
+        clock.set(after_window);
+        let expired = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+
+        // An entry is released once its timestamp can no longer be accepted.
+        let (body, headers) = e2ee_chat_request_at(&h, &client_secret, &nonce, false, after_window);
+        let next = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(next.status, StatusCode::OK);
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[tokio::test]
+async fn e2ee_v2_rechecks_timestamp_before_claim_after_entry_expiry() {
+    struct ValidationSnapshotClock {
+        current: admission::TestClock,
+        validation_snapshot: Mutex<Option<u64>>,
+    }
+    impl Clock for ValidationSnapshotClock {
+        fn now_secs(&self) -> u64 {
+            self.validation_snapshot
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| self.current.now_secs())
+        }
+    }
+
+    let timestamp = 1_700_000_000;
+    let clock = Arc::new(ValidationSnapshotClock {
+        current: admission::TestClock(AtomicU64::new(timestamp)),
+        validation_snapshot: Mutex::new(None),
+    });
+    let h = harness_with_clock(
+        RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE),
+        Arc::new(AlwaysVerified),
+        true,
+        clock.clone(),
+    );
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let nonce = hex_nonce("nonce-claim-time");
+    let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    clock.current.set(timestamp + 301);
+    let (other_body, other_headers) = e2ee_chat_request_at(
+        &h,
+        &client_secret,
+        &hex_nonce("nonce-next-claim"),
+        false,
+        timestamp + 301,
+    );
+    let other = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &other_body, &other_headers)
+        .await;
+    assert_eq!(other.status, StatusCode::OK);
+
+    // The initial validation snapshot is at the inclusive boundary; the claim
+    // must use the current clock after the earlier entry has been evicted.
+    *clock.validation_snapshot.lock().unwrap() = Some(timestamp + 300);
+    let expired = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(expired.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&expired), "e2ee_invalid_timestamp");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_identity_is_independent_of_client_key() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let nonce = hex_nonce("nonce-client-keys");
+    for (client_key, expected_status) in [
+        ([0x58; 32], StatusCode::OK),
+        ([0x59; 32], StatusCode::BAD_REQUEST),
+    ] {
+        let client_secret = k256::SecretKey::from_slice(&client_key).unwrap();
+        let (body, headers) = e2ee_request(&h, &client_secret, &nonce);
+        let response = h
+            .requester
+            .post_owned_headers("/v1/chat/completions", &body, &headers)
+            .await;
+        assert_eq!(response.status, expected_status);
+        if expected_status == StatusCode::BAD_REQUEST {
+            assert_eq!(error_type(&response), "e2ee_replay_detected");
+        }
+    }
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn e2ee_v2_replay_detection_normalizes_service_key_hex_case() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, mut headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-service-key"));
+    let first = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+
+    let model_key = &mut headers
+        .iter_mut()
+        .find(|(name, _)| *name == "x-model-pub-key")
+        .unwrap()
+        .1;
+    *model_key = model_key.to_ascii_uppercase();
+    let second = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(second.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&second), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_failed_decryption_leaves_nonce_available() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = k256::SecretKey::from_slice(&[0x58; 32]).unwrap();
+    let (body, headers) = e2ee_request(&h, &client_secret, &hex_nonce("nonce-decryption"));
+    let mut invalid_payload: Value = serde_json::from_slice(&body).unwrap();
+    let content = &mut invalid_payload["messages"][0]["content"];
+    let mut ciphertext = hex::decode(content.as_str().unwrap()).unwrap();
+    *ciphertext.last_mut().unwrap() ^= 1;
+    *content = Value::String(hex::encode(ciphertext));
+
+    let invalid = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&invalid_payload).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&invalid), "e2ee_decryption_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+
+    let valid = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(valid.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn e2ee_v2_replay_detection_normalizes_nonce_hex_case() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = k256::SecretKey::from_slice(&[0x5d; 32]).unwrap();
@@ -1617,12 +2245,13 @@ async fn legacy_signature_endpoint_returns_vllm_proxy_shape() {
 }
 
 // ---------------------------------------------------------------------------
-// /v1/completions and /v1/embeddings surfaces (plaintext)
+// /v1/completions, /v1/embeddings, and /v1/systemone surfaces (plaintext)
 // ---------------------------------------------------------------------------
 
 const EMBEDDINGS_REQUEST: &[u8] = br#"{"model":"aci-model","input":"the quick brown fox"}"#;
 const EMBEDDINGS_PLAIN_RESPONSE: &[u8] =
     br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":3,"total_tokens":3}}"#;
+const SYSTEMONE_RESPONSE: &[u8] = br#"{"model":"aci-model","answers":{"kind":{"type":"choice","choice":"platform"}},"usage":{"input_tokens":3,"output_tokens":2},"provider_trace":"keep-in-direct-mode"}"#;
 
 #[tokio::test]
 async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
@@ -1639,7 +2268,7 @@ async fn completions_endpoint_forwards_non_stream_and_issues_aci_receipt() {
         let calls = h.upstream_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].path.as_deref(), Some("/v1/completions"));
-        assert_eq!(calls[0].body, request);
+        assert_eq!(calls[0].body.as_ref(), request);
     }
 
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
@@ -1722,6 +2351,41 @@ async fn embeddings_endpoint_forwards_non_stream_and_issues_aci_receipt() {
     assert_eq!(
         payload_event(&payload, "response.returned")["body_hash"],
         sha256_hex(EMBEDDINGS_PLAIN_RESPONSE)
+    );
+}
+
+#[tokio::test]
+async fn systemone_endpoint_forwards_native_payload_buffered_and_issues_aci_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(SYSTEMONE_RESPONSE));
+    let request = br#"{"model":"aci-model","state":{"message":"export failed"},"questions":{"kind":{"type":"choice","instructions":"Classify the issue","criteria":{"platform":"outage","billing":null}}},"stream":true}"#;
+
+    let resp = h.requester.post("/v1/systemone", request, &[]).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body, SYSTEMONE_RESPONSE);
+    let request_id = header(&resp.headers, "x-typesafe-request-id");
+    assert!(request_id.starts_with("req_"));
+    assert_ne!(request_id, "upstream-id");
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "false");
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/systemone"));
+        assert_eq!(calls[0].body.as_ref(), request);
+    }
+
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/systemone");
+    assert!(receipt.chat_id.is_none());
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(request)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(SYSTEMONE_RESPONSE)
     );
 }
 
@@ -2012,7 +2676,7 @@ async fn aci_verified_makes_an_unconstrained_request_fail_closed() {
 // --- SSE stream-repair suite (restored from main: c643fb5, 3ea864e, c26878d) ---
 
 #[tokio::test]
-async fn a_stream_cut_mid_event_is_not_given_an_error() {
+async fn a_stream_cut_mid_event_discards_the_pending_payload_and_emits_an_error_tail() {
     let h = harness_with_upstream(RecordingUpstream::with_stream_chunks(vec![
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\n"),
         Bytes::from_static(b"data: {\"id\":\"chat-stream-1\","),
@@ -2028,7 +2692,7 @@ async fn a_stream_cut_mid_event_is_not_given_an_error() {
 
     assert_eq!(
         resp.body,
-        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"id\":\"chat-stream-1\","
+        b"data: {\"id\":\"chat-stream-1\",\"delta\":\"hel\"}\n\ndata: {\"error\":{\"message\":\"The upstream provider returned an error\",\"type\":\"upstream_error\",\"code\":502,\"param\":null}}\n\ndata: [DONE]\n\n"
     );
 }
 
@@ -2209,9 +2873,10 @@ async fn a_responses_stream_missing_its_terminal_is_completed_without_a_tail() {
 // upstream never sent would dispatch a fragment the client would otherwise
 // discard, and it would fail on that instead of reading the error.
 // A transport failure reaches the finalizer, which holds the protocol state
-// that decides whether the client can still be told. It appends the error only
-// when the stream stopped on a complete event without its terminal; a stream
-// that already ended, or stopped mid-event, is left as it is.
+// that decides whether the client can still be told. It appends the error before
+// the protocol terminal; a stream that already ended is left as it is. An
+// incomplete event never reaches the
+// client, so appending the protocol error is safe even after a mid-event reset.
 #[tokio::test]
 async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
     struct Case {
@@ -2266,21 +2931,26 @@ async fn a_transport_failure_is_told_to_the_client_only_when_it_is_safe() {
             path: "/v1/chat/completions",
             request: chat,
             chunks: vec![Bytes::from_static(b"data: {\"id\":\"c\",")],
-            expect_error: false,
-            expect_in_error: "",
+            expect_error: true,
+            expect_in_error: "data: [DONE]",
         },
         Case {
             // The error continues the event numbering rather than restarting
             // it, which is why the finalizer builds it: only there is the last
             // sequence known.
-            name: "responses stream drops after sequence 4",
+            name: "responses stream drops after sequences 3 and 9",
             path: "/v1/responses",
             request: responses,
-            chunks: vec![Bytes::from_static(
-                b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":4}\n\n",
-            )],
+            chunks: vec![
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":3}\n\n",
+                ),
+                Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":9}\n\n",
+                ),
+            ],
             expect_error: true,
-            expect_in_error: "\"sequence_number\":5",
+            expect_in_error: "\"sequence_number\":10",
         },
     ];
     for case in cases {
@@ -2367,15 +3037,26 @@ async fn aci_constraint_refuses_a_route_not_classed_as_attested() {
 // refuses (§5.3 "a direct service has no sessions").
 #[tokio::test]
 async fn direct_service_satisfies_aci_verified_by_construction() {
+    struct UnreadCache;
+    #[async_trait]
+    impl UpstreamVerifier for UnreadCache {
+        async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+            event_from_request(&request, VerificationResult::Verified)
+        }
+        fn cached(&self, _: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+            panic!("direct services must not inspect the verifier cache");
+        }
+    }
     let mut cfg = AciServiceConfig::for_test();
     cfg.service_capabilities.serving = "direct".to_string();
     let upstream = RecordingUpstream::default();
     let calls = upstream.calls();
     let service = Arc::new(
-        AciService::new(
+        AciService::new_with_upstream_verifier(
             Arc::new(StaticKeyProvider::default()),
             Arc::new(StubQuoter::default()),
             Arc::new(upstream),
+            Arc::new(UnreadCache),
             Arc::new(InMemoryReceiptStore::default()),
             cfg,
             Arc::new(FixedClock(1_700_000_000)),
@@ -2389,6 +3070,17 @@ async fn direct_service_satisfies_aci_verified_by_construction() {
         service,
         upstream_calls: calls,
     };
+    assert!(h
+        .service
+        .list_current_sessions(&[UpstreamVerificationRequest {
+            upstream_name: "surface-upstream".to_string(),
+            model_id: "aci-model".to_string(),
+            url_origin: Some("https://surface-upstream.example".to_string()),
+            forwarded_body_hash: sha256_hex(b""),
+            required: true,
+        }])
+        .unwrap()
+        .is_empty());
 
     let body = br#"{"model":"aci-model","messages":[],"provider":{"aci_verified":true}}"#;
     let resp = h.requester.post("/v1/chat/completions", body, &[]).await;
@@ -2806,4 +3498,1613 @@ async fn legacy_v1_e2ee_still_works_when_aci_e2ee_is_off() {
     );
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
     assert_eq!(header(&resp.headers, "x-e2ee-version"), "1");
+}
+
+async fn listed_sessions(harness: &Harness, query: &str) -> Vec<Value> {
+    let listed = harness
+        .requester
+        .get(&format!("/v1/aci/sessions{query}"), &[])
+        .await;
+    assert_eq!(listed.status, StatusCode::OK);
+    json_body(&listed)["sessions"].as_array().unwrap().clone()
+}
+
+async fn pin_session(harness: &Harness, id: &str) -> HttpResult {
+    let body = serde_json::to_vec(&serde_json::json!({
+        "model": "aci-model", "messages": [], "provider": {"aci_session_ids": [id]},
+    }))
+    .unwrap();
+    harness
+        .requester
+        .post("/v1/chat/completions", &body, &[])
+        .await
+}
+
+fn cited_session(harness: &Harness, response: &HttpResult) -> String {
+    let receipt = harness
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    receipt_event(&receipt, "upstream.verified")["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[derive(Default)]
+struct InterleavingVerifier {
+    inner: RotatingVerifier,
+    service: Mutex<Weak<AciService>>,
+}
+
+#[async_trait]
+impl UpstreamVerifier for InterleavingVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        let first = self.inner.refresh(request.clone()).await;
+        self.inner.refresh(request.clone()).await;
+        self.service
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .list_current_sessions(&[request])
+            .unwrap();
+        first
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.inner.cached(request)
+    }
+}
+
+#[tokio::test]
+async fn stale_inflight_verification_cannot_replace_the_cached_listing() {
+    let verifier = Arc::new(InterleavingVerifier::default());
+    let (h, _) = harness_for_sessions(verifier.clone(), "phala-direct");
+    *verifier.service.lock().unwrap() = Arc::downgrade(&h.service);
+    let first = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(first.status, StatusCode::OK);
+    let first_id = cited_session(&h, &first);
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    let second_id = listed[0]["session_id"].as_str().unwrap();
+    assert_ne!(second_id, first_id);
+    let accepted = pin_session(&h, second_id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), second_id);
+    let refused = pin_session(&h, &first_id).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert!(json_body(&refused)["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("re-list /v1/aci/sessions"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_listing_tracks_cache_warmth_and_keeps_historical_lookup() {
+    let verifier = Arc::new(RotatingVerifier::default());
+    let (h, request) = harness_for_sessions(verifier.clone(), "phala-direct");
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_eq!(
+        verifier.verifications.load(Ordering::Relaxed),
+        0,
+        "listing never verifies afresh"
+    );
+    verifier.verify(request).await;
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
+    tokio::time::advance(Duration::from_secs(300)).await;
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_eq!(verifier.verifications.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{id}"), &[])
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn chutes_listing_tracks_only_instances_in_the_current_cached_event() {
+    let verifier = Arc::new(RotatingVerifier::default());
+    let (h, request) = harness_for_sessions(verifier.clone(), "chutes");
+    let event = |instances: &[&str]| UpstreamVerifiedEvent {
+        provider_type: Some("chutes".to_string()),
+        verifier_id: "chutes-fixture/v1".to_string(),
+        channel_bindings: instances
+            .iter()
+            .map(|instance| ChannelBinding::E2eePublicKeySha256 {
+                provider: "chutes".to_string(),
+                algorithm: "rsa-oaep-sha256".to_string(),
+                key_id: Some((*instance).to_string()),
+                public_key_sha256: sha256_hex(instance.as_bytes()),
+            })
+            .collect(),
+        ..event_from_request(&request, VerificationResult::Verified)
+    };
+    verifier.cache_event(&request, event(&["instance-a", "instance-b"]));
+    let before = listed_sessions(&h, "").await;
+    assert_eq!(before.len(), 2);
+    let removed = before
+        .iter()
+        .find(|session| session["channel_binding"][0]["key_id"] == "instance-a")
+        .unwrap();
+    let retained = before
+        .iter()
+        .find(|session| session["channel_binding"][0]["key_id"] == "instance-b")
+        .unwrap();
+    verifier.cache_event(&request, event(&["instance-b"]));
+    let after = listed_sessions(&h, "").await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["session_id"], retained["session_id"]);
+    assert_eq!(
+        h.requester
+            .get(
+                &format!(
+                    "/v1/aci/sessions/{}",
+                    removed["session_id"].as_str().unwrap()
+                ),
+                &[]
+            )
+            .await
+            .status,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn cached_session_listing_omits_evidence_data_but_lookup_keeps_it() {
+    let event = UpstreamVerifiedEvent {
+        verifier_id: "surface-verifier/v1".to_string(),
+        evidence: Some(serde_json::json!({
+            "digest": sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        })),
+        ..Default::default()
+    };
+    let (h, _) = harness_for_sessions(
+        Arc::new(
+            private_ai_gateway::aci::verifier::StaticUpstreamVerifier::new(UpstreamVerifiedEvent {
+                result: VerificationResult::Verified,
+                channel_bindings: vec![common::test_channel_binding()],
+                ..event
+            }),
+        ),
+        "phala-direct",
+    );
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["evidence"]["digest"], sha256_hex(b"evidence"));
+    assert!(listed[0]["evidence"].get("data").is_none());
+    let id = listed[0]["session_id"].as_str().unwrap();
+    let full = h
+        .requester
+        .get(&format!("/v1/aci/sessions/{id}"), &[])
+        .await;
+    assert_eq!(full.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&full)["evidence"]["data"],
+        "data:text/plain;base64,ZXZpZGVuY2U="
+    );
+    assert_eq!(
+        hex::encode(private_ai_gateway::aci::digest::sha256_raw(&full.body)),
+        id
+    );
+}
+
+#[tokio::test]
+async fn current_listing_remains_admissible_but_expired_history_cannot_satisfy_pins() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        ..
+    } = admission::Harness::new(vec![admission::Attempt::Response {
+        status: 200,
+        at: 109,
+    }]);
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "phala-direct", "base_url": "https://test.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let listed = listed_sessions(&h, "").await;
+    let id = listed[0]["session_id"].as_str().unwrap();
+    clock.set(109);
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], id);
+    let accepted = pin_session(&h, id).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), id);
+    clock.set(110);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{id}"), &[])
+            .await
+            .status,
+        StatusCode::OK
+    );
+    let new_listing = listed_sessions(&h, "").await;
+    assert_ne!(new_listing[0]["session_id"], id);
+    let refused = pin_session(&h, id).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(
+        backend.events.lock().unwrap().len(),
+        1,
+        "expired history must not authorize another forward"
+    );
+}
+
+fn session_profile(provider: &str) -> Value {
+    let profiles: Value =
+        serde_json::from_str(include_str!("fixtures/session_material.json")).unwrap();
+    profiles[provider].clone()
+}
+
+#[tokio::test]
+async fn reviewed_snapshot_reuse_pins_material_recovery_and_expiry() {
+    let admission::Harness {
+        service,
+        backend,
+        clock,
+        verifier,
+    } = admission::Harness::new(
+        [101, 103, 104, 106]
+            .into_iter()
+            .map(|at| admission::Attempt::Response { status: 200, at })
+            .collect(),
+    );
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".to_string());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".to_string();
+    event.provider_claims = Some(session_profile("near-ai"));
+    *verifier.0.lock().unwrap() = event.clone();
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": "near-ai", "base_url": "https://near.example",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    let h = Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    let original = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let full = h
+        .requester
+        .get(&format!("/v1/aci/sessions/{original}"), &[])
+        .await;
+    let original_bytes = full.body;
+    // A reviewed profile ignores the round token as well as fresh evidence.
+    event.verification_round = Some(VerificationRound::fresh());
+    // A new successful round with different evidence keeps the establishing bytes.
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"round two")).unwrap());
+    // EvidenceRef serializes its data URI as `data`, just like the bridge.
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let accepted = pin_session(&h, &original).await;
+    assert_eq!(accepted.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &accepted), original);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    assert_eq!(backend.events.lock().unwrap()[0].evidence, event.evidence);
+
+    // B changes measured identity: a fixed A pin is refused before backend I/O.
+    clock.set(102);
+    let a = event.clone();
+    event.provider_claims.as_mut().unwrap()["compose_hash"] = serde_json::json!("ff".repeat(32));
+    *verifier.0.lock().unwrap() = event;
+    let b = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(b, original);
+    let refused = pin_session(&h, &original).await;
+    assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(error_type(&refused), "session_not_accepted");
+    assert_eq!(backend.events.lock().unwrap().len(), 1);
+    assert_eq!(pin_session(&h, &b).await.status, StatusCode::OK);
+
+    // A -> B -> A can select the original still-unexpired A snapshot.
+    *verifier.0.lock().unwrap() = a.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    let returned = pin_session(&h, &original).await;
+    assert_eq!(returned.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &returned), original);
+
+    // An unusable verification fails closed, without revoking immutable history.
+    clock.set(105);
+    let mut failed = a.clone();
+    failed.result = VerificationResult::Failed;
+    failed.diagnostic = Some("fixture verification failure".to_string());
+    *verifier.0.lock().unwrap() = failed;
+    assert!(listed_sessions(&h, "").await.is_empty());
+    assert_ne!(pin_session(&h, &original).await.status, StatusCode::OK);
+    assert_eq!(backend.events.lock().unwrap().len(), 3);
+    assert_eq!(
+        h.requester
+            .get(&format!("/v1/aci/sessions/{original}"), &[])
+            .await
+            .body,
+        original_bytes
+    );
+    *verifier.0.lock().unwrap() = a;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], original);
+    assert_eq!(pin_session(&h, &original).await.status, StatusCode::OK);
+
+    // Expiry reseals from the same cached verification; fixed pins need replacement.
+    clock.set(110);
+    let replacement = listed_sessions(&h, "").await[0].clone();
+    assert_ne!(replacement["session_id"], original);
+    assert_eq!(replacement["established_at"], 110);
+    assert_eq!(replacement["expires_at"], 120);
+    assert_eq!(
+        pin_session(&h, &original).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn unreviewed_providers_and_legacy_chutes_remain_evidence_sensitive() {
+    for provider in [
+        "armet-ai",
+        "secret-ai",
+        "chutes",
+        "0g-private-computer",
+        "custom",
+    ] {
+        for cpu in ["tdx", "sev-snp"] {
+            let h = admission::Harness::new(vec![]);
+            let verify = || {
+                let mut event = common::verified_event("admission-test", "model-a");
+                event.provider_type = Some(provider.to_string());
+                event.verifier_id = format!("private-ai-verifier/{provider}/v1");
+                // An unsupported marker cannot opt in, even with copied complete TDX material.
+                let mut claims = session_profile("near-ai");
+                claims["session_material_version"] = serde_json::json!(format!("{provider}/1"));
+                claims["cpu_type"] = serde_json::json!(cpu);
+                event.provider_claims = Some(claims);
+                if matches!(provider, "chutes" | "0g-private-computer") {
+                    event.channel_bindings = vec![ChannelBinding::E2eePublicKeySha256 {
+                        provider: provider.to_string(),
+                        algorithm: "rsa-oaep-sha256".to_string(),
+                        key_id: Some("instance-a".to_string()),
+                        public_key_sha256: "ab".repeat(32),
+                    }];
+                }
+                event
+            };
+            *h.verifier.0.lock().unwrap() = verify();
+            let first = h.listed()[0].session_id().to_string();
+            // Fresh complete-evidence verifications with identical bytes reuse
+            // the session at a later time, including 0G broker responses.
+            h.clock.set(101);
+            let mut event = verify();
+            *h.verifier.0.lock().unwrap() = event.clone();
+            assert_eq!(h.listed()[0].session_id(), first, "{provider}/{cpu}");
+            event.evidence = Some(
+                serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new evidence"))
+                    .unwrap(),
+            );
+            *h.verifier.0.lock().unwrap() = event;
+            assert_ne!(h.listed()[0].session_id(), first, "{provider}/{cpu}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn incomplete_evidence_rounds_rotate_sessions_but_cache_hits_reuse() {
+    let h = admission::Harness::new(vec![admission::Attempt::Response {
+        status: 200,
+        at: 102,
+    }]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    event.provider_type = Some("tinfoil".into());
+    event.verifier_id = "private-ai-verifier/tinfoil/v1".into();
+    event.verification_round = Some(VerificationRound::fresh());
+    *h.verifier.0.lock().unwrap() = event.clone();
+    let original = h.listed()[0].session_id().to_string();
+    h.clock.set(101);
+    assert_eq!(h.listed()[0].session_id(), original, "cached event");
+
+    // The SDK summary can be identical while unreported platform state changes.
+    event.verification_round = Some(VerificationRound::fresh());
+    *h.verifier.0.lock().unwrap() = event;
+    let replacement = h.listed()[0].session_id().to_string();
+    assert_ne!(replacement, original, "independent verification round");
+    assert!(h
+        .service
+        .forward_chat_completion_request(admission::request(vec![original]))
+        .await
+        .is_err());
+    assert!(h.backend.events.lock().unwrap().is_empty());
+    let response = h
+        .service
+        .forward_chat_completion_request(admission::request(vec![replacement.clone()]))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt_event(&response.receipt, "upstream.verified")["session_id"],
+        replacement
+    );
+}
+
+#[tokio::test]
+async fn privatemode_manifest_observation_time_is_material() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    event.provider_type = Some("privatemode".to_string());
+    event.verifier_id = "privatemode-proxy/co-deployed-contrast/v1".to_string();
+    event.provider_claims = Some(session_profile("privatemode"));
+    event.channel_bindings = vec![ChannelBinding::ProxyImageSha256 {
+        provider: "privatemode".to_string(),
+        proxy_image_digest: sha256_hex(b"image"),
+        credential_sha256: "ab".repeat(32),
+    }];
+    *h.verifier.0.lock().unwrap() = event.clone();
+    let first = h.listed()[0].session_id().to_string();
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"refreshed evidence")).unwrap(),
+    );
+    *h.verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(h.listed()[0].session_id(), first);
+    event.provider_claims.as_mut().unwrap()["manifest_observed_at"] =
+        serde_json::json!("2026-10-16T12:01:00Z");
+    *h.verifier.0.lock().unwrap() = event;
+    assert_ne!(h.listed()[0].session_id(), first);
+}
+
+fn admission_http(service: AciService, provider: &str) -> Harness {
+    let service = Arc::new(service);
+    let config = common::session_config(serde_json::json!([{
+        "name": "admission-test", "provider": provider, "base_url": "https://upstream.test",
+        "models": {"aci-model": "aci-model"},
+    }]));
+    Harness {
+        requester: Requester {
+            app: build_router_with_admin(service.clone(), config, None),
+        },
+        service,
+        upstream_calls: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[tokio::test]
+async fn tls_group_pins_keep_all_alternatives_and_reject_legacy_singletons() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("near-ai".into());
+    event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
+    event.provider_claims = Some(session_profile("near-ai"));
+    let a = event.channel_bindings[0].clone();
+    let b = ChannelBinding::TlsSpkiSha256 {
+        origin: "https://upstream.test".into(),
+        spki_sha256: "22".repeat(32),
+    };
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "near-ai");
+    let singleton = listed_sessions(&h, "").await[0]["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    event.channel_bindings = vec![b.clone(), a.clone(), b.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["channel_binding"].as_array().unwrap().len(), 2);
+    let group = listed[0]["session_id"].as_str().unwrap().to_string();
+    assert_ne!(group, singleton);
+    event.channel_bindings = vec![a.clone(), b.clone()];
+    event.evidence =
+        Some(serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"fresh round")).unwrap());
+    *verifier.0.lock().unwrap() = event.clone();
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], group);
+    assert_eq!(
+        pin_session(&h, &singleton).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert!(backend.events.lock().unwrap().is_empty());
+    for key in ["11", "22"] {
+        *backend.tls_key.lock().unwrap() = Some(key.repeat(32));
+        let response = pin_session(&h, &group).await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(cited_session(&h, &response), group);
+        assert_eq!(
+            backend
+                .events
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .channel_bindings,
+            vec![a.clone(), b.clone()]
+        );
+    }
+    // Removing a member restores the original singleton material. A group ID
+    // cannot authorize the new smaller channel, even though it shares a key.
+    event.channel_bindings = vec![a];
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(listed_sessions(&h, "").await[0]["session_id"], singleton);
+    assert_eq!(
+        pin_session(&h, &group).await.status,
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn chutes_groups_pin_instances_cite_the_served_instance_and_survive_sibling_churn() {
+    let admission::Harness {
+        service,
+        backend,
+        verifier,
+        ..
+    } = admission::Harness::new(vec![
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+        admission::Attempt::Response {
+            status: 200,
+            at: 100,
+        },
+    ]);
+    let mut event = common::verified_event("admission-test", "aci-model");
+    event.provider_type = Some("chutes".into());
+    event.verifier_id = "private-ai-verifier/chutes/v1".into();
+    let own = session_profile("chutes");
+    let mut fleet = serde_json::json!({});
+    for key in [
+        "session_material_version",
+        "trust_boundary",
+        "evidence_scope",
+        "chute_id",
+        "canonical_model_id",
+    ] {
+        fleet[key] = own[key].clone();
+    }
+    for (map, key) in [
+        ("instance_tdx_reports", "tdx_report"),
+        ("instance_tdx_report_sha256", "tdx_report_sha256"),
+        ("instance_tcb_statuses", "tcb_status"),
+        ("instance_measurements", "measurement"),
+        ("instance_advisory_ids", "advisory_ids"),
+    ] {
+        fleet[map] = serde_json::json!({});
+        for id in ["instance-a", "instance-b", "instance-c"] {
+            fleet[map][id] = own[key].clone();
+        }
+    }
+    fleet["instance_gpu"] = serde_json::json!({});
+    for id in ["instance-a", "instance-b", "instance-c"] {
+        fleet["instance_gpu"][id] = serde_json::json!({});
+        for key in [
+            "gpu_verified",
+            "gpu_arch",
+            "gpu_evidence_present",
+            "gpu_evidence_nonce_matched",
+        ] {
+            fleet["instance_gpu"][id][key] = own[key].clone();
+        }
+    }
+    event.provider_claims = Some(fleet);
+    let binding = |id: &str, byte: &str| ChannelBinding::E2eePublicKeySha256 {
+        provider: "chutes".into(),
+        algorithm: "rsa-oaep-sha256".into(),
+        key_id: Some(id.into()),
+        public_key_sha256: byte.repeat(32),
+    };
+    let a = binding("instance-a", "aa");
+    event.channel_bindings = vec![a.clone(), binding("instance-b", "bb"), a.clone()];
+    *verifier.0.lock().unwrap() = event.clone();
+    let h = admission_http(service, "chutes");
+    let listed = listed_sessions(&h, "").await;
+    assert_eq!(listed.len(), 2);
+    let id = |name: &str| {
+        listed
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == name)
+            .unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let a_id = id("instance-a");
+    *backend.instance.lock().unwrap() = Some("instance-a".into());
+    let response = pin_session(&h, &a_id).await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), a_id);
+    assert_eq!(
+        backend.events.lock().unwrap()[0].channel_bindings,
+        vec![a.clone()]
+    );
+    // Without a pin, citation follows the actual selected sibling, not order.
+    *backend.instance.lock().unwrap() = Some("instance-b".into());
+    let response = h
+        .requester
+        .post("/v1/chat/completions", CHAT_REQUEST, &[])
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(cited_session(&h, &response), id("instance-b"));
+    event.channel_bindings = vec![a.clone(), binding("instance-c", "cc")];
+    event.evidence = Some(
+        serde_json::to_value(EvidenceRef::from_bytes("text/plain", b"new fleet round")).unwrap(),
+    );
+    *verifier.0.lock().unwrap() = event.clone();
+    let after = listed_sessions(&h, "").await;
+    assert_eq!(
+        after
+            .iter()
+            .find(|s| s["channel_binding"][0]["key_id"] == "instance-a")
+            .unwrap()["session_id"],
+        a_id
+    );
+    event.channel_bindings.push(binding("instance-a", "dd"));
+    *verifier.0.lock().unwrap() = event;
+    assert_eq!(
+        pin_session(&h, &a_id).await.status,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(backend.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn unsupported_or_mixed_origin_groups_fail_before_forwarding() {
+    let h = admission::Harness::new(vec![]);
+    let mut event = common::verified_event("admission-test", "model-a");
+    let a = event.channel_bindings[0].clone();
+    for extra in [
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://other.test".into(),
+            spki_sha256: "22".repeat(32),
+        },
+        ChannelBinding::E2eePublicKeySha256 {
+            provider: "other".into(),
+            algorithm: "x25519".into(),
+            key_id: None,
+            public_key_sha256: "22".repeat(32),
+        },
+    ] {
+        event.channel_bindings = vec![a.clone(), extra];
+        *h.verifier.0.lock().unwrap() = event.clone();
+        assert!(h
+            .service
+            .forward_chat_completion_request(admission::request(vec![]))
+            .await
+            .is_err());
+        assert!(h.backend.events.lock().unwrap().is_empty());
+    }
+}
+
+const IMAGE_REQUEST: &[u8] =
+    br#"{"model":"aci-model","prompt":"a blue circle","n":1,"user":"alice","safety_identifier":"hashed-user","style":"vivid"}"#;
+
+#[tokio::test]
+async fn images_buffered_inline_response_has_receipt_and_receipt_id_lookup() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"created":1,"id":"upstream-id","model":"private","size":{"url":"https://private"},"data":[{"b64_json":"aW1hZ2U=","url":"https://private","revised_prompt":{"url":"https://private/image","provider":"private"}}],"usage":{"input_tokens":-1,"input_tokens_details":{"text_tokens":1,"url":"https://private/image"},"output_tokens_details":[],"cost":{"provider":"private"}}}"#,
+    ));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
+    let resp = h
+        .requester
+        .post(
+            "/v1/images/generations",
+            IMAGE_REQUEST,
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"created":1,"data":[{"b64_json":"aW1hZ2U="}],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0,"input_tokens_details":{"text_tokens":1,"image_tokens":0}}})
+    );
+    {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/images/generations"));
+        let body: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"model":"aci-model","prompt":"a blue circle","n":1,"response_format":"b64_json"})
+        );
+    }
+    let receipt_id = header(&resp.headers, "x-receipt-id");
+    let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/images/generations");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(IMAGE_REQUEST)
+    );
+    let fetched = h
+        .requester
+        .get(
+            &format!("/v1/aci/receipts/{receipt_id}"),
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(fetched.status, StatusCode::OK);
+}
+
+#[tokio::test(start_paused = true)]
+async fn images_reject_url_stream_unknown_and_e2ee_without_parsing_upload() {
+    let h = harness();
+    for patch in [
+        r#""n":0"#,
+        r#""response_format":"url""#,
+        r#""stream":true"#,
+        r#""stream":false"#,
+        r#""seed":1"#,
+    ] {
+        let body = format!("{{\"model\":\"aci-model\",\"prompt\":\"hi\",{patch}}}");
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                body.as_bytes(),
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        if patch.contains("seed") {
+            assert_eq!(json_body(&resp)["error"]["code"], "unknown_parameter");
+            assert_eq!(json_body(&resp)["error"]["param"], "seed");
+        }
+    }
+    for name in [
+        "x-signing-algo",
+        "x-e2ee-version",
+        "x-e2ee-unknown",
+        "x-client-pub-key",
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header("authorization", "Bearer tenant-key")
+            .header(name, "x")
+            .body(Body::from_stream(stream::pending::<
+                Result<Bytes, std::io::Error>,
+            >()))
+            .unwrap();
+        let resp = tokio::time::timeout(Duration::from_secs(2), h.requester.call(request))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&resp), "e2ee_unsupported_endpoint");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn images_forward_requested_maximum_and_accept_fewer_without_fill() {
+    for returned in 1..=2 {
+        let upstream = serde_json::to_vec(
+            &serde_json::json!({"data":vec![serde_json::json!({"b64_json":"ok"});returned]}),
+        )
+        .unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                br#"{"model":"aci-model","prompt":"hello","n":2}"#,
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(json_body(&resp)["data"].as_array().unwrap().len(), returned);
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&calls[0].body).unwrap()["n"],
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn images_malformed_success_is_502_and_receipt_hashes_sanitized_error() {
+    for (n, upstream) in [
+        (
+            Some(1),
+            serde_json::json!({"data":[{"url":"https://private"}]}),
+        ),
+        (
+            Some(2),
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+        (
+            None,
+            serde_json::json!({"data":[{"b64_json":"ok"},{"b64_json":"ok"}]}),
+        ),
+    ] {
+        let upstream = serde_json::to_vec(&upstream).unwrap();
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(&upstream));
+        let mut request = serde_json::json!({"model":"aci-model","prompt":"hello"});
+        if let Some(n) = n {
+            request["n"] = serde_json::json!(n);
+        }
+        let resp = h
+            .requester
+            .post(
+                "/v1/images/generations",
+                &serde_json::to_vec(&request).unwrap(),
+                &[("authorization", "Bearer tenant-key")],
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+        assert!(!String::from_utf8_lossy(&resp.body).contains("https://private"));
+        assert_eq!(error_type(&resp), "upstream_error");
+        assert!(json_body(&resp).get("data").is_none());
+        assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        assert_eq!(
+            payload_event(&receipt_payload(&receipt), "response.returned")["body_hash"],
+            sha256_hex(&resp.body)
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_image_uploads_do_not_reserve_generation_capacity() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"data":[{"b64_json":"image"}]}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..private_ai_gateway::middleware::admission::MAX_IN_FLIGHT {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(stream::poll_fn(move |_| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+            std::task::Poll::<Option<Result<Bytes, std::io::Error>>>::Pending
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/images/generations")
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "application/json")
+            .header("content-length", "1000000")
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each handler has reached its stalled body read before the normal request.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester.post(
+            "/v1/images/generations",
+            IMAGE_REQUEST,
+            &[("authorization", "Bearer tenant-key")],
+        ),
+    )
+    .await
+    .unwrap();
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+fn transcription_request(extra: &str) -> Vec<u8> {
+    format!("--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\naci-model\r\n{extra}--upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private.wav\"\r\nContent-Type: audio/wav\r\n\r\nspoken audio\r\n--upload--\r\n").into_bytes()
+}
+
+fn transcription_http(body: Vec<u8>) -> axum::http::request::Builder {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/audio/transcriptions")
+        .header("authorization", "Bearer tenant-key")
+        .header("content-type", "multipart/form-data; boundary=upload")
+        .header("content-length", body.len())
+}
+
+#[tokio::test]
+async fn audio_multipart_hashes_exact_received_and_forwarded_bytes_with_no_chat_id() {
+    let h=harness_with_upstream(RecordingUpstream::with_response_body(br#"{"text":"hello","duration":2.965,"id":"private","words":[{"word":"hello","url":"private"}]}"#));
+    let original_digest = h.service.workload_keyset_digest();
+    assert_eq!(
+        h.service.renew_keyset_if_due(600_000_000).unwrap(),
+        Some(2_300_000_000)
+    );
+    assert_ne!(h.service.workload_keyset_digest(), original_digest);
+    let raw = transcription_request("");
+    let request = transcription_http(raw.clone())
+        .header("x-aci-provider", r#"{"order":["near"]}"#)
+        .body(Body::from(raw.clone()))
+        .unwrap();
+    let resp = h.requester.call(request).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(
+        json_body(&resp),
+        serde_json::json!({"text":"hello","usage":{"type":"duration","seconds":3}})
+    );
+    let forwarded = {
+        let calls = h.upstream_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/transcriptions"));
+        assert!(!calls[0].headers.contains_key("x-aci-provider"));
+        calls[0].clone()
+    };
+    let (params, form) = private_ai_gateway::middleware::audio::parse(
+        forwarded.body.clone(),
+        forwarded.content_type.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(params["model"], "aci-model");
+    assert_eq!(params["response_format"], "json");
+    assert!(
+        matches!(form.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "spoken audio")
+    );
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/audio/transcriptions");
+    assert_eq!(
+        payload["workload_keyset_digest"],
+        header(&resp.headers, "x-aci-keyset-digest")
+    );
+    assert_eq!(
+        header(&resp.headers, "x-aci-keyset-digest"),
+        h.service.workload_keyset_digest()
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+    assert_eq!(
+        payload_event(&payload, "request.forwarded")["body_hash"],
+        sha256_hex(&forwarded.body)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn audio_malformed_duration_withholds_transcript_and_keeps_forwarded_receipt() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"private transcript","duration":1,"usage":{"type":"duration","seconds":-1}}"#,
+    ));
+    let raw = transcription_request("");
+    let resp = h
+        .requester
+        .call(
+            transcription_http(raw.clone())
+                .body(Body::from(raw))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&resp.body).contains("private transcript"));
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&resp.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    assert!(!payload_event(&receipt_payload(&receipt), "request.forwarded").is_null());
+}
+
+#[tokio::test(start_paused = true)]
+async fn audio_rejects_bad_carriers_without_parsing_upload() {
+    let h = harness();
+    for request in [
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "null"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "{"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", r#"{"aci_unknown":true}"#),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", r#"{"aci_session_ids":[]}"#),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "{}")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("x-aci-provider", "{}"),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("x-aci-provider", "x".repeat(8193)),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header(
+                "x-aci-provider",
+                axum::http::HeaderValue::from_bytes(b"{\"order\":[\"n\xc3\xa9ar\"]}").unwrap(),
+            ),
+    ] {
+        let resp = tokio::time::timeout(
+            Duration::from_secs(2),
+            h.requester.call(
+                request
+                    .header("authorization", "Bearer tenant-key")
+                    .body(Body::from_stream(stream::pending::<
+                        Result<Bytes, std::io::Error>,
+                    >()))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_header_constraint_refusal_has_required_receipt_without_forwarding() {
+    let h = harness_serving_optional(Arc::new(AlwaysFailed));
+    let raw = transcription_request("");
+    let response = h
+        .requester
+        .call(
+            transcription_http(raw.clone())
+                .header("x-aci-provider", r#"{"aci_verified":true}"#)
+                .body(Body::from(raw.clone()))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error_type(&response), "upstream_verification_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    let verified = payload_event(&payload, "upstream.verified");
+    assert_eq!(verified["required"], true);
+    assert_eq!(verified["result"], "failed");
+    assert!(!payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["type"] == "request.forwarded"));
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+}
+
+#[tokio::test]
+async fn audio_header_refusals_complete_over_tcp_without_reset_or_continue() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let h = harness();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        private_ai_gateway::http::app::serve_with_write_idle_timeout(
+            listener,
+            h.requester.app.clone(),
+        ),
+    );
+    for (carrier, length, expect, status) in [
+        ("x-e2ee-unknown: 1\r\n", 4 * 1024 * 1024, false, 400),
+        ("x-e2ee-unknown: 1\r\n", 25 * 1024 * 1024, true, 400),
+        ("", 33 * 1024 * 1024, true, 413),
+    ] {
+        let response = tokio::time::timeout(Duration::from_secs(7), async {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let expect_header = if expect { "Expect: 100-continue\r\n" } else { "" };
+            socket.write_all(format!("POST /v1/audio/transcriptions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer tenant-key\r\nContent-Length: {length}\r\nConnection: close\r\n{expect_header}{carrier}\r\n").as_bytes()).await.unwrap();
+            if !expect {
+                let chunk = [b'x'; 16 * 1024];
+                let mut remaining = length;
+                while remaining > 0 {
+                    let count = remaining.min(chunk.len());
+                    socket.write_all(&chunk[..count]).await.expect("refusal must not reset an in-progress upload");
+                    remaining -= count;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+            let mut response = Vec::new();
+            socket.read_to_end(&mut response).await.expect("refusal must close cleanly");
+            String::from_utf8(response).unwrap()
+        }).await.unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {status} ")),
+            "{response}"
+        );
+        assert!(!response.contains("100 Continue"));
+        assert!(response
+            .to_ascii_lowercase()
+            .contains("connection: close\r\n"));
+        let (_, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(serde_json::from_str::<Value>(body).unwrap()["error"].is_object());
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn audio_invalid_parameters_reject_before_forwarding() {
+    let h = harness();
+    for (name, value, code) in [
+        ("provider", "true", "unknown_parameter"),
+        ("response_format", "srt", "invalid_parameter"),
+    ] {
+        let raw = transcription_request(&format!(
+            "--upload\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+        ));
+        let resp = h
+            .requester
+            .call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let error = &json_body(&resp)["error"];
+        assert_eq!(error["code"], code);
+        assert_eq!(error["type"], "invalid_request_error");
+        assert_eq!(error["param"], name);
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn audio_http_transport_sends_matching_multipart_and_caps_responses_at_eight_mib() {
+    for (limit, response_mib) in [
+        (2 * MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES, 9),
+        (1024 * 1024, 2),
+    ] {
+        let fake_upstream = Router::new().route(
+            "/v1/audio/transcriptions",
+            axum::routing::post(move |headers: HeaderMap, body: Body| async move {
+                let bytes = to_bytes(body, 4096).await.unwrap();
+                let (params, file) = private_ai_gateway::middleware::audio::parse(
+                    bytes,
+                    headers["content-type"].to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(params["model"], "aci-model");
+                assert!(matches!(file.as_ref(), private_ai_gateway::middleware::media::MediaForm::Transcription { file, .. } if file == "spoken audio"));
+                let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+                axum::http::Response::builder()
+                    .status(400)
+                    .body(Body::from_stream(stream::iter(
+                        (0..response_mib).map(move |_| Ok::<_, std::io::Error>(chunk.clone())),
+                    )))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, fake_upstream).await.unwrap() });
+        let mut config = AciServiceConfig::for_test();
+        config.max_buffered_response_bytes = limit;
+        let service = Arc::new(
+            AciService::new(
+                Arc::new(StaticKeyProvider::default()),
+                Arc::new(StubQuoter::default()),
+                Arc::new(
+                    OpenAICompatibleBackend::new(format!("http://{address}"))
+                        .unwrap()
+                        .with_max_buffered_response_bytes(limit),
+                ),
+                Arc::new(InMemoryReceiptStore::default()),
+                config,
+                Arc::new(FixedClock(1_700_000_000)),
+            )
+            .unwrap(),
+        );
+        let requester = Requester {
+            app: build_router(service.clone()),
+        };
+        let raw = transcription_request("");
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            requester.call(
+                transcription_http(raw.clone())
+                    .body(Body::from(raw))
+                    .unwrap(),
+            ),
+        )
+        .await;
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let response = result.expect("reject oversized audio response before waiting for its body");
+        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+        let metrics = String::from_utf8(service.metrics().unwrap().body).unwrap();
+        assert!(metrics.contains(
+            "private_ai_gateway_audio_failures_total{reason=\"response_size_failure\"} 1"
+        ));
+    }
+}
+
+#[tokio::test]
+async fn stalled_audio_uploads_do_not_block_an_upload_that_sends_data() {
+    let h = harness_with_upstream(RecordingUpstream::with_response_body(
+        br#"{"text":"hello","duration":1}"#,
+    ));
+    let mut uploads = Vec::new();
+    let mut started = Vec::new();
+    for _ in 0..32 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let upload = Body::from_stream(
+            stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"-")) }).chain(
+                stream::poll_fn(move |_| {
+                    if let Some(tx) = tx.take() {
+                        let _ = tx.send(());
+                    }
+                    std::task::Poll::Pending
+                }),
+            ),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/audio/transcriptions")
+            .header("authorization", "Bearer tenant-key")
+            .header("content-type", "multipart/form-data; boundary=upload")
+            // A declared full upload must not reserve that much capacity.
+            .header(
+                "content-length",
+                private_ai_gateway::middleware::audio::MAX_BODY_BYTES,
+            )
+            .body(upload)
+            .unwrap();
+        uploads.push(tokio::spawn(h.requester.app.clone().oneshot(request)));
+        started.push(rx);
+    }
+    // Each upload has delivered one byte and stalled.
+    for upload in started {
+        tokio::time::timeout(Duration::from_secs(1), upload)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let raw = transcription_request("");
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        h.requester.call(
+            transcription_http(raw.clone())
+                .header("authorization", "Bearer requester")
+                .body(Body::from(raw))
+                .unwrap(),
+        ),
+    )
+    .await;
+    for upload in uploads {
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+    }
+    let response = response.expect("stalled uploads must not consume per-connection slots");
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(json_body(&response)["text"], "hello");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rerank_sanitizes_success_and_receipts_malformed_usage() {
+    let request =
+        br#"{"model":"aci-model","query":"q","documents":["a",{"text":"b"}],"top_n":1,"user":"alice"}"#;
+    for (upstream, status) in [
+        (br#"{"id":"rank-1","model":"private","results":[{"index":1,"relevance_score":0.9,"document":{"text":"b","url":"private"},"trace":"private"}],"usage":{"prompt_tokens":5,"total_tokens":5,"provider":"private"},"provider":"private"}"#.as_slice(), StatusCode::OK),
+        (br#"{"results":[{"index":0,"relevance_score":0.9}]}"#.as_slice(), StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(upstream));
+        let response = h.requester.post("/v1/rerank", request, &[("authorization", "Bearer tenant-key")]).await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        if status == StatusCode::OK {
+            assert_eq!(body["results"], serde_json::json!([{"index":1,"relevance_score":0.9,"document":{"text":"b"}}]));
+            assert_eq!(body["usage"], serde_json::json!({"prompt_tokens":5,"total_tokens":5}));
+            assert!(body.get("provider").is_none());
+        } else {
+            assert!(body.get("usage").is_none());
+        }
+        let receipt = h.service.get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id")).unwrap();
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/rerank");
+        assert_eq!(payload_event(&payload, "response.returned")["body_hash"], sha256_hex(&response.body));
+        let calls = h.upstream_calls.lock().unwrap();
+        let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+        assert!(forwarded.get("user").is_none());
+        assert_eq!(forwarded["documents"], serde_json::json!(["a", "b"]));
+        assert_eq!(calls[0].path.as_deref(), Some("/v1/rerank"));
+    }
+}
+
+#[tokio::test]
+async fn image_edits_hash_exact_multipart_and_sanitize_success_or_malformed_body() {
+    for (upstream, requested, status) in [
+        (
+            serde_json::json!({"id":"private","file_path":"private","peak_memory_mb":99,"data":[{"b64_json":"image","url":"private"}]}),
+            1,
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"data":[{"url":"private"}]}),
+            1,
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 2]}),
+            10,
+            StatusCode::OK,
+        ),
+        (
+            serde_json::json!({"data":vec![serde_json::json!({"b64_json":"image"}); 11]}),
+            10,
+            StatusCode::BAD_GATEWAY,
+        ),
+    ] {
+        let h = harness_with_upstream(RecordingUpstream::with_response_body(
+            &serde_json::to_vec(&upstream).unwrap(),
+        ));
+        let raw = common::image_edit_request("aci-model", requested);
+        let response = h
+            .requester
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/images/edits")
+                    .header("authorization", "Bearer tenant-key")
+                    .header("content-type", "multipart/form-data; boundary=upload")
+                    .header("x-aci-provider", r#"{"order":["near"]}"#)
+                    .body(Body::from(raw.clone()))
+                    .unwrap(),
+            )
+            .await;
+        assert_eq!(response.status, status);
+        let body = json_body(&response);
+        assert!(!body.to_string().contains("private"));
+        if status == StatusCode::OK {
+            assert_eq!(
+                body["data"],
+                serde_json::json!(vec![
+                    serde_json::json!({"b64_json":"image"});
+                    upstream["data"].as_array().unwrap().len()
+                ])
+            );
+        }
+        let forwarded = h.upstream_calls.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.path.as_deref(), Some("/v1/images/edits"));
+        assert!(!forwarded.headers.contains_key("x-aci-provider"));
+        let (params, image) = private_ai_gateway::middleware::image_edits::parse(
+            forwarded.body.clone(),
+            forwarded.content_type.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(params["model"], "aci-model");
+        assert_eq!(params["response_format"], "b64_json");
+        assert_eq!(params["n"], requested);
+        assert!(
+            matches!(image.as_ref(), private_ai_gateway::middleware::media::MediaForm::ImageEdit { images, .. } if images[0].data == b"\x89PNG\r\n\x1a\nimage".as_slice())
+        );
+        let receipt = h
+            .service
+            .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+            .unwrap();
+        assert!(receipt.chat_id.is_none());
+        let payload = receipt_payload(&receipt);
+        assert_eq!(payload["endpoint"], "/v1/images/edits");
+        for (event, bytes) in [
+            ("request.received", raw.as_slice()),
+            ("request.forwarded", forwarded.body.as_ref()),
+            ("response.returned", response.body.as_ref()),
+        ] {
+            assert_eq!(
+                payload_event(&payload, event)["body_hash"],
+                sha256_hex(bytes)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn speech_binary_receipt_preserves_audio_type_bytes_and_scalar_usage() {
+    let audio = b"RIFF\0\xffWAVE\x80audio";
+    let h = harness_with_upstream(RecordingUpstream {
+        response_body: audio.to_vec(),
+        response_content_type: "Audio/WAV; rate=24000",
+        ..Default::default()
+    });
+    let raw = serde_json::to_vec(&serde_json::json!({"model":"aci-model","input":"界🙂e\u{301}","voice":"ryan","stream_format":"audio"})).unwrap();
+    let response = h
+        .requester
+        .post(
+            "/v1/audio/speech",
+            &raw,
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.headers["content-type"], "audio/wav");
+    assert_eq!(response.body, audio);
+    let calls = h.upstream_calls.lock().unwrap();
+    assert_eq!(calls[0].path.as_deref(), Some("/v1/audio/speech"));
+    let forwarded: Value = serde_json::from_slice(&calls[0].body).unwrap();
+    assert!(forwarded.get("stream_format").is_none());
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    assert!(receipt.chat_id.is_none());
+    let payload = receipt_payload(&receipt);
+    assert_eq!(payload["endpoint"], "/v1/audio/speech");
+    assert_eq!(
+        payload_event(&payload, "usage.reported")["usage"],
+        serde_json::json!({"type":"characters","characters":4})
+    );
+    assert_eq!(
+        payload_event(&payload, "request.received")["body_hash"],
+        sha256_hex(&raw)
+    );
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(audio)
+    );
+}
+
+#[tokio::test]
+async fn speech_refuses_non_audio_success_with_a_sanitized_receipt() {
+    let content_type = "text/event-stream";
+    let h = harness_with_upstream(RecordingUpstream {
+        response_body: b"private upstream data".to_vec(),
+        response_content_type: content_type,
+        ..Default::default()
+    });
+    let response = h
+        .requester
+        .post(
+            "/v1/audio/speech",
+            br#"{"model":"aci-model","input":"hello","voice":"ryan"}"#,
+            &[("authorization", "Bearer tenant-key")],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY, "{content_type}");
+    assert_eq!(response.headers["content-type"], "application/json");
+    assert!(!String::from_utf8_lossy(&response.body).contains("private"));
+    let receipt = h
+        .service
+        .get_receipt_by_receipt_id(header(&response.headers, "x-receipt-id"))
+        .unwrap();
+    let payload = receipt_payload(&receipt);
+    assert_eq!(
+        payload_event(&payload, "response.returned")["body_hash"],
+        sha256_hex(&response.body)
+    );
+    assert!(!payload["event_log"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|event| event["type"] == "usage.reported"));
+}
+
+#[tokio::test]
+async fn buffered_auth_e2ee_and_carrier_refusals_precede_parsing() {
+    let h = harness();
+    for path in ["/v1/rerank", "/v1/images/edits", "/v1/audio/speech"] {
+        for (headers, status) in [
+            (vec![], StatusCode::UNAUTHORIZED),
+            (
+                vec![
+                    ("authorization", "Bearer tenant-key"),
+                    ("x-e2ee-test", "true"),
+                ],
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = h.requester.post(path, b"not a request", &headers).await;
+            assert_eq!(response.status, status, "{path}");
+        }
+    }
+    let response = h
+        .requester
+        .post(
+            "/v1/images/edits",
+            b"not multipart",
+            &[
+                ("authorization", "Bearer tenant-key"),
+                ("x-aci-provider", "null"),
+            ],
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }

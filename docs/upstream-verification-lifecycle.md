@@ -1,8 +1,31 @@
-# Upstream Verification Lifecycle
+# Upstream verification lifecycle
 
 This page explains when the gateway verifies an upstream, how long a verified result is reused, and how channel-binding failures affect forwarding. It applies to the direct-upstream configuration managed by `UpstreamConfigManager`.
 
 For field definitions and defaults, see [Configuration reference](configuration-reference.md). For the resulting audit record, see [Attested sessions](attested-session-system.md).
+
+## Verification freshness and session validity
+
+The verifier cache TTL, `attested_session_ttl_seconds` (default 3600), and
+`receipt_ttl_seconds` govern different lifetimes. A failed proactive refresh may
+keep a still-valid cached result, but cannot extend its cache deadline (#399).
+Without usable verification, forwarding fails closed even if historical sessions
+are retained. A session expiring does not force network verification: a still-usable
+cached result can establish a replacement with older evidence.
+
+Before each forwarding attempt the gateway owns the admitted immutable session and
+retention lease. Binding retries acquire a new admission. The committed receipt cites
+that attempt's admitted session, with `served_at` equal to its admission time; later
+verification cannot substitute a newer snapshot. Streams, pending middleware and
+retained responses keep the snapshot available, and receipt publication extends
+retention through its receipt deadline without extending session validity.
+
+Complete reviewed profiles can revalidate equal material under an unexpired snapshot,
+retaining its original ID and evidence. Failure alone does not revoke history;
+equal recovery and A → B → A may reuse the original unexpired A. ArmetAI, SecretAI,
+custom verifiers and incomplete profiles retain evidence-sensitive dedup. See
+[the profile and migration contract](attested-session-system.md#reviewed-material-and-snapshot-evidence).
+Session creation, cache freshness and evidence collection time must not be conflated.
 
 ## Security property
 
@@ -16,40 +39,52 @@ For a required request, the gateway does not forward the prompt unless a verifie
 
 The verifier input contains the upstream config name, origin, upstream model identifier, hash of the body that will be forwarded, and whether verification is required.
 
-Caching follows the provider's attestation scope:
+Most router-scoped providers use one verification key for the origin.
+NEAR AI includes the upstream model ID because it checks model selection as
+part of verifying the router channel. Per-model and per-instance providers
+also include the model in the verification key.
 
-- Router-scoped providers use one verification key for the origin. The model is omitted because all routed models share the same attested channel.
-- Per-model or per-instance providers include the model in the verification key.
-
-Only successful verification events are cached. Failed verification is returned to the caller and is not stored as a reusable success.
-
-## Startup and configuration replacement
-
-After startup, the manager prewarms verification for configured targets. Replacing upstream configuration through the admin API constructs and validates a new runtime snapshot, publishes it, and starts another prewarm.
-
-For a router-scoped upstream, prewarm chooses one deterministic representative model. For per-model providers, it verifies each distinct upstream model.
-
-A successful prewarm also records the corresponding attested session. This makes the audit surface useful before the first user request. Request-time verification records the same content-addressed session idempotently.
-
-Prewarm results are logged after the background task finishes. They are not
-included in the startup or admin response. A failed prewarm does not prevent
-the process from serving unrelated routes. A later constrained request still
-applies the fail-closed gate.
+The verifier caches successful events for reuse. NEAR AI also caches failures
+per upstream model. A model name mismatch is cached for 60 seconds.
+Unavailable evidence is cached for up to 10 seconds, capped by the refresh lead
+when background refresh is enabled.
 
 ## Cache and background refresh
 
-`verifier_cache_seconds` sets the maximum reuse period for provider-verifier
-results, and `verification_refresh_seconds` sets the proactive refresh cadence.
-[Upstream fields](configuration-reference.md#upstream-fields) lists their
-defaults and zero values.
+The manager runs one sequential task per upstream with a verifier route and
+refresh enabled. Startup verification uses this task; hot reload cancels old
+tasks and starts fresh verifiers. Startup and admin responses do not wait for it.
+Most router-scoped upstreams and ACI-service upstreams refresh one
+representative model. NEAR AI and other providers refresh each distinct
+upstream model.
 
-The manager runs at the smallest enabled interval and refreshes only upstreams whose policy enables refresh. Refresh bypasses the existing cache. A successful result replaces the cached event; a failed refresh leaves the previous unexpired successful event in place.
+Never-attempted targets run first in stable order, then due warm entries by
+earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
+after waiting for a background permit, since caches and deadlines can change.
+The period p is a positive `verification_refresh_seconds`, or
+`max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` by default
+(240 seconds); zero disables refresh. The lead is `max(TTL - p, 0)`,
+and warm entries become due at expiry minus lead. Successful external and
+ACI-service cache TTLs begin at verification start. The NEAR AI failure TTL
+begins when verification reports the failure. ACI-service caps expiry at keyset `not_after`,
+rechecked when verification completes; appraisal uses the wall clock after the
+response. Cold requests and background refresh share its single-flight lock.
 
-The ACI-service verifier also limits its cached result to the workload keyset's
-`not_after` timestamp. Its usable lifetime is the earlier of keyset expiry and
-the configured cache deadline.
+All tasks share `upstream_verification_concurrency` permits (default 4);
+request-time verification is independent. After success, a target cannot start
+again before its previous start plus p, including cacheless verifiers. A failed
+refresh normally keeps a valid entry and retries at expiry, or at start plus p
+if there is no valid entry. NEAR AI preserves a current verification when
+evidence is unavailable. An explicit model name mismatch replaces it
+immediately because the upstream returned a different model identity.
+On Unix, cancellation or timeout kills an external verifier's process group,
+including bridge subprocesses, and reaps the child.
 
-Cache lifetime is not a promise that a connection remains safe for that duration. Every forward still enforces the cached channel binding against the connection it uses.
+Warmth is best-effort within capacity: replacements must complete before expiry;
+under sustained upstream overload cold targets may get no background retry,
+while requests still verify on demand. A previously successful target found cold
+at refresh start logs a warning with upstream and model. Every forward enforces
+the current channel binding against its connection.
 
 ## Request-time flow
 
@@ -58,12 +93,17 @@ For a constrained request, the gateway follows this sequence:
 1. Resolve the candidate upstream and the body that would be forwarded.
 2. Obtain a cached successful verifier event or perform verification.
 3. Require a verified result.
-4. Derive current attested sessions and apply any `aci_session_ids` allowlist.
+4. Admit at one timestamp: persist/acquire current attested sessions, require
+   `established_at <= admitted_at < expires_at`, and apply any `aci_session_ids`
+   allowlist. This admission also runs for verified requests without pins.
 5. Connect through a client that enforces the verified channel binding.
 6. Forward the prompt only after the binding is satisfied.
-7. Record the verification event and selected session in the signed receipt.
+7. Record the admitted verification event and selected session in the signed
+   receipt, with `served_at = admitted_at` for the committed attempt. Keep its
+   lease while the response or draft is pending, then extend session retention
+   through the receipt's actual publication deadline before storing the receipt.
 
-TLS SPKI bindings are enforced by the pinned TLS client. Chutes E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
+TLS SPKI bindings are enforced by the pinned TLS client. Chutes and 0G E2EE public-key bindings are enforced by the provider backend when it selects and encrypts to a verified instance.
 
 ## Binding mismatch and reverification
 
@@ -71,7 +111,9 @@ A channel-binding mismatch can indicate normal rotation or an attack. The gatewa
 
 1. Invalidate the cached verifier event owned by the gateway.
 2. Run a fresh verification that bypasses the cache.
-3. Retry the forward only if the new result verifies and its binding can be enforced.
+3. Release the failed attempt's leases and obtain a new admission, reapplying
+   pins. Retry only if the new result verifies and its binding can be enforced;
+   the receipt uses the successful retry's admission.
 4. Repeat for a later mismatch, up to two fresh verifications per candidate.
 5. Treat a mismatch after the second fresh verification as terminal for that candidate, and leave the cache entry invalidated.
 
@@ -109,14 +151,14 @@ For each request, the Chutes backend:
 The pool uses the provider's `nonce_expires_in` value when present and a
 55-second fallback otherwise. Expired entries are discarded, and selecting a
 nonce removes it from the pool. The model cache and nonce pools are in memory;
-a process restart rebuilds them through prewarm, refresh, or the next request.
+a process restart rebuilds them through background refresh or the next request.
 
 A dated live probe on 2026-05-18 observed roughly 138 to 145 seconds for cold
 Chutes evidence verification and roughly one second for warmed small prompts.
 A short 120 requests-per-minute stage and a 25-request burst completed without
 provider `429` responses. These measurements are a lower bound from one model
 and account, not a current latency or throughput guarantee. They explain why
-prewarm and background session refresh keep evidence discovery off the normal
+background verification and session refresh keep evidence discovery off the normal
 request path.
 
 To measure warmed Chutes throughput across several nonce lifetimes, run the
@@ -152,7 +194,7 @@ Each candidate goes through its own verification and binding checks. A verified 
 
 Use these surfaces when diagnosing lifecycle behavior:
 
-- gateway logs for prewarm, refresh, invalidation, and binding-mismatch messages;
+- gateway logs for refresh, invalidation, and binding-mismatch messages;
 - `GET /v1/aci/sessions` for current materialized sessions;
 - `GET /v1/admin/upstreams` for redacted active configuration and its digest;
 - `GET /v1/metrics` for gateway-owned request metrics;

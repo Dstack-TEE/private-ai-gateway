@@ -1,4 +1,11 @@
 /**
+ * A session contains an establishing-evidence snapshot. A reused session does not
+ * supply evidence from every later verification round. Session and evidence hashes
+ * prove integrity; they do not perform provider-specific deep audit. Fixed session
+ * pins require explicit replacement after expiry or material migration.
+ */
+
+/**
  * Attested-session helpers (§8, §9.3). A session is content-addressed: its id
  * is the SHA-256 of the exact served document bytes, and the signed receipt
  * commits to that id — there is no session signature.

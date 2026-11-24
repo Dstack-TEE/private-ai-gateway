@@ -19,6 +19,7 @@ import os
 import sys
 
 from provider_verifier import (
+    verify_armet_ai,
     verify_chutes,
     verify_nearai,
     verify_phala_direct,
@@ -28,6 +29,7 @@ from provider_verifier import (
 from provider_verifier.common import failed
 
 __all__ = [
+    "verify_armet_ai",
     "verify_chutes",
     "verify_nearai",
     "verify_phala_direct",
@@ -61,8 +63,10 @@ async def main() -> None:
             await verify_secret_ai(request)
         elif provider == "chutes":
             await verify_chutes(request)
+        elif provider == "armet-ai":
+            await verify_armet_ai(request)
         else:
-            failed(str(provider), f"unsupported provider: {provider!r}")
+            failed(str(provider), f"unsupported provider: {provider!r}", failure="verifier_misconfigured")
     except Exception as exc:
         failed(str(provider), str(exc))
 

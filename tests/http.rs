@@ -24,6 +24,7 @@ use private_ai_gateway::aci::receipt::{
 use private_ai_gateway::aci::types::{ServiceCapabilities, TlsSpki};
 use private_ai_gateway::aci::upstream::{
     PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStreamResponse,
 };
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, FixedClock, InMemoryReceiptStore,
@@ -59,6 +60,14 @@ impl StubUpstream {
 
 #[async_trait]
 impl UpstreamBackend for StubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "stub-upstream"
     }
@@ -66,7 +75,7 @@ impl UpstreamBackend for StubUpstream {
         Some("http://stub-upstream")
     }
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        *self.received.lock().unwrap() = Some(req.body);
+        *self.received.lock().unwrap() = Some(req.body.to_vec());
         let mut headers = std::collections::HashMap::new();
         headers.insert("content-type".to_string(), "application/json".to_string());
         Ok(UpstreamResponse {
@@ -78,12 +87,44 @@ impl UpstreamBackend for StubUpstream {
         })
     }
 
+    /// Model `verified-only` stands for a provider that cannot be served
+    /// without a verified binding (0G Private Computer).
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        req.model_id == "verified-only"
+    }
+
     async fn forward_verified_prepared(
         &self,
         req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
+        if req.model_id == "invalid-for-route" {
+            return Err(UpstreamError::InvalidRequest(
+                "request field \"zz\" is not supported".to_string(),
+            ));
+        }
+        withheld(&req)?;
         self.forward(req.request).await
+    }
+
+    async fn forward_stream_verified_prepared(
+        &self,
+        req: PreparedUpstreamRequest,
+        _event: &UpstreamVerifiedEvent,
+    ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        withheld(&req)?;
+        self.forward_stream_prepared(req).await
+    }
+}
+
+/// Model `withheld-<status>` answers as an adapter that withholds an
+/// unverified body (0G) does: the status alone.
+fn withheld(req: &PreparedUpstreamRequest) -> Result<(), UpstreamError> {
+    match req.model_id.strip_prefix("withheld-") {
+        Some(status) => Err(UpstreamError::Upstream {
+            status: status.parse().unwrap(),
+        }),
+        None => Ok(()),
     }
 }
 
@@ -189,7 +230,7 @@ async fn attestation_report_endpoint_shape() {
             .unwrap()
             .as_str()
             .unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
     assert!(body
         .get("attestation")
@@ -397,7 +438,7 @@ async fn attestation_report_nonce_null_when_absent() {
 
     // Re-derive report_data with nonce=None and confirm match.
     let stmt = private_ai_gateway::aci::identity::attestation_statement(
-        h.service.workload_keyset_digest(),
+        &h.service.workload_keyset_digest(),
         None,
     )
     .unwrap();
@@ -469,6 +510,14 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
     struct ErrUpstream;
     #[async_trait]
     impl UpstreamBackend for ErrUpstream {
+        fn response_protocol(
+            &self,
+            _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+            _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+        ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             "err-upstream"
         }
@@ -553,6 +602,100 @@ async fn direct_messages_image_fetch_5xx_returns_anthropic_400() {
         .contains("https://img.example/x.jpg"));
 }
 
+/// Every answer, an error included, names the gateway's own request id in the
+/// header the surface's SDK reads, so a caller can quote it.
+#[tokio::test]
+async fn responses_carry_the_gateway_request_id_per_surface() {
+    let h = make_harness();
+    for (path, header) in [
+        ("/v1/chat/completions", "x-request-id"),
+        ("/v1/messages", "request-id"),
+    ] {
+        let resp = build_router(h.service.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"model":"verified-only","max_tokens":1,"messages":[]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let id = resp.headers()[header].to_str().unwrap();
+        assert!(id.starts_with("req_"), "{path}: {id}");
+    }
+}
+
+async fn post_chat(h: &TestHarness, body: &str) -> (StatusCode, bool, serde_json::Value) {
+    let resp = build_router(h.service.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let has_receipt = resp.headers().contains_key("x-receipt-id");
+    let body = body_bytes(resp.into_body()).await;
+    (status, has_receipt, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+async fn chat_route_that_needs_verification_is_refused_when_unverified() {
+    // The caller did not ask for verification, but the route cannot be served
+    // unverified, so it gets the same receipt-backed refusal.
+    let h = make_harness();
+    let (status, has_receipt, json) =
+        post_chat(&h, r#"{"model":"verified-only","messages":[]}"#).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(has_receipt);
+    assert_eq!(json["error"]["type"], "upstream_verification_failed");
+    assert!(h.received.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn chat_request_the_route_cannot_carry_is_a_400() {
+    let h = make_harness();
+    let (status, _, json) = post_chat(&h, r#"{"model":"invalid-for-route","messages":[]}"#).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+/// A withheld upstream status reaches a direct caller, buffered or streamed,
+/// as the gateway normalizes that status: the provider's auth and billing
+/// refusals are not the caller's, a 2xx without a verifiable body is no
+/// success, and a 429 stays a 429.
+#[tokio::test]
+async fn chat_withheld_upstream_status_is_normalized() {
+    let h = make_harness();
+    for stream in [false, true] {
+        for (upstream, client) in [(401, 502), (402, 502), (403, 502), (204, 502), (429, 429)] {
+            let body =
+                format!(r#"{{"model":"withheld-{upstream}","messages":[],"stream":{stream}}}"#);
+            let (status, _, json) = post_chat(&h, &body).await;
+            assert_eq!(
+                status.as_u16(),
+                client,
+                "stream={stream} {upstream}: {json}"
+            );
+            assert!(
+                json["error"]["type"].is_string(),
+                "stream={stream} {upstream}: {json}"
+            );
+        }
+    }
+    let (_, _, json) = post_chat(&h, r#"{"model":"withheld-429","messages":[]}"#).await;
+    assert_eq!(json["error"]["type"], "rate_limit_error");
+}
+
 #[tokio::test]
 async fn chat_optional_verification_forwards_and_signs_receipt_with_failed_event() {
     let h = make_optional_verification_harness();
@@ -585,7 +728,7 @@ async fn chat_optional_verification_forwards_and_signs_receipt_with_failed_event
             .unwrap()
             .to_str()
             .unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 
     let receipt = h
@@ -660,7 +803,7 @@ async fn attested_session_lookup_returns_audit_record() {
         url_origin: Some("https://stub-upstream".to_string()),
         verifier_id: "stub-verifier-1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:c66545694666be261c5babe518913c3536f26b1dd34c5f14de71dd7ad1968c1a",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoic3R1Yi11cHN0cmVhbS1hdHRlc3RhdGlvbiJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -760,11 +903,10 @@ async fn attested_session_lookup_returns_audit_record() {
     let body: serde_json::Value =
         serde_json::from_slice(&body_bytes(resp.into_body()).await).unwrap();
     assert_eq!(body["api_version"], "aci/1");
-    assert_eq!(body["sessions"][0]["session_id"], session_id);
-    // The broad list keeps the integrity digest but strips the evidence bytes;
-    // fetch a single session by id for the full bundle (see above).
-    assert!(body["sessions"][0]["evidence"]["digest"].is_string());
-    assert!(body["sessions"][0]["evidence"].get("data").is_none());
+    assert!(
+        body["sessions"].as_array().unwrap().is_empty(),
+        "a router without upstream config lists no sessions"
+    );
 
     // Legacy alias still returns the dstack-vllm-proxy signature wrapper.
     let app = build_router(h.service.clone());
@@ -874,6 +1016,8 @@ async fn receipt_lookup_unknown_chat_id_returns_404() {
 
 fn upstream_runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes:
+            private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode: UpstreamVerifierMode::Preverified,
         accepted_subjects: vec![],
         accepted_image_digests: vec![],
@@ -883,18 +1027,13 @@ fn upstream_runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 30,
         verifier_request_timeout_seconds: 30,
+        privatemode_proxy: None,
     }
 }
 
-fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
-    // Unique per call: a coarse system clock can hand concurrent tests the same
-    // nanos, so an atomic counter guarantees distinct temp paths.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "pag-http-upstreams-{}-{}.json",
-        std::process::id(),
-        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-    ));
+fn setup_with_config(config_json: &str) -> (tempfile::TempDir, Arc<AciService>, Router) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     std::fs::write(&path, config_json).unwrap();
     let manager = Arc::new(UpstreamConfigManager::load(&path, upstream_runtime_options()).unwrap());
     let keys = Arc::new(StaticKeyProvider::default());
@@ -911,7 +1050,7 @@ fn setup_with_config(config_json: &str) -> (Arc<AciService>, Router) {
         .unwrap(),
     );
     let app = build_router_with_admin(service.clone(), manager, None);
-    (service, app)
+    (directory, service, app)
 }
 
 /// Records the query string and `Authorization` header the stub received.
@@ -986,7 +1125,7 @@ async fn attestation_report_extracts_nearai_nvidia_payload_by_model_name() {
     let config = format!(
         r#"[{{"name":"nearai-a","provider":"near-ai","base_url":"{base}","models":{{"near/glm":"zai-org/GLM-X"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
     let resp = app
         .oneshot(
             Request::builder()
@@ -1010,6 +1149,43 @@ async fn attestation_report_extracts_nearai_nvidia_payload_by_model_name() {
 }
 
 #[tokio::test]
+async fn attestation_report_omits_oversized_upstream_evidence_without_reading_body() {
+    let upstream = Router::new().route(
+        "/v1/attestation/report",
+        get(|| async {
+            Response::builder()
+                .header("content-length", 64 * 1024 * 1024 + 1)
+                .body(Body::from_stream(futures_util::stream::pending::<
+                    Result<Bytes, std::io::Error>,
+                >()))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let config = format!(
+        r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"http://{address}","models":{{"phala/gemma":"gemma-up"}}}}]"#
+    );
+    let (_directory, _svc, app) = setup_with_config(&config);
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), app.oneshot(
+        Request::builder()
+            .uri(format!("/v1/attestation/report?model=phala/gemma&nonce={TEST_NONCE}&signing_algo=ecdsa"))
+            .body(Body::empty()).unwrap()
+    )).await;
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    let response = response
+        .expect("reject oversized evidence from headers")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body_bytes(response.into_body()).await).unwrap();
+    let nvidia: Value = serde_json::from_str(body["nvidia_payload"].as_str().unwrap()).unwrap();
+    assert_eq!(nvidia["evidence_list"], serde_json::json!([]));
+    assert_eq!(nvidia["nonce"], TEST_NONCE);
+}
+
+#[tokio::test]
 async fn attestation_report_merges_upstream_nvidia_payload() {
     let nvidia_payload =
         r#"{"nonce":"x","evidence_list":[{"certificate":"c","evidence":"e"}],"arch":"HOPPER"}"#
@@ -1018,7 +1194,7 @@ async fn attestation_report_merges_upstream_nvidia_payload() {
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1072,7 +1248,7 @@ async fn attestation_report_plumbs_nvidia_payload_through_aci_service_upstream()
     let config = format!(
         r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1110,7 +1286,7 @@ async fn attestation_report_stops_aci_service_forwarding_at_depth_zero() {
     let config = format!(
         r#"[{{"name":"aci-2","provider":"aci-service","base_url":"{base}","models":{{"aci/model":"aci-up-model"}},"bearer_token":"tok","accepted_subjects":["app-id:0xtest"],"accepted_dstack_kms_root_public_keys":["0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"]}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1148,7 +1324,7 @@ async fn attestation_report_generates_nonce_and_merges_when_client_omits_nonce()
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1180,7 +1356,7 @@ async fn attestation_report_degrades_to_empty_nvidia_on_upstream_error() {
     let config = format!(
         r#"[{{"name":"phala-a","provider":"phala-direct","base_url":"{base}","models":{{"phala/gemma":"gemma-up"}},"bearer_token":"tok"}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1235,7 +1411,7 @@ async fn attestation_report_chutes_multi_instance_shape() {
     let config = format!(
         r#"[{{"name":"chutes-a","provider":"chutes","base_url":"{base}","models":{{"chutes/m":"m-up"}},"bearer_token":"tok","chutes_e2ee_api_base":"{base}","chutes_chute_ids":{{"m-up":"00000000-0000-0000-0000-0000000c1234"}}}}]"#
     );
-    let (_svc, app) = setup_with_config(&config);
+    let (_directory, _svc, app) = setup_with_config(&config);
 
     let resp = app
         .oneshot(
@@ -1516,6 +1692,14 @@ struct TimingOutStubUpstream;
 
 #[async_trait]
 impl UpstreamBackend for TimingOutStubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "stub-timeout-upstream"
     }
@@ -1568,4 +1752,201 @@ async fn direct_messages_timeout_is_an_anthropic_504() {
         .as_str()
         .unwrap_or("")
         .starts_with("req_"));
+}
+
+#[tokio::test]
+async fn configured_backend_publishes_receipt_before_terminal_then_pending_disconnect() {
+    configured_backend_terminal_receipt("text/event-stream", false).await;
+}
+
+#[tokio::test]
+async fn empty_content_type_uses_one_source_hash_writer_on_normal_and_early_streams() {
+    for early in [false, true] {
+        configured_backend_terminal_receipt("", early).await;
+    }
+}
+
+async fn configured_backend_terminal_receipt(content_type: &'static str, early: bool) {
+    use std::time::Duration;
+
+    use axum::routing::post;
+    use futures_util::StreamExt;
+    use private_ai_gateway::http::build_router_with_admin_and_middleware;
+    use private_ai_gateway::middleware::{
+        CacheSaltKey, Middleware, MiddlewareConfig, PrefixHashKey,
+    };
+    use serde_json::json;
+
+    const SOURCE: &[u8] = concat!(
+        "data: {\"id\":\"configured-terminal\",\"model\":\"upstream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5}}\n\n",
+        "data: [DONE]\n\n"
+    ).as_bytes();
+    let (sent, mut reports) = tokio::sync::mpsc::unbounded_channel();
+    let headers_ready = Arc::new(tokio::sync::Notify::new());
+    let upstream_headers = headers_ready.clone();
+    let fixture = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(move || {
+                let headers_ready = upstream_headers.clone();
+                async move {
+                    if early {
+                        headers_ready.notified().await;
+                    }
+                    (
+                        [("content-type", content_type)],
+                        Body::from_stream(
+                            futures_util::stream::once(async {
+                                Ok::<_, std::io::Error>(Bytes::from_static(SOURCE))
+                            })
+                            .chain(futures_util::stream::pending()),
+                        ),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/consult/pre",
+            post(|| async {
+                Json(json!({"allow":true,"candidates":[{"routeId":"fixture:public","format":"openai"}]}))
+            }),
+        )
+        .route(
+            "/consult/post",
+            post(move |Json(body): Json<Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(body).unwrap();
+                    StatusCode::OK
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, fixture).await.unwrap() });
+    let manager = common::session_config(json!([{
+        "name":"fixture", "provider":"openai-compatible",
+        "base_url":format!("http://{address}"), "models":{"public":"upstream"}
+    }]));
+    let service = Arc::new(
+        AciService::new(
+            Arc::new(StaticKeyProvider::default()),
+            Arc::new(StubQuoter::default()),
+            manager.backend(),
+            Arc::new(InMemoryReceiptStore::default()),
+            AciServiceConfig::for_test(),
+            Arc::new(FixedClock(1_700_000_000)),
+        )
+        .unwrap(),
+    );
+    let middleware = Arc::new(
+        Middleware::new(
+            PrefixHashKey::new([7; 32]),
+            CacheSaltKey::new([8; 32]),
+            &MiddlewareConfig {
+                control_url: format!("http://{address}"),
+                control_token: None,
+                control_timeout_ms: Some(2_000),
+                control_post_timeout_ms: Some(2_000),
+                sse_keepalive_ms: Some(if early { 1 } else { 0 }),
+                send_request_features: Some(false),
+                tee_only_domains: vec![],
+            },
+        )
+        .unwrap(),
+    );
+    let app = build_router_with_admin_and_middleware(service.clone(), manager, None, middleware);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer fixture-key")
+                .body(Body::from(
+                    r#"{"model":"public","messages":[],"stream":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let header_receipt_id = response
+        .headers()
+        .get("x-receipt-id")
+        .map(|value| value.to_str().unwrap().to_owned());
+    let mut body = response.into_body().into_data_stream();
+    let mut wire = Vec::new();
+    if early {
+        wire.extend_from_slice(&body.next().await.unwrap().unwrap());
+        assert_eq!(wire, b": PROCESSING\n\n");
+        headers_ready.notify_one();
+    }
+    while !wire.ends_with(b"data: [DONE]\n\n") {
+        wire.extend_from_slice(
+            &tokio::time::timeout(Duration::from_secs(2), body.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    // Early headers precede candidate selection and can have no reserved id.
+    let response_id = std::str::from_utf8(&wire)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find_map(|data| {
+            serde_json::from_str::<Value>(data)
+                .ok()
+                .and_then(|value| value["id"].as_str().map(str::to_owned))
+        })
+        .unwrap();
+    let receipt_id = service
+        .get_receipt_by_chat_id(&response_id)
+        .unwrap()
+        .receipt_id;
+    if let Some(header_receipt_id) = header_receipt_id {
+        assert_eq!(header_receipt_id, receipt_id);
+    }
+    // No EOF has arrived and the client never polls the body after the terminal.
+    let receipt = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/aci/receipts/{receipt_id}"))
+                .header("authorization", "Bearer fixture-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.status(), StatusCode::OK);
+    let document: Value = serde_json::from_slice(&body_bytes(receipt.into_body()).await).unwrap();
+    let events = document["event_log"].as_array().unwrap();
+    for (kind, bytes) in [
+        ("response.received", SOURCE),
+        ("response.returned", wire.as_slice()),
+    ] {
+        assert_eq!(
+            events.iter().find(|event| event["type"] == kind).unwrap()["body_hash"],
+            private_ai_gateway::aci::digest::sha256_hex(bytes),
+            "{kind}: content_type={content_type:?}, early={early}"
+        );
+    }
+    assert!(reports.try_recv().is_err());
+    drop(body);
+    let report = tokio::time::timeout(Duration::from_secs(2), reports.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report["status"], 200);
+    assert_eq!(report["selectedRouteId"], "fixture:public");
+    assert_eq!(
+        report["usage"],
+        json!({"prompt_tokens":2,"completion_tokens":3,"total_tokens":5})
+    );
+    assert!(reports.try_recv().is_err());
+    server.abort();
+    let _ = server.await;
 }

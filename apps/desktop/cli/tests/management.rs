@@ -48,6 +48,79 @@ fn legacy_aci_alias_output_matches_the_canonical_command() {
     }
 }
 
+#[test]
+fn completions_and_argument_errors_use_the_invoked_alias() {
+    #[cfg(unix)]
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["pap", "aci", "private-ai-proxy"] {
+        #[cfg(unix)]
+        let executable = {
+            let alias = directory.path().join(name);
+            std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_private-ai-proxy"), &alias).unwrap();
+            alias
+        };
+        #[cfg(not(unix))]
+        let executable = std::path::PathBuf::from(env!("CARGO_BIN_EXE_private-ai-proxy"));
+        for shell in ["bash", "zsh"] {
+            let mut command = std::process::Command::new(&executable);
+            command.args(["completions", shell]);
+            #[cfg(unix)]
+            command.env_remove(desktop_core::launch::ALIAS_ENV);
+            #[cfg(not(unix))]
+            command.env(desktop_core::launch::ALIAS_ENV, name);
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            let script = String::from_utf8(output.stdout).unwrap();
+            if shell == "bash" {
+                assert!(
+                    script
+                        .lines()
+                        .any(|line| line.trim().starts_with("complete -F ")
+                            && line.ends_with(&format!(" {name}"))),
+                    "{name}: missing bash registration"
+                );
+            } else {
+                assert!(
+                    script.contains(&format!("#compdef {name}\n")),
+                    "{name}: missing zsh registration"
+                );
+            }
+            assert!(script.contains("profiles"));
+            assert!(script.contains("verify"));
+        }
+        for value in [None, Some("dark")] {
+            for json in [false, true] {
+                let mut command = std::process::Command::new(&executable);
+                command.args(["settings", "set", "appearance", "--value-stdin"]);
+                command.args(value);
+                if json {
+                    command.arg("--json");
+                }
+                command.env(desktop_core::launch::ALIAS_ENV, name);
+                let output = command.output().unwrap();
+                assert_eq!(output.status.code(), Some(2), "{output:?}");
+                assert!(output.stdout.is_empty());
+                let stderr = String::from_utf8(output.stderr).unwrap();
+                let message = if json {
+                    let error: Value = serde_json::from_str(&stderr).unwrap();
+                    assert_eq!(error["error"]["code"], "invalid_arguments");
+                    error["error"]["message"].as_str().unwrap().to_string()
+                } else {
+                    stderr
+                };
+                assert!(
+                    message.starts_with("error: Only web-ui.password reads its value from stdin"),
+                    "{message}"
+                );
+                assert!(
+                    message.contains(&format!("Usage: {name} [OPTIONS] <COMMAND>")),
+                    "{message}"
+                );
+            }
+        }
+    }
+}
+
 const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
@@ -552,7 +625,17 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    backend.run(&["agents", "connect", "codex", "--yes"]);
+    // Protection is off: the connection is saved, and the command says the
+    // agent is not routed yet instead of reporting success.
+    let saved = backend
+        .command(&["agents", "connect", "codex", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert!(!saved.status.success());
+    assert!(
+        String::from_utf8_lossy(&[saved.stdout, saved.stderr].concat())
+            .contains("Saved, but not applied")
+    );
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);
     let before = backend.run(&["settings", "show"]);
@@ -577,7 +660,6 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_eq!(state["sessionActive"], false);
     assert_eq!(state["localApi"]["listenAddress"], "127.0.0.1");
     assert_eq!(state["localApi"]["port"], 4180);
-    assert_eq!(state["config"]["requireProductionOs"], true);
     assert_eq!(backend.run(&["token", "show", "--yes"]), key);
     assert_eq!(backend.run(&["profiles", "list"]), profiles);
     assert!(backend
@@ -791,6 +873,8 @@ fn shutdown_is_explicit_and_read_only_commands_do_not_restart_backend() {
     let competing: Value = serde_json::from_slice(&competing.stdout).unwrap();
     assert_eq!(started["instanceId"], competing["instanceId"]);
     assert!(started["processId"].as_u64().is_some());
+    let restarted = backend.run(&["service", "restart"]);
+    assert_ne!(restarted["instanceId"], started["instanceId"]);
     backend.run(&["service", "stop", "--yes"]);
 }
 

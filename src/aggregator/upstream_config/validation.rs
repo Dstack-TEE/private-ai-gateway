@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::aci::verifier::TinfoilProviderVerifier;
+
 use super::{
     ConfiguredUpstreams, UpstreamConfig, UpstreamConfigError, UpstreamConfigSnapshot,
     UpstreamProvider, UpstreamRuntimeOptions,
@@ -12,7 +14,7 @@ const DEFAULT_UPSTREAM_SESSION_REFRESH_SECONDS: u64 = 45;
 
 /// One configured model-endpoint to verify: the upstream's config `name`, the
 /// configured upstream `model_id`, and the endpoint origin. Drives both the
-/// verifier-cache prewarm and the attested-session writes.
+/// verifier-cache refresh and the attested-session writes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(super) struct UpstreamVerificationTarget {
     pub(super) upstream_name: String,
@@ -20,35 +22,26 @@ pub(super) struct UpstreamVerificationTarget {
     pub(super) url_origin: Option<String>,
 }
 
+impl UpstreamVerificationTarget {
+    pub(super) fn request(&self) -> crate::aggregator::service::UpstreamVerificationRequest {
+        crate::aggregator::service::UpstreamVerificationRequest {
+            upstream_name: self.upstream_name.clone(),
+            url_origin: self.url_origin.clone(),
+            model_id: self.model_id.clone(),
+            forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+            required: true,
+        }
+    }
+}
+
 pub(super) fn verification_targets(config: &[UpstreamConfig]) -> Vec<UpstreamVerificationTarget> {
-    verification_targets_for_configs(config.iter())
-}
-
-pub(super) fn verification_targets_for_refresh(
-    config: &[UpstreamConfig],
-    options: &UpstreamRuntimeOptions,
-) -> Vec<UpstreamVerificationTarget> {
-    verification_targets_for_configs(
-        config
-            .iter()
-            .filter(|cfg| verification_refresh_seconds(cfg, options).is_some()),
-    )
-}
-
-fn verification_targets_for_configs<'a>(
-    configs: impl Iterator<Item = &'a UpstreamConfig>,
-) -> Vec<UpstreamVerificationTarget> {
     let mut seen = HashSet::new();
     let mut targets = Vec::new();
-    for cfg in configs {
+    for cfg in config {
         let url_origin = Some(cfg.base_url.trim_end_matches('/').to_string());
-        // A router's attestation is of the gateway/enclave channel itself, which
-        // is identical for every model it fronts — every model resolves to the
-        // same channel-keyed verification. So probing a second model would only
-        // re-verify the same channel (a cache hit); we probe once with one
-        // representative model (`models` is a BTreeMap, so `.take(1)` is
-        // deterministic). Per-model / per-instance providers verify every model.
-        let model_ids: Vec<&String> = if cfg.provider.attestation_scope().is_per_router() {
+        // NEAR AI validates the selected model even though its evidence is
+        // router-scoped. Routers with shared verification use one model.
+        let model_ids: Vec<&String> = if cfg.provider.shares_verification_across_models() {
             cfg.models.values().take(1).collect()
         } else {
             cfg.models.values().collect()
@@ -74,12 +67,15 @@ pub(super) fn verification_refresh_seconds(
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
-        None => {
-            let cache_seconds = cfg
-                .verifier_cache_seconds
-                .unwrap_or(options.verifier_cache_seconds);
-            Some(cache_seconds.saturating_sub(60).max(1))
-        }
+        None => Some(
+            cfg.verifier_cache_seconds
+                .unwrap_or(options.verifier_cache_seconds)
+                .saturating_sub(
+                    cfg.verifier_request_timeout_seconds
+                        .unwrap_or(options.verifier_request_timeout_seconds),
+                )
+                .max(1),
+        ),
     }
 }
 
@@ -107,7 +103,7 @@ fn looks_like_uuid(value: &str) -> bool {
         && value.chars().all(|c| c == '-' || c.is_ascii_hexdigit())
 }
 
-fn valid_secret_ai_origin(value: &str) -> bool {
+fn valid_root_https_origin(value: &str) -> bool {
     let Ok(origin) = reqwest::Url::parse(value) else {
         return false;
     };
@@ -118,6 +114,26 @@ fn valid_secret_ai_origin(value: &str) -> bool {
         && origin.path() == "/"
         && origin.query().is_none()
         && origin.fragment().is_none()
+}
+
+/// `tdx-measurement:sha256:<64 lowercase hex>`, the pin format the armet-ai
+/// bridge derives from the verified MRTD, RTMR0-3 and TD launch configuration.
+pub(super) fn valid_tdx_measurement_subject(value: &str) -> bool {
+    value
+        .strip_prefix("tdx-measurement:sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// `tdx-boot-chain:sha256:<64 lowercase hex>`: SHA-256 over a dstack OS
+/// image's MRTD ‖ RTMR1 ‖ RTMR2, which a 0G provider's quote must match.
+fn valid_tdx_boot_chain_subject(value: &str) -> bool {
+    value
+        .strip_prefix("tdx-boot-chain:sha256:")
+        .is_some_and(|hex| {
+            hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
 }
 
 pub(super) fn snapshot_for(path: &Path, state: &ConfiguredUpstreams) -> UpstreamConfigSnapshot {
@@ -174,6 +190,32 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
                 upstream.name
             )));
         }
+        if upstream
+            .path
+            .as_deref()
+            .is_some_and(|path| path.trim_start_matches('/') == "v1/audio/transcriptions")
+            && matches!(
+                upstream.provider,
+                UpstreamProvider::Chutes
+                    | UpstreamProvider::ZeroGPrivateComputer
+                    | UpstreamProvider::Anthropic
+            )
+        {
+            return Err(UpstreamConfigError::InvalidConfig(
+                "this provider does not support audio transcriptions".into(),
+            ));
+        }
+        if upstream.streaming_usage.is_some()
+            && upstream
+                .path
+                .as_deref()
+                .is_some_and(|path| !crate::aci::upstream::supports_streaming_usage(path))
+        {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} streaming_usage requires an OpenAI chat/completions path",
+                upstream.name
+            )));
+        }
         if upstream.models.is_empty() {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} must route at least one public model",
@@ -181,12 +223,65 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
             )));
         }
         if upstream.provider == UpstreamProvider::SecretAi
-            && !valid_secret_ai_origin(&upstream.base_url)
+            && !valid_root_https_origin(&upstream.base_url)
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} provider secret-ai requires a root HTTPS base_url without userinfo, query, or fragment",
                 upstream.name
             )));
+        }
+        if upstream.provider == UpstreamProvider::Tinfoil {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            for pin in subjects.iter().filter_map(|subject| {
+                subject.strip_prefix(TinfoilProviderVerifier::RELEASE_SUBJECT_PREFIX)
+            }) {
+                if !pin.strip_prefix("sha256:").is_some_and(|hex| {
+                    hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                }) {
+                    return Err(UpstreamConfigError::InvalidConfig(format!(
+                        "upstream {:?} provider tinfoil accepted_subjects release pins must be tinfoil-release:sha256:<64 lowercase hex>",
+                        upstream.name
+                    )));
+                }
+            }
+        }
+        if upstream.provider == UpstreamProvider::ArmetAi {
+            if !valid_root_https_origin(&upstream.base_url) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai requires a root HTTPS base_url without userinfo, query, or fragment",
+                    upstream.name
+                )));
+            }
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if subjects.is_empty() {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai requires at least one accepted_subjects measurement pin",
+                    upstream.name
+                )));
+            }
+            if let Some(bad) = subjects.iter().find(|s| !valid_tdx_measurement_subject(s)) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider armet-ai accepted_subjects entry {bad:?} must be tdx-measurement:sha256:<64 lowercase hex>",
+                    upstream.name
+                )));
+            }
+        }
+        if upstream.provider == UpstreamProvider::PhalaDirect {
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if let Some(bad) = subjects.iter().find(|subject| {
+                subject.starts_with("dstack-compose:")
+                    && !subject
+                        .strip_prefix("dstack-compose:sha256:")
+                        .is_some_and(|hex| {
+                            hex.len() == 64
+                                && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                        })
+            }) {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider phala-direct accepted_subjects entry {bad:?} must be dstack-compose:sha256:<64 lowercase hex>",
+                    upstream.name
+                )));
+            }
         }
         if upstream.basic_auth {
             if upstream.bearer_token.is_none() {
@@ -278,6 +373,51 @@ pub(super) fn validate_config(config: &[UpstreamConfig]) -> Result<(), UpstreamC
         {
             return Err(UpstreamConfigError::InvalidConfig(format!(
                 "upstream {:?} has Chutes E2EE fields but provider is not chutes",
+                upstream.name
+            )));
+        }
+        // The private trust tier and the TargetSeparated rule are code, not config.
+        if upstream.provider == UpstreamProvider::ZeroGPrivateComputer {
+            let rpc_is_https = upstream
+                .zg_chain_rpc_url
+                .as_deref()
+                .and_then(|url| reqwest::Url::parse(url).ok())
+                .is_some_and(|url| url.scheme() == "https");
+            let contract_is_address = upstream.zg_serving_contract.as_deref().is_some_and(|v| {
+                v.len() == 42 && v.starts_with("0x") && hex::decode(&v[2..]).is_ok()
+            });
+            let subjects = upstream.accepted_subjects.as_deref().unwrap_or_default();
+            if !valid_root_https_origin(&upstream.base_url)
+                || subjects.is_empty()
+                || !subjects.iter().all(|s| valid_tdx_boot_chain_subject(s))
+                || upstream
+                    .bearer_token
+                    .as_deref()
+                    .is_none_or(|token| token.trim().is_empty())
+                || upstream.path.is_some()
+                || !rpc_is_https
+                || !contract_is_address
+            {
+                return Err(UpstreamConfigError::InvalidConfig(format!(
+                    "upstream {:?} provider 0g-private-computer requires the 0G router as a root HTTPS base_url, bearer_token, an HTTPS zg_chain_rpc_url, zg_serving_contract (0x + 40 hex) and accepted_subjects pins (tdx-boot-chain:sha256:<64 lowercase hex>), and forbids path",
+                    upstream.name
+                )));
+            }
+        } else if upstream.zg_chain_rpc_url.is_some() || upstream.zg_serving_contract.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} has 0G fields but provider is not 0g-private-computer",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.bearer_token.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids bearer_token; the measured proxy reads its credential from the shared Compose secret",
+                upstream.name
+            )));
+        }
+        if upstream.provider == UpstreamProvider::Privatemode && upstream.path.is_some() {
+            return Err(UpstreamConfigError::InvalidConfig(format!(
+                "upstream {:?} provider privatemode forbids path; the measured proxy backend pins encrypted handler paths",
                 upstream.name
             )));
         }

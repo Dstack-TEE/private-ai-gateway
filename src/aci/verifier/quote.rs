@@ -12,6 +12,8 @@ use serde_json::Value;
 pub(super) struct VerifiedQuote {
     /// The collateral's TCB status, for the caller to appraise (§8.3).
     pub status: String,
+    pub report: dcap_qvl::quote::Report,
+    pub advisory_ids: Vec<String>,
     pub tee_type: &'static str,
 }
 
@@ -50,6 +52,8 @@ pub(super) async fn verify_quote_to_root(
     }
     Ok(VerifiedQuote {
         status: verified.status,
+        report: verified.report,
+        advisory_ids: verified.advisory_ids,
         tee_type,
     })
 }

@@ -9,7 +9,7 @@ runs it nightly and before a stable release
 `run.sh` verifies the package against the release's `SHA256SUMS` and starts a
 fresh `ubuntu:24.04` container. There it installs the package, Node.js and
 each agent with the agent's official installer as an unprivileged user. It
-checks that every agent reports its pinned version, and runs each agent once
+checks that every agent reports its resolved version, and runs each agent once
 so that it creates the configuration folder Private AI Proxy detects. Once no
 process of that user is left running, `agents.test.mjs` (`node:test`) starts
 protection with a RedPill profile and checks, for each agent:
@@ -33,23 +33,48 @@ and runs `pap profiles use redpill-alt`, which restarts protection on a
 profile it cannot verify now. The phase must be `reconnecting` or
 `interrupted`, each agent's configuration must still point at the Local API,
 every agent token and the Local API client token must get 503
-`gateway_not_verified`, and no request may leave the device. Releases up to
-0.2.0-beta.11 withdraw agent tokens during an outage and answer 401 instead,
-so that check fails for them. After the network is reconnected, protection
-must be Protected again within three minutes, with the tokens accepted and a
-real reply through one agent. Finally, `pap stop` must restore every agent
-and revoke every token, and `pap service stop` must leave them restored.
+`gateway_not_verified`. Once it observes the failed verification, the test
+snapshots usage, sends those probes, and checks that no newly recorded request
+left the device; a failure lists each such request with its agent, time and
+status. Releases up to 0.2.0-beta.11 withdraw agent tokens during an outage
+and answer 401 instead, so that check fails for them. After the network is
+reconnected, protection must be Protected again within three minutes, with the
+tokens accepted and a real reply through one agent. Finally, `pap stop` must
+restore every agent and revoke every token, and `pap service stop` must leave
+them restored.
 
 When an agent's one-shot command times out or does not reply `PAP-OK`, the
 failure shows why: the last 40 lines of its stdout and stderr and its latest
-usage record since the prompt (HTTP status, verification and detail), with the
+new usage record for that reply (HTTP status, verification and detail), with the
 API key, agent tokens and anything shaped like a credential masked.
+
+The reply keeps its normal 240-second timeout. A timeout reports an unfinished
+upstream response, including the model and agent, only when the latest new
+usage record reached the service (`leftDevice: true`), returned HTTP 200 and
+still has verification pending (`null`). Before
+starting the reply, the test snapshots that agent's usage record IDs; older
+records are excluded even if they share the reply's timestamp. If that snapshot
+cannot be read, the failure keeps the usual timeout message and reports usage
+as unreadable. Upstream failures appear as `UPSTREAM` in the summary's reply
+column. No replies are retried.
+
+On failure, a run of at least 500 identical non-whitespace characters in either
+output stream adds an informational line with the character and full run
+length. Output content never stops the command or classifies an upstream
+failure: long base64 values, separators and progress bars can be legitimate.
 
 The output ends with one row per agent and the result of each phase.
 
+The version resolver and reply diagnostics have offline tests (no API key or
+Docker required):
+
+```sh
+node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
+```
+
 ## Run locally
 
-Requirements: Docker, `sha256sum`, and the GitHub CLI for release downloads.
+Requirements: Node.js 22+, Docker, `sha256sum`, and the GitHub CLI for release downloads.
 Nothing is built: the container is removed afterwards, and only the
 `ubuntu:24.04` image stays.
 
@@ -77,20 +102,35 @@ takes about 10 minutes and sends about a dozen tiny prompts.
 
 ## Versions
 
-`versions.env` pins Node.js and every agent, one line each, so a bump is a
-one-line change. `OPENCODE_VERSION` pins OpenCode 1 and `OPENCODE_V2_VERSION`
-OpenCode 2. `npm_config_before` freezes the npm dependencies the
-installers resolve; move it forward with any bump. Codex must stay on the
-baseline the app supports (`agent-bridge/resources/codex/manifest.json`).
-Hermes is pinned to a release tag and installed with that tag's own
-`scripts/install.sh`, since the current installer expects the current source
-tree; its Python dependencies come from the tag's hash-verified `uv.lock`.
+`versions.env` defaults Node.js, Bun and every agent to `latest`, one line
+each. Before starting the container, `run.sh` resolves each channel to an exact
+release from its installer's official source: npm's `dist-tags.latest`, Claude
+Code's native release channel, OpenCode 2's update API, GitHub's latest release
+for Bun and Hermes, and nodejs.org's release index for Node's 24.x line.
+`OPENCODE_VERSION` selects OpenCode 1 and `OPENCODE_V2_VERSION` OpenCode 2.
+Lookups retry network errors, HTTP 429 and 5xx up to three times, waiting
+one, two and four seconds; an exhausted lookup fails the run before installation.
+The versions under test appear at the start and in the final summary, including
+when installation fails. Installers still have to report those exact versions.
+The Codex catalog baseline (`agent-bridge/resources/codex/manifest.json`) is
+reviewed and refreshed separately; the test deliberately exercises the latest
+Codex against it.
+
+To reproduce a run, set exact versions in `versions.env` or override them in
+the environment, which takes precedence, for example
+`CODEX_VERSION=0.163.0 apps/desktop/e2e/run.sh --tag desktop-v0.6.1`.
+Hermes uses its release tag (for example `HERMES_VERSION=v0.22.2`) and that
+tag's own `scripts/install.sh`, since the current installer expects the current
+source tree. Its Python dependencies come from the tag's hash-verified
+`uv.lock`. npm transitive dependencies intentionally follow the current
+releases; there is no publish-date cutoff.
 Claude Code and OpenCode self-updates are off (`DISABLE_AUTOUPDATER`,
 `OPENCODE_DISABLE_AUTOUPDATE`), and so is DeepSeek Harness telemetry
 (`DSH_TELEMETRY_DISABLED`). DeepSeek Harness is installed from npm without its
 install scripts; its one-shot command is `dsh headless`. For dsh the reply step
 also checks the composed configuration with `--dump-config`: `acp` and the
-default model point at the Local API, DeepSeek web search is disabled, and the
+default model point at the Local API, the headless credential store is enabled,
+DeepSeek web search is disabled, and the
 shipped `acp` row still has only `provider` and `model`, the fields the
 connection replaces. It also replays the connected provider through a
 `--patch` overlay against a local recorder. That must receive no

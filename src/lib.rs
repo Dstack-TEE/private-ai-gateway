@@ -10,8 +10,9 @@
 pub mod aci;
 pub mod aggregator;
 pub mod dstack;
+pub mod endpoint;
 pub(crate) mod error_payload;
 pub mod http;
 pub mod middleware;
-pub(crate) mod sse_framing;
+pub(crate) mod sse;
 pub(crate) mod sse_protocol;

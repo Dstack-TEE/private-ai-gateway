@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
-import { Check, Copy } from "lucide-react";
-import { localApiExample, type ExampleLanguage } from "../lib/local-api-example";
+import { Fragment, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Check, Copy, ImageIcon, ListChecks, Mic, Type, type LucideIcon } from "lucide-react";
+import { exampleModels, localApiExample, type ExampleKind, type ExampleLanguage } from "../lib/local-api-example";
 import { useCopy } from "../hooks/use-copy";
 import { AppDialog, DoneFooter, type DialogControl } from "./app-dialog";
 import { IconButton } from "./controls";
@@ -8,35 +9,74 @@ import { Field, FieldError, FieldLabel } from "./ui/field";
 import { ChoiceSelect } from "./choice-select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { errorMessage } from "../lib/error-message";
-import { localEndpoint } from "../lib/format";
+import { localEndpoint, maskClientKey } from "../lib/format";
 import { useShell } from "../lib/shell";
 
+// The icons match the model modality icons on redpill.ai. They hide on narrow
+// windows, where the four labels need the room.
+const kinds: { value: ExampleKind; label: string; icon: LucideIcon }[] = [
+  { value: "chat", label: "Chat", icon: Type },
+  { value: "images", label: "Images", icon: ImageIcon },
+  { value: "transcription", label: "Transcription", icon: Mic },
+  { value: "decisions", label: "Decisions", icon: ListChecks },
+];
+
 export function LocalApiExamplesDialog(control: DialogControl) {
-  const { state, clientKey: apiKey } = useShell();
+  const { state, clientKey: apiKey, clientKeyVisible } = useShell();
   const endpoint = state.proxyUrl ?? localEndpoint(state.localApi);
-  const models = (state.catalog?.models ?? []).filter((model) => model.supportedEndpoints?.includes("/v1/chat/completions") ?? true);
+  const catalog = state.catalog?.models ?? [];
+  // Chat is always offered; the other kinds only when the catalog has a model for them.
+  const available = (entry: ExampleKind) => entry === "chat" || exampleModels(entry, catalog).length > 0;
+  const [tab, setTab] = useState<ExampleKind>("chat");
+  const kind = available(tab) ? tab : "chat";
+  const models = exampleModels(kind, catalog);
   const [language, setLanguage] = useState<ExampleLanguage>("javascript");
   const [selection, setSelection] = useState("");
   const model = models.some((entry) => entry.id === selection) ? selection : models[0]?.id ?? "";
-  const code = useMemo(() => {
+  // The copy has the key; the code shown hides it, as the Local API key does, until it is shown.
+  const examples = useMemo(() => {
     if (!endpoint || !apiKey) return undefined;
-    try { return localApiExample(language, endpoint, model || "MODEL_ID", apiKey); }
+    try {
+      const example = (key: string) => localApiExample(kind, language, endpoint, model || "MODEL_ID", key);
+      const copied = example(apiKey);
+      return { copied, shown: clientKeyVisible ? copied : example(maskClientKey(apiKey)) };
+    } catch { return undefined; }
+  }, [endpoint, kind, language, model, apiKey, clientKeyVisible]);
+  const code = examples?.copied;
+  // Loaded with the dialog; the code shows plain until it is ready, or if it fails.
+  const { data: highlight } = useQuery({
+    queryKey: ["example-highlighter"],
+    queryFn: () => import("../lib/example-highlighter").then((module) => module.createExampleHighlighter()),
+    staleTime: Infinity,
+    gcTime: Infinity,
+    retry: false,
+  });
+  const tokens = useMemo(() => {
+    if (!examples || !highlight) return undefined;
+    try { return highlight(examples.shown, language); }
     catch { return undefined; }
-  }, [endpoint, language, model, apiKey]);
+  }, [examples, highlight, language]);
   const { copy, copying, error, isCopied, status } = useCopy();
   return <AppDialog {...control} title="Local API examples" className="sm:max-w-3xl">
-    <Field>
-      <FieldLabel htmlFor="example-model">Model</FieldLabel>
-      <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}
-        options={models.length ? models.map((entry) => ({ value: entry.id, label: entry.name || entry.id })) : [{ value: "", label: "No verified models" }]} />
-    </Field>
-    <Tabs value={language} className="min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
-      <div className="flex items-center justify-between gap-2">
-        <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
-        <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
-      </div>
-      <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
-        <pre className="p-4 text-xs leading-relaxed"><code>{code ?? "Local API example unavailable."}</code></pre>
+    <Tabs value={kind} className="min-h-0 flex-1 gap-4" onValueChange={(value) => { const entry = kinds.find((entry) => entry.value === value); if (entry) setTab(entry.value); }}>
+      <TabsList aria-label="Example" className="w-full">{kinds.map((entry) => <TabsTrigger key={entry.value} value={entry.value} disabled={!available(entry.value)}><entry.icon className="max-sm:hidden" aria-hidden />{entry.label}</TabsTrigger>)}</TabsList>
+      <TabsContent value={kind} className="flex min-h-0 flex-col gap-4">
+        <Field>
+          <FieldLabel htmlFor="example-model">Model</FieldLabel>
+          <ChoiceSelect id="example-model" label="Model" className="w-full" value={model} disabled={models.length === 0} onChange={setSelection}
+            options={models.length ? models.map((entry) => ({ value: entry.id, label: entry.name || entry.id })) : [{ value: "", label: "No verified models" }]} />
+        </Field>
+        <Tabs value={language} className="min-h-0 flex-1" onValueChange={(value) => { if (value === "curl" || value === "python" || value === "javascript") setLanguage(value); }}>
+          <div className="flex items-center justify-between gap-2">
+            <TabsList aria-label="Code language"><TabsTrigger value="javascript">JavaScript</TabsTrigger><TabsTrigger value="python">Python</TabsTrigger><TabsTrigger value="curl">cURL</TabsTrigger></TabsList>
+            <IconButton label="Copy example" disabled={!code || copying} onClick={() => { if (code) copy("Example", code, true); }}>{isCopied(code) ? <Check /> : <Copy />}</IconButton>
+          </div>
+          <TabsContent value={language} className="min-h-0 overflow-auto rounded-2xl border bg-muted/50">
+            <pre className="select-text p-4 text-xs leading-relaxed"><code>{tokens
+              ? tokens.map((line, index) => <Fragment key={index}>{index > 0 && "\n"}{line.map((token) => <span key={token.offset} className="text-(--shiki-light) dark:text-(--shiki-dark)" style={token.htmlStyle}>{token.content}</span>)}</Fragment>)
+              : examples?.shown ?? "Local API example unavailable."}</code></pre>
+          </TabsContent>
+        </Tabs>
       </TabsContent>
     </Tabs>
     <FieldError>{apiKey ? (error ? `Could not copy the example. ${errorMessage(error)}` : undefined) : "The Local API key is unavailable."}</FieldError>

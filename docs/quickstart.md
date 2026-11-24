@@ -1,22 +1,23 @@
-# ACI Quickstart
+# ACI quickstart
 
 Verify a live ACI deployment yourself. The commands below run against
 `https://tee.redpill.ai`, a live deployment of the reference implementation
 that enforces TEE-only routing. Point `ACI_URL` at any ACI service to verify
 that instead.
 
-You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy from npm
-and select the service:
+You need `pap`, `curl`, `jq`, and `openssl`. Install Private AI Proxy with the
+native installer (macOS and Linux) and select the service:
 
 ```bash
-npm install --global private-ai-proxy
+curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh
 pap --help
 export ACI_URL=https://tee.redpill.ai
 ```
 
-`pap curl` and the custody flags need 0.2.0 or later.
-`private-ai-proxy` is the full name of the same command. For Homebrew, native
-installers, and install scripts, see the [install guide](private-ai-proxy-install.md).
+If `pap` is not found, add `$HOME/.local/bin` to `PATH`. `pap curl` and the
+custody flags need 0.2.0 or later.
+`private-ai-proxy` is the full name of the same command. For Windows, Homebrew, npm,
+and the desktop app, see the [install guide](private-ai-proxy-install.md).
 From a source checkout, replace each `pap` command below with
 `cargo run --manifest-path apps/desktop/Cargo.toml --bin private-ai-proxy --`.
 
@@ -94,10 +95,10 @@ for that app. It does not cover the TLS private key. That key stays inside the
 TEE only if the compose you reviewed runs the TLS terminator and keeps its key
 there.
 
-`--require-production-os` also requires the RTMR3 `os-image-hash` to be on the
-CLI's allowlist of reviewed production images. It does not replace a dstack
-verifier run; see
-[Build a verifier policy](attested-confidential-inference.md#build-a-verifier-policy).
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
 ## 2. Send a familiar API request over the verified channel
 
@@ -268,12 +269,15 @@ receipts are bound to the credential that made the request
 
 ```text
 PASS  receipt-1    document signature (JCS, minus signature member) under attested receipt key [9.3(1)]
-PASS  receipt-2    document workload_keyset_digest matches established digest [9.3(2)]
+PASS  receipt-2    document workload_keyset_digest matches established digest [9.3(2)] — payload workload_keyset_digest matches the established keyset valid at served_at
 PASS  receipt-3    request.received body_hash matches sent bytes [9.3(3)]
 PASS  receipt-4    response.returned body_hash matches received wire bytes [9.3(4)]
 PASS  upstream-1   upstream.verified result is verified and cites a session [9.3(5)]
-PASS  upstream-2   session deep audit: document hashes to cited id, served_at in window, evidence digest [9.2(1-2), 9.3(6)]
+PASS  upstream-2   cited session: document hashes to the id, served_at in window, evidence digest [9.2(1-2), 9.3(6)] — session 95ad1cb4dd25445808c2e9d116caf420b05703730b506395e8fc1ca6faeae28f: document hashes to the cited id; receipt served_at inside the validity window; evidence data hashes to its digest; claims: gpu_attested=unknown, model_weights_provenance=unknown, os_known_good=unknown, serving_software_known_good=unknown, tcb_up_to_date=unknown, tee_attested=asserted(hardware_proven)
 ```
+
+`upstream-2` checks session integrity and applies any `--require-claim` policy.
+Provider-specific deep audit is a separate step ([aci.md](../spec/aci.md) §9.2(4)).
 
 If the service rewrote the request before inference, an `INFO receipt-note` line
 reports the differing `request.forwarded` hash; whether a rewrite is

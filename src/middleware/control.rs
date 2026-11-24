@@ -131,12 +131,13 @@ impl ControlClient {
     }
 
     /// Pre-request consult:
-    /// `{ apiKeyHash?, model?, provider? }` -> decision.
+    /// `{ endpoint, apiKeyHash?, model?, provider? }` -> decision.
     /// Fails closed — any non-200, invalid JSON, timeout, or transport error
     /// returns a 503 denial.
     pub(super) async fn consult_pre(
         &self,
         model: Option<&str>,
+        endpoint: &str,
         api_key_hash: Option<&str>,
         provider: Option<&Value>,
         tee_only: bool,
@@ -145,6 +146,7 @@ impl ControlClient {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Body<'a> {
+            endpoint: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             api_key_hash: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,6 +169,7 @@ impl ControlClient {
         }
 
         let body = Body {
+            endpoint,
             api_key_hash,
             model,
             provider,
@@ -233,10 +236,23 @@ impl ControlClient {
     /// Fetch a model catalog from the control plane and relay it verbatim.
     /// Bounded by the consult timeout so a hung control plane cannot stall a
     /// catalog request.
-    pub async fn catalog_get(&self, path: &str) -> Result<CatalogResponse, ControlError> {
+    ///
+    /// `api_key_hash` is the hash of the caller's key when the request carried
+    /// one, sent as `x-api-key-hash`: the same hash a consult carries, and the
+    /// only thing about the caller that leaves the gateway.
+    pub async fn catalog_get(
+        &self,
+        path: &str,
+        api_key_hash: Option<&str>,
+    ) -> Result<CatalogResponse, ControlError> {
         let build = || {
-            self.authorize(self.client.get(self.url(path)))
-                .timeout(self.pre_timeout)
+            let request = self
+                .authorize(self.client.get(self.url(path)))
+                .timeout(self.pre_timeout);
+            match api_key_hash {
+                Some(hash) => request.header("x-api-key-hash", hash),
+                None => request,
+            }
         };
         let response = self
             .send_idempotent(build)
@@ -308,7 +324,9 @@ mod tests {
         // Port 1 is unroutable in practice; the request fails fast within the
         // configured timeout and must deny.
         let client = ControlClient::new(&config("http://127.0.0.1:1")).unwrap();
-        let consult = client.consult_pre(Some("m"), None, None, false, None).await;
+        let consult = client
+            .consult_pre(Some("m"), "/v1/chat/completions", None, None, false, None)
+            .await;
         assert!(!consult.allow);
         assert_eq!(consult.status, Some(503));
         assert_eq!(

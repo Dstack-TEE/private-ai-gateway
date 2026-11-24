@@ -12,7 +12,7 @@ export interface UiTransport {
 
 /** What the shell or the browser does itself, without a UI method. */
 export type UiPlatform = Pick<DesktopApi, "showEditMenu" | "getAppVersion" | "setUpdateChannel" | "prepareUpdate" | "restartToUpdate"
-  | "getCliRegistration" | "setCliRegistration" | "stopAllAndQuit" | "onNavigate" | "closeWindow" | "quit" | "copyText"
+  | "getCliRegistration" | "setCliRegistration" | "stopAllAndQuit" | "onNavigate" | "onCheckForUpdates" | "closeWindow" | "quit" | "copyText"
   | "selectProfileBackup" | "saveProfileExport" | "saveDiagnosticsExport" | "requestNotificationPermission"
   | "openNotificationSettings" | "openAboutLink" | "openWebUi" | "openAgentWebsite" | "openApiKeyPage" | "openOrganization" | "openTopUp"> & {
   /** Shows the page an account sign-in continues on. */
@@ -23,6 +23,8 @@ export type UiPlatform = Pick<DesktopApi, "showEditMenu" | "getAppVersion" | "se
 export interface WebSession {
   /** Whether this browser has a live session; starts the event stream when it does. */
   check(): Promise<boolean>;
+  /** Whether this page confirmed a session that has not ended since; asks nothing, so it never fails. */
+  active(): boolean;
   /** Exchanges the web UI password for an `HttpOnly` session cookie. */
   signIn(password: string): Promise<void>;
   signOut(): Promise<void>;
@@ -72,16 +74,14 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
     onAgentsChange: (listener) => subscribe(AGENTS_CHANGED_EVENT, listener),
     onClientKeyChange: (listener) => subscribe(CLIENT_KEY_CHANGED_EVENT, listener),
     start: (config) => call("start", { config }),
-    setRequireProductionOs: (required) => call("set_require_production_os", { required }),
-    saveConfiguration: (profile, requireProductionOs, key) => call("save_configuration", { profile, requireProductionOs, key }),
-    completeAccountLogin: (id, callbackUrl) => call("complete_account_login", { id, callbackUrl }),
+    saveConfiguration: (profile, key) => call("save_configuration", { profile, key }),
     beginAccountLogin: async (profile) => {
       const login = await call("begin_account_login", { profile });
       presentAccountLogin(login);
       return login;
     },
     pollAccountLogin: (id) => call("poll_account_login", { id }),
-    saveAccountLogin: (id, profile, requireProductionOs, workspaceId) => call("save_account_login", { id, profile, requireProductionOs, workspaceId }),
+    saveAccountLogin: (id, profile, workspaceId) => call("save_account_login", { id, profile, workspaceId }),
     getAccountDetails: (profileId) => call("get_account_details", { profileId }),
     getAccountBalance: (target) => call("get_account_balance", { target }),
     cancelAccountLogin: (id) => call("cancel_account_login", { id }),

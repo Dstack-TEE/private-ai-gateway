@@ -1,14 +1,14 @@
 use super::*;
+use crate::verifier_session::Reverified;
 
 impl DesktopRuntime {
     pub async fn save_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     ) -> Result<AppState, Error> {
         let saved = self
-            .persist_configuration(profile, require_production_os, key, None, false)
+            .persist_configuration(profile, key, None, false)
             .await?;
         self.finish_configuration(saved)
     }
@@ -16,12 +16,9 @@ impl DesktopRuntime {
     pub async fn verify_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
     ) -> Result<AppState, Error> {
-        let saved = self
-            .persist_configuration(profile, require_production_os, key, None, true)
-            .await?;
+        let saved = self.persist_configuration(profile, key, None, true).await?;
         self.finish_configuration(saved)
     }
 
@@ -39,7 +36,6 @@ impl DesktopRuntime {
     pub(super) async fn persist_configuration(
         self: &Arc<Self>,
         profile: ConfidentialProfileInput,
-        require_production_os: bool,
         key: Option<String>,
         auth: Option<desktop_core::contracts::ProfileAuth>,
         verify: bool,
@@ -89,9 +85,42 @@ impl DesktopRuntime {
         };
         let config = StartConfig {
             remote_url: candidate.remote_url.clone(),
-            require_production_os,
         };
 
+        // The profile that is protecting, unchanged, is attested where it
+        // runs: stopping it to verify it would only cut its requests. The
+        // verifier owns the session's state throughout; only the time of a
+        // successful attestation is saved.
+        if verify && !profile_changed && !replace_key && initial.active_profile_id == id {
+            match self.manager.verify_running().await {
+                Reverified::NotProtecting => {}
+                Reverified::Kept => {
+                    candidate.verified_at = Some(desktop_core::now_secs());
+                    self.update_config(|settings| {
+                        settings.upsert(id.clone(), candidate)?;
+                        Ok(())
+                    })?;
+                    self.publish_profiles()?;
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    });
+                }
+                Reverified::Changed => {
+                    return Ok(SavedConfiguration {
+                        config,
+                        reconnect: false,
+                        _operation,
+                    })
+                }
+                Reverified::Failed(reason) => {
+                    return Err(Error::invalid_state(format!(
+                        "The service did not verify again: {reason}. Protection is retried automatically."
+                    )))
+                }
+            }
+        }
         if reconnect {
             self.pause_protection()?;
         }
@@ -172,7 +201,6 @@ impl DesktopRuntime {
         let saved = self.update_config(|settings| {
             settings.upsert(id.clone(), candidate)?;
             settings.active_profile = id.clone();
-            settings.require_production_os = require_production_os;
             Ok(())
         });
         if let Err(error) = saved {

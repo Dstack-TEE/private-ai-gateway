@@ -1,4 +1,4 @@
-# Router-Mode Review: Load Balancing, Routing, and Cache Locality
+# Router-mode review: load balancing, routing, and cache locality
 
 > [!NOTE]
 > This is a point-in-time audit dated 2026-05-18. Provider routing and cache
@@ -42,7 +42,7 @@ returning `gateway_attestation.vpc.vpc_hostname = "cloud-api-prod-mhxybla8.dstac
 and `info.app_id` consistent with a dstack-launched build of that crate.
 
 There is no separately maintained gateway source. The earlier hypothesis in
-`docs/router-mode-provider-review.md` that "we still need to confirm the exact
+`docs/reviews/router-mode-provider-review.md` that "we still need to confirm the exact
 source and provenance story for the gateway" is partially closed: source is
 `nearai/cloud-api`; release-tag-to-attestation provenance is *not* yet pinned
 in our adapter and is out of scope here (covered in the soundness note).
@@ -445,3 +445,7 @@ should weigh them.
 - "NEAR retries exactly once on connection/fingerprint error and never on
   request timeout" - high confidence from the explicit comments and the
   send-closure structure.
+- These findings concern the providers' own routers and prompt caches. They
+  do not conflict with the gateway's cache-affinity key (`prefixHash` in the
+  control plane contract), which steers the gateway's choice *between* upstreams and
+  claims nothing about cache behaviour inside any of them.

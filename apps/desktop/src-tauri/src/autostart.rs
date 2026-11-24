@@ -21,6 +21,9 @@ mod platform {
 
     pub struct ManagerState(AutoLaunch);
 
+    /// Registers the login item manager. Without it, as when the executable's
+    /// path cannot be read or written in a login entry, the app still starts
+    /// and Open at Login reports itself unavailable.
     pub fn setup(app: &AppHandle) -> Result<(), auto_launch::Error> {
         app.manage(ManagerState(build(
             app.package_info().name.as_str(),
@@ -32,7 +35,7 @@ mod platform {
     pub fn is_enabled(app: &AppHandle) -> Result<bool, String> {
         #[cfg(target_os = "linux")]
         validate_linux_home(app)?;
-        app.state::<ManagerState>()
+        manager(app)?
             .0
             .is_enabled()
             .map_err(|error| error.to_string())
@@ -41,13 +44,18 @@ mod platform {
     pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         validate_linux_home(app)?;
-        let manager = app.state::<ManagerState>();
+        let manager = manager(app)?;
         if enabled {
             manager.0.enable()
         } else {
             manager.0.disable()
         }
         .map_err(|error| error.to_string())
+    }
+
+    fn manager(app: &AppHandle) -> Result<tauri::State<'_, ManagerState>, String> {
+        app.try_state()
+            .ok_or_else(|| "Open at Login is unavailable for this installation".into())
     }
 
     pub fn launched_at_login() -> bool {

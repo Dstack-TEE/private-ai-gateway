@@ -6,8 +6,8 @@ use super::*;
 use crate::checks::{parse_receipt_document, run_response_checks, UpstreamContext};
 use crate::client::host_of;
 use crate::spec_fixtures::{
-    vector_receipt_envelope, vector_report, vector_session_bytes, REQUEST_BODY, RESPONSE_BODY,
-    SERVED_AT,
+    vector_receipt_envelope, vector_report, vector_session_bytes, KEYSET_NOT_AFTER, REQUEST_BODY,
+    RESPONSE_BODY, SERVED_AT,
 };
 use crate::transcript::Transcript;
 use agent_bridge::proxy::ProxyEvent;
@@ -15,6 +15,59 @@ use axum::routing::{get, post};
 use axum::Json;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::sync::mpsc;
+
+const AUDIO_PATH: &str = "/v1/audio/transcriptions";
+const AUDIO_CONTENT_TYPE: &str = "multipart/form-data; boundary=audio-test";
+
+fn audio_body(part: &str) -> Bytes {
+    let mut body = format!("--audio-test\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nm\r\n--audio-test\r\nContent-Disposition: form-data; name=\"{part}\"; filename=\"provider.wav\"\r\nContent-Type: audio/wav\r\n\r\n").into_bytes();
+    body.extend_from_slice(&[0, 255, 13, 10]);
+    body.extend_from_slice(b"--audio-test--\r\n");
+    body.into()
+}
+
+fn audio_receipt(body: &[u8]) -> Value {
+    use ed25519_dalek::Signer;
+    let mut receipt = vector_receipt_envelope();
+    for event in receipt["event_log"].as_array_mut().unwrap() {
+        if event["type"] == "request.received" || event["type"] == "request.forwarded" {
+            event["body_hash"] = json!(BodyDigest::of(body).sha256);
+        }
+    }
+    let signing_input = crate::aci::receipt::receipt_signing_input(&receipt).unwrap();
+    receipt["signature"] = json!(hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+            .sign(&signing_input)
+            .to_bytes()
+    ));
+    receipt
+}
+
+fn with_receipt_routes(router: Router, receipt: Value) -> Router {
+    router
+        .route(
+            "/v1/aci/receipts/{id}",
+            get(move || {
+                let receipt = receipt.clone();
+                async move { Json(receipt) }
+            }),
+        )
+        .route(
+            "/v1/aci/sessions/{id}",
+            get(|| async {
+                (
+                    [("content-type", "application/json")],
+                    vector_session_bytes(),
+                )
+            }),
+        )
+}
+
+fn enable_multipart(state: &ProxyState) {
+    Arc::make_mut(&mut state.trusted.lock().unwrap().current.report)
+        .service_capabilities
+        .supported_multipart_constraint_endpoints = vec![AUDIO_PATH.into()];
+}
 
 /// The one-line summary over the self-consistent fixtures, without any
 /// network: signature, wire hash, and the asserted upstream claim.
@@ -49,7 +102,7 @@ fn summary_over_fixtures_reads_all_ok() {
         "signature ok, wire hash ok, upstream tee_attested asserted (hardware_proven)"
     );
 
-    // A failed deep audit is named first, and the upstream is not presented
+    // A failed session audit is named first, and the upstream is not presented
     // as verified.
     let upstream_2 = transcript
         .checks
@@ -94,23 +147,18 @@ async fn blocked_after_entry_checks_delivers_nothing() {
     let base = spawn_server(upstream).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(base, tx);
-    let reached = Arc::new(tokio::sync::Notify::new());
-    let resume = Arc::new(tokio::sync::Notify::new());
-    *state.pause.lock().unwrap() = Some((reached.clone(), resume.clone()));
-    let proxy = spawn_server(build_proxy_router(state.clone())).await;
-    let request = tokio::spawn(async move {
-        reqwest::Client::new()
-            .post(format!("{proxy}/v1/chat/completions"))
-            .header("content-type", "application/json")
-            .body(r#"{"model":"m","messages":[]}"#)
-            .send()
-            .await
-            .unwrap()
-    });
-    reached.notified().await;
+    state.ensure_unblocked().await.unwrap();
+    let admitted = state.snapshot();
     state.snapshot().delivery.cancel();
-    resume.notify_one();
-    let response = request.await.unwrap();
+    let response = proxy_inference(
+        state,
+        admitted,
+        "/v1/chat/completions".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::from_static(br#"{"model":"m","messages":[]}"#),
+        None,
+    )
+    .await;
     assert_eq!(response.status().as_u16(), 503);
     assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -131,23 +179,18 @@ async fn managed_shutdown_revokes_request_before_send() {
     let base = spawn_server(upstream).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(base, tx);
-    let reached = Arc::new(tokio::sync::Notify::new());
-    let resume = Arc::new(tokio::sync::Notify::new());
-    *state.pause.lock().unwrap() = Some((reached.clone(), resume.clone()));
-    let proxy = spawn_server(build_proxy_router(state.clone())).await;
-    let request = tokio::spawn(async move {
-        reqwest::Client::new()
-            .post(format!("{proxy}/v1/chat/completions"))
-            .header("content-type", "application/json")
-            .body(r#"{"model":"m","messages":[]}"#)
-            .send()
-            .await
-            .unwrap()
-    });
-    reached.notified().await;
+    state.ensure_unblocked().await.unwrap();
+    let admitted = state.snapshot();
     state.shutdown.cancel();
-    resume.notify_one();
-    let response = request.await.unwrap();
+    let response = proxy_inference(
+        state,
+        admitted,
+        "/v1/chat/completions".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::from_static(br#"{"model":"m","messages":[]}"#),
+        None,
+    )
+    .await;
     assert_eq!(response.status().as_u16(), 503);
     assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
@@ -268,11 +311,9 @@ async fn keyset_change_and_verification_failure_have_distinct_events() {
     rotation_gate(&state, &state.snapshot(), &headers);
     // A second response under the already-blocked identity reports nothing.
     rotation_gate(&state, &state.snapshot(), &headers);
-    assert!(previous.is_cancelled());
-    assert!(matches!(
-        received.recv().await.unwrap(),
-        VerifierEvent::Blocked { code: Some(code), .. } if code == "keyset_changed"
-    ));
+    assert!(!previous.is_cancelled());
+    assert!(state.is_blocked());
+    assert!(received.try_recv().is_err());
     let proxy = spawn_server(build_proxy_router(state)).await;
     let response = reqwest::Client::new()
         .get(format!("{proxy}/v1/models"))
@@ -326,9 +367,9 @@ async fn a_rotation_observed_under_a_replaced_identity_is_ignored() {
     headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
     rotation_gate(&state, &observed, &headers);
 
-    assert!(observed.delivery.is_cancelled());
+    assert!(!observed.delivery.is_cancelled());
+    assert!(state.is_blocked());
     assert!(blocked_codes(&mut events).is_empty());
-    assert_forwards_without_reverification(&state).await;
 }
 
 /// The expiry path: a request observes the old identity expired, another
@@ -341,7 +382,10 @@ async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_success
     let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
     let (tx, _rx) = mpsc::unbounded_channel();
     let state = state_over(upstream, tx);
-    state.trusted.lock().unwrap().not_after = 0;
+    Arc::get_mut(&mut state.trusted.lock().unwrap().current.identity)
+        .unwrap()
+        .keyset
+        .not_after = 0;
     let expired = state.snapshot();
     adopt_fixture_identity(&state);
 
@@ -356,7 +400,7 @@ async fn an_expiry_observed_under_a_replaced_identity_does_not_block_its_success
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(expired.delivery.is_cancelled());
+    assert!(!expired.delivery.is_cancelled());
     assert_forwards_without_reverification(&state).await;
 }
 
@@ -397,7 +441,6 @@ fn state_over(base_url: String, tx: mpsc::UnboundedSender<RequestOutcome>) -> Ar
         host,
         false,
         VerifierPolicy::default(),
-        false,
         Vec::new(),
         Vec::new(),
         vector_report(),
@@ -431,6 +474,7 @@ async fn client_cancelled_stream_is_not_a_failed_proof() {
         response: BodyDigest::of(b"data: partial\n\n"),
         delivery: ResponseDelivery::Cancelled,
         pinned_sessions: Vec::new(),
+        requires_verified: false,
         at: 1,
         verified: None,
         context: None,
@@ -489,6 +533,7 @@ async fn audits_past_the_concurrency_limit_wait_instead_of_being_skipped() {
         response: BodyDigest::of(RESPONSE_BODY),
         delivery: ResponseDelivery::Complete,
         pinned_sessions: Vec::new(),
+        requires_verified: false,
         at: 1,
         verified: None,
         context: None,
@@ -535,6 +580,7 @@ async fn standalone_control_lists_and_retries_recorded_exchanges() {
         response: BodyDigest::of(b"partial"),
         delivery: ResponseDelivery::Cancelled,
         pinned_sessions: Vec::new(),
+        requires_verified: false,
         at: 17,
         verified: None,
         context: None,
@@ -591,6 +637,7 @@ async fn an_oversized_receipt_is_refused_once_and_not_kept() {
         response: BodyDigest::of(RESPONSE_BODY),
         delivery: ResponseDelivery::Complete,
         pinned_sessions: Vec::new(),
+        requires_verified: false,
         at: 1,
         verified: None,
         context: None,
@@ -655,6 +702,7 @@ async fn transient_receipt_and_session_fetches_are_retried() {
         response: BodyDigest::of(RESPONSE_BODY),
         delivery: ResponseDelivery::Complete,
         pinned_sessions: Vec::new(),
+        requires_verified: false,
         at: 1,
         verified: None,
         context: None,
@@ -672,10 +720,31 @@ async fn transient_receipt_and_session_fetches_are_retried() {
     assert_eq!(session_calls.load(Ordering::SeqCst), 2);
 }
 
-#[test]
-fn apply_constraints_tightens_plaintext_body() {
+async fn apply_constraints(
+    body: Vec<u8>,
+    enforce_verified: bool,
+    pins: &[String],
+) -> Result<Vec<u8>, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", "application/json".parse().unwrap());
+    prepare_request(
+        body.into(),
+        &headers,
+        "/v1/chat/completions",
+        enforce_verified,
+        pins,
+        &Default::default(),
+    )
+    .await
+    .map(|prepared| prepared.body.to_vec())
+}
+
+#[tokio::test]
+async fn apply_constraints_tightens_plaintext_body() {
     // Plain body: the member is added.
-    let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[]).unwrap();
+    let out = apply_constraints(br#"{"model":"m","messages":[]}"#.to_vec(), true, &[])
+        .await
+        .unwrap();
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["provider"]["aci_verified"], true);
     assert_eq!(v["provider"].get("aci_session_ids"), None);
@@ -686,6 +755,7 @@ fn apply_constraints_tightens_plaintext_body() {
         true,
         &[],
     )
+    .await
     .unwrap();
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["provider"]["aci_verified"], true);
@@ -693,9 +763,18 @@ fn apply_constraints_tightens_plaintext_body() {
 
     // A pin set is injected — and implies verified serving.
     let pins = vec!["a".repeat(64)];
-    let out = apply_constraints(br#"{"model":"m"}"#.to_vec(), false, &pins).unwrap();
+    let out = apply_constraints(br#"{"model":"m"}"#.to_vec(), false, &pins)
+        .await
+        .unwrap();
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["provider"]["aci_session_ids"][0], pins[0]);
+    assert_eq!(v["provider"]["aci_verified"], true);
+
+    // A null provider has the same gateway semantics as an absent provider.
+    let out = apply_constraints(br#"{"model":"m","provider":null}"#.to_vec(), true, &[])
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["provider"]["aci_verified"], true);
 
     // The client's own narrower set survives when local policy accepts it.
@@ -704,6 +783,7 @@ fn apply_constraints_tightens_plaintext_body() {
         true,
         &pins,
     )
+    .await
     .unwrap();
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["provider"]["aci_session_ids"], json!(pins));
@@ -712,13 +792,111 @@ fn apply_constraints_tightens_plaintext_body() {
     let disjoint = json!({
         "provider": { "aci_session_ids": ["b".repeat(64)] }
     });
-    assert!(apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,).is_err());
-
-    // Non-JSON bodies pass through untouched.
-    assert_eq!(
-        apply_constraints(b"not json".to_vec(), true, &[]).unwrap(),
-        b"not json"
+    assert!(
+        apply_constraints(serde_json::to_vec(&disjoint).unwrap(), true, &pins,)
+            .await
+            .is_err()
     );
+}
+
+#[tokio::test]
+async fn local_policy_applied_only_when_constraints_are_tightened() {
+    let accepted = "a".repeat(64);
+    let other = "b".repeat(64);
+    for (provider, enforce_verified, pins, expected) in [
+        // Caller pins already imply verification; normalization is not local policy.
+        (
+            json!({"aci_session_ids": [accepted, accepted]}),
+            false,
+            vec![],
+            false,
+        ),
+        (
+            json!({"aci_session_ids": [accepted]}),
+            true,
+            vec![accepted.clone(), other.clone()],
+            false,
+        ),
+        (json!({"aci_verified": true}), true, vec![], false),
+        // Local policy adds verification, adds pins, or narrows the caller's pins.
+        (json!({}), true, vec![], true),
+        (json!({"aci_verified": false}), true, vec![], true),
+        (
+            json!({"aci_verified": true}),
+            false,
+            vec![accepted.clone()],
+            true,
+        ),
+        (
+            json!({"aci_session_ids": [accepted, other]}),
+            true,
+            vec![accepted.clone()],
+            true,
+        ),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let body = serde_json::to_vec(&json!({"provider": provider}))
+            .unwrap()
+            .into();
+        let prepared = prepare_request(
+            body,
+            &headers,
+            "/v1/chat/completions",
+            enforce_verified,
+            &pins,
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            prepared.policy.local_policy_applied, expected,
+            "provider={provider}, enforce_verified={enforce_verified}, pins={pins:?}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_constraint_shapes_return_the_reason_without_an_upstream_call() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().fallback({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }
+    });
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    Arc::get_mut(&mut state).unwrap().enforce_verified = true;
+    let proxy = spawn_server(build_proxy_router(state)).await;
+    let client = reqwest::Client::new();
+    for (body, reason) in [
+        ("[]", "JSON request body must have an object top level"),
+        (
+            r#"{"provider":[]}"#,
+            "JSON request provider must be an object or null",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":"not-an-array"}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+        (
+            r#"{"provider":{"aci_session_ids":[1]}}"#,
+            "provider.aci_session_ids must be an array of strings",
+        ),
+    ] {
+        let response = client
+            .post(format!("{proxy}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.text().await.unwrap(), format!("{reason}\n"));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -768,6 +946,20 @@ async fn proxy_rejects_e2ee_request_headers_without_contacting_upstream() {
 /// sessions (spec 9.2 audit + claims policy) and retries once.
 #[tokio::test]
 async fn a_412_refusal_refreshes_policy_pins_and_retries() {
+    policy_412_refresh_case(false, false).await;
+}
+
+#[tokio::test]
+async fn multipart_412_refreshes_header_pins_and_audit_policy() {
+    policy_412_refresh_case(true, false).await;
+}
+
+#[tokio::test]
+async fn multipart_caller_pins_are_never_replaced_on_412() {
+    policy_412_refresh_case(true, true).await;
+}
+
+async fn policy_412_refresh_case(multipart: bool, caller_pinned: bool) {
     use axum::response::IntoResponse;
 
     // A currently-valid session: the fixture record with its validity
@@ -780,18 +972,35 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
     let current_id = crate::aci::digest::sha256_bare_hex(&session_bytes);
     let keyset_digest = vector_report().workload_keyset_digest;
 
+    let path = if multipart {
+        AUDIO_PATH
+    } else {
+        "/v1/chat/completions"
+    };
+    let sends = Arc::new(Mutex::new(Vec::new()));
+    let observed = sends.clone();
     let sid = current_id.clone();
     let upstream = Router::new()
         .route(
-            "/v1/chat/completions",
-            post(move |body: Bytes| {
+            path,
+            post(move |headers: HeaderMap, body: Bytes| {
                 let sid = sid.clone();
                 let keyset_digest = keyset_digest.clone();
+                let observed = observed.clone();
                 async move {
-                    let v: Value = serde_json::from_slice(&body).unwrap();
-                    let pinned_current = v["provider"]["aci_session_ids"]
+                    let provider: Value = if multipart {
+                        serde_json::from_str(header_str(&headers, "x-aci-provider").unwrap())
+                            .unwrap()
+                    } else {
+                        serde_json::from_slice::<Value>(&body).unwrap()["provider"].clone()
+                    };
+                    let pinned_current = provider["aci_session_ids"]
                         .as_array()
                         .is_some_and(|pins| pins.iter().any(|pin| pin == &json!(sid)));
+                    observed
+                        .lock()
+                        .unwrap()
+                        .push((provider["aci_session_ids"].clone(), body));
                     if pinned_current {
                         (
                             StatusCode::OK,
@@ -843,7 +1052,6 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
         host,
         true,
         VerifierPolicy::default(),
-        false,
         Vec::new(),
         vec![crate::checks::RequiredClaim::parse("tee_attested").unwrap()],
         vector_report(),
@@ -856,15 +1064,36 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
     )));
     // A stale pin, as if the pinned session was superseded after startup.
     *state.policy_pins.lock().unwrap() = vec!["f".repeat(64)];
+    enable_multipart(&state);
     let proxy = spawn_server(build_proxy_router(state.clone())).await;
-
-    let resp = reqwest::Client::new()
-        .post(format!("{proxy}/v1/chat/completions"))
-        .header("content-type", "application/json")
-        .body(br#"{"model":"m","messages":[]}"#.to_vec())
-        .send()
-        .await
-        .unwrap();
+    let request_body = if multipart {
+        audio_body("file")
+    } else {
+        Bytes::from_static(br#"{"model":"m","messages":[]}"#)
+    };
+    let mut request = reqwest::Client::new()
+        .post(format!("{proxy}{path}"))
+        .header(
+            "content-type",
+            if multipart {
+                AUDIO_CONTENT_TYPE
+            } else {
+                "application/json"
+            },
+        );
+    if caller_pinned {
+        request = request.header(
+            "x-aci-provider",
+            json!({"aci_session_ids": ["f".repeat(64)]}).to_string(),
+        );
+    }
+    let resp = request.body(request_body.clone()).send().await.unwrap();
+    if caller_pinned {
+        assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(sends.lock().unwrap().len(), 1);
+        assert_eq!(*state.policy_pins.lock().unwrap(), vec!["f".repeat(64)]);
+        return;
+    }
     assert_eq!(resp.status().as_u16(), 200);
     assert_eq!(resp.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
 
@@ -877,7 +1106,24 @@ async fn a_412_refusal_refreshes_policy_pins_and_retries() {
         outcome.detail
     );
     // The refreshed set replaced the stale pin.
-    assert_eq!(*state.policy_pins.lock().unwrap(), vec![current_id]);
+    assert_eq!(*state.policy_pins.lock().unwrap(), vec![current_id.clone()]);
+    let observed = sends.lock().unwrap();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[0].0, json!(["f".repeat(64)]));
+    assert_eq!(observed[1].0, json!([current_id.clone()]));
+    let recorded = state.recorded.lock().unwrap();
+    let exchange = recorded.back().unwrap();
+    assert_eq!(exchange.pinned_sessions, vec![current_id]);
+    assert!(exchange.local_policy_applied);
+    assert!(exchange.requires_verified);
+    assert_eq!(
+        exchange.request.sha256,
+        BodyDigest::of(&observed[1].1).sha256
+    );
+    if multipart {
+        assert_eq!(observed[0].1, request_body);
+        assert_eq!(observed[1].1, request_body);
+    }
 }
 
 async fn spawn_server(app: Router) -> String {
@@ -1519,6 +1765,79 @@ async fn a_repin_drops_connections_made_under_the_old_pin() {
     assert!(crate::aci::tls::is_pin_mismatch(&refused), "{refused:?}");
 }
 
+#[tokio::test]
+async fn verified_sessions_reject_rotated_listing_and_record_keys() {
+    use std::io::Write;
+
+    for rotate_at in [1, 2] {
+        let upstream = spawn_tls_upstream(
+            move |index| {
+                if index < rotate_at {
+                    &PINNED_KEY
+                } else {
+                    &ROTATED_KEY
+                }
+            },
+            |index, mut stream| {
+                read_request_head(&mut stream);
+                let body = if index == 1 {
+                    br#"{"sessions":[{"session_id":"test-session"}]}"#.to_vec()
+                } else {
+                    vector_session_bytes()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            },
+        );
+        let client = AciClient::new().unwrap();
+        let host = host_of(&upstream.base).unwrap();
+        // Observe the original key as verification does, before sessions pins it.
+        client.get(&upstream.base, None).await.unwrap();
+        assert_eq!(client.observed_spki(&host), Some(PINNED_KEY.spki()));
+        let mut transcript = Transcript::default();
+        for check in [
+            crate::transcript::ID_1,
+            crate::transcript::ID_2,
+            crate::transcript::ID_3,
+            crate::transcript::ID_4,
+            crate::transcript::ID_5,
+            crate::transcript::ID_6,
+        ] {
+            transcript.pass(check, "verified service fixture");
+        }
+        let verification = ServiceVerification {
+            transcript,
+            report: vector_report(),
+            identity: Some(crate::checks::established_identity(&vector_report()).unwrap()),
+            client,
+            base_url: upstream.base.clone(),
+            host,
+            observed_spki: Some(PINNED_KEY.spki()),
+            tls_pins: vec![PINNED_KEY.spki()],
+        };
+        let args = crate::args::SessionsArgs {
+            base_url: upstream.base.clone(),
+            policy: Default::default(),
+            model: None,
+            require_claims: Vec::new(),
+            json: true,
+        };
+        let result = crate::sessions::run_verified(args, verification).await;
+        if rotate_at == 1 {
+            let error = result.expect_err("rotated listing key was accepted");
+            assert!(error.contains("PinMismatch"), "{error}");
+        } else {
+            assert_eq!(result.unwrap(), 1, "rotated record key was accepted");
+        }
+        assert_eq!(upstream.completed.load(Ordering::SeqCst), rotate_at);
+    }
+}
+
 /// A base URL on a local port that refuses connections, with the socket
 /// holding it: bound but never listening, so connecting is refused (RST) on
 /// every platform, and no concurrent test can bind the port while the caller
@@ -1749,6 +2068,86 @@ async fn requests_queued_behind_a_heal_share_one_reverification() {
     assert_eq!(blocked_codes(&mut events), vec![None]);
 }
 
+#[tokio::test]
+async fn timed_out_reverification_releases_waiters_and_keeps_old_pins() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let chunks = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/v1/aci/attestation",
+        get({
+            let (started, chunks, calls) = (started.clone(), chunks.clone(), calls.clone());
+            move || {
+                let (started, chunks) = (started.clone(), chunks.clone());
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    let body = async_stream::stream! {
+                        started.notify_one();
+                        loop {
+                            chunks.fetch_add(1, Ordering::SeqCst);
+                            yield Ok::<_, std::convert::Infallible>(Bytes::from_static(b" "));
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        }
+                    };
+                    Response::new(Body::from_stream(body))
+                }
+            }
+        }),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    state.client.pin(&state.host, &[PINNED_KEY.spki()]).unwrap();
+    let stale = state.client.pinned_spkis(&state.host);
+    Arc::get_mut(&mut state).unwrap().verify = Arc::new(|state| {
+        Box::pin(crate::verify::verify_service_with_timeout(
+            &state.base_url,
+            None,
+            &state.policy,
+            false,
+            std::time::Duration::from_millis(100),
+        ))
+    });
+    let mut events = capture_events(&mut state);
+    let observed = state.snapshot();
+    state.block_for_keyset_change(&observed, "test rotation".to_string());
+
+    let first = {
+        let state = state.clone();
+        tokio::spawn(async move { state.reverify_blocked(0, None).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(1), started.notified())
+        .await
+        .expect("attestation request did not start");
+    let waiters = (0..6).map(|_| {
+        let state = state.clone();
+        async move { state.reverify_blocked(0, None).await }
+    });
+    let (first, waiters) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(first, futures_util::future::join_all(waiters))
+    })
+    .await
+    .expect("re-verification waiters did not complete");
+    let failure = first.unwrap().unwrap_err();
+    assert!(failure.contains("did not respond in time"), "{failure}");
+    assert!(waiters
+        .iter()
+        .all(|result| result.as_ref().err() == Some(&failure)));
+    assert!(
+        state.reverify.try_lock().is_ok(),
+        "reverify lock was not released"
+    );
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        chunks.load(Ordering::SeqCst) > 1,
+        "attestation did not trickle"
+    );
+    assert_eq!(state.client.pinned_spkis(&state.host), stale);
+    assert_eq!(state.snapshot().current.digest(), observed.current.digest());
+    assert!(state.is_blocked());
+    assert_eq!(blocked_codes(&mut events), vec![keyset_changed(), None]);
+}
+
 /// A request refused by a pin that another request's heal is replacing
 /// waits for that heal instead of starting its own. `identity_changed`
 /// selects whether the heal adopted a new keyset digest.
@@ -1778,23 +2177,36 @@ async fn refused_while_another_heal_completes(
         .pin(&state.host, &[ROTATED_KEY.spki()])
         .unwrap();
     let mut report = vector_report();
-    let identity = crate::checks::established_identity(&report).unwrap();
     if identity_changed {
-        report.workload_keyset_digest = "rotated-keyset".to_string();
+        report.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+            json!("00".repeat(32));
     }
+    let identity = crate::checks::established_identity(&report).unwrap();
     state.adopt(report, identity);
     drop(heal);
 
     let resp = request.await.unwrap().unwrap();
     let status = resp.status().as_u16();
     let body = resp.text().await.unwrap();
-    assert!(admitted.is_cancelled());
+    assert!(admitted.is_cancelled() == identity_changed);
     assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 0);
     (status, body, upstream, blocked_codes(&mut events))
 }
 
 /// When the heal kept the identity, the request is sent once more — under
 /// the current delivery token, since the one it was admitted with was
+/// When the heal kept the identity, the request is sent once more — under
+/// the current delivery token, since the one it was admitted with was
+/// revoked.
+#[tokio::test]
+async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
+    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
+    assert_eq!(status, 503);
+    assert!(body.contains("identity changed"), "{body}");
+    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
+    assert!(blocked.is_empty());
+}
+
 /// revoked.
 #[tokio::test]
 async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
@@ -1802,17 +2214,6 @@ async fn a_request_whose_pin_was_healed_elsewhere_is_sent_once_more() {
     assert_eq!(status, 200);
     assert_eq!(body, "ok");
     assert_eq!(upstream.completed.load(Ordering::SeqCst), 1);
-    assert!(blocked.is_empty());
-}
-
-/// When the heal replaced the identity, the request admitted under the old
-/// one is refused as retryable, never silently re-sent under the new one.
-#[tokio::test]
-async fn a_request_whose_identity_changed_during_the_heal_is_retryable() {
-    let (status, body, upstream, blocked) = refused_while_another_heal_completes(true).await;
-    assert_eq!(status, 503);
-    assert!(body.contains("identity changed"), "{body}");
-    assert_eq!(upstream.completed.load(Ordering::SeqCst), 0);
     assert!(blocked.is_empty());
 }
 
@@ -1866,9 +2267,22 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
         }
         let _ = events.send(event);
     });
-    let mut headers = HeaderMap::new();
-    headers.insert("x-aci-keyset-digest", "rotated-keyset".parse().unwrap());
-    rotation_gate(&state, &state.snapshot(), &headers);
+    let mut report = vector_report();
+    report.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+        json!("00".repeat(32));
+    let identity = crate::checks::established_identity(&report).unwrap();
+    state
+        .apply_verified_identity(ServiceVerification {
+            transcript: Transcript::default(),
+            report,
+            identity: Some(identity),
+            client: AciClient::new().unwrap(),
+            base_url: state.base_url.clone(),
+            host: state.host.clone(),
+            observed_spki: None,
+            tls_pins: vec!["c0".repeat(32)],
+        })
+        .unwrap();
 
     let proxy = spawn_server(build_proxy_router(state)).await;
     let client = reqwest::Client::new();
@@ -1891,14 +2305,11 @@ async fn a_managed_rotation_is_not_reported_as_a_failed_verification() {
     assert_eq!(blocked_codes(&mut received), vec![keyset_changed()]);
 }
 
-/// Stale-pin heal against the live service: a bogus pin on the real host
-/// makes every forward's handshake fail closed, exactly as when the service
-/// rotates its attested TLS key. The proxy must re-verify (fresh nonce, full
-/// §9.1 checks incl. the DCAP quote) and re-pin — not wedge in 502 until
-/// restarted. The harness starts from a fixture identity, so the request
-/// that triggered the heal sees the identity change (retryable 503) and the
-/// next one goes through.
-/// Run from apps/desktop with: cargo test --package private-ai-proxy --lib -- --ignored stale_pin
+/// A normal rotation in managed mode: a response advertises a new keyset,
+/// the backend stops this verifier to rebuild the session, and requests
+/// arriving meanwhile are refused as retryable. None of them may report a
+/// verification failure: a `Blocked` without a code after `keyset_changed`
+/// would turn the rebuild into a hard block with no reconnect.
 #[tokio::test]
 #[ignore]
 async fn stale_pin_heals_against_live_service() {
@@ -1951,4 +2362,837 @@ fn upstream_urls_keep_the_base_path_and_the_request_target() {
         "https://gateway.example/base/v1/a%20b?q=%26"
     );
     assert!(join_url("not a url", &Uri::from_static("/v1/models")).is_err());
+}
+
+#[tokio::test]
+async fn standalone_listeners_require_network_access_opt_in() {
+    for address in ["127.0.0.1:0", "[::1]:0", "localhost:0"] {
+        assert!(
+            listener_addresses(address, false).await.is_ok(),
+            "{address}"
+        );
+    }
+    for address in ["0.0.0.0:0", "[::]:0", "192.0.2.1:4180"] {
+        assert!(listener_addresses(address, false)
+            .await
+            .unwrap_err()
+            .contains("--allow-network-access"));
+        assert!(listener_addresses(address, true).await.is_ok(), "{address}");
+    }
+}
+
+#[test]
+fn host_guard_refuses_missing_duplicate_and_malformed_hosts() {
+    let mut headers = HeaderMap::new();
+    assert!(!valid_host(&headers, true, &[]));
+    for host in [
+        "localhost:",
+        "localhost:invalid",
+        "127.0.0.1:65536",
+        "user@127.0.0.1",
+        "[::1]:invalid",
+        "::1",
+        "localhost.attacker.example",
+    ] {
+        headers.insert("host", host.parse().unwrap());
+        assert!(!valid_host(&headers, true, &[]), "{host}");
+    }
+    headers.insert("host", "localhost".parse().unwrap());
+    headers.append("host", "127.0.0.1".parse().unwrap());
+    assert!(!valid_host(&headers, true, &[]));
+}
+
+#[tokio::test]
+async fn both_standalone_listeners_refuse_rebindable_hosts_before_handling_requests() {
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().route(
+        "/receipts",
+        get({
+            let forwarded = forwarded.clone();
+            move || {
+                forwarded.fetch_add(1, Ordering::SeqCst);
+                async { "forwarded" }
+            }
+        }),
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let state = state_over(spawn_server(upstream).await, tx);
+    let client = reqwest::Client::new();
+    for loopback in [true, false] {
+        for (router, proxy) in [
+            (build_proxy_router(state.clone()), true),
+            (build_control_router(state.clone()), false),
+        ] {
+            let client_hosts = vec!["docker.internal".to_string()];
+            let listener = spawn_server(with_host_guard(router, loopback, &client_hosts)).await;
+            for (host, accepted) in [
+                ("127.0.0.1", true),
+                ("127.0.0.1:4180", true),
+                ("[::1]", true),
+                ("[::1]:4180", true),
+                ("192.0.2.1:4180", true),
+                ("LOCALHOST:4180", loopback),
+                ("docker.internal", true),
+                ("DOCKER.INTERNAL:4180", true),
+                ("attacker.example:4180", false),
+                ("localhost.attacker.example", false),
+            ] {
+                let before = forwarded.load(Ordering::SeqCst);
+                let response = client
+                    .get(format!("{listener}/receipts"))
+                    .header("host", host)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    if accepted {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::FORBIDDEN
+                    },
+                    "{host} loopback={loopback} proxy={proxy}"
+                );
+                assert_eq!(
+                    forwarded.load(Ordering::SeqCst),
+                    before + usize::from(accepted && proxy)
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_upstream_requests_never_put_query_credentials_in_events() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let state = state_over(base, tx);
+    let response = proxy_request(
+        state,
+        Method::GET,
+        "/v1/models?api_key=never-log-this".parse().unwrap(),
+        HeaderMap::new(),
+        Bytes::new(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let outcome = outcomes.recv().await.unwrap();
+    assert!(outcome.detail.contains("upstream connection failed"));
+    let event = request_outcome_event(outcome).to_string();
+    assert!(!event.contains("never-log-this"), "{event}");
+    assert!(!event.contains("api_key"), "{event}");
+}
+
+fn renewed_fixture_report() -> AttestationReport {
+    let mut report = vector_report();
+    report.attestation.workload_keyset["not_after"] = json!(KEYSET_NOT_AFTER + 86_400);
+    report.workload_keyset_digest = crate::checks::established_identity(&report)
+        .expect("renewed fixture keyset parses")
+        .keyset_digest;
+    report
+}
+
+fn verify_with_report(state: &mut Arc<ProxyState>, report: AttestationReport) {
+    use crate::transcript::{ID_1, ID_2, ID_3, ID_4, ID_5, ID_6};
+
+    Arc::get_mut(state).unwrap().verify = Arc::new(move |state| {
+        let report = report.clone();
+        Box::pin(async move {
+            let mut transcript = Transcript::default();
+            for check in [ID_1, ID_2, ID_3, ID_4, ID_5, ID_6] {
+                transcript.pass(check, "freshly verified fixture");
+            }
+            Ok(ServiceVerification {
+                transcript,
+                identity: Some(crate::checks::established_identity(&report).unwrap()),
+                report,
+                client: AciClient::new().unwrap(),
+                base_url: state.base_url.clone(),
+                host: state.host.clone(),
+                observed_spki: None,
+                tls_pins: vec!["c0".repeat(32)],
+            })
+        })
+    });
+}
+
+#[tokio::test]
+async fn replica_b_hints_allow_sends_when_fresh_verification_keeps_landing_on_a() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    let admitted = state.snapshot();
+    let digest_b = renewed_fixture_report().workload_keyset_digest;
+    verify_with_report(&mut state, vector_report());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    for _ in 0..3 {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-aci-keyset-digest", digest_b.parse().unwrap());
+        rotation_gate(&state, &admitted, &headers);
+        assert_eq!(
+            reqwest::get(format!("{proxy}/v1/models"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert!(!state.is_blocked());
+        assert!(!admitted.delivery.is_cancelled());
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 3);
+    assert!(state
+        .receipt_identity(
+            &admitted,
+            &json!({
+                "workload_keyset_digest": digest_b, "served_at": SERVED_AT,
+            })
+        )
+        .is_none());
+}
+
+#[tokio::test]
+async fn delayed_retired_digest_response_does_not_strand_admission() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    Arc::get_mut(&mut state).unwrap().now_secs = || KEYSET_NOT_AFTER;
+    let admitted = state.snapshot();
+    let renewed = renewed_fixture_report();
+    state.adopt(
+        renewed.clone(),
+        crate::checks::established_identity(&renewed).unwrap(),
+    );
+    assert!(!state
+        .snapshot()
+        .members()
+        .any(|entry| entry.digest() == admitted.current.digest()));
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-aci-keyset-digest",
+        admitted.current.digest().parse().unwrap(),
+    );
+    rotation_gate(&state, &admitted, &headers);
+    verify_with_report(&mut state, renewed);
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    assert_eq!(
+        reqwest::get(format!("{proxy}/v1/models"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!state.is_blocked());
+    assert!(!admitted.delivery.is_cancelled());
+    assert!(
+        state
+            .receipt_identity(
+                &admitted,
+                &json!({
+                    "workload_keyset_digest": admitted.current.digest(), "served_at": SERVED_AT,
+                })
+            )
+            .is_some(),
+        "the admission snapshot retains its historical receipt evidence"
+    );
+}
+
+#[tokio::test]
+async fn family_breaking_changes_cancel_delivery_and_refuse_the_pending_send() {
+    let changes: [fn(&mut AttestationReport); 5] = [
+        |report| report.attestation.workload_keyset["subject"] = json!("other"),
+        |report| report.attestation.source_provenance.repo_commit = Some("other".into()),
+        |report| {
+            report.attestation.workload_keyset["e2ee_public_keys"][0]["public_key"] =
+                json!("00".repeat(32))
+        },
+        |report| report.attestation.tee_type = "other".into(),
+        |report| report.attestation.evidence["app_compose"] = json!("other"),
+    ];
+    for (change, mutate) in changes.into_iter().enumerate() {
+        let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = state_over(upstream, tx);
+        let mut events = capture_events(&mut state);
+        let admitted = state.snapshot();
+        let mut report = renewed_fixture_report();
+        mutate(&mut report);
+        report.workload_keyset_digest = crate::checks::established_identity(&report)
+            .unwrap()
+            .keyset_digest;
+        state.require_reverification(&report.workload_keyset_digest);
+        verify_with_report(&mut state, report);
+        let proxy = spawn_server(build_proxy_router(state.clone())).await;
+        assert_eq!(
+            reqwest::get(format!("{proxy}/v1/models"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{change}"
+        );
+        assert!(admitted.delivery.is_cancelled(), "{change}");
+        assert!(
+            matches!(events.try_recv(), Ok(VerifierEvent::Blocked { code: Some(code), .. }) if code == "keyset_changed"),
+            "{change}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_rotation_pin_preserves_the_previous_identity_and_gate() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let mut state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let mut events = capture_events(&mut state);
+    let previous = state.snapshot();
+    let mut report = renewed_fixture_report();
+    report.attestation.workload_keyset["subject"] = json!("other");
+    let result = state.apply_verified_identity(ServiceVerification {
+        identity: Some(crate::checks::established_identity(&report).unwrap()),
+        report,
+        transcript: Transcript::default(),
+        client: AciClient::new().unwrap(),
+        base_url: state.base_url.clone(),
+        host: state.host.clone(),
+        observed_spki: None,
+        tls_pins: vec![],
+    });
+    assert!(result.unwrap_err().contains("no attested TLS key to pin"));
+    assert_eq!(state.snapshot().current.digest(), previous.current.digest());
+    assert!(!previous.delivery.is_cancelled());
+    assert!(!state.is_blocked());
+    assert!(events.try_recv().is_err());
+}
+
+#[test]
+fn an_established_receipt_at_expiry_fails_receipt_two() {
+    use ed25519_dalek::Signer;
+    let (tx, _) = mpsc::unbounded_channel();
+    let state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let mut receipt = vector_receipt_envelope();
+    receipt["served_at"] = json!(KEYSET_NOT_AFTER);
+    let input = crate::aci::receipt::receipt_signing_input(&receipt).unwrap();
+    receipt["signature"] = json!(hex::encode(
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+            .sign(&input)
+            .to_bytes()
+    ));
+    let member = state
+        .receipt_identity(&state.snapshot(), &receipt)
+        .expect("an established digest must reach receipt-2");
+    let mut transcript = Transcript::default();
+    crate::checks::run_receipt_checks(
+        &mut transcript,
+        crate::checks::ReceiptContext::new(&receipt, &member.identity, None, None),
+    );
+    let signature = transcript
+        .checks
+        .iter()
+        .find(|check| check.def.id == "receipt-1")
+        .unwrap();
+    assert_eq!(signature.status, crate::transcript::Status::Pass);
+    let expiry = transcript
+        .checks
+        .iter()
+        .find(|check| check.def.id == "receipt-2")
+        .unwrap();
+    assert_eq!(expiry.status, crate::transcript::Status::Fail);
+    assert!(expiry.detail.contains("before not_after"));
+}
+
+#[test]
+fn renewal_keeps_delivery_and_accepts_the_family_receipt() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let state = state_over("http://127.0.0.1:9".to_string(), tx);
+    let previous = state.snapshot();
+    let renewed = renewed_fixture_report();
+    let renewed_identity = crate::checks::established_identity(&renewed).unwrap();
+    state.adopt(renewed, renewed_identity);
+
+    assert!(!previous.delivery.is_cancelled());
+    assert!(!state.is_blocked());
+    let old_receipt = json!({
+        "workload_keyset_digest": previous.current.digest(),
+        "served_at": SERVED_AT,
+    });
+    assert!(state.receipt_identity(&previous, &old_receipt).is_some());
+}
+
+#[tokio::test]
+async fn renewal_during_a_stream_keeps_delivery_and_emits_identity_renewed() {
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let upstream_resume = resume.clone();
+    let upstream = Router::new().route(
+        "/v1/models",
+        get(move || {
+            let resume = upstream_resume.clone();
+            async move {
+                let body = async_stream::stream! {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"first"));
+                    resume.notified().await;
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"second"));
+                };
+                Response::new(Body::from_stream(body))
+            }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let mut state = state_over(base, tx);
+    let mut events = capture_events(&mut state);
+    let report = renewed_fixture_report();
+    let renewed_digest = report.workload_keyset_digest.clone();
+    verify_with_report(&mut state, report);
+    let previous = state.snapshot();
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let mut response = reqwest::get(format!("{proxy}/v1/models")).await.unwrap();
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "first");
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", renewed_digest.parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+    assert!(state.is_blocked());
+    // A new admission runs the pending single-flight re-verification while
+    // the first response is still open.
+    let admitted = reqwest::get(format!("{proxy}/v1/ping")).await.unwrap();
+    assert_eq!(admitted.status(), StatusCode::NOT_FOUND);
+    assert!(!previous.delivery.is_cancelled());
+    assert!(matches!(
+        events.try_recv(),
+        Ok(VerifierEvent::IdentityRenewed { .. })
+    ));
+    assert!(events.try_recv().is_err());
+
+    resume.notify_one();
+    let mut body = b"first".to_vec();
+    while let Some(chunk) = response.chunk().await.unwrap() {
+        body.extend_from_slice(&chunk);
+    }
+    assert_eq!(body, b"firstsecond");
+    state.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn expiry_reverification_adopts_a_renewal_without_leaving_pending_expired_digest() {
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(upstream, tx);
+    Arc::get_mut(&mut state.trusted.lock().unwrap().current.identity)
+        .unwrap()
+        .keyset
+        .not_after = SERVED_AT;
+
+    verify_with_report(&mut state, renewed_fixture_report());
+
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    for _ in 0..2 {
+        let response = client
+            .get(format!("{proxy}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert!(!state.is_blocked());
+    assert!(state.snapshot().pending.is_none());
+}
+
+#[tokio::test]
+async fn different_keys_cancel_delivery_and_report_rotation() {
+    let (tx, _) = mpsc::unbounded_channel();
+    let upstream = spawn_server(Router::new().fallback(|| async { StatusCode::OK })).await;
+    let mut state = state_over(upstream, tx);
+    let mut events = capture_events(&mut state);
+    let previous = state.snapshot();
+    let mut rotated = renewed_fixture_report();
+    rotated.attestation.workload_keyset["receipt_signing_keys"][0]["public_key"] =
+        json!("00".repeat(32));
+    let rotated_digest = crate::checks::established_identity(&rotated)
+        .unwrap()
+        .keyset_digest;
+    verify_with_report(&mut state, rotated);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-aci-keyset-digest", rotated_digest.parse().unwrap());
+    rotation_gate(&state, &state.snapshot(), &headers);
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let response = reqwest::get(format!("{proxy}/v1/models")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(previous.delivery.is_cancelled());
+    assert!(
+        matches!(events.try_recv(), Ok(VerifierEvent::Blocked { code: Some(code), .. }) if code == "keyset_changed")
+    );
+}
+
+#[tokio::test]
+async fn unknown_receipt_digest_reverifies_once_then_audit_fails() {
+    let mut receipt = vector_receipt_envelope();
+    receipt["workload_keyset_digest"] = json!("unknown");
+    let upstream = Router::new().route(
+        "/v1/aci/receipts/rcpt-0001",
+        get(move || {
+            let receipt = receipt.clone();
+            async move { json_response(StatusCode::OK, receipt) }
+        }),
+    );
+    let base = spawn_server(upstream).await;
+    let (tx, _) = mpsc::unbounded_channel();
+    let mut state = state_over(base, tx);
+    verify_with_report(&mut state, vector_report());
+    let (outcomes, mut received) = mpsc::unbounded_channel();
+    let state = {
+        let mut state = state;
+        Arc::get_mut(&mut state).unwrap().reporter = Arc::new(move |outcome| {
+            let _ = outcomes.send(outcome);
+        });
+        state
+    };
+    let exchange = RecordedExchange {
+        receipt_id: "rcpt-0001".to_string(),
+        path: "/v1/chat/completions".to_string(),
+        status: 200,
+        streamed: false,
+        request: BodyDigest::of(REQUEST_BODY),
+        response: BodyDigest::of(RESPONSE_BODY),
+        delivery: ResponseDelivery::Complete,
+        pinned_sessions: Vec::new(),
+        requires_verified: false,
+        at: SERVED_AT,
+        verified: None,
+        context: None,
+        local_policy_applied: false,
+    };
+    audit_exchange(state.clone(), state.snapshot(), exchange, None);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.verified, None);
+    assert!(outcome
+        .detail
+        .contains("receipt digest was not established"));
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+    assert!(!state.is_blocked());
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    assert_eq!(
+        reqwest::get(format!("{proxy}/v1/models"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(state.reverify_attempts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn invalid_bodies_and_multipart_carriers_never_send_inference() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = Router::new().fallback({
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::NO_CONTENT }
+        }
+    });
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let mut state = state_over(spawn_server(upstream).await, tx);
+    {
+        let inner = Arc::get_mut(&mut state).unwrap();
+        inner.enforce_verified = true;
+        inner.fixed_pins = vec!["a".repeat(64)];
+    }
+    enable_multipart(&state);
+    let proxy = spawn_server(build_proxy_router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let mut cases = vec![
+        (AUDIO_PATH, "application/json", "not json".into(), None),
+        (AUDIO_PATH, "text/plain", "{}".into(), None),
+        (
+            AUDIO_PATH,
+            "application/octet-stream",
+            Bytes::from_static(&[0, 255]),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            AUDIO_CONTENT_TYPE,
+            audio_body("file"),
+            None,
+        ),
+        (AUDIO_PATH, AUDIO_CONTENT_TYPE, audio_body("provider"), None),
+        (
+            AUDIO_PATH,
+            AUDIO_CONTENT_TYPE,
+            "broken multipart".into(),
+            None,
+        ),
+        (
+            "/v1/chat/completions",
+            "application/json",
+            "{}".into(),
+            Some("{}".to_string()),
+        ),
+    ];
+    let mut text_provider = audio_body("file").to_vec();
+    text_provider.truncate(text_provider.len() - b"--audio-test--\r\n".len());
+    text_provider.extend_from_slice(b"--audio-test\r\nContent-Disposition: form-data; name=\"provider\"\r\n\r\n{}\r\n--audio-test--\r\n");
+    cases.push((AUDIO_PATH, AUDIO_CONTENT_TYPE, text_provider.into(), None));
+    for carrier in [
+        "{",
+        "null",
+        "[]",
+        "{}, {}",
+        r#"{"order":["café"]}"#,
+        r#"{"aci_future":true}"#,
+        r#"{"aci_verified":"yes"}"#,
+        r#"{"aci_session_ids":[]}"#,
+        r#"{"aci_session_ids":["bad"]}"#,
+    ] {
+        cases.push((
+            AUDIO_PATH,
+            AUDIO_CONTENT_TYPE,
+            audio_body("file"),
+            Some(carrier.to_string()),
+        ));
+    }
+    for carrier in [
+        json!({"aci_session_ids": ["b".repeat(64)]}),
+        json!({"aci_verified": false, "aci_session_ids": ["a".repeat(64)]}),
+        json!({"padding": "a".repeat(8192)}),
+    ] {
+        cases.push((
+            AUDIO_PATH,
+            AUDIO_CONTENT_TYPE,
+            audio_body("file"),
+            Some(carrier.to_string()),
+        ));
+    }
+    for (path, content_type, body, carrier) in cases {
+        let mut request = client
+            .post(format!("{proxy}{path}"))
+            .header("content-type", content_type)
+            .body(body);
+        if let Some(carrier) = carrier {
+            request = request.header("x-aci-provider", carrier);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    let response = client
+        .post(format!("{proxy}{AUDIO_PATH}"))
+        .header("content-type", AUDIO_CONTENT_TYPE)
+        .header("x-aci-provider", "{}")
+        .header("x-aci-provider", "{}")
+        .body(audio_body("file"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = client
+        .post(format!("{proxy}{AUDIO_PATH}"))
+        .header("content-type", AUDIO_CONTENT_TYPE)
+        .header("connection", "x-aci-provider")
+        .body(audio_body("file"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    Arc::make_mut(&mut state.trusted.lock().unwrap().current.report)
+        .service_capabilities
+        .supported_multipart_constraint_endpoints
+        .clear();
+    let response = client
+        .post(format!("{proxy}{AUDIO_PATH}"))
+        .header("content-type", AUDIO_CONTENT_TYPE)
+        .body(audio_body("file"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(response
+        .text()
+        .await
+        .unwrap()
+        .contains("does not advertise multipart"));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn multipart_preserves_bytes_and_audits_effective_header_pins_with_local_policy_on_or_off() {
+    let session_id = crate::aci::digest::sha256_bare_hex(&vector_session_bytes());
+    let body = audio_body("file");
+    let receipt = audio_receipt(&body);
+    for local_policy in [true, false] {
+        for accepted in [session_id.clone(), "b".repeat(64)] {
+            let upstream = with_receipt_routes(Router::new()
+                .route(AUDIO_PATH, post({
+                    let (accepted, body) = (accepted.clone(), body.clone());
+                    move |headers: HeaderMap, received: Bytes| {
+                        let (accepted, body) = (accepted.clone(), body.clone());
+                        async move {
+                            assert_eq!(received, body);
+                            let carrier = header_str(&headers, "x-aci-provider").unwrap();
+                            assert!(carrier.is_ascii());
+                            let carrier: Value = serde_json::from_str(carrier).unwrap();
+                            assert_eq!(carrier, json!({"order": ["café 🎙"], "aci_verified": true, "aci_session_ids": [accepted]}));
+                            ([("x-receipt-id", "rcpt-0001")], RESPONSE_BODY)
+                        }
+                    }
+                })), receipt.clone());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut state = state_over(spawn_server(upstream).await, tx);
+            if local_policy {
+                let inner = Arc::get_mut(&mut state).unwrap();
+                inner.enforce_verified = true;
+                inner.fixed_pins = vec![accepted.clone()];
+            }
+            enable_multipart(&state);
+            let proxy = spawn_server(build_proxy_router(state.clone())).await;
+            let caller_pins = if local_policy {
+                vec![accepted.clone(), "c".repeat(64)]
+            } else {
+                vec![accepted.clone()]
+            };
+            let response = reqwest::Client::new()
+                .post(format!("{proxy}{AUDIO_PATH}"))
+                .header("content-type", AUDIO_CONTENT_TYPE)
+                .header(
+                    "x-aci-provider",
+                    json!({"order": ["café 🎙"], "aci_session_ids": caller_pins})
+                        .to_string()
+                        .replace("café 🎙", r"caf\u00e9 \ud83c\udf99"),
+                )
+                .body(body.clone())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
+            let _pending = rx.recv().await.unwrap();
+            let audited = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                audited.verified,
+                Some(accepted == session_id),
+                "{}",
+                audited.detail
+            );
+            let recorded = state.recorded.lock().unwrap();
+            let exchange = recorded.back().unwrap();
+            assert_eq!(exchange.pinned_sessions, vec![accepted]);
+            assert_eq!(exchange.request.sha256, BodyDigest::of(&body).sha256);
+            assert!(exchange.requires_verified);
+            assert_eq!(exchange.local_policy_applied, local_policy);
+        }
+    }
+}
+
+#[tokio::test]
+async fn bridge_multipart_uses_managed_constraints() {
+    use agent_bridge::{
+        catalog::Catalog,
+        proxy::{self as bridge, Session},
+        tokens::{TokenSet, LOCAL_TOOLS_AGENT},
+    };
+
+    let session_id = crate::aci::digest::sha256_bare_hex(&vector_session_bytes());
+    let body = audio_body("file");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let upstream = with_receipt_routes(
+        Router::new().route(
+            AUDIO_PATH,
+            post({
+                let (calls, body, session_id) = (calls.clone(), body.clone(), session_id.clone());
+                move |headers: HeaderMap, received: Bytes| {
+                    let (calls, body, session_id) =
+                        (calls.clone(), body.clone(), session_id.clone());
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(received, body);
+                        assert_eq!(
+                            header_str(&headers, "content-type"),
+                            Some(AUDIO_CONTENT_TYPE)
+                        );
+                        assert_eq!(
+                            header_str(&headers, "authorization"),
+                            Some("Bearer test-key")
+                        );
+                        let provider: Value =
+                            serde_json::from_str(header_str(&headers, "x-aci-provider").unwrap())
+                                .unwrap();
+                        assert_eq!(
+                            provider,
+                            json!({"aci_verified": true, "aci_session_ids": [session_id]})
+                        );
+                        ([("x-receipt-id", "rcpt-0001")], RESPONSE_BODY)
+                    }
+                }
+            }),
+        ),
+        audio_receipt(&body),
+    );
+    let (tx, mut outcomes) = mpsc::unbounded_channel();
+    let mut verifier = state_over(spawn_server(upstream).await, tx);
+    let inner = Arc::get_mut(&mut verifier).unwrap();
+    inner.enforce_verified = true;
+    inner.fixed_pins = vec![session_id.clone()];
+    enable_multipart(&verifier);
+
+    let (events, _events) = mpsc::channel(8);
+    let local = bridge::ProxyState::new(events, std::time::Duration::ZERO).unwrap();
+    let mut tokens = TokenSet::default();
+    tokens.insert("local-token".into(), LOCAL_TOOLS_AGENT.into());
+    local.set_tokens(tokens);
+    local.set_api_key(Some("test-key".into()));
+    local.publish(Session {
+        generation: 1,
+        epoch: 1,
+        session_id: Some("bridge-session".into()),
+        service: Some(verifier.clone()),
+        verified: true,
+        catalog: Some(
+            Catalog::from_remote(
+                &json!({"data": [{
+                    "id": "m", "input_modalities": ["audio"], "output_modalities": ["transcription"]
+                }]}),
+                1,
+            )
+            .unwrap(),
+        ),
+    });
+    let base = spawn_server(bridge::router(local)).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}{AUDIO_PATH}"))
+        .bearer_auth("local-token")
+        .header("content-type", AUDIO_CONTENT_TYPE)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-receipt-id"], "rcpt-0001");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), RESPONSE_BODY);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let _pending = outcomes.recv().await.unwrap();
+    let audited = tokio::time::timeout(std::time::Duration::from_secs(5), outcomes.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(audited.verified, Some(true), "{}", audited.detail);
+    let context = audited.context.as_ref().unwrap();
+    assert_eq!(context.agent, LOCAL_TOOLS_AGENT);
+    assert_eq!(context.model.as_deref(), Some("m"));
+    let recorded = verifier.recorded.lock().unwrap();
+    let exchange = recorded.back().unwrap();
+    assert_eq!(exchange.pinned_sessions, vec![session_id.clone()]);
+    assert_eq!(exchange.request.sha256, BodyDigest::of(&body).sha256);
+    assert!(exchange.requires_verified);
+    assert!(exchange.local_policy_applied);
+    verifier.shutdown.cancel();
 }

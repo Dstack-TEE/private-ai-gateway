@@ -1,7 +1,5 @@
 //! Printing: compact JSON, or a human rendering chosen by the command.
 
-use std::io::{self, Write};
-
 use desktop_core::client::CallError;
 use serde_json::Value;
 
@@ -9,6 +7,8 @@ use super::{
     Action, Agents, App, Models, Profiles, Service, Settings, Token, Usage, WebUi, WebUiPassword,
 };
 use crate::Global;
+use private_ai_proxy::safe;
+pub(super) use private_ai_proxy::write_stdout;
 
 /// Prints a command's result as one line of compact JSON or its human rendering.
 pub(super) fn print(action: &Action, global: &Global, value: &Value) -> Result<(), CallError> {
@@ -34,16 +34,6 @@ pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
     Ok(())
 }
 
-/// Writes to stdout, `Ok(false)` once the reader has gone away, as after
-/// `| head`: output then ends quietly.
-pub(super) fn write_stdout(bytes: &[u8]) -> Result<bool, String> {
-    match io::stdout().lock().write_all(bytes) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(false),
-        Err(_) => Err("Cannot write output".into()),
-    }
-}
-
 /// The human rendering of `action`'s result `value`; details by default.
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
@@ -54,6 +44,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Service { command } => match command {
             Service::Start => "Backend started.".into(),
             Service::Stop => "Backend stopped.".into(),
+            Service::Restart => "Backend restarted.".into(),
             Service::Status => status(value),
         },
         Action::App {
@@ -79,7 +70,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             Profiles::Export { .. } => exported(value),
             Profiles::Use { id } => format!("Selected profile: {}\n{}", safe(id), status(value)),
             Profiles::Login(_) => format!(
-                "Account saved. Use private-ai-proxy start to enable protection.\n{}",
+                "Account saved. Use pap start to enable protection.\n{}",
                 status(value)
             ),
             Profiles::Remove { id } => format!("Deleted profile: {}", safe(id)),
@@ -128,6 +119,19 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             WebUiPassword::Rotate => "Web UI password rotated.".into(),
         },
         Action::Diagnostics { .. } => exported(value),
+        Action::Update => match value["version"].as_str() {
+            Some(version) => format!(
+                "Updated {} → {}.{}",
+                text(&value["currentVersion"]),
+                safe(version),
+                if value["protectionResumed"] == true {
+                    " Protection is on again."
+                } else {
+                    ""
+                }
+            ),
+            None => format!("Up to date ({}).", text(&value["currentVersion"])),
+        },
         Action::Cli { .. } | Action::Doctor | Action::Completions { .. } => details(value),
     }
 }
@@ -174,7 +178,7 @@ fn agents(value: &Value) -> String {
 
 fn status(value: &Value) -> String {
     if value["status"] == "not_running" {
-        return "Backend not running.\nStart backend: private-ai-proxy service start\nStart protection: private-ai-proxy start".into();
+        return "Backend not running. Agents connected through it cannot reach the Local API.\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start".into();
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
@@ -182,10 +186,17 @@ fn status(value: &Value) -> String {
         _ if state["configurationVerification"] == true => {
             "Verifying profile (not protecting traffic)"
         }
+        _ if state["protection"]["phase"] == "verificationFailed" => {
+            if state["reconnecting"] == true {
+                "Not protected (verification failed; retrying)"
+            } else {
+                "Not protected (verification failed)"
+            }
+        }
+        _ if state["endpointError"].is_string() => "Not protected (Local API unavailable)",
         _ if state["reconnecting"] == true => "Reconnecting (requests paused)",
         Some("verified") => "Protected",
         Some("verifying") => "Verifying",
-        Some("blocked") => "Not protected (blocked)",
         Some("error") => "Not protected (error)",
         _ => "Not protected",
     };
@@ -275,12 +286,6 @@ fn status(value: &Value) -> String {
     {
         lines.push(format!("Settings warning: {}", safe(warning)));
     }
-    lines.extend(flag(
-        "Production OS",
-        &state["config"]["requireProductionOs"],
-        "Required",
-        "Development images allowed",
-    ));
     let identity = &state["identity"];
     if identity.is_object() {
         lines.push(format!(
@@ -310,7 +315,12 @@ fn status(value: &Value) -> String {
             .filter(|check| check["status"] == "fail")
             .take(3)
         {
-            lines.push(format!("  Failed: {}", text(&check["title"])));
+            lines.push(format!(
+                "  Failed: {} {} [{}]",
+                text(&check["id"]),
+                text(&check["title"]),
+                text(&check["section"])
+            ));
         }
     }
     if let Some(models) = state["catalog"]["models"].as_array() {
@@ -349,11 +359,15 @@ fn status(value: &Value) -> String {
             }
         }
     }
-    for (key, label) in [
-        ("progress", "Progress"),
-        ("error", "Error"),
-        ("endpointError", "Warning"),
-    ] {
+    let retrying_failed_verification = state["reconnecting"] == true
+        && state["protection"]["phase"] == "verificationFailed"
+        && state["status"] == "verifying";
+    if retrying_failed_verification {
+        lines.push("Retry: verifying again (attempt in progress)".into());
+    } else if let Some(progress) = state["progress"].as_str().filter(|s| !s.is_empty()) {
+        lines.push(format!("Progress: {}", safe(progress)));
+    }
+    for (key, label) in [("error", "Error"), ("endpointError", "Warning")] {
         if let Some(value) = state[key].as_str().filter(|s| !s.is_empty()) {
             lines.push(format!("{label}: {}", safe(value)));
         }
@@ -451,19 +465,6 @@ fn text(value: &Value) -> String {
     }
 }
 
-pub(super) fn safe(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| {
-            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 fn label(key: &str) -> String {
     let mut label = String::new();
     for (index, c) in safe(key).chars().enumerate() {
@@ -477,4 +478,125 @@ fn label(key: &str) -> String {
         }
     }
     label
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn management_fields_cannot_inject_output_lines() {
+        let field = "x\n[PASS] forged\tfield";
+        let value = serde_json::json!({
+            "gateway": {
+                "status": "error",
+                "error": field,
+                "progress": field,
+                "webUi": { "enabled": true, "error": field },
+                "configFiles": { "warnings": [field] }
+            }
+        });
+        let rendered = status(&value);
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(lines.contains(&"Error: x [PASS] forged field"));
+        assert!(lines.contains(&"Progress: x [PASS] forged field"));
+        assert!(lines.contains(&"Web UI: Not listening (x [PASS] forged field)"));
+        assert!(lines.contains(&"Settings warning: x [PASS] forged field"));
+
+        let rendered = agents(&serde_json::json!({ "attention": field, "error": field }));
+        let lines: Vec<_> = rendered.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "  x [PASS] forged field");
+        assert_eq!(lines[2], "  Error: x [PASS] forged field");
+        assert_eq!(
+            details(&serde_json::json!({ "field\nlabel": field })),
+            "Field label: x [PASS] forged field"
+        );
+    }
+
+    #[test]
+    fn status_shows_a_failed_check_and_its_reason_during_a_retry() {
+        let mut state = AppState {
+            status: VerificationStatus::Verifying,
+            session_active: true,
+            reconnecting: true,
+            verification_failed: true,
+            progress: Some("Starting the verifier".into()),
+            error: Some("Service verification failed: id-6 … protection stays off.".into()),
+            ..AppState::default()
+        };
+        state.checks.push(VerificationCheck {
+            id: "id-6".into(),
+            section: "9.1(6)".into(),
+            title: "channel bound to the attested keyset".into(),
+            status: "fail".into(),
+            detail: "observed SPKI is not attested".into(),
+        });
+        let value = serde_json::json!({"gateway": AppStateWire::from(state)});
+        let rendered = status(&value);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(lines[0], "Not protected (verification failed; retrying)");
+        assert!(lines.contains(&"Retry: verifying again (attempt in progress)"));
+        assert!(!rendered.contains("Progress:"));
+        assert!(lines.contains(&"Checks: 0 passed, 1 failed, 0 skipped"));
+        assert!(lines.contains(&"  Failed: id-6 channel bound to the attested keyset [9.1(6)]"));
+        assert!(lines.contains(&"Error: Service verification failed: id-6 … protection stays off."));
+        let json = render_line(
+            &Action::Status { watch: false },
+            &Global {
+                json: true,
+                non_interactive: false,
+                yes: false,
+            },
+            &value,
+        )
+        .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&json).unwrap(), value);
+        assert_eq!(value["gateway"]["progress"], "Starting the verifier");
+        assert_eq!(value["gateway"]["checks"][0]["status"], "fail");
+    }
+
+    #[test]
+    fn status_shows_a_failed_verification_without_a_retry_in_progress() {
+        for (reconnecting, headline) in [
+            (true, "Not protected (verification failed; retrying)"),
+            (false, "Not protected (verification failed)"),
+        ] {
+            let state = AppState {
+                status: VerificationStatus::Error,
+                reconnecting,
+                verification_failed: true,
+                error: Some("Service verification failed; protection stays off.".into()),
+                ..AppState::default()
+            };
+            let rendered = status(&serde_json::json!({"gateway": AppStateWire::from(state)}));
+            let lines: Vec<&str> = rendered.lines().collect();
+            assert_eq!(lines[0], headline);
+            assert!(!rendered.contains("Retry:"));
+            assert!(!rendered.contains("Progress:"));
+            assert!(lines.contains(&"Error: Service verification failed; protection stays off."));
+        }
+    }
+
+    #[test]
+    fn status_keeps_progress_while_verifying_normally() {
+        for (reconnecting, headline) in [
+            (false, "Verifying"),
+            (true, "Reconnecting (requests paused)"),
+        ] {
+            let state = AppState {
+                status: VerificationStatus::Verifying,
+                reconnecting,
+                progress: Some("Starting the verifier".into()),
+                ..AppState::default()
+            };
+            let rendered = status(&serde_json::json!({"gateway": AppStateWire::from(state)}));
+            let lines: Vec<&str> = rendered.lines().collect();
+            assert_eq!(lines[0], headline);
+            assert!(lines.contains(&"Progress: Starting the verifier"));
+            assert!(!rendered.contains("Retry:"));
+        }
+    }
 }

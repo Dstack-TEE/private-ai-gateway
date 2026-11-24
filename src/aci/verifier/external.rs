@@ -14,19 +14,80 @@ use std::time::Duration;
 use aci_verify::decode_hex_32;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::{Child, Command};
+use tokio::time::Instant;
 
-use super::current_unix_secs;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use super::CachedProviderEvent;
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+    VerificationRound,
+};
 use crate::aci::upstream::{ChutesSessionStore, ChutesVerifiedDiscovery};
 use crate::aggregator::service::UpstreamVerificationRequest;
+use crate::aggregator::session::EvidenceRef;
 use crate::aggregator::upstream_config::AttestationScope;
+
+const NEAR_AI_MODEL_MISMATCH_TTL: Duration = Duration::from_secs(60);
+const NEAR_AI_EVIDENCE_UNAVAILABLE_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
     #[error("provider verifier command must not be empty")]
     EmptyCommand,
+}
+
+struct VerifierProcess {
+    child: Option<Child>,
+    #[cfg(unix)]
+    group: libc::pid_t,
+    #[cfg(test)]
+    reaped: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl VerifierProcess {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.kill_on_drop(true).spawn()?;
+        Ok(Self {
+            #[cfg(unix)]
+            group: child.id().expect("spawned verifier has a pid") as libc::pid_t,
+            child: Some(child),
+            #[cfg(test)]
+            reaped: None,
+        })
+    }
+}
+
+impl Drop for VerifierProcess {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        // The group belongs to this spawn; SIGKILL also stops bridge subprocesses.
+        if unsafe { libc::killpg(self.group, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                tracing::warn!(%error, "failed to kill provider verifier process group");
+            }
+        }
+        if let Some(mut child) = self.child.take() {
+            #[cfg(not(unix))]
+            if let Err(error) = child.start_kill() {
+                tracing::warn!(%error, "failed to kill provider verifier");
+            }
+            #[cfg(test)]
+            let reaped = self.reaped.take();
+            tokio::spawn(async move {
+                if let Err(error) = child.wait().await {
+                    tracing::warn!(%error, "failed to reap provider verifier");
+                }
+                #[cfg(test)]
+                if let Some(reaped) = reaped {
+                    let _ = reaped.send(());
+                }
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -40,9 +101,12 @@ pub(super) struct ExternalProviderVerifier {
     options: HashMap<String, String>,
     timeout_seconds: u64,
     cache_ttl_seconds: u64,
-    cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedExternalProviderEvent>>>,
+    near_ai_unavailable_ttl: Duration,
+    cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
+    #[cfg(test)]
+    reaped: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
 
 impl ExternalProviderVerifier {
@@ -77,9 +141,12 @@ impl ExternalProviderVerifier {
             options: HashMap::new(),
             timeout_seconds,
             cache_ttl_seconds,
+            near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         }
     }
 
@@ -102,9 +169,12 @@ impl ExternalProviderVerifier {
             options: HashMap::new(),
             timeout_seconds,
             cache_ttl_seconds: 0,
+            near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
+            #[cfg(test)]
+            reaped: Default::default(),
         })
     }
 
@@ -134,12 +204,16 @@ impl ExternalProviderVerifier {
         self
     }
 
-    /// Cache / channel-identity key. A per-router provider shares one verified
-    /// channel across all its models, so the model is dropped from the key.
+    pub(super) fn with_near_ai_refresh_lead(mut self, lead: Duration) -> Self {
+        self.near_ai_unavailable_ttl = NEAR_AI_EVIDENCE_UNAVAILABLE_TTL.min(lead);
+        self
+    }
+
+    /// NEAR AI checks model selection before accepting its router evidence.
     fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
         let mut key = ExternalProviderVerifierCacheKey::from_request(request);
-        if self.scope.is_per_router() {
-            key.model_id = String::new();
+        if self.scope.is_per_router() && self.provider != "near-ai" {
+            key.model_id.clear();
         }
         key
     }
@@ -148,31 +222,87 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached_event(&request) {
             return event;
         }
         let _verify_guard = self.verify_lock.lock().await;
-        if let Some(event) = self.cached_event(&cache_key, &request) {
+        if let Some(event) = self.cached_event(&request) {
             return event;
         }
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
+    }
+
+    pub(super) fn cached(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<UpstreamVerifiedEvent> {
+        self.cached_event(request)
+            .filter(|event| event.result == VerificationResult::Verified)
+    }
+
+    fn cached_event(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cache_key = self.cache_key(request);
+        let now = Instant::now();
+        let cached = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned")
+            .get(&cache_key)
+            .cloned();
+        match cached {
+            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
+            Some(_) => {
+                let mut cache = self
+                    .cache
+                    .write()
+                    .expect("external provider verifier cache poisoned");
+                if cache
+                    .get(&cache_key)
+                    .is_some_and(|entry| entry.expires_at <= now)
+                {
+                    cache.remove(&cache_key);
+                }
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub(super) fn cache_remaining(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<Duration> {
+        let cache = self
+            .cache
+            .read()
+            .expect("external provider verifier cache poisoned");
+        let entry = cache.get(&self.cache_key(request))?;
+        if entry.event.result != VerificationResult::Verified {
+            return None;
+        }
+        entry
+            .expires_at
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
     }
 
     pub(super) async fn refresh(
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        let cache_key = self.cache_key(&request);
         let _verify_guard = self.verify_lock.lock().await;
-        self.verify_uncached(request, cache_key).await
+        self.verify_uncached(request).await
     }
 
-    async fn verify_uncached(
-        &self,
-        request: UpstreamVerificationRequest,
-        cache_key: ExternalProviderVerifierCacheKey,
-    ) -> UpstreamVerifiedEvent {
+    async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let cache_key = self.cache_key(&request);
+        let started = Instant::now();
+        let event = self.verifier_event(request).await;
+        self.maybe_cache_event(cache_key, &event, started);
+        event
+    }
+
+    async fn verifier_event(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -188,17 +318,17 @@ impl ExternalProviderVerifier {
             Ok(input) => input,
             Err(err) => {
                 return self
-                    .failed_event(request, format!("failed to encode verifier input: {err}"));
+                    .unavailable_event(request, format!("failed to encode verifier input: {err}"));
             }
         };
         let output = match self.run(input).await {
             Ok(output) => output,
-            Err(err) => return self.failed_event(request, err),
+            Err(err) => return self.unavailable_event(request, err),
         };
         let output: ExternalProviderVerifierOutput = match serde_json::from_slice(&output) {
             Ok(output) => output,
             Err(err) => {
-                return self.failed_event(
+                return self.unavailable_event(
                     request,
                     format!("provider verifier returned invalid JSON: {err}"),
                 );
@@ -211,38 +341,9 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
-                self.maybe_cache_event(cache_key, &event);
                 event
             }
             Err(err) => self.failed_event(request, err),
-        }
-    }
-
-    fn cached_event(
-        &self,
-        cache_key: &ExternalProviderVerifierCacheKey,
-        request: &UpstreamVerificationRequest,
-    ) -> Option<UpstreamVerifiedEvent> {
-        if self.cache_ttl_seconds == 0 {
-            return None;
-        }
-        let now = current_unix_secs();
-        let cached = self
-            .cache
-            .read()
-            .expect("external provider verifier cache poisoned")
-            .get(cache_key)
-            .cloned();
-        match cached {
-            Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
-            Some(_) => {
-                self.cache
-                    .write()
-                    .expect("external provider verifier cache poisoned")
-                    .remove(cache_key);
-                None
-            }
-            None => None,
         }
     }
 
@@ -250,24 +351,48 @@ impl ExternalProviderVerifier {
         &self,
         cache_key: ExternalProviderVerifierCacheKey,
         event: &UpstreamVerifiedEvent,
+        started: Instant,
     ) {
-        if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
+        let now = Instant::now();
+        let expires_at = match (event.result, event.failure) {
+            (VerificationResult::Verified, _) if self.cache_ttl_seconds > 0 => {
+                started + Duration::from_secs(self.cache_ttl_seconds)
+            }
+            // The NEAR AI bridge uses binding_mismatch for the model-name check.
+            (VerificationResult::Failed, VerificationFailure::BindingMismatch)
+                if self.provider == "near-ai" =>
+            {
+                now + NEAR_AI_MODEL_MISMATCH_TTL
+            }
+            (VerificationResult::Failed, VerificationFailure::EvidenceUnavailable)
+                if self.provider == "near-ai" && !self.near_ai_unavailable_ttl.is_zero() =>
+            {
+                now + self.near_ai_unavailable_ttl
+            }
+            _ => return,
+        };
+        let mut cache = self
+            .cache
+            .write()
+            .expect("external provider verifier cache poisoned");
+        if event.result == VerificationResult::Failed
+            && event.failure == VerificationFailure::EvidenceUnavailable
+            && cache.get(&cache_key).is_some_and(|entry| {
+                entry.event.result == VerificationResult::Verified && now < entry.expires_at
+            })
+        {
             return;
         }
-        let cached = CachedExternalProviderEvent {
-            expires_at: current_unix_secs().saturating_add(self.cache_ttl_seconds),
-            event: event.clone(),
-        };
-        self.cache
-            .write()
-            .expect("external provider verifier cache poisoned")
-            .insert(cache_key, cached);
+        cache.insert(
+            cache_key,
+            CachedProviderEvent {
+                expires_at,
+                event: event.clone(),
+            },
+        );
     }
 
     pub(super) fn invalidate(&self, request: &UpstreamVerificationRequest) {
-        // Must use the same key as `verify`/`refresh` (channel-keyed for routers),
-        // otherwise invalidation would target a different entry than the one
-        // cached and a router's verification could never be flushed.
         self.cache
             .write()
             .expect("external provider verifier cache poisoned")
@@ -283,31 +408,48 @@ impl ExternalProviderVerifier {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(current_dir) = &self.current_dir {
             command.current_dir(current_dir);
         }
         for (key, value) in &self.env {
             command.env(key, value);
         }
-        let mut child = command
-            .spawn()
+        let mut process = VerifierProcess::spawn(&mut command)
             .map_err(|e| format!("failed to spawn provider verifier {program:?}: {e}"))?;
+        #[cfg(test)]
+        {
+            process.reaped = self.reaped.lock().unwrap().take();
+        }
+        let child = process.child.as_mut().expect("spawned verifier child");
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| "failed to open provider verifier stdin".to_string())?;
-        stdin
-            .write_all(&input)
-            .await
-            .map_err(|e| format!("failed to write provider verifier stdin: {e}"))?;
-        drop(stdin);
-
-        let output = tokio::time::timeout(
-            Duration::from_secs(self.timeout_seconds),
-            child.wait_with_output(),
-        )
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stdout".to_string())?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "failed to open provider verifier stderr".to_string())?;
+        let output = tokio::time::timeout(Duration::from_secs(self.timeout_seconds), async {
+            stdin.write_all(&input).await?;
+            drop(stdin);
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let (status, _, _) = tokio::try_join!(
+                child.wait(),
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+            )?;
+            Ok::<_, std::io::Error>(std::process::Output {
+                status,
+                stdout: out,
+                stderr: err,
+            })
+        })
         .await
         .map_err(|_| {
             format!(
@@ -325,6 +467,12 @@ impl ExternalProviderVerifier {
             ));
         }
         Ok(output.stdout)
+    }
+
+    /// Tinfoil's SDK returns a summary without the authenticated quote. Equal
+    /// summaries cannot prove unchanged platform state across verification runs.
+    fn evidence_binds_platform_state(&self) -> bool {
+        self.provider != "tinfoil"
     }
 
     fn event_from_output(
@@ -348,10 +496,26 @@ impl ExternalProviderVerifier {
                     .to_string(),
             );
         }
+        let mut evidence = output.evidence.clone();
         if result == VerificationResult::Verified {
             self.enforce_attested_scope(output.attested_scope.as_deref())?;
+            let mut canonical = canonical_verified_evidence(evidence)?;
+            if self.provider == "near-ai" {
+                if let Some(bundle) = canonical
+                    .as_object_mut()
+                    .and_then(|obj| obj.remove("near_model"))
+                {
+                    if let Ok(bundle) = canonical_verified_evidence(Some(bundle)) {
+                        canonical["near_model"] = bundle;
+                    }
+                }
+            }
+            evidence = Some(canonical);
         }
         Ok(UpstreamVerifiedEvent {
+            aci_identity: None,
+            verification_round: (!self.evidence_binds_platform_state())
+                .then(VerificationRound::fresh),
             upstream_name: request.upstream_name,
             provider_type: Some(self.provider.to_string()),
             model_id: request.model_id,
@@ -362,9 +526,14 @@ impl ExternalProviderVerifier {
                 .unwrap_or_else(|| format!("{}/external-verifier/v1", self.provider)),
             result,
             required: request.required,
-            reason: output.reason.clone(),
-            evidence: output.evidence.clone(),
+            failure: output.failure,
+            diagnostic: output.reason.clone(),
+            evidence,
             channel_bindings,
+            // Optional reviewed profiles are checked at session projection (after
+            // per-instance slicing for Chutes). Incomplete/custom/legacy claims
+            // are accepted here and keep evidence-sensitive dedup. Evidence
+            // integrity and binding enforcement above are never bypassed.
             provider_claims: output.provider_claims.clone(),
         })
     }
@@ -412,6 +581,18 @@ impl ExternalProviderVerifier {
             .map_err(|e| format!("failed to record Chutes provider session: {e}"))
     }
 
+    /// The verifier could not run or answer: nothing was judged.
+    fn unavailable_event(
+        &self,
+        request: UpstreamVerificationRequest,
+        reason: impl Into<String>,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            failure: VerificationFailure::EvidenceUnavailable,
+            ..self.failed_event(request, reason)
+        }
+    }
+
     fn failed_event(
         &self,
         request: UpstreamVerificationRequest,
@@ -425,7 +606,7 @@ impl ExternalProviderVerifier {
             verifier_id: format!("{}/external-verifier/v1", self.provider),
             result: VerificationResult::Failed,
             required: request.required,
-            reason: Some(reason.into()),
+            diagnostic: Some(reason.into()),
             ..Default::default()
         }
     }
@@ -462,31 +643,23 @@ impl ExternalProviderVerifierCacheKey {
     }
 }
 
-#[derive(Clone, Debug)]
-struct CachedExternalProviderEvent {
-    expires_at: u64,
-    event: UpstreamVerifiedEvent,
-}
-
-impl CachedExternalProviderEvent {
-    fn event_for(&self, request: &UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let mut event = self.event.clone();
-        event.upstream_name = request.upstream_name.clone();
-        event.model_id = request.model_id.clone();
-        event.url_origin = request.url_origin.clone();
-        event.required = request.required;
-        event
-    }
-}
-
 #[derive(Deserialize)]
 struct ExternalProviderVerifierOutput {
     result: String,
     verifier_id: Option<String>,
+    /// Why it failed, from the closed set receipts and clients are told.
+    #[serde(default)]
+    failure: VerificationFailure,
+    /// The verifier's own account, for the log and the operator only.
     reason: Option<String>,
     evidence: Option<Value>,
     #[serde(default)]
     channel_bindings: Vec<ExternalChannelBinding>,
+    /// Optional session_material_version profiles: near-ai/1, phala-direct/1,
+    /// chutes/1 (per instance), privatemode/1. Eligibility requires
+    /// matching provider, built-in verifier ID and complete validated material;
+    /// custom profiles have no evidence-independent reuse capability. The
+    /// configured verifier remains responsible for authenticating these facts.
     #[serde(default)]
     provider_claims: Option<serde_json::Value>,
     /// The channel boundary the verifier attests ("router" / "model" /
@@ -507,6 +680,19 @@ struct ExternalChannelBinding {
     key_id: Option<String>,
     algorithm: Option<String>,
     public_key_sha256: Option<String>,
+}
+
+/// A verified result must carry evidence whose data hashes to its digest
+/// (§8.2). The data is re-encoded so a stored session rebuilds byte for byte.
+fn canonical_verified_evidence(evidence: Option<Value>) -> Result<Value, String> {
+    let mut evidence = evidence.ok_or("provider verifier returned verified without evidence")?;
+    let (content_type, bytes) = EvidenceRef::from_value(&evidence).decode().ok_or(
+        "provider verifier returned verified with evidence whose data does not hash to its digest",
+    )?;
+    evidence["data"] = EvidenceRef::from_bytes(&content_type, &bytes)
+        .data_uri
+        .into();
+    Ok(evidence)
 }
 
 fn parse_external_channel_bindings(
@@ -553,4 +739,170 @@ fn parse_external_channel_bindings(
 
 fn normalize_sha256_hex(value: &str) -> Result<String, String> {
     decode_hex_32(value).map(hex::encode)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod process_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    #[tokio::test(start_paused = true)]
+    async fn abort_and_timeout_kill_and_reap_verifier_process_tree() {
+        const HELPER_ENV: &str = "ACI_VERIFIER_PROCESS_TEST_HELPER";
+        if std::env::var_os(HELPER_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .env(HELPER_ENV, "1")
+                .args([
+                    "--exact",
+                    "aci::verifier::external::process_tests::abort_and_timeout_kill_and_reap_verifier_process_tree",
+                    "--nocapture",
+                ])
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            return;
+        }
+        // Only this isolated test process adopts killed grandchildren, so it can
+        // reap them without relying on init's timing or changing other tests.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) },
+            0
+        );
+        for timeout in [false, true] {
+            // The inherited pipe confirms both processes exist before advancing time.
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+            let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+            let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
+            let script = format!(
+                r#"sleep 60 & printf '%s %s\n' "$$" "$!" > /proc/self/fd/{}; wait"#,
+                writer.as_raw_fd()
+            );
+            let read_pids = || {
+                drop(writer);
+                let mut ready = String::new();
+                BufReader::new(reader).read_line(&mut ready).unwrap();
+                let pids: Vec<libc::pid_t> = ready
+                    .split_whitespace()
+                    .map(|pid| pid.parse().unwrap())
+                    .collect();
+                assert_eq!(pids.len(), 2);
+                assert!(pids
+                    .iter()
+                    .all(|pid| unsafe { libc::getpgid(*pid) } == pids[0]));
+                pids
+            };
+            let (reaped, waited) = tokio::sync::oneshot::channel();
+            let pids = if timeout {
+                let verifier = ExternalProviderVerifier::with_command(
+                    "tinfoil",
+                    AttestationScope::PerRouter,
+                    vec!["sh".to_string(), "-c".to_string(), script],
+                    1,
+                )
+                .unwrap();
+                *verifier.reaped.lock().unwrap() = Some(reaped);
+                let mut run = Box::pin(verifier.run(Vec::new()));
+                assert!(futures_util::poll!(&mut run).is_pending());
+                let pids = read_pids();
+                tokio::time::advance(Duration::from_secs(1)).await;
+                assert_eq!(
+                    run.await.unwrap_err(),
+                    "provider verifier timed out after 1s"
+                );
+                pids
+            } else {
+                let mut command = Command::new("sh");
+                command.args(["-c", &script]);
+                let mut process = VerifierProcess::spawn(&mut command).unwrap();
+                process.reaped = Some(reaped);
+                let pids = read_pids();
+                let task = tokio::spawn(async move {
+                    process.child.as_mut().unwrap().wait().await.unwrap();
+                });
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                pids
+            };
+            waited.await.unwrap();
+            let mut status = 0;
+            assert_eq!(unsafe { libc::waitpid(pids[1], &mut status, 0) }, pids[1]);
+            assert!(libc::WIFSIGNALED(status));
+            assert_eq!(libc::WTERMSIG(status), libc::SIGKILL);
+            // Both the leader and its grandchild are gone, not just the direct child.
+            assert_eq!(unsafe { libc::killpg(pids[0], 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_material_tests {
+    use super::*;
+    use crate::aggregator::service::reviewed_session_material;
+
+    #[test]
+    fn legacy_custom_and_incomplete_outputs_remain_accepted_but_evidence_sensitive() {
+        let verifier = ExternalProviderVerifier::with_command(
+            "near-ai",
+            AttestationScope::PerRouter,
+            vec!["unused".to_string()],
+            5,
+        )
+        .unwrap();
+        for claims in [
+            serde_json::json!({}),
+            serde_json::json!({"session_material_version": "custom/1"}),
+            serde_json::json!({"session_material_version": "near-ai/1"}),
+        ] {
+            let output: ExternalProviderVerifierOutput = serde_json::from_value(serde_json::json!({
+                "result": "verified", "verifier_id": "private-ai-verifier/near-ai-gateway/v1",
+                "attested_scope": "router", "provider_claims": claims,
+                "channel_bindings": [{"type": "tls_spki_sha256", "origin": "https://near.example", "spki_sha256": "ab".repeat(32)}],
+                "evidence": {"digest": crate::aci::digest::sha256_hex(b"evidence"), "data": "data:text/plain;base64,ZXZpZGVuY2U="},
+            })).unwrap();
+            let request = || UpstreamVerificationRequest {
+                upstream_name: "near".to_string(),
+                url_origin: Some("https://near.example".to_string()),
+                model_id: "model".to_string(),
+                forwarded_body_hash: String::new(),
+                required: true,
+            };
+            let event = verifier.event_from_output(request(), &output).unwrap();
+            assert_eq!(event.result, VerificationResult::Verified);
+            assert!(event.verification_round.is_none());
+            assert!(!reviewed_session_material(
+                &event,
+                event.provider_claims.as_ref().unwrap()
+            ));
+            let mut invalid = output;
+            invalid.evidence = None;
+            assert!(verifier.event_from_output(request(), &invalid).is_err());
+            invalid.channel_bindings.clear();
+            assert!(verifier.event_from_output(request(), &invalid).is_err());
+        }
+        let mut complete: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/session_material.json"
+        ))
+        .unwrap();
+        let mut event = UpstreamVerifiedEvent {
+            provider_type: Some("near-ai".into()),
+            verifier_id: "custom/verifier/v1".into(),
+            ..Default::default()
+        };
+        assert!(!reviewed_session_material(&event, &complete["near-ai"]));
+        event.verifier_id = "private-ai-verifier/near-ai-gateway/v1".into();
+        complete["near-ai"]["tdx_report_sha256"] = Value::Null;
+        assert!(!reviewed_session_material(&event, &complete["near-ai"]));
+    }
 }

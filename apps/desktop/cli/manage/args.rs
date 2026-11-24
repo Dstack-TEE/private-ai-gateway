@@ -88,6 +88,8 @@ pub enum Action {
     },
     /// Report independent local installation and backend diagnostics without starting services.
     Doctor,
+    /// Install the newer release of the saved update channel, if there is one. The backend restarts and resumes protection.
+    Update,
     /// Export a redacted diagnostics report to a new file.
     Diagnostics {
         /// New destination path. Existing files are never overwritten.
@@ -108,6 +110,8 @@ pub enum Service {
     Start,
     /// Stop the backend and restore managed agent configurations.
     Stop,
+    /// Restart the backend. Protection resumes and agents stay connected.
+    Restart,
     /// Show backend and protection state without starting the backend.
     Status,
 }
@@ -203,17 +207,16 @@ pub struct AccountLoginOptions {
     /// Provider for a new profile (defaults to RedPill).
     #[arg(long, value_enum)]
     pub provider: Option<Provider>,
+    /// Display name for the account profile
     #[arg(long)]
     pub name: Option<String>,
     /// Workspace ID; required if the organization has several workspaces.
     #[arg(long)]
     pub workspace: Option<i64>,
-    /// Read a pasted loopback callback URL from stdin (RedPill only).
-    #[arg(long)]
-    pub callback_stdin: bool,
     /// Print the authorization URL without launching a browser.
     #[arg(long)]
     pub no_browser: bool,
+    /// Maximum sign-in wait in seconds
     #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=900))]
     pub timeout: u64,
 }
@@ -240,7 +243,7 @@ pub enum Profiles {
     },
     /// Sign in to Phala or RedPill and save an account profile. Protection starts separately.
     Login(AccountLoginOptions),
-    /// Save a new profile and credential; protection verifies it when started.
+    /// Verify a new profile's service, then save it with its credential and select it. Nothing is saved when verification fails.
     Add {
         #[arg(long, help = "Unique profile ID")]
         id: String,
@@ -253,8 +256,8 @@ pub enum Profiles {
         /// Read the credential from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         key_stdin: bool,
-        /// Permit a verified development OS image for this profile.
-        #[arg(long)]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         allow_development_os: bool,
     },
     /// Validate and save a profile, optionally replacing its credential.
@@ -264,6 +267,9 @@ pub enum Profiles {
         /// Read a replacement credential from stdin.
         #[arg(long)]
         key_stdin: bool,
+        /// Replace the saved credential, entered at a hidden prompt.
+        #[arg(long, conflicts_with = "key_stdin")]
+        replace_key: bool,
     },
     /// Edit and save an existing profile.
     #[command(
@@ -284,11 +290,11 @@ pub enum Profiles {
         /// Read a replacement credential from stdin.
         #[arg(long)]
         key_stdin: bool,
-        /// Permit a verified development OS image; otherwise retain the current global policy.
-        #[arg(long, conflicts_with = "require_production_os")]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         allow_development_os: bool,
-        /// Require a production OS image; otherwise retain the current global policy.
-        #[arg(long, conflicts_with = "allow_development_os")]
+        /// Deprecated compatibility flag; clients no longer check the gateway OS image.
+        #[arg(long, hide = true)]
         require_production_os: bool,
     },
     /// Make a saved profile active.
@@ -300,7 +306,10 @@ pub enum Profiles {
         id: String,
     },
     /// Delete a profile and its stored credential.
-    Remove { id: String },
+    Remove {
+        /// Saved profile ID
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -309,7 +318,7 @@ pub enum Agents {
     List,
     /// Connect an agent to the Local API.
     Connect {
-        /// Agent ID reported by `private-ai-proxy agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Optional default model from the verified catalog.
         #[arg(long)]
@@ -323,7 +332,7 @@ pub enum Agents {
     },
     /// Disconnect an agent and restore its managed configuration.
     Disconnect {
-        /// Agent ID reported by `private-ai-proxy agents list`.
+        /// Agent ID reported by `pap agents list`.
         id: String,
         /// Preview changes and return a revision without applying them.
         #[arg(long, conflicts_with = "revision")]
@@ -376,6 +385,7 @@ pub enum Usage {
     },
     /// Show one usage record by ID.
     Show {
+        /// Usage record ID
         id: String,
         /// Print the signed receipt document its audit checked, exactly as the service returned it.
         #[arg(long)]
@@ -388,6 +398,7 @@ pub enum Usage {
         /// New destination path. Existing files are never overwritten.
         #[arg(long)]
         output: PathBuf,
+        /// Export file format
         #[arg(long, default_value = "csv", value_parser = ["csv"])]
         format: String,
     },
@@ -499,7 +510,9 @@ pub enum Settings {
         /// The setting's dotted path in config.toml, for example web-ui.enabled.
         #[arg(value_parser = SettingsKeyArg::parser())]
         key: SettingsKeyArg,
-        /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it.
+        /// Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable.
+        /// "" clears local-api.client-host or web-ui.client-host. web-ui.password uses --value-stdin
+        /// or the hidden prompt and cannot be cleared.
         value: Option<String>,
         /// Read the web-ui.password value from stdin instead of a hidden terminal prompt.
         #[arg(long)]

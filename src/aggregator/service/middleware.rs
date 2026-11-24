@@ -3,29 +3,34 @@
 //!
 
 use super::e2ee_crypto::{encrypt_e2ee_final_response, is_sse_content_type};
-use super::forward::{attested_route_eligible, cite_served_session, ReverifyOutcome};
+use super::forward::{attested_route_eligible, ReverifyOutcome, SelectedUpstream};
 use super::helpers::{
     accepted_response_model, collect_upstream_body, extract_chat_id, generate_receipt_id,
 };
 use super::streaming::{
-    E2eeSseTransformer, MiddlewareProviderResponseDraftingStream,
-    MiddlewareResponseFinalizingStream,
+    finalize_sse_body, MiddlewareProviderResponseDraftingStream, ResponseContext, ResponseInput,
+    ResponseOwner,
 };
 use super::{
-    AciService, ChatCompletionRequest, E2eeError, E2eeRequestContext, E2eeResponseInfo,
-    FailedAttempt, ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult,
-    MiddlewareForwarded, MiddlewareGeneratedFinalization, MiddlewareReceiptDraft,
-    MiddlewareReceiptFinalization, MiddlewareReceiptJournal, MiddlewareStreamFinalization,
-    MiddlewareStreamingForwarded, MiddlewareUpstreamError, ReceiptOwner, ServiceError,
-    ServiceResponseStream, StreamingUpstreamError, UpstreamVerificationError,
+    AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, FailedAttempt,
+    ForwardCandidate, MiddlewareAllFailed, MiddlewareForwardResult, MiddlewareForwarded,
+    MiddlewareGeneratedFinalization, MiddlewareReceiptDraft, MiddlewareReceiptFinalization,
+    MiddlewareReceiptJournal, MiddlewareStreamFinalization, MiddlewareStreamingForwarded,
+    MiddlewareUpstreamError, ReceiptOwner, ServiceError, ServiceResponseStream,
+    StreamingUpstreamError, UpstreamVerificationError,
 };
 use crate::aci::receipt::{ReceiptBuilder, UpstreamVerifiedEvent};
+use crate::aci::upstream::request_id::request_id_from_headers;
 use crate::aci::upstream::{
-    UpstreamError, UpstreamRequest, UpstreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
+    is_near_chat_request, PreparedUpstreamRequest, UpstreamError, UpstreamRequest,
+    UpstreamResponse, EVENT_UPSTREAM_RESPONSE_ATTESTED,
 };
 use crate::aggregator::metrics::{RequestMode, StreamErrorKind};
+use crate::endpoint::Endpoint;
 use crate::middleware::errors::{is_upstream_capacity_signal, recorded_attempt_status};
-use crate::sse_framing::SseFramingObserver;
+use crate::middleware::sse::Accounting;
+use crate::middleware::types::ProviderFormat;
+use crate::sse::EventStream;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -46,17 +51,43 @@ use std::time::{Duration, Instant};
 // 400/422 stay excluded: those describe the request body, which every candidate
 // receives identically.
 /// Status recorded for a candidate that produced no HTTP response: 504 when the
-/// gateway's own connect/read deadline expired, 502 for every other failure.
-fn abandoned_status(err: &UpstreamError) -> u16 {
-    if matches!(err, UpstreamError::Timeout(_)) {
-        504
-    } else {
-        502
+/// gateway's own connect/read deadline expired, 502 for every other failure, and
+/// none for a request the route cannot carry — the caller's fault, which must
+/// not count against the provider. That skip leaves no attempt behind, so it
+/// is logged; the adapters' messages name a field or path, never content.
+fn abandoned_status(err: &UpstreamError, prepared: &PreparedUpstreamRequest) -> Option<u16> {
+    match err {
+        UpstreamError::Timeout(_) => Some(504),
+        // The reason is written for the caller and can quote the request, so
+        // it is served, not logged.
+        UpstreamError::InvalidRequest(_) => {
+            tracing::warn!(upstream = %prepared.upstream_name, route = prepared.route_id.as_deref().unwrap_or_default(), model = %prepared.model_id, "candidate skipped before sending: the route cannot carry this request");
+            None
+        }
+        // A withheld non-2xx is forwarded as a response before it gets here;
+        // one that did not is still the upstream's answer.
+        UpstreamError::Upstream { status } if !(200..300).contains(status) => Some(*status),
+        // A withheld 2xx (no verifiable body) is no answer; the rest never
+        // got one.
+        UpstreamError::Upstream { .. }
+        | UpstreamError::Routing(_)
+        | UpstreamError::Transport(_)
+        | UpstreamError::SseLineOverflow
+        | UpstreamError::SseTruncated
+        | UpstreamError::EnvelopeTruncated
+        | UpstreamError::ResponseTooLarge
+        | UpstreamError::ChannelBindingMismatch(_)
+        | UpstreamError::ResponseBindingMismatch { .. } => Some(502),
     }
 }
 
 fn is_retryable_provider_status(status: u16) -> bool {
-    matches!(status, 401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504)
+    // 520-527: a reverse proxy in front of the provider could not get an
+    // answer from the node behind it, which says nothing about a sibling.
+    matches!(
+        status,
+        401 | 402 | 403 | 404 | 429 | 500 | 502 | 503 | 504 | 520..=527
+    )
 }
 
 // Whether to abandon this candidate and try the next. The status must be a
@@ -70,6 +101,8 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // re-tries exactly the candidates that answered 429 — once. A request that
 // already spent long in the chain is returned rather than delayed further.
 // The jittered delay de-synchronizes requests bounced by the same capacity dip.
+// An upstream that says how long to wait (`Retry-After`) is waited on instead
+// when that is longer, up to the walk's budget.
 //
 // x-user-tier does not gate this. Preemptible callers were once excluded on
 // the reasoning that they handle capacity signals themselves; they do, by
@@ -77,6 +110,17 @@ fn is_retryable_provider_status(status: u16) -> bool {
 // under pressure, not retries.
 const CAPACITY_RETRY_DELAY_MS: u64 = 2_000;
 const CAPACITY_RETRY_MAX_ELAPSED: Duration = Duration::from_secs(10);
+
+/// A capacity rejection's `Retry-After`, in its delay-seconds form, capped at
+/// the walk's budget. An HTTP-date or unparsable value counts as absent.
+fn retry_after(headers: &HashMap<String, String>) -> Duration {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::ZERO, |secs| {
+            Duration::from_secs(secs).min(CAPACITY_RETRY_MAX_ELAPSED)
+        })
+}
 
 /// Whether this request may still take the delayed capacity-retry pass.
 fn capacity_retry_eligible(done: bool, started: Instant) -> bool {
@@ -87,7 +131,7 @@ fn should_fail_over(status: u16, received_body: &[u8], upstream_body: &[u8]) -> 
     // The capacity signal must be failover-able regardless of the literal
     // status: error normalization surfaces the recognized capacity body under
     // ANY 5xx as a client 429, so a status outside the retryable whitelist
-    // (e.g. 520) carrying that body would otherwise be told "capacity" while
+    // (e.g. 501) carrying that body would otherwise be told "capacity" while
     // having been denied both the failover and the capacity retry that
     // capacity outcomes get.
     (is_retryable_provider_status(status) || is_upstream_capacity_signal(status, upstream_body))
@@ -131,6 +175,16 @@ enum RetainedResponse {
 }
 
 impl RetainedResponse {
+    /// Drop the answer's `Retry-After`. It counted from when the answer
+    /// arrived; once the gateway has waited on it, relaying it would make the
+    /// caller wait a second time.
+    fn forget_retry_after(&mut self) {
+        match self {
+            Self::Streaming { error, .. } => error.upstream_headers.remove("retry-after"),
+            Self::Buffered { inputs, .. } => inputs.response.headers.remove("retry-after"),
+        };
+    }
+
     /// Where this candidate's own entry sits in `failed_attempts`. Removing it
     /// on commit keeps the committed attempt last: attempts are reported by
     /// position, and a request's user-facing status is read as the one at the
@@ -150,11 +204,12 @@ pub(super) struct BufferedCommit {
     pub response: UpstreamResponse,
     /// Resolved where the response arrived, alongside its one metrics count.
     pub response_model: Option<String>,
-    pub recorded_event: UpstreamVerifiedEvent,
+    pub admission: SelectedUpstream,
     pub route_id: String,
-    pub path: &'static str,
+    pub endpoint: Endpoint,
+    pub format: ProviderFormat,
     pub middleware_forwarded_body: Vec<u8>,
-    pub forwarded_body: Vec<u8>,
+    pub forwarded_body: bytes::Bytes,
 }
 
 /// The request/response context observed for one forwarded candidate,
@@ -162,6 +217,7 @@ pub(super) struct BufferedCommit {
 /// [`AciService::build_middleware_receipt_prefix`] reads by field name rather
 /// than ten positional arguments.
 pub(super) struct MiddlewareReceiptInputs<'a> {
+    pub keyset: &'a crate::aci::identity::SealedWorkloadKeyset,
     pub receipt_id: &'a str,
     pub chat_id: Option<String>,
     /// The user-requested model (received request's top-level `model`), recorded
@@ -175,6 +231,7 @@ pub(super) struct MiddlewareReceiptInputs<'a> {
     pub forwarded_body: &'a [u8],
     pub recorded_event: UpstreamVerifiedEvent,
     pub recorded: Option<String>,
+    pub upstream_headers: &'a HashMap<String, String>,
 }
 
 impl AciService {
@@ -183,6 +240,7 @@ impl AciService {
         inputs: MiddlewareReceiptInputs<'_>,
     ) -> Result<ReceiptBuilder, ServiceError> {
         let MiddlewareReceiptInputs {
+            keyset,
             receipt_id,
             chat_id,
             model,
@@ -194,12 +252,13 @@ impl AciService {
             forwarded_body,
             recorded_event,
             recorded,
+            upstream_headers,
         } = inputs;
         let mut builder = ReceiptBuilder::new(
             receipt_id.to_string(),
             chat_id,
             model,
-            self.keyset.digest().to_string(),
+            keyset.digest().to_string(),
             endpoint_path.to_string(),
             "POST".to_string(),
             served_at,
@@ -210,13 +269,18 @@ impl AciService {
         builder.add_request_forwarded(forwarded_body)?;
         // A direct service has no upstream hop, so §7.5's event does not apply.
         if !self.serves_directly() {
-            Self::append_upstream_verified(&mut builder, &recorded_event, recorded)?;
+            Self::append_upstream_verified(
+                &mut builder,
+                &recorded_event,
+                recorded,
+                upstream_headers,
+            )?;
         }
         Ok(builder)
     }
 
-    /// Turn one buffered upstream response into a committed result: seal the
-    /// attested session, build the receipt, and report the attempts that
+    /// Turn one buffered upstream response into a committed result: carry the
+    /// admitted session, build the receipt, and report the attempts that
     /// preceded it. Shared by the in-loop commit and the retained-response
     /// commit after the walk.
     fn commit_buffered_response(
@@ -228,23 +292,33 @@ impl AciService {
         user_model: Option<String>,
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         let BufferedCommit {
-            response,
+            mut response,
             response_model,
-            recorded_event,
+            admission,
             route_id,
-            path,
+            endpoint,
+            format,
             middleware_forwarded_body,
             forwarded_body,
         } = commit;
         let status = response.status_code;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
 
         let receipt_id = generate_receipt_id();
-        let served_at = self.clock.now_secs();
-        let chat_id = extract_chat_id(&response.body);
-        let sealed = self.record_attested_upstream_session(&recorded_event)?;
-        let recorded = cite_served_session(&sealed, response.served_instance_id.as_deref());
+        let served_at = admission.admitted_at;
+        let keyset = self.current_keyset();
+        let chat_id = if client_endpoint.is_media() {
+            None
+        } else {
+            extract_chat_id(&response.body)
+        };
+        let recorded = admission
+            .lease
+            .as_ref()
+            .map(|lease| lease.session_id().to_string());
         let session_id = recorded.clone();
         let mut builder = self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+            keyset: &keyset,
             receipt_id: &receipt_id,
             chat_id,
             model: user_model,
@@ -254,34 +328,59 @@ impl AciService {
             middleware_forwarded_body: &middleware_forwarded_body,
             selected_route_id: &route_id,
             forwarded_body: &forwarded_body,
-            recorded_event,
+            recorded_event: admission.event,
             recorded,
+            upstream_headers: &response.headers,
         })?;
         // The session is keyed on the requested (routed) model; record the
         // exact upstream-served model in the receipt's upstream.verified.
         builder.set_upstream_verified_model_id(response_model.clone());
         builder.add_response_received(&response.body)?;
-        // Per-response enclave attestation (NEAR AI), recorded whether or not
-        // it bound, so a verifier can re-check the signature offline.
-        if let Some(fields) = &response.response_attestation {
-            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields.clone())?;
+        if let Some(fields) = response.response_attestation.take() {
+            builder.add_extension_event(EVENT_UPSTREAM_RESPONSE_ATTESTED, fields)?;
         }
+        let usage = if client_endpoint == Endpoint::AudioSpeech && (200..300).contains(&status) {
+            if let Some(content_type) =
+                crate::middleware::speech::response_content_type(&response.headers, &response.body)
+            {
+                response.headers.insert("content-type".into(), content_type);
+                let usage = serde_json::from_slice::<serde_json::Value>(received_body)
+                    .ok()
+                    .and_then(|params| crate::middleware::speech::usage(&params))
+                    .ok_or_else(|| {
+                        UpstreamError::InvalidRequest("invalid speech input metadata".into())
+                    })?;
+                Self::append_speech_usage(&mut builder, usage.clone())?;
+                Some(usage)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Ok(MiddlewareForwardResult::Forwarded(Box::new(
             MiddlewareForwarded {
+                usage,
                 receipt_id: receipt_id.clone(),
                 receipt: MiddlewareReceiptDraft {
                     receipt_id: receipt_id.clone(),
                     builder,
                     endpoint_path: endpoint_path.to_string(),
                     request_mode: RequestMode::Buffered,
-                    response_model,
+                    response_model: std::sync::Arc::new(
+                        response_model
+                            .map(std::sync::OnceLock::from)
+                            .unwrap_or_default(),
+                    ),
+                    session_lease: admission.lease,
                 },
                 upstream_status: status,
                 upstream_body: response.body,
                 upstream_headers: response.headers,
                 selected_route: route_id,
-                selected_path: path,
+                selected_endpoint: endpoint,
+                selected_format: format,
                 failed_attempts,
                 session_id,
             },
@@ -297,10 +396,11 @@ impl AciService {
     ) -> Result<MiddlewareForwardResult, ServiceError> {
         // §5.3: a direct service satisfies `aci_verified` by construction — the
         // workload the client verified (§9.1) is the one serving (§4.1); pinned
-        // session lists are still refused in `apply_aci_session_constraint`.
+        // session lists are still refused in `admit_upstream`.
         let aci_required = req.requires_aci_verification() && !self.serves_directly();
         let received_body = req.received_body;
         let endpoint_path = req.endpoint_path;
+        let client_endpoint = Endpoint::from_path(endpoint_path);
         // The user-requested model, recorded as the receipt's top-level `model`.
         let user_model = req.context.user_model.clone();
         let mode = if stream {
@@ -353,6 +453,13 @@ impl AciService {
         // attempt's status is chosen is documented on `FailedAttempt`.
         let mut failed_attempts: Vec<FailedAttempt> = Vec::new();
 
+        let all_failed = |failed_attempts, error| {
+            MiddlewareForwardResult::AllFailed(Box::new(MiddlewareAllFailed {
+                failed_attempts,
+                error,
+            }))
+        };
+
         // The most recent candidate that actually answered, held back in case
         // nothing better follows. See [`RetainedResponse`].
         let mut retained: Option<RetainedResponse> = None;
@@ -370,9 +477,13 @@ impl AciService {
         // index, not route id: route ids may repeat in a caller-supplied chain,
         // and reconstructing the set from ids would replay a hard-failed twin.
         let mut capacity_indices: Vec<usize> = Vec::new();
+        // The longest `Retry-After` among this pass's capacity rejections.
+        let mut capacity_wait: Duration;
 
+        let mut response_binding_reverified = false;
         loop {
             capacity_indices.clear();
+            capacity_wait = Duration::ZERO;
             let last_index = current.len() - 1;
             for (index, candidate) in current.iter().enumerate() {
                 let route_id = candidate.route_id.clone();
@@ -381,11 +492,14 @@ impl AciService {
                 // Mirrored into the journal as well as the local list: the
                 // local list reaches the caller only through the forward
                 // result, which a request cancelled mid-walk never sees.
-                let abandon = |failed_attempts: &mut Vec<FailedAttempt>, status: u16| {
+                let abandon = |failed_attempts: &mut Vec<FailedAttempt>,
+                               status: u16,
+                               upstream_request_id: Option<String>| {
                     let attempt = FailedAttempt {
                         route_id: route_id.clone(),
                         status,
                         duration_ms: attempt_started.elapsed().as_millis() as u64,
+                        upstream_request_id,
                     };
                     receipt_journal.record_abandoned(attempt.clone());
                     failed_attempts.push(attempt);
@@ -396,15 +510,38 @@ impl AciService {
                 // attributed to it.
                 receipt_journal.set_in_flight(&route_id, failed_attempts.len() as u32);
 
-                let prepared = match self.upstream.prepare(UpstreamRequest {
-                    body: candidate.body.clone(),
-                    headers: upstream_headers.clone(),
-                    path: Some(candidate.path.to_string()),
-                    target_route_id: Some(route_id.clone()),
-                }) {
+                let (prepared, source_protocol) = match self
+                    .upstream
+                    .prepare(UpstreamRequest {
+                        cache_salt: req.context.cache_salt.clone(),
+                        body: candidate.body.clone().into(),
+                        form: req.form.clone(),
+                        content_type: None,
+                        headers: upstream_headers.clone(),
+                        path: Some(candidate.endpoint.path().to_string()),
+                        target_route_id: Some(route_id.clone()),
+                    })
+                    .and_then(|prepared| {
+                        let protocol = self
+                            .upstream
+                            .response_protocol(&prepared, candidate.wire_endpoint);
+                        // Evidence validates the shaped route protocol; it never
+                        // replaces the protocol used by the source decoder.
+                        if stream
+                            && protocol.is_some_and(|protocol| {
+                                protocol != (candidate.format, candidate.endpoint).into()
+                            })
+                        {
+                            return Err(UpstreamError::Routing(
+                                "candidate format contradicts the configured upstream protocol"
+                                    .into(),
+                            ));
+                        }
+                        Ok((prepared, protocol))
+                    }) {
                     Ok(prepared) => prepared,
                     Err(UpstreamError::Routing(message)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             1,
@@ -413,11 +550,18 @@ impl AciService {
                         continue;
                     }
                     Err(err) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         continue;
                     }
                 };
+
+                let mut prepared = prepared;
+                if let Err(err) = prepared.encode_media().await {
+                    abandon(&mut failed_attempts, 502, None);
+                    upgrade_err(&mut aggregated_err, 2, err.into());
+                    continue;
+                }
 
                 // A route not known to be attested cannot serve an
                 // `aci_verified` request. Kept out of `failed_attempts`: this is a
@@ -441,7 +585,7 @@ impl AciService {
                 // Unconstrained requests still record the verifier outcome.
                 let candidate_required = aci_required;
 
-                let mut recorded_event = match self
+                let recorded_event = match self
                     .recorded_upstream_event(
                         &prepared,
                         candidate_required,
@@ -451,7 +595,7 @@ impl AciService {
                 {
                     Ok(event) => event,
                     Err(ServiceError::UpstreamVerification(uv)) => {
-                        abandon(&mut failed_attempts, 502);
+                        abandon(&mut failed_attempts, 502, None);
                         upgrade_err(
                             &mut aggregated_err,
                             3,
@@ -462,22 +606,30 @@ impl AciService {
                     Err(err) => return Err(err),
                 };
 
-                if let Err(err) = self.apply_aci_session_constraint(
-                    &mut recorded_event,
+                let admission = match self.admit_upstream(
+                    recorded_event,
                     &req.aci_session_ids,
                     &prepared.model_id,
+                    Some(&receipt_journal),
+                    !stream && is_near_chat_request(&prepared),
                 ) {
-                    if matches!(
-                        err,
-                        ServiceError::UpstreamVerification(
-                            UpstreamVerificationError::NoEligibleAttestedSession(_)
-                        )
-                    ) {
-                        upgrade_err(&mut aggregated_err, 0, err);
-                        continue;
+                    Ok(admission) => admission,
+                    Err(error @ ServiceError::EarlyResponseKeysetExpired) => {
+                        return Ok(all_failed(failed_attempts, error));
                     }
-                    return Err(err);
-                }
+                    Err(err) => {
+                        if matches!(
+                            err,
+                            ServiceError::UpstreamVerification(
+                                UpstreamVerificationError::NoEligibleAttestedSession(_)
+                            )
+                        ) {
+                            upgrade_err(&mut aggregated_err, 0, err);
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                };
 
                 let forwarded_body = prepared.request.body.clone();
 
@@ -485,13 +637,15 @@ impl AciService {
                     let upstream_response = match self
                         .forward_with_binding_reverify(
                             &prepared,
-                            &mut recorded_event,
+                            admission,
                             candidate_required,
                             caller_supplied_upstream_event,
                             &req.aci_session_ids,
+                            Some(&receipt_journal),
                             // Failover path: flush a possibly-stale binding on any
                             // terminal mismatch so the next candidate/request re-verifies.
                             true,
+                            &mut response_binding_reverified,
                             |prepared, event| async move {
                                 self.upstream
                                     .forward_stream_verified_prepared(prepared, &event)
@@ -500,7 +654,14 @@ impl AciService {
                         )
                         .await
                     {
-                        ReverifyOutcome::Forwarded(response) => Ok(response),
+                        ReverifyOutcome::Forwarded(response, admission) => {
+                            Ok((response, admission))
+                        }
+                        ReverifyOutcome::RefreshFailed(
+                            error @ ServiceError::EarlyResponseKeysetExpired,
+                        ) => {
+                            return Ok(all_failed(failed_attempts, error));
+                        }
                         ReverifyOutcome::RefreshFailed(err) => {
                             let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                                 3
@@ -508,7 +669,7 @@ impl AciService {
                                 2
                             };
                             upgrade_err(&mut aggregated_err, priority, err);
-                            Err(502)
+                            Err(Some(502))
                         }
                         ReverifyOutcome::Failed(err) => {
                             // Terminal binding mismatch and transport errors
@@ -516,19 +677,23 @@ impl AciService {
                             // reverify outranks them at 3). The recorded status
                             // still tells them apart: a deadline the gateway's
                             // client enforced is 504, everything else 502.
-                            let status = abandoned_status(&err);
+                            let status = abandoned_status(&err, &prepared);
                             upgrade_err(&mut aggregated_err, 2, err.into());
                             Err(status)
                         }
                     };
-                    let upstream_response = match upstream_response {
+                    let (upstream_response, admission) = match upstream_response {
                         Ok(response) => response,
                         Err(status) => {
-                            abandon(&mut failed_attempts, status);
+                            if let Some(status) = status {
+                                abandon(&mut failed_attempts, status, None);
+                            }
                             continue;
                         }
                     };
 
+                    let admission =
+                        (*admission).select(upstream_response.served_instance_id.as_deref())?;
                     let status = upstream_response.status_code;
                     if status != 200 {
                         self.metrics.record_upstream_response(
@@ -537,14 +702,32 @@ impl AciService {
                             status,
                             None,
                         );
-                        // Collect the (small) error body up front so the failover
-                        // decision can inspect it. A truncated/unreadable error body
-                        // must not abort the remaining candidates, so it degrades to
-                        // empty — the caller's normalizer emits its generic message.
+                        // Collect the error body up front so the failover decision
+                        // can inspect it. Oversized bodies are upstream failures;
+                        // other truncated/unreadable bodies still degrade to empty
+                        // for the caller's normalizer to emit its generic message.
                         let upstream_headers = upstream_response.headers;
-                        let upstream_body = collect_upstream_body(upstream_response.body)
-                            .await
-                            .unwrap_or_default();
+                        let upstream_body = match collect_upstream_body(
+                            upstream_response.body,
+                            &upstream_headers,
+                            self.config.max_buffered_response_bytes,
+                        )
+                        .await
+                        {
+                            Ok(body) => body,
+                            Err(ServiceError::Upstream(err @ UpstreamError::ResponseTooLarge)) => {
+                                if let Some(status) = abandoned_status(&err, &prepared) {
+                                    abandon(
+                                        &mut failed_attempts,
+                                        status,
+                                        request_id_from_headers(&upstream_headers),
+                                    );
+                                }
+                                upgrade_err(&mut aggregated_err, 2, err.into());
+                                continue;
+                            }
+                            Err(_) => Vec::new(),
+                        };
                         // A last-candidate answer is retained rather than returned while
                         // a capacity-retry pass is still available and this pass produced
                         // any capacity signal: the walk exit decides whether to replay the
@@ -559,7 +742,9 @@ impl AciService {
                         {
                             if is_capacity {
                                 capacity_indices.push(index);
+                                capacity_wait = capacity_wait.max(retry_after(&upstream_headers));
                             }
+                            let upstream_request_id = request_id_from_headers(&upstream_headers);
                             retained = Some(RetainedResponse::Streaming {
                                 error: StreamingUpstreamError {
                                     upstream_status: status,
@@ -569,7 +754,7 @@ impl AciService {
                                 route_id: route_id.clone(),
                                 attempt_slot: failed_attempts.len(),
                             });
-                            abandon(&mut failed_attempts, attempt_status);
+                            abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                             continue;
                         }
                         self.metrics
@@ -589,16 +774,26 @@ impl AciService {
 
                     // Commit this candidate.
                     let upstream_headers = upstream_response.headers;
+                    let content_type = upstream_headers
+                        .get("content-type")
+                        .map(|value| value.split(';').next().unwrap_or("").trim())
+                        .filter(|base| !base.is_empty());
+                    let is_sse = content_type.is_none_or(|value| is_sse_content_type(Some(value)));
                     let receipt_id = generate_receipt_id();
-                    let served_at = self.clock.now_secs();
-                    let sealed = self.record_attested_upstream_session(&recorded_event)?;
-                    let recorded = cite_served_session(
-                        &sealed,
-                        upstream_response.served_instance_id.as_deref(),
-                    );
+                    let served_at = admission.admitted_at;
+                    // Early SSE headers may already cite a keyset. Preserve
+                    // that snapshot even if renewal happened during the wait.
+                    let keyset = receipt_journal
+                        .early_response_keyset()
+                        .unwrap_or_else(|| self.current_keyset());
+                    let recorded = admission
+                        .lease
+                        .as_ref()
+                        .map(|lease| lease.session_id().to_string());
                     let session_id = recorded.clone();
                     let builder =
                         self.build_middleware_receipt_prefix(MiddlewareReceiptInputs {
+                            keyset: &keyset,
                             receipt_id: &receipt_id,
                             chat_id: None,
                             model: user_model.clone(),
@@ -608,29 +803,41 @@ impl AciService {
                             middleware_forwarded_body: &candidate.body,
                             selected_route_id: &route_id,
                             forwarded_body: &forwarded_body,
-                            recorded_event,
+                            recorded_event: admission.event,
                             recorded,
+                            upstream_headers: &upstream_headers,
                         })?;
                     receipt_journal.reserve_receipt_id(receipt_id.clone());
 
+                    let keyset_digest = keyset.digest().to_string();
+                    receipt_journal.set_early_publication(source_protocol.is_some());
                     let body = MiddlewareProviderResponseDraftingStream::new(
                         upstream_response.body,
-                        builder,
+                        MiddlewareReceiptDraft {
+                            receipt_id: receipt_id.clone(),
+                            builder,
+                            session_lease: admission.lease,
+                            endpoint_path: endpoint_path.to_string(),
+                            request_mode: RequestMode::Streaming,
+                            response_model: receipt_journal.response_model.clone(),
+                        },
                         receipt_journal,
-                        receipt_id.clone(),
-                        endpoint_path.to_string(),
                         self.metrics.clone(),
                         status,
+                        !is_sse,
                     );
 
                     return Ok(MiddlewareForwardResult::Stream(Box::new(
                         MiddlewareStreamingForwarded {
+                            is_sse,
                             receipt_id: receipt_id.clone(),
+                            keyset_digest,
                             upstream_status: status,
                             upstream_headers,
                             body: Box::pin(body),
                             selected_route: route_id.clone(),
-                            selected_path: candidate.path,
+                            selected_endpoint: candidate.endpoint,
+                            selected_format: candidate.format,
                             failed_attempts: std::mem::take(&mut failed_attempts),
                             session_id,
                         },
@@ -641,13 +848,15 @@ impl AciService {
                 let upstream_response = match self
                     .forward_with_binding_reverify(
                         &prepared,
-                        &mut recorded_event,
+                        admission,
                         candidate_required,
                         caller_supplied_upstream_event,
                         &req.aci_session_ids,
+                        Some(&receipt_journal),
                         // Failover path: flush a possibly-stale binding on any
                         // terminal mismatch so the next candidate/request re-verifies.
                         true,
+                        &mut response_binding_reverified,
                         |prepared, event| async move {
                             self.upstream
                                 .forward_verified_prepared(prepared, &event)
@@ -656,7 +865,7 @@ impl AciService {
                     )
                     .await
                 {
-                    ReverifyOutcome::Forwarded(response) => Ok(response),
+                    ReverifyOutcome::Forwarded(response, admission) => Ok((response, admission)),
                     ReverifyOutcome::RefreshFailed(err) => {
                         let priority = if matches!(err, ServiceError::UpstreamVerification(_)) {
                             3
@@ -664,7 +873,7 @@ impl AciService {
                             2
                         };
                         upgrade_err(&mut aggregated_err, priority, err);
-                        Err(502)
+                        Err(Some(502))
                     }
                     ReverifyOutcome::Failed(err) => {
                         // Terminal binding mismatch and transport errors
@@ -672,24 +881,34 @@ impl AciService {
                         // reverify outranks them at 3). The recorded status
                         // still tells them apart: a deadline the gateway's
                         // client enforced is 504, everything else 502.
-                        let status = abandoned_status(&err);
+                        let status = abandoned_status(&err, &prepared);
                         upgrade_err(&mut aggregated_err, 2, err.into());
                         Err(status)
                     }
                 };
-                let upstream_response = match upstream_response {
+                let (upstream_response, admission) = match upstream_response {
                     Ok(response) => response,
                     Err(status) => {
-                        abandon(&mut failed_attempts, status);
+                        if let Some(status) = status {
+                            abandon(&mut failed_attempts, status, None);
+                        }
                         continue;
                     }
                 };
+
+                let admission =
+                    (*admission).select(upstream_response.served_instance_id.as_deref())?;
 
                 // Counted once, here, where the response arrives — a response that is
                 // held back and committed after the walk must not be counted again
                 // on commit.
                 let status = upstream_response.status_code;
-                let response_model = accepted_response_model(status, &upstream_response.body);
+                let response_model = accepted_response_model(status, &upstream_response.body)
+                    .or_else(|| {
+                        client_endpoint
+                            .is_media()
+                            .then(|| prepared.model_id.clone())
+                    });
                 self.metrics.record_upstream_response(
                     endpoint_path,
                     RequestMode::Buffered,
@@ -710,20 +929,23 @@ impl AciService {
                 {
                     if is_capacity {
                         capacity_indices.push(index);
+                        capacity_wait = capacity_wait.max(retry_after(&upstream_response.headers));
                     }
+                    let upstream_request_id = request_id_from_headers(&upstream_response.headers);
                     retained = Some(RetainedResponse::Buffered {
                         inputs: Box::new(BufferedCommit {
                             response: upstream_response,
                             response_model,
-                            recorded_event,
+                            admission,
                             route_id: route_id.clone(),
-                            path: candidate.path,
+                            endpoint: candidate.endpoint,
+                            format: candidate.format,
                             middleware_forwarded_body: candidate.body.clone(),
                             forwarded_body,
                         }),
                         attempt_slot: failed_attempts.len(),
                     });
-                    abandon(&mut failed_attempts, attempt_status);
+                    abandon(&mut failed_attempts, attempt_status, upstream_request_id);
                     continue;
                 }
 
@@ -732,9 +954,10 @@ impl AciService {
                     BufferedCommit {
                         response: upstream_response,
                         response_model,
-                        recorded_event,
+                        admission,
                         route_id,
-                        path: candidate.path,
+                        endpoint: candidate.endpoint,
+                        format: candidate.format,
                         middleware_forwarded_body: candidate.body.clone(),
                         forwarded_body,
                     },
@@ -752,14 +975,17 @@ impl AciService {
                 && capacity_retry_eligible(capacity_retry_done, forward_started)
             {
                 capacity_retry_done = true;
+                if let Some(retained) = retained.as_mut() {
+                    retained.forget_retry_after();
+                }
                 let jitter = rand::random::<u64>() % CAPACITY_RETRY_DELAY_MS;
                 // Nothing is being waited on during the pause; a request abandoned
                 // here must not be pinned on whichever candidate happened to
                 // answer last.
                 receipt_journal.clear_in_flight();
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    CAPACITY_RETRY_DELAY_MS + jitter,
-                ))
+                tokio::time::sleep(
+                    Duration::from_millis(CAPACITY_RETRY_DELAY_MS + jitter).max(capacity_wait),
+                )
                 .await;
                 current = capacity_indices
                     .iter()
@@ -814,12 +1040,7 @@ impl AciService {
                 candidate_route_ids.join(", ")
             )))
         });
-        Ok(MiddlewareForwardResult::AllFailed(Box::new(
-            MiddlewareAllFailed {
-                failed_attempts,
-                error,
-            },
-        )))
+        Ok(all_failed(failed_attempts, error))
     }
 
     /// Start a streaming chat completion. The response stream hashes
@@ -828,30 +1049,32 @@ impl AciService {
     pub fn finalize_middleware_receipt(
         &self,
         mut draft: MiddlewareReceiptDraft,
-        final_cleartext_body: &[u8],
+        final_cleartext_body: Vec<u8>,
         content_type: Option<&str>,
         requester: Option<ReceiptOwner>,
         e2ee: Option<E2eeRequestContext>,
     ) -> Result<MiddlewareReceiptFinalization, ServiceError> {
         let is_sse = is_sse_content_type(content_type);
-        if is_sse {
-            let mut parser = SseFramingObserver::identifiers_only();
-            parser.observe(final_cleartext_body);
-            if parser.chat_id().is_some() {
-                draft.builder.set_chat_id(parser.chat_id());
+        let wire_body = if is_sse {
+            let (wire, ids) =
+                finalize_sse_body(&final_cleartext_body, e2ee.as_ref(), &draft.endpoint_path)?;
+            if ids.chat_id.is_some() {
+                draft.builder.set_chat_id(ids.chat_id);
             }
-        } else if let Some(chat_id) = extract_chat_id(final_cleartext_body) {
-            draft.builder.set_chat_id(Some(chat_id));
-        }
-
-        let wire_body = match e2ee.as_ref() {
-            Some(ctx) => encrypt_e2ee_final_response(
-                final_cleartext_body,
-                ctx,
-                &draft.endpoint_path,
-                is_sse,
-            )?,
-            None => final_cleartext_body.to_vec(),
+            wire
+        } else {
+            if let Some(id) = extract_chat_id(&final_cleartext_body) {
+                draft.builder.set_chat_id(Some(id));
+            }
+            match e2ee.as_ref() {
+                Some(ctx) => encrypt_e2ee_final_response(
+                    &final_cleartext_body,
+                    ctx,
+                    &draft.endpoint_path,
+                    false,
+                )?,
+                None => final_cleartext_body,
+            }
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
@@ -862,11 +1085,11 @@ impl AciService {
         let receipt = draft
             .builder
             .finalize(self.keys.as_ref(), &self.default_receipt_key_id)?;
-        self.store_receipt(receipt.clone(), requester);
+        self.store_receipt(receipt.clone(), requester, draft.session_lease.as_ref())?;
         self.metrics.record_receipt_issued(
             &draft.endpoint_path,
             draft.request_mode,
-            draft.response_model.as_deref(),
+            draft.response_model.get().map(String::as_str),
         );
 
         Ok(MiddlewareReceiptFinalization {
@@ -886,6 +1109,7 @@ impl AciService {
         let is_sse = is_sse_content_type(content_type);
         let wire_body = match e2ee.as_ref() {
             Some(ctx) => encrypt_e2ee_final_response(cleartext_body, ctx, endpoint_path, is_sse)?,
+            None if is_sse => finalize_sse_body(cleartext_body, None, endpoint_path)?.0,
             None => cleartext_body.to_vec(),
         };
         let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
@@ -898,62 +1122,117 @@ impl AciService {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn finalize_middleware_response_stream(
+    pub(crate) fn finalize_middleware_events(
         &self,
         journal: MiddlewareReceiptJournal,
-        cleartext_stream: ServiceResponseStream,
-        endpoint_path: &str,
-        content_type: Option<&str>,
-        requester: Option<ReceiptOwner>,
-        e2ee: Option<E2eeRequestContext>,
-        request_id: Option<String>,
-    ) -> Result<MiddlewareStreamFinalization, ServiceError> {
-        let is_sse = is_sse_content_type(content_type);
-        if e2ee.is_some() && !is_sse {
-            return Err(E2eeError::EncryptionFailed.into());
-        }
-        let e2ee_response = e2ee.as_ref().map(|ctx| E2eeResponseInfo {
+        events: EventStream,
+        context: ResponseContext,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        let info = context.e2ee.as_ref().map(|ctx| E2eeResponseInfo {
             version: ctx.version.clone(),
             algo: ctx.algo.clone(),
         });
-        let e2ee_transformer = e2ee
-            .clone()
-            .map(|ctx| E2eeSseTransformer::new(ctx, endpoint_path.to_string()));
-        let body = MiddlewareResponseFinalizingStream::new(
-            self,
-            cleartext_stream,
-            journal,
-            requester,
-            endpoint_path.to_string(),
-            e2ee_transformer,
-            request_id,
-            is_sse,
-        );
-        Ok(MiddlewareStreamFinalization {
-            body: Box::pin(body),
-            e2ee: e2ee_response,
-        })
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Events(events),
+                journal,
+                context,
+                accounting,
+            )),
+            e2ee: info,
+        }
+    }
+    pub(crate) fn finalize_middleware_bytes(
+        &self,
+        journal: MiddlewareReceiptJournal,
+        body: ServiceResponseStream,
+        endpoint: &str,
+        requester: Option<ReceiptOwner>,
+        request_id: Option<String>,
+        accounting: Accounting,
+    ) -> MiddlewareStreamFinalization {
+        MiddlewareStreamFinalization {
+            body: Box::pin(ResponseOwner::middleware(
+                self,
+                ResponseInput::Bytes(body),
+                journal,
+                ResponseContext {
+                    requester,
+                    endpoint: endpoint.into(),
+                    e2ee: None,
+                    request_id,
+                    identity: None,
+                },
+                accounting,
+            )),
+            e2ee: None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_provider_status;
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use super::{is_retryable_provider_status, retry_after, RetainedResponse};
+
+    /// The gateway waits on a rejection's `Retry-After` before its second
+    /// pass. If that pass gets no answer, the first one is what the caller
+    /// receives — without a delay the gateway has already served.
+    #[test]
+    fn a_retained_answer_loses_the_retry_after_the_gateway_waited_on() {
+        let mut retained = RetainedResponse::Streaming {
+            error: crate::aggregator::service::StreamingUpstreamError {
+                upstream_status: 429,
+                upstream_headers: HashMap::from([
+                    ("retry-after".to_string(), "8".to_string()),
+                    ("content-type".to_string(), "application/json".to_string()),
+                ]),
+                upstream_body: Vec::new(),
+            },
+            route_id: "route".to_string(),
+            attempt_slot: 0,
+        };
+        retained.forget_retry_after();
+        let RetainedResponse::Streaming { error, .. } = retained else {
+            unreachable!()
+        };
+        assert_eq!(
+            error.upstream_headers,
+            HashMap::from([("content-type".to_string(), "application/json".to_string())])
+        );
+    }
+
+    #[test]
+    fn retry_after_reads_delay_seconds_capped_at_the_budget() {
+        let headers = |value: &str| HashMap::from([("retry-after".to_string(), value.to_string())]);
+        assert_eq!(retry_after(&headers("5")), Duration::from_secs(5));
+        assert_eq!(retry_after(&headers("60")), Duration::from_secs(10));
+        assert_eq!(
+            retry_after(&headers("Wed, 21 Oct 2026 07:28:00 GMT")),
+            Duration::ZERO
+        );
+        assert_eq!(retry_after(&HashMap::new()), Duration::ZERO);
+    }
 
     #[test]
     fn retryable_covers_transient_and_account_specific_statuses() {
         // Transient provider trouble (429/5xx), auth/account failures (401
         // invalid key, 402 out of credit, 403 no access), and 404 (this provider
         // dropped the model; a sibling's catalog may still have it) fail over.
-        for status in [401, 402, 403, 404, 429, 500, 502, 503, 504] {
+        for status in [
+            401, 402, 403, 404, 429, 500, 502, 503, 504, 520, 522, 524, 527,
+        ] {
             assert!(
                 is_retryable_provider_status(status),
                 "{status} should retry"
             );
         }
         // Request-level errors would fail identically on every candidate.
-        for status in [400, 422] {
+        for status in [400, 422, 501, 528] {
             assert!(
                 !is_retryable_provider_status(status),
                 "{status} should not retry"

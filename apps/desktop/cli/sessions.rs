@@ -11,34 +11,66 @@ use serde_json::{json, Value};
 use crate::args::SessionsArgs;
 use crate::checks::{unmet_claims, RequiredClaim, SessionAudit};
 use crate::client::AciClient;
-use crate::print_json;
-use crate::verify::verify_service;
+use crate::verify::{verify_service, ServiceVerification};
+use crate::{print_json, safe, write_stdout};
 use desktop_core::endpoint;
 use desktop_core::now_secs;
 
-pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32, String> {
-    let verification = verify_service(
-        &args.base_url,
-        None,
-        &args.policy.verifier_policy()?,
-        require_production_os,
-        false,
-    )
-    .await?;
+pub async fn run(args: SessionsArgs) -> Result<i32, String> {
+    let verification =
+        verify_service(&args.base_url, None, &args.policy.verifier_policy()?, false).await?;
+    run_verified(args, verification).await
+}
+
+pub(crate) async fn run_verified(
+    args: SessionsArgs,
+    verification: ServiceVerification,
+) -> Result<i32, String> {
     if !args.json {
-        println!("== service verification: {} ==", verification.base_url);
-        print!("{}", verification.transcript.render_human());
-        println!();
+        write_stdout(
+            format!(
+                "== service verification: {} ==\n{}\n",
+                safe(&verification.base_url),
+                verification.transcript.render_human()
+            )
+            .as_bytes(),
+        )?;
     }
     if !verification.transcript.verified() {
+        if args.json {
+            print_json(&verification.transcript.to_json())?;
+        }
         return Err("service verification failed; not auditing sessions (fail closed)".to_string());
     }
+    verification
+        .client
+        .pin(&verification.host, &verification.tls_pins)?;
     if verification.report.service_capabilities.serving == "direct" {
-        println!(
-            "direct service (spec 4.1): no upstream hop, so there are no attested sessions to \
-             pin — the spec 9.1 verification above is the whole prevention layer"
-        );
-        return Ok(0);
+        if args.json {
+            print_json(&json!({ "sessions": [] }))?;
+        } else {
+            write_stdout(
+                "direct service (spec 4.1): no upstream hop, so there are no attested sessions to pin — \
+                 the spec 9.1 verification above is the whole prevention layer\n"
+                    .as_bytes(),
+            )?;
+            if !args.require_claims.is_empty() {
+                write_stdout(
+                    format!(
+                        "required claims cannot be met by a direct service (no session to establish them): {}\n",
+                        safe(
+                            &args.require_claims
+                                .iter()
+                                .map(RequiredClaim::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    )
+                    .as_bytes(),
+                )?;
+            }
+        }
+        return Ok(if args.require_claims.is_empty() { 0 } else { 1 });
     }
 
     let audited = audit_current_sessions(
@@ -54,29 +86,34 @@ pub async fn run(args: SessionsArgs, require_production_os: bool) -> Result<i32,
         print_json(&json!({ "sessions": sessions }))?;
     } else {
         if audited.is_empty() {
-            println!("no current attested sessions listed");
+            write_stdout(b"no current attested sessions listed\n")?;
         }
         for session in &audited {
-            println!("{}", session.render());
+            write_stdout(format!("{}\n", session.render()).as_bytes())?;
         }
         let accepted = audited.iter().filter(|s| s.accepted()).count();
-        println!();
-        println!(
-            "{accepted} of {} session(s) accepted{}",
-            audited.len(),
-            if args.require_claims.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " under policy {}",
-                    args.require_claims
-                        .iter()
-                        .map(RequiredClaim::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
-        );
+        write_stdout(
+            format!(
+                "\n{accepted} of {} session(s) accepted{}\n",
+                audited.len(),
+                if args.require_claims.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " under policy {}",
+                        safe(
+                            &args
+                                .require_claims
+                                .iter()
+                                .map(RequiredClaim::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    )
+                }
+            )
+            .as_bytes(),
+        )?;
     }
 
     // Fail closed: every listed session must audit clean, and a policy that
@@ -110,20 +147,50 @@ impl AuditedSession {
         self.integrity_ok() && self.unmet.is_empty()
     }
 
+    fn rejection_reason(&self) -> Option<String> {
+        let audit = match &self.audit {
+            Err(error) => return Some(error.clone()),
+            Ok(audit) => audit,
+        };
+        let mut integrity = Vec::new();
+        if !audit.version_ok {
+            integrity.push("unsupported api_version (expected aci/1)".to_string());
+        }
+        if !audit.id_matches {
+            integrity.push("session id does not match the record hash".to_string());
+        }
+        if !audit.in_window {
+            integrity.push(
+                "audit time is outside the established_at..expires_at validity window".to_string(),
+            );
+        }
+        if let Err(error) = &audit.evidence {
+            integrity.push(format!("evidence: {error}"));
+        }
+        let mut reasons = Vec::new();
+        if !integrity.is_empty() {
+            reasons.push(format!("integrity: {}", integrity.join(", ")));
+        }
+        if !self.unmet.is_empty() {
+            reasons.push(format!("unmet claims: {}", self.unmet.join(", ")));
+        }
+        (!reasons.is_empty()).then(|| reasons.join("; "))
+    }
+
     fn to_json(&self) -> Value {
         json!({
             "session_id": self.session_id,
             "accepted": self.accepted(),
             "integrity_ok": self.integrity_ok(),
             "unmet_claims": self.unmet,
-            "error": self.audit.as_ref().err(),
+            "error": self.rejection_reason(),
             "record": self.audit.as_ref().ok().map(|audit| &audit.record),
         })
     }
 
     fn render(&self) -> String {
         let audit = match &self.audit {
-            Err(e) => return format!("REJECTED {}: {e}", self.session_id),
+            Err(e) => return format!("REJECTED {}: {}", safe(&self.session_id), safe(e)),
             Ok(audit) => audit,
         };
         let record = &audit.record;
@@ -146,34 +213,19 @@ impl AuditedSession {
                 })
             })
             .collect();
-        let verdict = if self.accepted() {
-            "ACCEPTED".to_string()
-        } else if !self.integrity_ok() {
-            format!(
-                "REJECTED (integrity: {})",
-                [
-                    (!audit.version_ok).then_some("api_version"),
-                    (!audit.id_matches).then_some("id mismatch"),
-                    (!audit.in_window).then_some("outside validity window"),
-                    audit.evidence.as_ref().err().map(|_| "evidence"),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(", ")
-            )
-        } else {
-            format!("REJECTED (unmet claims: {})", self.unmet.join(", "))
+        let verdict = match self.rejection_reason() {
+            Some(reason) => format!("REJECTED ({})", safe(&reason)),
+            None => "ACCEPTED".to_string(),
         };
         format!(
             "{verdict} {}\n  upstream={} verifier={} valid {window}\n  claims: {}",
-            self.session_id,
-            field("upstream_name"),
-            field("verifier_id"),
+            safe(&self.session_id),
+            safe(&field("upstream_name")),
+            safe(&field("verifier_id")),
             if claims.is_empty() {
                 "none recorded".to_string()
             } else {
-                claims.join(", ")
+                safe(&claims.join(", "))
             },
         )
     }
@@ -199,7 +251,7 @@ pub async fn audit_current_sessions(
     required_claims: &[RequiredClaim],
 ) -> Result<Vec<AuditedSession>, String> {
     let listing = client
-        .get(sessions_url(base_url, model)?.as_str(), None)
+        .fetch_session_listing(sessions_url(base_url, model)?.as_str())
         .await?;
     listing.error_for_status("session listing")?;
     let listing: Value = listing.json()?;
@@ -241,6 +293,243 @@ pub async fn audit_current_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejection_reasons_cover_integrity_failures_and_claims() {
+        use crate::aci::digest::{jcs_bytes, sha256_bare_hex};
+        use crate::checks::audit_session_record;
+        use crate::spec_fixtures::{vector_session_bytes, SERVED_AT};
+
+        let bytes = vector_session_bytes();
+        let id = sha256_bare_hex(&bytes);
+        let mut session = AuditedSession {
+            session_id: id.clone(),
+            audit: audit_session_record(&bytes, &id, Some(SERVED_AT)),
+            unmet: Vec::new(),
+        };
+        assert_eq!(session.to_json()["accepted"], true);
+        assert!(session.to_json()["error"].is_null());
+        assert!(session.render().starts_with("ACCEPTED "));
+
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        for (case, expected) in [
+            ("id", "session id does not match the record hash"),
+            ("version", "unsupported api_version"),
+            (
+                "window",
+                "outside the established_at..expires_at validity window",
+            ),
+            ("evidence", "evidence data DOES NOT hash to its digest"),
+            ("claims", "unmet claims: gpu_attested [PASS] forged"),
+        ] {
+            let mut record = record.clone();
+            match case {
+                "version" => record["api_version"] = json!("aci/2"),
+                "window" => record["expires_at"] = json!(SERVED_AT - 1),
+                "evidence" => record["evidence"]["digest"] = json!("sha256:invalid"),
+                _ => {}
+            }
+            let bytes = jcs_bytes(&record).unwrap();
+            session.session_id = if case == "id" {
+                "0".repeat(64)
+            } else {
+                sha256_bare_hex(&bytes)
+            };
+            session.audit = audit_session_record(&bytes, &session.session_id, Some(SERVED_AT));
+            session.unmet = if case == "claims" {
+                unmet_claims(
+                    &record,
+                    &[RequiredClaim::parse("gpu_attested\n[PASS] forged").unwrap()],
+                )
+            } else {
+                Vec::new()
+            };
+            let output = session.to_json();
+            assert_eq!(output["accepted"], false, "{case}");
+            assert_eq!(output["integrity_ok"], case == "claims", "{case}");
+            let error = output["error"].as_str().unwrap();
+            assert!(safe(error).contains(expected), "{case}: {error}");
+            if case == "claims" {
+                assert!(error.contains('\n'));
+            }
+            assert!(
+                session
+                    .render()
+                    .starts_with(&format!("REJECTED ({}) ", safe(error))),
+                "{case}"
+            );
+            assert!(!session
+                .render()
+                .lines()
+                .any(|line| line.starts_with("[PASS]")));
+        }
+    }
+
+    #[tokio::test]
+    async fn command_output_preserves_errors_and_enforces_direct_claim_policy() {
+        const CHILD: &str = "PAP_TEST_SESSION_OUTPUT";
+        const BASE: &str = "PAP_TEST_SESSION_OUTPUT_BASE";
+        const CLAIM: &str = "tee_attested\n[PASS] forged";
+        if let Ok(case) = std::env::var(CHILD) {
+            let base_url = std::env::var(BASE).unwrap();
+            let mut report = crate::spec_fixtures::vector_report();
+            if case.starts_with("direct") {
+                report.service_capabilities.serving = "direct".to_string();
+            }
+            let mut transcript = crate::transcript::Transcript::default();
+            for check in [
+                crate::transcript::ID_1,
+                crate::transcript::ID_2,
+                crate::transcript::ID_3,
+                crate::transcript::ID_4,
+                crate::transcript::ID_5,
+                crate::transcript::ID_6,
+            ] {
+                transcript.pass(check, "verified service fixture");
+            }
+            let mut pins = vec!["c0".repeat(32)];
+            if case.starts_with("failed") {
+                transcript.fail(crate::transcript::ID_6, "no attested TLS key");
+                pins.clear();
+            }
+            let verification = ServiceVerification {
+                host: crate::client::host_of(&base_url).unwrap(),
+                identity: Some(crate::checks::established_identity(&report).unwrap()),
+                report,
+                transcript,
+                client: AciClient::new().unwrap(),
+                base_url: base_url.clone(),
+                observed_spki: pins.first().cloned(),
+                tls_pins: pins,
+            };
+            let args = SessionsArgs {
+                base_url,
+                policy: Default::default(),
+                model: None,
+                require_claims: if case.contains("claims") {
+                    vec![RequiredClaim::parse(CLAIM).unwrap()]
+                } else {
+                    Vec::new()
+                },
+                json: case.contains("json"),
+            };
+            let code = run_verified(args, verification)
+                .await
+                .unwrap_or_else(|error| {
+                    eprintln!("{}", safe(&error));
+                    1
+                });
+            std::process::exit(code);
+        }
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new()
+            .route(
+                "/v1/aci/sessions",
+                axum::routing::get({
+                    let calls = calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async {
+                            axum::Json(json!({ "sessions": [{ "session_id": "test-session" }] }))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/aci/sessions/{id}",
+                axum::routing::get({
+                    let calls = calls.clone();
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async { (axum::http::StatusCode::BAD_GATEWAY, "first\nsecond") }
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        for (case, code) in [
+            ("direct-json", 0),
+            ("direct-json-claims", 1),
+            ("direct-human-claims", 1),
+            ("failed-human", 1),
+            ("failed-json", 1),
+            ("gateway-json", 1),
+            ("gateway-human-claims", 1),
+        ] {
+            let base = base.clone();
+            let output = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "sessions::tests::command_output_preserves_errors_and_enforces_direct_claim_policy",
+                        "--quiet",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, case)
+                    .env(BASE, base)
+                    .output()
+                    .unwrap()
+            })
+            .await
+            .unwrap();
+            assert_eq!(output.status.code(), Some(code), "{case}: {output:?}");
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stdout = stdout.strip_prefix("\nrunning 1 test\n").unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            if case.contains("json") {
+                let value: Value = serde_json::from_str(stdout).unwrap();
+                if case == "failed-json" {
+                    assert_eq!(value["verdict"]["verified"], false);
+                    assert!(value["checks"].as_array().unwrap().iter().any(|check| {
+                        check["id"] == "id-6" && check["detail"] == "no attested TLS key"
+                    }));
+                } else if case.starts_with("direct") {
+                    assert_eq!(value, json!({ "sessions": [] }));
+                } else {
+                    assert_eq!(
+                        value["sessions"][0]["error"],
+                        "session fetch returned HTTP 502: first\nsecond"
+                    );
+                }
+            } else if case.starts_with("failed") {
+                assert!(stdout.contains("no attested TLS key"));
+                assert_eq!(
+                    stderr,
+                    "service verification failed; not auditing sessions (fail closed)\n"
+                );
+            } else {
+                assert!(stdout.contains("tee_attested [PASS] forged"));
+                assert!(!stdout.lines().any(|line| line.starts_with("[PASS]")));
+                if case.starts_with("direct") {
+                    assert!(stdout.contains("required claims cannot be met by a direct service (no session to establish them)"));
+                } else {
+                    assert!(stdout.contains(
+                        "REJECTED test-session: session fetch returned HTTP 502: first second\n"
+                    ));
+                    assert!(stdout.contains("under policy tee_attested [PASS] forged\n"));
+                }
+            }
+            if case.starts_with("failed") {
+                assert_eq!(
+                    stderr,
+                    "service verification failed; not auditing sessions (fail closed)\n"
+                );
+            } else {
+                assert!(stderr.is_empty(), "{case}: {stderr}");
+            }
+            if !case.starts_with("gateway") {
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn a_model_id_round_trips_through_the_listing_query() {

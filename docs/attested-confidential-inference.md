@@ -56,20 +56,23 @@ the relying party checks independently.
 | Local client or agent | Plaintext prompt and response | API key and all local context |
 | Attested gateway workload | Plaintext after TLS or E2EE termination | Requested model, credential, routing constraints, and provider response |
 | Accepted provider workload or route | Plaintext needed for routing or inference | Gateway-side provider credential and request metadata |
-| Optional external control plane | No prompt or response body | Bearer-token hash, model, routing options, request features including a prefix hash, usage, and status metadata |
+| Optional external control plane | No prompt or response body | Bearer-token hash, model, endpoint, routing options, request features including a cache-affinity key, usage, and status metadata |
 | Cloud host and workload operator | Not through the accepted TEE memory boundary | Network timing, addresses, sizes, and operational metadata |
 
 ### What leaves the request path
 
 The gateway does not log or report prompts, completions, or upstream error
-messages. Of an upstream response body, only its `usage` object is reported.
+messages. Of an upstream response body, its `usage` object and, for successful
+image generation, image count, size, and quality are reported. Image bytes and
+prompts remain inside the inference path.
 This table lists everything that leaves the request path, so you can check it
 against the code:
 
 | Destination | Contents | Defined in |
 | --- | --- | --- |
-| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and `prefixHash` | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
-| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, and `prefixHash` | `PostReport` in `src/middleware/types.rs` |
+| Pre-request consult to the control plane | SHA-256 of the API key, the requested model, the public endpoint, the caller's `provider` routing object, the TEE-only host flag, and, unless `middleware.send_request_features` is `false`, request features: a token estimate, input modalities, tool and response-format flags, reasoning intent, and the cache-affinity key (`prefixHash`, with `sessionKind`) | `consult_pre` in `src/middleware/control.rs`, `src/middleware/request_features.rs` |
+| Catalog request to the control plane | The catalog path and query string, the TEE-only `tee=true` override, and, when the request carried a bearer key, its SHA-256 as `x-api-key-hash` | `catalog_get` in `src/middleware/control.rs` |
+| Usage report to the control plane, one per attempt | Request ID, endpoint, status, timings, streaming flag, attempt index, selected route, requested model, the upstream's `usage` object, successful image count/size/quality, the consult's routing and billing fields echoed back unchanged, `errorSource`, a failure class in `errorMessage`, the upstream's request identifier (`upstreamRequestId`), and the cache-affinity key (`prefixHash`, `sessionKind`) | `PostReport` in `src/middleware/types.rs` |
 | Receipt | SHA-256 hashes of the request and response bodies, never the bodies | `src/aci/receipt.rs` |
 
 Two properties make this checkable:
@@ -79,6 +82,10 @@ Two properties make this checkable:
   such as `upstream_timeout` or `stream_truncated`. An upstream error body is
   read only to choose a class (`classify_upstream` in
   `src/middleware/errors.rs`).
+- `upstreamRequestId` carries no message text either. It is the upstream's
+  request-id response header or the `id` of a success body, and it is kept only
+  when it is at most 128 characters drawn from letters, digits, and `_.:-`
+  (`src/aci/upstream/request_id.rs`). Anything else is left out.
 - `tests/middleware_completion.rs` plants a marker in upstream error text on the
   buffered, streaming, and in-band stream paths. It captures every log event at
   `TRACE` and fails if the marker appears in any log line or usage report.
@@ -93,11 +100,15 @@ that fails partway (`stream_abort`, the one line that carries a request ID).
 Such a line can name the requested model or the request host. It never carries
 request or response content.
 
-`prefixHash` is derived from content: an HMAC-SHA256 of the conversation's
-first 4 KiB, truncated to 32 hex characters, used for cache-affinity routing.
-The gateway derives the HMAC key from dstack KMS, so the key never leaves the
-TEE. The control plane can see when two requests share a prefix, but it cannot
-test a guessed prefix against the hash. See the
+`prefixHash` is the key for cache-affinity routing: an HMAC-SHA256, truncated
+to 32 hex characters, of either the client's `prompt_cache_key` or, failing
+one, the conversation's opening two messages. The gateway derives the HMAC key
+from dstack KMS, so the key never leaves the TEE. The control plane can see
+when two requests share a cache key or an opening — identical openings map to
+one key — but it cannot test a guessed key or opening against the hash, and it
+never receives either. `prompt_cache_key` is only a routing hint: it does not
+select, pin or verify an attested session. To pin one, use
+`provider.aci_session_ids` with `provider.aci_verified`. See the
 [control-plane contract](control-plane-contract.md) for every field.
 
 Provider workloads can have their own internal routing, telemetry, or storage
@@ -151,7 +162,17 @@ The receipt commits to:
 - the body forwarded after any gateway rewrite;
 - the upstream verification result and cited session;
 - the exact response bytes returned, including raw SSE framing; and
-- the gateway keyset digest current for the exchange.
+- the gateway keyset digest established for the exchange. The response header
+  and receipt carry that same digest; a renewal keeps the keys and provenance
+  and only extends `not_after`.
+
+Replicas may expose different expiry times for the same key family. A freshly
+verified family member remains continuous while its own keyset is unexpired.
+An unknown digest hint triggers fresh verification, but the attestation may
+reach another replica. Successful verification of any valid member restores
+future sends; a receipt still needs its exact digest established and fails
+its audit if that member cannot be obtained. The verifier does not enforce
+a monotonic version or provide rollback protection between unexpired members.
 
 The receipt stores hashes, not plaintext request or response bodies. For an
 aggregator, its `upstream.verified` event cites a content-addressed attested
@@ -162,6 +183,33 @@ A receipt proves what the attested gateway recorded. A deep session audit lets
 the relying party reappraise the provider evidence instead of accepting the
 gateway's `verified` label alone.
 
+For streaming responses, publication at the first destination terminal requires
+the source protocol's own terminal on a route with an established protocol, or
+clean EOF, accepted from the provider adapter after any authentication barrier.
+The selected backend declares protocol evidence for the shaped upstream wire
+operation, including on custom paths. The route protocol always controls decoding
+and billing; a contradictory declaration is a routing failure for every streaming
+operation. An unknown declaration retains EOF publication.
+The gateway publishes before returning the first destination terminal's bytes.
+The body then stays open, reading the source until EOF while emitting no bytes
+after the destination terminal. Accounting observes allowlisted upstream usage
+in the source protocol through EOF or disconnect; settlement remains at source
+EOF. The received hash covers the accepted source prefix through its
+terminal block, or all source bytes at clean EOF; the returned hash includes the
+destination terminal's final wire bytes. Later source bytes are excluded from the
+received hash. A disconnect after a terminal with a published receipt settles as
+completed with the usage observed so far, retaining any failure status.
+
+A bridge-generated failure terminal without a source terminal retains normal
+source consumption and EOF finalization. At clean source EOF, synthesized
+terminals publish in the poll that returns them. Middleware source-read, decoder
+or transform failures before publication can prevent completion and leave no
+receipt. Later failures retain their report status while an already-published
+receipt remains available. Cancellation or failure can leave a reserved receipt id
+unpublished even after an error
+terminal. Publication proves neither client delivery nor model-generation
+completeness.
+
 ### Audit the receipt
 
 Given an established workload keyset and the exact request and response bytes,
@@ -170,8 +218,9 @@ a relying party checks:
 1. The receipt `signature` verifies over the JCS form of the document without
    its `signature` member, using the `receipt_signing_keys` entry named by
    `key_id`.
-2. `api_version` is `aci/1`, and `workload_keyset_digest` matches the
-   established gateway identity.
+2. `api_version` is `aci/1`, and `workload_keyset_digest` names a digest the
+   client established in the admitted renewal family, with that keyset still
+   valid at `served_at`.
 3. `request.received.body_hash` matches the plaintext request wire body. For
    E2EE v2, it instead matches the compact JSON body reconstructed after
    replacing encrypted fields with their decrypted values.
@@ -254,12 +303,14 @@ host. Policy flags narrow what it accepts:
 | --- | --- |
 | `--accept-compose <hash>` | Workload release |
 | `--accept-subject app-id:0x<hex>` with `--accept-dstack-kms-root-public-key <key>` | Key custody for the receipt-signing key |
-| `--require-production-os` | An RTMR3-bound OS image hash on a reviewed allowlist |
 
-Without a custody policy, the CLI reports custody as skipped. It does not
-reconstruct MRTD and RTMR0-2, so `--require-production-os` does not replace a
-dstack verifier run over the same quote, event log, and VM configuration. The
-TypeScript verifier does not check custody.
+Without a custody policy, the CLI reports custody as skipped. The TypeScript
+verifier does not check custody.
+
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
 Do not turn an unproven field into a stronger claim. A reported repository,
 commit, image, model ID, or TCB status remains a label until the applicable

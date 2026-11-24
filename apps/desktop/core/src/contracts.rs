@@ -189,12 +189,6 @@ impl ServiceProvider {
     pub const fn workspaces(self) -> bool {
         matches!(self, Self::Redpill)
     }
-
-    /// Whether a sign-in returns to a loopback callback URL the user can also
-    /// paste; Phala signs in with a device code instead.
-    pub const fn callback_url(self) -> bool {
-        matches!(self, Self::Redpill)
-    }
 }
 
 /// A provider as the profile editor presents it.
@@ -207,7 +201,6 @@ pub struct ServiceProviderInfo {
     pub key_label: &'static str,
     pub account_login: bool,
     pub workspaces: bool,
-    pub callback_url: bool,
 }
 
 impl From<ServiceProvider> for ServiceProviderInfo {
@@ -219,7 +212,6 @@ impl From<ServiceProvider> for ServiceProviderInfo {
             key_label: provider.key_label(),
             account_login: provider.account_login(),
             workspaces: provider.workspaces(),
-            callback_url: provider.callback_url(),
         }
     }
 }
@@ -396,6 +388,11 @@ pub struct AppState {
     pub protected_since: Option<u64>,
     #[serde(default)]
     pub reconnecting: bool,
+    /// The last verification reached a verdict other than VERIFIED: the
+    /// service answered but did not pass. `checks` and `error` say why, and a
+    /// retry keeps them until its own result replaces them.
+    #[serde(default)]
+    pub verification_failed: bool,
     /// User protection session, independent of the current verified transport.
     #[serde(default)]
     pub session_active: bool,
@@ -530,9 +527,7 @@ impl AppState {
                 || self.session_active
                 || matches!(
                     self.status,
-                    VerificationStatus::Verifying
-                        | VerificationStatus::Verified
-                        | VerificationStatus::Blocked
+                    VerificationStatus::Verifying | VerificationStatus::Verified
                 ))
     }
 }
@@ -558,6 +553,7 @@ impl Default for AppState {
             session_id: None,
             protected_since: None,
             reconnecting: false,
+            verification_failed: false,
             session_active: false,
             session_usage: UsageSummary::default(),
             usage_revision: 0,
@@ -604,14 +600,12 @@ impl Default for ListenConfig {
 #[serde(rename_all = "camelCase")]
 pub struct StartConfig {
     pub remote_url: String,
-    pub require_production_os: bool,
 }
 
 impl Default for StartConfig {
     fn default() -> Self {
         Self {
             remote_url: crate::brand::SERVICE_DEFAULT_URL.to_string(),
-            require_production_os: true,
         }
     }
 }
@@ -934,6 +928,11 @@ mod typescript {
             (
                 "NAVIGATE_EVENT",
                 ui_api::NAVIGATE_EVENT,
+                <()>::name(&config),
+            ),
+            (
+                "CHECK_FOR_UPDATES_EVENT",
+                ui_api::CHECK_FOR_UPDATES_EVENT,
                 <()>::name(&config),
             ),
         ];

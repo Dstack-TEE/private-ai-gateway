@@ -21,7 +21,9 @@ Environment:
                    `pap profiles add` inside the container.
   GH_REPO          Repository for --tag. Default: Dstack-TEE/private-ai-gateway
 
-Requirements: docker, sha256sum, and gh unless --deb is given.
+  *_VERSION       Override a versions.env default with an exact release version.
+
+Requirements: Node.js 22+, docker, sha256sum, and gh unless --deb is given.
 EOF
 }
 
@@ -56,15 +58,29 @@ e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/pap-e2e.XXXXXX")"
 container="$(basename "$work")"
 network=bridge
-versions=(--env-file "$e2e_dir/versions.env")
+versions=(--env-file "$work/versions.env")
 if [[ "$opencode_v2" == true ]]; then
   versions+=(--env PAP_E2E_OPENCODE_V2=1)
 fi
 cleanup() {
+  if [[ -s "$work/versions.env" ]]; then
+    echo
+    echo "Versions under test (final summary)"
+    versions_table
+  fi
   docker rm --force "$container" >/dev/null 2>&1 || true
   rm -rf "$work"
 }
 trap cleanup EXIT
+
+versions_table() {
+  while IFS='=' read -r name version; do
+    printf '  %-24s %s\n' "$name" "$version"
+  done <"$work/versions.env"
+}
+env -u PAP_E2E_API_KEY node "$e2e_dir/resolve-versions.mjs" >"$work/versions.env"
+echo "Versions under test"
+versions_table
 
 mkdir "$work/pkg"
 if [[ -n "$deb" ]]; then

@@ -78,8 +78,6 @@ def run_embeddings_case(
             f"{provider.name} embeddings receipt fetch failed: HTTP {receipt_status}"
         )
 
-    verifier_summary = run_pap_audit(report_path, receipt_path, nonce, request_path, response_path)
-    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     assert_embeddings_receipt_log(provider, receipt)
     attested_sessions = assert_upstream_attested_sessions(
         base_url=base_url,
@@ -87,6 +85,17 @@ def run_embeddings_case(
         receipt=receipt,
         artifact_dir=provider_dir,
     )
+    if len(attested_sessions) != 1:
+        raise RuntimeError(f"{provider.name} expected one serving attested session")
+    verifier_summary = run_pap_audit(
+        report_path,
+        receipt_path,
+        provider_dir / "attested-session-0.json",
+        nonce,
+        request_path,
+        response_path,
+    )
+    write_json(provider_dir / "user-verification-summary.json", verifier_summary)
     return {
         "provider": provider.name,
         "receipt_id": receipt_id,

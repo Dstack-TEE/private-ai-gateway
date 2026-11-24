@@ -24,6 +24,9 @@ aci-verify = { path = "crates/aci-verify" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# Full RFC 8785 JCS (ES6 number formatting, UTF-16 key order) for the 0G
+# Private Computer AAD, which binds arbitrary cleartext JSON.
+serde_json_canonicalizer = "0.4"
 dstack-sdk = "0.1.2"
 bytes = "1"
 rust_decimal = "1"
@@ -40,6 +43,9 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 flate2 = "1"
 hkdf = "0.12"
+# RFC 9180 HPKE (base mode, DHKEM-X25519 / HKDF-SHA256 / ChaCha20Poly1305) for
+# the 0G Private Computer E2EE protocol; 0.12 reuses the RustCrypto versions above.
+hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }
 ml-kem = { version = "0.3", features = ["getrandom"] }
 rand = "0.8"
 rand_core = "0.6"
@@ -55,6 +61,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
+multer = "3"
+mime = "0.3"
 # Serving the public entry directly (rather than via axum::serve) is what lets the
 # connection IO be wrapped with a write-idle timeout; axum 0.7 takes a concrete
 # TcpListener and offers no hook for that. Deliberately NOT hyper-util's
@@ -67,9 +75,12 @@ hyper-util = { version = "0.1", features = ["tokio", "service"] }
 http-body-util = "0.1"
 async-stream = "0.3"
 
+# Server-sent event framing at provider and client boundaries.
+sse-stream = "0.3"
+
 # HTTP client (upstream forwarding). Rustls with native roots keeps TLS
 # validation normal without linking against system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "stream", "multipart"] }
 
 # Errors and logging.
 thiserror = "1"
@@ -83,7 +94,11 @@ async-trait = "0.1"
 # Upstream ACI/DCAP verification.
 dcap-qvl = { version = "0.3.12", default-features = false, features = ["std", "report", "rustcrypto"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 serde_json = "1"
 

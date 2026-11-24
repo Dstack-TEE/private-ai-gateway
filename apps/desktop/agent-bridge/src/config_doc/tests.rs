@@ -57,6 +57,41 @@ fn jsonc_inspection_accepts_comments_not_json5_or_malformed_json() {
 }
 
 #[test]
+fn jsonc_inspection_rejects_extended_json5_numbers_and_escapes() {
+    for source in [
+        r#"{"a":.5}"#,
+        r#"{"a":5.}"#,
+        r#"{"a":Infinity}"#,
+        r#"{"a":-Infinity}"#,
+        r#"{"a":NaN}"#,
+        r#"{"a":"\x41"}"#,
+        r#"{"a":"\v"}"#,
+        "{\"a\":\"line\\\ncontinued\"}",
+    ] {
+        assert!(parse_jsonc(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn json5_extended_syntax_survives_edits_byte_for_byte() {
+    let source =
+        "{\r // keep\r decimal: .5, trailing: 5., escaped: '\\x41\\v',\r model: 'other',\r}\r";
+    let mut doc = ConfigDoc::parse(Format::Json5, source).unwrap();
+    assert_eq!(doc.render().unwrap(), source);
+    assert_eq!(
+        doc.get_value(&[]),
+        Some(ConfigValue::Json(serde_json::json!({
+            "decimal": 0.5,
+            "trailing": 5.0,
+            "escaped": "A\u{b}",
+            "model": "other"
+        })))
+    );
+    doc.set_str(&["model"], "ours").unwrap();
+    assert_eq!(doc.render().unwrap(), source.replace("'other'", "\"ours\""));
+}
+
+#[test]
 fn toml_lists_and_numbers_round_trip_and_prune() {
     let mut doc = ConfigDoc::parse(Format::Toml, "model = \"x\"\n").unwrap();
     let args = ConfigValue::List(vec!["--agent-token".into(), "codex".into()]);

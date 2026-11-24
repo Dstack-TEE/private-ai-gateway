@@ -28,9 +28,8 @@ fn the_main_window_is_granted_exactly_the_desktop_commands() {
         .collect();
     let capability: serde_json::Value =
         serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-    let granted: BTreeSet<String> = capability["permissions"]
-        .as_array()
-        .unwrap()
+    let permissions = capability["permissions"].as_array().unwrap();
+    let granted: BTreeSet<String> = permissions
         .iter()
         .filter_map(serde_json::Value::as_str)
         // Plugin and core permissions are namespaced (`core:event:allow-listen`).
@@ -38,4 +37,22 @@ fn the_main_window_is_granted_exactly_the_desktop_commands() {
         .map(str::to_owned)
         .collect();
     assert_eq!(granted, expected);
+    // The opener plugin's link handler opens `target=_blank` links through
+    // `open_url`; the window may open only web pages.
+    let opener: Vec<&serde_json::Value> = permissions
+        .iter()
+        .filter(|permission| {
+            permission
+                .as_str()
+                .or_else(|| permission["identifier"].as_str())
+                .is_some_and(|identifier| identifier.starts_with("opener:"))
+        })
+        .collect();
+    assert_eq!(
+        opener,
+        [&serde_json::json!({
+            "identifier": "opener:allow-open-url",
+            "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+        })]
+    );
 }

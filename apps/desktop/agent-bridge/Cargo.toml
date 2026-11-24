@@ -23,10 +23,10 @@ desktop-core = { package = "private-ai-proxy-core", path = "../core", features =
 axum = "0.8"
 async-stream = "0.3"
 bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["std", "serde"] }
 futures-util = "0.3"
 hex = "0.4"
-jsonc-parser = { version = "0.33.1", features = ["serde", "cst"] }
+jsonc-parser = { version = "0.34.0", features = ["serde", "cst"] }
+multer = { version = "3", default-features = false }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -52,4 +52,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 # clients without the backend's provider setup need the bundled one.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "test-util", "time"] }

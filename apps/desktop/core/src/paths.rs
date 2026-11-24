@@ -164,6 +164,7 @@ fn home_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
     }
     env("HOME")
         .or_else(|| env("USERPROFILE"))
+        .or_else(std::env::home_dir)
         .ok_or_else(|| "Cannot determine the home directory".to_string())
 }
 

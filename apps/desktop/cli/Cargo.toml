@@ -28,6 +28,7 @@ path = "service.rs"
 aci-protocol = { path = "../../../crates/aci-protocol" }
 aci-verify = { path = "../../../crates/aci-verify" }
 agent-bridge = { package = "private-ai-proxy-agent-bridge", path = "../agent-bridge" }
+anyhow = "1"
 async-stream = "0.3"
 axum = "0.8"
 backon = { version = "1", default-features = false, features = ["std", "tokio-sleep"] }
@@ -35,14 +36,13 @@ base64 = "0.23"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-dcap-qvl = { version = "0.6.3", default-features = false, features = ["std", "report", "rustcrypto"] }
+dcap-qvl = { version = "0.7.0", default-features = false, features = ["std", "report", "rustcrypto"] }
 desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["server"] }
 desktop-runtime = { package = "private-ai-proxy-runtime", path = "../runtime" }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hex = "0.4"
 http-body-util = "0.1"
-k256 = { version = "0.13", features = ["ecdsa"] }
 open = "5"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "stream"] }
@@ -51,7 +51,6 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
-sha3 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "time"] }
 tokio-util = "0.7"
@@ -66,15 +65,18 @@ x509-parser = "0.18"
 rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-registry = "0.6.1"
-windows-result = "0.4"
+windows-registry = "0.100"
+windows-result = "0.100"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+k256 = { version = "0.14", features = ["ecdsa"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1"
+sha3 = "0.12"
 snapbox = { version = "1", features = ["cmd", "regex"] }
 tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unused_must_use = "deny"

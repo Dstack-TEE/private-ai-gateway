@@ -2,7 +2,7 @@ import React, { useEffect, useEffectEvent, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Outlet, useMatches, useNavigate } from "@tanstack/react-router";
 import { SERVICE_AGENT, useAgents } from "./hooks/use-agents";
-import { useAppState } from "./lib/use-app-state";
+import { appStateKey, useAppState } from "./lib/use-app-state";
 import { useUpdates } from "./updates";
 import { INITIAL_STATE, type NavigationTarget } from "../shared/contracts";
 import { PageHeader, Sidebar } from "./components/navigation";
@@ -30,7 +30,7 @@ export function AppLayout(): React.JSX.Element {
   const [announcement, setAnnouncement] = useState("");
   useEffect(() => desktopApi.onSettingsReset(() => {
     // The window's state is the backend's, which a reset doesn't clear.
-    void client.resetQueries({ predicate: (query) => query.queryKey[0] !== "app-state" });
+    void client.resetQueries({ predicate: (query) => query.queryKey[0] !== appStateKey[0] });
     void navigate({ to: "/settings", replace: true });
     setAnnouncement("Settings reset");
   }), [client, navigate]);
@@ -75,17 +75,6 @@ function Window(): React.JSX.Element {
     reportFailure("Could not register the pap command", new AuthoredError(cliStartupError));
   }, [cliStartupError, reportFailure]);
 
-  const osPolicy = useMutation({
-    mutationFn: async (required: boolean) => {
-      if (state.protection.action.operation === "stop" && !await confirm({
-        title: required ? "Require production OS?" : "Allow development OS?",
-        message: "Protection stops before the policy changes.",
-        confirmLabel: "Stop and Change",
-      })) return;
-      setState(await desktopApi.setRequireProductionOs(required));
-    },
-    meta: { errorTitle: "Could not change the OS policy" },
-  });
   const reset = useMutation({
     mutationFn: () => desktopApi.resetSettings(),
     onSuccess: setState,
@@ -102,7 +91,7 @@ function Window(): React.JSX.Element {
     meta: { errorTitle: "Could not start the background service" },
   });
   /** A settings change is applying; controls that change settings wait. */
-  const applying = osPolicy.isPending || reset.isPending;
+  const applying = reset.isPending;
 
   // Protection needs a usable profile first: create one, or `repair` the active one.
   const starting = state.protection.phase === "starting";
@@ -153,9 +142,6 @@ function Window(): React.JSX.Element {
       if (!action.enabled || protection.isPending) return;
       if (action.operation === "setUpProfile") openProfiles(true);
       else protection.mutate(action.operation);
-    },
-    changeRequireProductionOs: (required) => {
-      if (!applying) osPolicy.mutate(required);
     },
     resetSettings: () => void resetSettings(),
     openDialog,

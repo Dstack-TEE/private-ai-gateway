@@ -2,16 +2,20 @@ import { Children, Fragment, isValidElement, useId, type ComponentProps, type Pr
 import { ChevronRight, ExternalLink } from "lucide-react";
 import { SwitchControl } from "./controls";
 import { Field, FieldLabel, FieldDescription } from "./ui/field";
-import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions, ItemGroup } from "./ui/item";
+import { Item, ItemContent, ItemTitle, ItemDescription, ItemActions } from "./ui/item";
 import { Separator } from "./ui/separator";
 import { ActionItem } from "./action-item";
 import { cn } from "../lib/utils";
 
-/** A card of rows divided by separators; its rows are `SettingsItem`s. */
+/**
+ * A card of rows divided by separators; its rows are `SettingsItem`s. Like a
+ * native settings group, it is not announced as a list: its rows are
+ * controls and the separators sit between them.
+ */
 export function SettingsList({ children }: PropsWithChildren): React.JSX.Element {
-  return <ItemGroup className="gap-0 has-data-[size=sm]:gap-0 has-data-[size=xs]:gap-0 overflow-hidden rounded-2xl border bg-card text-card-foreground">
+  return <div className="flex w-full flex-col overflow-hidden rounded-2xl border bg-card text-card-foreground">
     {Children.toArray(children).map((child, index) => <Fragment key={isValidElement(child) ? child.key : index}>{index > 0 && <Separator />}{child}</Fragment>)}
-  </ItemGroup>;
+  </div>;
 }
 
 /** A titled group of rows; `detail` is a short summary beside the title. */

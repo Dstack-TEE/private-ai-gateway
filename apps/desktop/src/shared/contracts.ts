@@ -49,7 +49,8 @@ export interface DesktopApi {
   closeWindow: (() => Promise<void>) | undefined;
   /** Quits the app and leaves the background service running. */
   quit: (() => Promise<void>) | undefined;
-  copyText(text: string): Promise<void>;
+  /** A `secret`, such as the Local API key, stays out of clipboard history where the platform allows. */
+  copyText(text: string, secret?: boolean): Promise<void>;
   getClientKey(): UiResult<"get_client_key">;
   rotateClientKey(): UiResult<"rotate_client_key">;
   saveLocalApiConfig(config: ListenConfig): UiResult<"save_local_api_config">;
@@ -78,6 +79,8 @@ export interface DesktopApi {
   onStateChange(listener: (state: AppState) => void): () => void;
   /** A request from the tray or the menu bar; one made before the window listened comes first. Desktop only. */
   onNavigate(listener: (target: NavigationTarget) => void): () => void;
+  /** The menu bar's Check for Updates…; desktop only. */
+  onCheckForUpdates(listener: () => void): () => void;
   onAgentsChange(listener: () => void): () => void;
   onClientKeyChange(listener: (available: boolean) => void): () => void;
   /** Open a documented, allowlisted project resource in the system browser. */
@@ -85,13 +88,10 @@ export interface DesktopApi {
   openAgentWebsite(agentId: string): Promise<void>;
   openApiKeyPage(provider: ServiceProvider): Promise<void>;
   start(config: StartConfig): UiResult<"start">;
-  /** Stops protection and saves the OS policy the next start uses. */
-  setRequireProductionOs(required: boolean): UiResult<"set_require_production_os">;
-  saveConfiguration(profile: ConfidentialProfileInput, requireProductionOs: boolean, key?: string): UiResult<"save_configuration">;
-  completeAccountLogin(id: string, callbackUrl: string): UiResult<"complete_account_login">;
+  saveConfiguration(profile: ConfidentialProfileInput, key?: string): UiResult<"save_configuration">;
   beginAccountLogin(profile: ConfidentialProfileInput): UiResult<"begin_account_login">;
   pollAccountLogin(id: string): UiResult<"poll_account_login">;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, requireProductionOs: boolean, workspaceId?: number): UiResult<"save_account_login">;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, workspaceId?: number): UiResult<"save_account_login">;
   getAccountDetails(profileId: string): UiResult<"get_account_details">;
   getAccountBalance(target: AccountBalanceTarget): UiResult<"get_account_balance">;
   openOrganization(organizationSlug: string): Promise<void>;

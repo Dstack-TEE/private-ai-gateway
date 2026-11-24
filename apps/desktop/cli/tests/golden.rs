@@ -11,6 +11,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::Path,
+    process::Stdio,
 };
 
 use sha2::{Digest, Sha256};
@@ -83,6 +84,55 @@ fn serve_json(body: Vec<u8>) -> String {
 }
 
 #[test]
+fn the_deprecated_os_flag_warns_without_changing_verification() {
+    let report =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aci_report_fixture.json");
+    let service = serve_json(fs::read(report).unwrap());
+    let nonce = "cd20088d763605cf78564e5b35524ad52715419624b76e029582a3652758708d";
+    let mut results = Vec::new();
+    for deprecated in [false, true] {
+        let mut command = std::process::Command::new(cargo_bin!("private-ai-proxy"));
+        command.args(["verify", &service, "--nonce", nonce, "--json"]);
+        if deprecated {
+            command.arg("--require-production-os");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1)); // The stub quote still fails.
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            if deprecated {
+                "warning: --require-production-os is deprecated and has no effect; clients no longer check the gateway OS image.\n"
+            } else {
+                ""
+            }
+        );
+        let mut transcript: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        // The clock can tick between the two runs.
+        transcript["checks"][2]
+            .as_object_mut()
+            .unwrap()
+            .remove("detail");
+        results.push(transcript);
+    }
+    assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn aci_output_stops_quietly_when_stdout_is_closed() {
+    let report =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/aci_report_fixture.json");
+    let mut child = std::process::Command::new(cargo_bin!("private-ai-proxy"))
+        .args(["audit", "--report", report.to_str().unwrap(), "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
 fn help() {
     pap().assert().code(2).stdout_eq("").stderr_eq(str![[r#"
 Private AI Proxy: manage local protection and verify confidential AI services
@@ -104,23 +154,25 @@ Commands:
   cli          Manage installation of the private-ai-proxy command
   app          Open the installed desktop app. Its backend may start protection when Protect on launch (`connect-on-launch`) is on
   doctor       Report independent local installation and backend diagnostics without starting services
+  update       Install the newer release of the saved update channel, if there is one. The backend restarts and resumes protection
   diagnostics  Export a redacted diagnostics report to a new file
   completions  Generate shell completions from the current command definition
-  verify       Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks under the dstack tdx verifier policy (spec 1.3), and print a verification transcript. Exits 0 only if the verdict is VERIFIED.
-  audit        Offline verification of saved artifacts using the same transcript engine as verify.
-  sessions     Verify the service (fail closed), list its current attested sessions, and run the spec 9.2 audit on each — the ids that pass are what a client pins (spec 5.3).
-  send         Verify the service (fail closed), send one chat completion over an SPKI-pinned connection, then fetch and verify its receipt. The API key is read from stdin with --api-key-stdin or from the ACI_API_KEY environment variable.
-  curl         Verify the target's ACI service (fail closed), then run the system curl with the attested TLS key pinned. Exits 125 when pap refuses the request, otherwise with curl's exit code.
-  serve        Local verifying proxy (default 127.0.0.1:4180, plain HTTP on localhost). Verifies the service on startup and refuses to start unless VERIFIED, accepts plaintext API requests only, forwards them over the pinned attested TLS channel, and verifies each POST response's receipt after the fact.
+  verify       Verify an ACI service and print the identity checks
+  audit        Verify saved ACI artifacts offline
+  sessions     Audit a service's current attested sessions
+  send         Send a pinned chat completion and verify its receipt
+  curl         Run system curl with the attested TLS key pinned
+  serve        Run a local verifying proxy that audits response receipts
   help         Print this message or the help of the given subcommand(s)
 
 Options:
-      --json                   Emit compact JSON instead of human-readable output
-      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
-      --yes                    Approve a command's documented mutation without prompting
-      --require-production-os  Require an attested production OS image
-  -h, --help                   Print help (see more with '--help')
-  -V, --version                Print version
+  -h, --help     Print help (see more with '--help')
+  -V, --version  Print version
+
+Global Options:
+      --json             Emit JSON instead of human-readable output
+      --non-interactive  Never prompt; commands that need input fail unless --yes or a stdin flag supplies it [alias: --no-interactive]
+      --yes              Approve a command's documented mutation without prompting
 
 "#]]);
     pap()
@@ -133,29 +185,39 @@ Fetch /v1/aci/attestation with a fresh nonce, run the spec 9.1 checks under the 
 Usage: private-ai-proxy verify [OPTIONS] <BASE_URL>
 
 Arguments:
-  <BASE_URL>  Base URL of the ACI service to verify.
+  <BASE_URL>
+          Base URL of the ACI service to verify
 
 Options:
       --accept-compose <HEX>
-          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself.
+          Compose hash to accept (spec 1.3 verifier policy); repeatable. Without it the compose measurement is verified and reported, and you appraise the provenance yourself
+
       --accept-subject <app-id:0xHEX>
-          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped.
-      --non-interactive
-          Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
+          Measured dstack app-id to accept for key custody (spec 9.1(5)); repeatable. Custody is checked when this and --accept-dstack-kms-root-public-key are given; with neither, id-5 is skipped
+
       --accept-dstack-kms-root-public-key <HEX>
-          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable.
+          dstack KMS root public key the receipt-key custody chain must end at (spec 3.3, 9.1(5)); repeatable
+
+      --nonce <NONCE>
+          Nonce to send with the attestation request; a fresh random one is generated when omitted
+
+      --explain
+          Print a one-line explanation for every check, not just failures
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Global Options:
+      --non-interactive
+          Never prompt; commands that need input fail unless --yes or a stdin flag supplies it
+[..]
+          [alias: --no-interactive]
+
       --yes
           Approve a command's documented mutation without prompting
-      --nonce <NONCE>
-          Nonce to send with the attestation request; a fresh random one is generated when omitted.
+
       --json
-          Print the verification transcript as JSON instead of the human-readable form.
-      --explain
-          Print a one-line explanation for every check, not just failures.
-      --require-production-os
-          Require an attested production OS image
-  -h, --help
-          Print help
+          Emit JSON instead of human-readable output
 
 "#]]);
     pap()
@@ -169,22 +231,23 @@ Usage: private-ai-proxy settings set [OPTIONS] <KEY> [VALUE]
 
 Arguments:
   <KEY>    The setting's dotted path in config.toml, for example web-ui.enabled [possible values: auto-cli-registration, notifications.enabled, notifications.gateway, notifications.local-api, notifications.verification, connect-on-launch, appearance, update-channel, local-api.listen-address, local-api.allow-network-access, local-api.port, local-api.client-host, web-ui.enabled, web-ui.port, web-ui.listen-address, web-ui.allow-network-access, web-ui.client-host, web-ui.password]
-  [VALUE]  Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. web-ui.password takes no value (use --value-stdin or the hidden prompt); "" removes it
+  [VALUE]  Boolean keys use true/false; appearance uses system/light/dark; update-channel uses beta/stable. "" clears local-api.client-host or web-ui.client-host. web-ui.password uses --value-stdin or the hidden prompt and cannot be cleared
 
 Options:
-      --json                   Emit compact JSON instead of human-readable output
-      --value-stdin            Read the web-ui.password value from stdin instead of a hidden terminal prompt
-      --non-interactive        Never prompt. Mutations require --yes; credential inputs use stdin flags [alias: --no-interactive]
-      --yes                    Approve a command's documented mutation without prompting
-      --require-production-os  Require an attested production OS image
-  -h, --help                   Print help
+      --value-stdin  Read the web-ui.password value from stdin instead of a hidden terminal prompt
+  -h, --help         Print help
+
+Global Options:
+      --json             Emit JSON instead of human-readable output
+      --non-interactive  Never prompt; commands that need input fail unless --yes or a stdin flag supplies it [alias: --no-interactive]
+      --yes              Approve a command's documented mutation without prompting
 
 "#]]);
     // Every command, option and value, by digest.
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["d3233317951610341a9893042185aff999266bc48080efe03934a4723a044b73"]
+        str!["7af13400ad074d65c8c2ce270cd1d86cd48118dc928c197958c162f0979cb569"]
     );
 }
 
@@ -290,11 +353,11 @@ fn aci_commands() {
 
 "#]]);
     fails(1, &["audit", "--report", invalid]).stderr_eq(str![[r#"
-private-ai-proxy: failed to parse report JSON: EOF while parsing an object at line 1 column 1
+error: failed to parse report JSON: EOF while parsing an object at line 1 column 1
 
 "#]]);
     fails(1, &["audit", "--report", report, "--receipt", invalid]).stderr_eq(str![[r#"
-private-ai-proxy: failed to parse receipt JSON [ROOT]/invalid.json: EOF while parsing an object at line 1 column 1
+error: failed to parse receipt JSON [ROOT]/invalid.json: EOF while parsing an object at line 1 column 1
 
 "#]]);
     fails(2, &["audit", "--report", report, "--pin", "x", "--json"]).stderr_eq(str![[r#"
@@ -308,54 +371,70 @@ For more information, try '--help'.
 
 "#]]);
     fails(
-        1,
+        2,
         &["audit", "--report", report, "--accept-subject", "0xab"],
     )
     .stderr_eq(str![[r#"
-private-ai-proxy: invalid --accept-subject "0xab": expected app-id:0x<hex>
+error: invalid value '0xab' for '--accept-subject <app-id:0xHEX>': invalid app-id subject "0xab": expected app-id:0x followed by hex
+
+For more information, try '--help'.
 
 "#]]);
     let subject = ["--accept-subject", "app-id:0xab"];
-    fails(1, &[&["audit", "--report", report][..], &subject].concat()).stderr_eq(str![[r#"
-private-ai-proxy: --accept-subject needs --accept-dstack-kms-root-public-key
+    fails(2, &[&["audit", "--report", report][..], &subject].concat()).stderr_eq(str![[r#"
+error: the following required arguments were not provided:
+  --accept-dstack-kms-root-public-key <HEX>
+
+Usage: private-ai-proxy audit --report <FILE> --accept-subject <app-id:0xHEX> --accept-dstack-kms-root-public-key <HEX>
+
+For more information, try '--help'.
 
 "#]]);
-    fails(1, &["audit", "--report", report, kms, kms_root]).stderr_eq(str![[r#"
-private-ai-proxy: --accept-dstack-kms-root-public-key needs --accept-subject
+    fails(2, &["audit", "--report", report, kms, kms_root]).stderr_eq(str![[r#"
+error: the following required arguments were not provided:
+  --accept-subject <app-id:0xHEX>
+
+Usage: private-ai-proxy audit --report <FILE> --accept-dstack-kms-root-public-key <HEX> --accept-subject <app-id:0xHEX>
+
+For more information, try '--help'.
 
 "#]]);
     let custody = [&["audit", "--report", report][..], &subject, &[kms, "02zz"]].concat();
-    fails(1, &custody).stderr_eq(str![[r#"
-private-ai-proxy: invalid --accept-dstack-kms-root-public-key: Invalid character 'z' at position 2
+    fails(2, &custody).stderr_eq(str![[r#"
+error: invalid value '02zz' for '--accept-dstack-kms-root-public-key <HEX>': Invalid character 'z' at position 2
+
+For more information, try '--help'.
 
 "#]]);
 
     fails(1, &["verify", &format!("{service}/busy")]).stderr_eq(str![[r#"
-private-ai-proxy: 127.0.0.1 is unavailable right now (HTTP 503). Try again later.
+error: 127.0.0.1 is unavailable right now (HTTP 503). Try again later.
 
 "#]]);
     fails(1, &["verify", &format!("{service}/private")]).stderr_eq(str![[r#"
-private-ai-proxy: 127.0.0.1 answered HTTP 403 instead of an attestation report. Check the service URL.
+error: 127.0.0.1 answered HTTP 403 instead of an attestation report. Check the service URL.
 
 "#]]);
     fails(1, &["verify", &format!("{service}/missing")]).stderr_eq(str![[r#"
-private-ai-proxy: 127.0.0.1 is not a Confidential AI service: it has no attestation report. Check the service URL.
+error: 127.0.0.1 is not a Confidential AI service: it has no attestation report. Check the service URL.
 
 "#]]);
     fails(1, &["verify", &tls]).stderr_eq(str![[r#"
-private-ai-proxy: A secure connection to 127.0.0.1 could not be established. Check the service URL.
+error: A secure connection to 127.0.0.1 could not be established. Check the service URL.
 
 "#]]);
     fails(1, &["verify", &refused, "--json"]).stderr_eq(str![[r#"
 {"error":{"code":"command_failed","message":"127.0.0.1 refused the connection. Check the service URL and port."}}
 
 "#]]);
-    fails(1, &["verify", ""]).stderr_eq(str![[r#"
-private-ai-proxy: base URL is empty
+    fails(2, &["verify", ""]).stderr_eq(str![[r#"
+error: invalid value '' for '<BASE_URL>': base URL must not be empty
+
+For more information, try '--help'.
 
 "#]]);
     fails(1, &["verify", "not a url"]).stderr_eq(str![[r#"
-private-ai-proxy: invalid URL "not a url": relative URL without a base
+error: invalid URL: relative URL without a base
 
 "#]]);
 
@@ -363,7 +442,7 @@ private-ai-proxy: invalid URL "not a url": relative URL without a base
         .args(["send", &refused, "--api-key-stdin"])
         .stdin("  \n");
     send.assert().code(1).stdout_eq("").stderr_eq(str![[r#"
-private-ai-proxy: Enter an API key
+error: Enter an API key
 
 "#]]);
     fails(2, &["send", &refused, "--api-key-stdin", "--api-key", "k"]).stderr_eq(str![[r#"
@@ -395,7 +474,7 @@ For more information, try '--help'.
 
     // pap's own refusals exit 125, apart from curl's codes.
     fails(125, &["curl", "http://example.com/v1"]).stderr_eq(str![[r#"
-private-ai-proxy: request URL must use https so the attested TLS key can be pinned: "http://example.com/v1"
+error: request URL must use https so the attested TLS key can be pinned
 
 "#]]);
     fails(125, &["curl", "https://user@example.com/v1", "--json"]).stderr_eq(str![[r#"
@@ -403,19 +482,19 @@ private-ai-proxy: request URL must use https so the attested TLS key can be pinn
 
 "#]]);
     fails(125, &["curl", "https://example.com/v1#frag"]).stderr_eq(str![[r#"
-private-ai-proxy: request URL must not contain a fragment
+error: request URL must not contain a fragment
 
 "#]]);
     fails(125, &["curl", "https://example.com/v1", "--", "-L"]).stderr_eq(str![[r#"
-private-ai-proxy: curl argument "-L" is not supported by pap curl; use a single URL and supported request options
+error: curl argument "-L" is not supported by pap curl; use a single URL and supported request options
 
 "#]]);
     fails(125, &["curl", "https://example.com/v1", "--", "--header"]).stderr_eq(str![[r#"
-private-ai-proxy: curl option "--header" needs a value
+error: curl option "--header" needs a value
 
 "#]]);
     fails(125, &["curl", &refused]).stderr_eq(str![[r#"
-private-ai-proxy: 127.0.0.1 refused the connection. Check the service URL and port.
+error: 127.0.0.1 refused the connection. Check the service URL and port.
 
 "#]]);
     fails(2, &["curl"]).stderr_eq(str![[r#"
@@ -445,7 +524,7 @@ For more information, try '--help'.
 "#]])
         .stderr_eq("");
     fails(1, &["serve", &refused]).stderr_eq(str![[r#"
-private-ai-proxy: 127.0.0.1 refused the connection. Check the service URL and port.
+error: 127.0.0.1 refused the connection. Check the service URL and port.
 
 "#]]);
     fails(
@@ -493,15 +572,32 @@ fn management_without_a_backend() {
 
 "#]]);
     fails(1, &["status", "--watch"]).stderr_eq(str![[r#"
-private-ai-proxy: Backend is not running. Run private-ai-proxy service start.
+error: Backend is not running. Run pap service start.
 
 "#]]);
     fails(1, &["--json", "profiles", "list"]).stderr_eq(str![[r#"
-{"error":{"code":"command_failed","message":"Backend is not running. Run private-ai-proxy service start."}}
+{"error":{"code":"command_failed","message":"Backend is not running. Run pap service start."}}
+
+"#]]);
+    fails(
+        1,
+        &[
+            "profiles",
+            "edit",
+            "work",
+            "--allow-development-os",
+            "--require-production-os",
+            "--json",
+        ],
+    )
+    .stderr_eq(str![[r#"
+warning: --allow-development-os is deprecated and has no effect; clients no longer check the gateway OS image.
+warning: --require-production-os is deprecated and has no effect; clients no longer check the gateway OS image.
+{"error":{"code":"command_failed","message":"Backend is not running. Run pap service start."}}
 
 "#]]);
     fails(1, &["token", "show"]).stderr_eq(str![[r#"
-private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+error: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     let add = ["profiles", "add", "--id", "t", "--name", "T", "--url"];
@@ -516,7 +612,7 @@ private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     fails(1, &[&add[..], &["not a url", "--yes"]].concat()).stderr_eq(str![[r#"
-private-ai-proxy: Gateway URL must be a valid HTTP or HTTPS URL
+error: Gateway URL must be a valid HTTP or HTTPS URL
 
 "#]]);
     fails(2, &["profiles", "add", "--id", "test"]).stderr_eq(str![[r#"
@@ -525,21 +621,6 @@ error: the following required arguments were not provided:
   --url <URL>
 
 Usage: private-ai-proxy profiles add --id <ID> --name <NAME> --url <URL>
-
-For more information, try '--help'.
-
-"#]]);
-    let edit = [
-        "profiles",
-        "edit",
-        "w",
-        "--allow-development-os",
-        "--require-production-os",
-    ];
-    fails(2, &edit).stderr_eq(str![[r#"
-error: the argument '--allow-development-os' cannot be used with '--require-production-os'
-
-Usage: private-ai-proxy profiles edit --allow-development-os <ID>
 
 For more information, try '--help'.
 
@@ -562,8 +643,12 @@ error: invalid value '0' for '--timeout <TIMEOUT>': 0 is not in 1..=300
 For more information, try '--help'.
 
 "#]]);
-    fails(1, &["settings", "set", "appearance"]).stderr_eq(str![[r#"
-private-ai-proxy: Missing the value for appearance
+    fails(2, &["settings", "set", "appearance"]).stderr_eq(str![[r#"
+error: Missing the value for appearance
+
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
 
 "#]]);
     fails(2, &["settings", "set", "no-such-key", "true"]).stderr_eq(str![[r#"
@@ -578,7 +663,7 @@ For more information, try '--help'.
         &["settings", "set", "web-ui.password", "secret", "--yes"],
     )
     .stderr_eq(str![[r#"
-private-ai-proxy: Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument.
+error: Pass the web UI password with --value-stdin or at the hidden prompt, not as an argument.
 
 "#]]);
     // Nothing started a backend or saved a credential, even the refused `profiles add`.
@@ -611,7 +696,7 @@ fn management_with_a_backend() {
     let fails = |code: i32, args: &[&str]| pap(args).assert().code(code).stdout_eq("");
 
     json(&["settings", "show"]).stdout_eq(str![[r#"
-{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","require-production-os":true,"connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
+{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
 
 "#]]);
     json(&["profiles", "list"]).stdout_eq(str![[r#"
@@ -631,11 +716,11 @@ fn management_with_a_backend() {
 
 "#]]);
     fails(1, &["profiles", "export", "--output", exported]).stderr_eq(str![[r#"
-private-ai-proxy: Export target already exists; choose a new path.
+error: Export target already exists; choose a new path.
 
 "#]]);
     fails(1, &["profiles", "show", "missing"]).stderr_eq(str![[r#"
-private-ai-proxy: Profile not found
+error: Profile not found
 
 "#]]);
     fails(1, &["profiles", "use", "missing", "--yes", "--json"]).stderr_eq(str![[r#"
@@ -643,12 +728,12 @@ private-ai-proxy: Profile not found
 
 "#]]);
     json(&["profiles", "remove", &profile, "--yes"]).stdout_eq(str![[r#"
-{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":4},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
+{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai"},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":4},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
 
 "#]]);
 
     fails(1, &["settings", "set", "appearance", "purple", "--yes"]).stderr_eq(str![[r#"
-private-ai-proxy: Expected system, light, or dark
+error: Expected system, light, or dark
 
 "#]]);
     fails(
@@ -656,11 +741,11 @@ private-ai-proxy: Expected system, light, or dark
         &["settings", "set", "update-channel", "nightly", "--yes"],
     )
     .stderr_eq(str![[r#"
-private-ai-proxy: Expected beta or stable
+error: Expected beta or stable
 
 "#]]);
     fails(1, &["settings", "set", "local-api.port", "port", "--yes"]).stderr_eq(str![[r#"
-private-ai-proxy: Expected a valid port number
+error: Expected a valid port number
 
 "#]]);
     fails(
@@ -668,20 +753,24 @@ private-ai-proxy: Expected a valid port number
         &["settings", "set", "connect-on-launch", "maybe", "--yes"],
     )
     .stderr_eq(str![[r#"
-private-ai-proxy: Expected true or false
+error: Expected true or false
 
 "#]]);
     fails(
-        1,
+        2,
         &["settings", "set", "appearance", "--value-stdin", "--yes"],
     )
     .stderr_eq(str![[r#"
-private-ai-proxy: Only web-ui.password reads its value from stdin
+error: Only web-ui.password reads its value from stdin
+
+Usage: private-ai-proxy [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
 
 "#]]);
     let deprecated = json(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
     deprecated.stdout_eq(str![[r#"
-{"require-production-os":true,"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
+{"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
 
 "#]]).stderr_eq(str![[r#"
 warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`
@@ -700,7 +789,7 @@ warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `au
         .assert()
         .success()
         .stdout_eq(str![[r#"
-{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai","requireProductionOs":true},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":6},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
+{"backendInstance":"[..]","sequence":[..],"clientKeyRevision":0,"wakeMonitorAvailable":true,"status":"stopped","configurationVerification":false,"proxyUrl":"http://127.0.0.1:[PORT]","checks":[],"activity":[],"reconnecting":false,"verificationFailed":false,"sessionActive":false,"sessionUsage":{"requests":0,"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"costUsd":0.0,"protected":0,"blockedLocally":0,"failedProof":0},"usageRevision":0,"config":{"remoteUrl":"https://tee.redpill.ai"},"profiles":[],"activeProfileId":"","localApi":{"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":[PORT]},"apiKeySaved":false,"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182},"configFiles":{"configPath":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentialsPath":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","warnings":[],"revision":6},"agentsRevision":0,"protection":{"phase":"profileRequired","title":"Not protected","tone":"neutral","action":{"operation":"setUpProfile","label":"Set Up Profile…","enabled":true}}}
 
 "#]]);
 
@@ -713,7 +802,7 @@ warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `au
 
 "#]]);
     fails(1, &["usage", "clear"]).stderr_eq(str![[r#"
-private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+error: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     json(&["usage", "clear", "--yes"]).stdout_eq(str![[r#"
@@ -729,7 +818,7 @@ private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     fails(1, &["token", "clear-credential", "--yes"]).stderr_eq(str![[r#"
-private-ai-proxy: The operation could not complete. Check the protection status and supplied configuration before retrying.
+error: The operation could not complete. Check the protection status and supplied configuration before retrying.
 
 "#]]);
     json(&["web-ui", "password", "rotate", "--yes"]).stdout_eq(str![[r#"
@@ -750,15 +839,15 @@ private-ai-proxy: The operation could not complete. Check the protection status 
 
 "#]]);
     fails(1, &["agents", "connect", "no-such-agent", "--dry-run"]).stderr_eq(str![[r#"
-private-ai-proxy: The operation could not complete. Check the protection status and supplied configuration before retrying.
+error: The operation could not complete. Check the protection status and supplied configuration before retrying.
 
 "#]]);
     fails(1, &["stop", "--offline"]).stderr_eq(str![[r#"
-private-ai-proxy: The backend is running; restore the agents through it with `stop` or `service stop`.
+error: The backend is running; restore the agents through it with `stop` or `service stop`.
 
 "#]]);
     fails(1, &["service", "stop"]).stderr_eq(str![[r#"
-private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
+error: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     json(&["service", "stop", "--yes"]).stdout_eq(str![[r#"
@@ -769,4 +858,78 @@ private-ai-proxy: Confirmation required. Pass --yes for noninteractive changes.
 {"backend":null,"status":"not_running"}
 
 "#]]);
+}
+
+#[test]
+fn argument_failures_use_the_documented_exit_code_and_json_error_code() {
+    for args in [
+        vec!["verify", ""],
+        vec![
+            "verify",
+            "https://example.com",
+            "--accept-subject",
+            "app-id:0xab",
+        ],
+        vec![
+            "verify",
+            "https://example.com",
+            "--accept-subject",
+            "invalid",
+        ],
+        vec!["settings", "set", "appearance"],
+        vec!["settings", "set", "connectOnLaunch"],
+        vec!["settings", "set", "appearance", "dark", "--value-stdin"],
+        vec!["settings", "set", "appearance", "--value-stdin"],
+        vec![
+            "serve",
+            "https://example.com",
+            "--client-host",
+            "https://host/path",
+        ],
+    ] {
+        let output = pap().arg("--json").args(&args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_arguments", "{args:?}");
+    }
+}
+
+#[test]
+fn online_commands_refuse_url_credentials_without_echoing_them() {
+    for command in ["verify", "send", "sessions", "serve", "curl"] {
+        for json in [false, true] {
+            let mut request = pap()
+                .args([command, "https://private-user:private-password@host"])
+                .env(desktop_core::launch::ALIAS_ENV, "pap")
+                .env("ACI_API_KEY", "test-key");
+            if json {
+                request = request.arg("--json");
+            }
+            let output = request.output().unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(if command == "curl" { 125 } else { 1 }),
+                "{output:?}"
+            );
+            let error = if command == "serve" && json {
+                assert!(output.stderr.is_empty(), "{output:?}");
+                let event: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(event["type"], "fatal");
+                event["message"].as_str().unwrap().to_string()
+            } else {
+                assert!(output.stdout.is_empty(), "{command}: {output:?}");
+                String::from_utf8(output.stderr).unwrap()
+            };
+            if !json {
+                assert!(error.starts_with("error: "), "{command}: {error}");
+            }
+            assert!(
+                error.contains("must not contain credentials"),
+                "{command}: {error}"
+            );
+            assert!(!error.contains("private-user"), "{command}: {error}");
+            assert!(!error.contains("private-password"), "{command}: {error}");
+        }
+    }
 }

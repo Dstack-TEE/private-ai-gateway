@@ -54,7 +54,7 @@ write .hermes/auth.json (600) sha256:5d5a7993fd7b
 connect hermes model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused AuthenticationConflict: Hermes has a private-ai-proxy credential pool that takes priority over key_cmd; resolve it in Hermes. Native auth files are left unchanged
 # openclaw refuses an include
 write .openclaw/openclaw.json (600) sha256:a79f24316104
-connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused InvalidConfiguration: The OpenClaw config at $HOME/.openclaw/openclaw.json is invalid or unsupported JSON5 syntax; fix it before connecting
+connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw configurations with $include are not supported; use a native standalone config
 # openclaw refuses a nested include
 write .openclaw/openclaw.json (600) sha256:3ee2b6396f35
 connect openclaw model="openai/gpt-oss-20b" catalog=0bf0a8e4: refused ConfigurationConflict: OpenClaw configurations with $include are not supported; use a native standalone config

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Regenerate the deterministic values in the ACI and E2EE v2 vector docs.
+"""Regenerate the deterministic values in the ACI, E2EE v2, and proxy-image
+binding vector docs.
 
 Every value in the test-vectors doc is reproduced here from first principles —
 an implementation independent of the Rust reference — so the doc, the
@@ -147,6 +148,15 @@ SESSION = {
 SESSION_BYTES = jcs(SESSION)
 SESSION_ID = sha256_hex(SESSION_BYTES)  # bare hex: ids are not digest fields
 
+# ---- proxy-image binding extension §6: the §3 session with that binding -----
+PROXY_BINDING = {
+    "type": "proxy_image_sha256",
+    "provider": "privatemode",
+    "proxy_image_digest": "sha256:" + "e1" * 32,
+    "credential_sha256": "f2" * 32,
+}
+PROXY_SESSION_ID = sha256_hex(jcs({**SESSION, "channel_binding": [PROXY_BINDING]}))
+
 # ---- §4 receipt (spec §7) ----------------------------------------------------
 REQUEST_BODY = b'{"messages":[{"content":"hi","role":"user"}],"model":"demo-model"}'
 RESPONSE_BODY = b'{"choices":[],"id":"chatcmpl-123"}'
@@ -200,7 +210,7 @@ RESPONSE_AAD = jcs({
     "ts": 1750000000,
 })
 
-# ---- Published constants (must match both spec vector documents) ------------
+# ---- Published constants (must match the spec vector documents) -------------
 PINNED = {
     "receipt-1 public key": (RECEIPT_PUB,
         "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
@@ -214,6 +224,8 @@ PINNED = {
         "0633919ca3f00e97bafaa3304278eb22420cc3ff0d19f87dfca2d3f7508150bc"),
     "§3 session_id": (SESSION_ID,
         "95ad1cb4dd25445808c2e9d116caf420b05703730b506395e8fc1ca6faeae28f"),
+    "proxy-image binding session_id": (PROXY_SESSION_ID,
+        "c9e76e6247b2bf28ce034b7c3b4866b9fe9ce9177e9858ad999503e63ed4f0df"),
     "§4 sha256(signing input)": (SIGNING_INPUT_SHA256,
         "1bd328e6880a5a12b3915af95ea32111310e04ab9e21ac3d71ce268e33b965c9"),
     "§4 signature": (RECEIPT_SIG,
@@ -260,6 +272,10 @@ def main():
     print("evidence data URI =", EVIDENCE_DATA_URI)
     print("session bytes =", SESSION_BYTES.decode())
     print("session_id =", SESSION_ID)
+    print()
+    print("== proxy-image binding §6 ==")
+    print("binding =", jcs(PROXY_BINDING).decode())
+    print("session_id =", PROXY_SESSION_ID)
     print()
     print("== §4 receipt ==")
     print("request body_hash =", REQUEST_BODY_HASH)

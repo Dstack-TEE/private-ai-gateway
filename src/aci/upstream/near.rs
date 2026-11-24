@@ -1,43 +1,33 @@
-//! NEAR AI Cloud backend: the OpenAI-compatible backend plus per-response
-//! enclave binding.
-//!
-//! NEAR's gateway routes each request to one of its model enclaves. For a
-//! non-streaming completion with a canonical model id, the serving enclave signs
-//! `<model>:<sha256(request body)>:<sha256(response body)>` (EIP-191, secp256k1)
-//! with the key its TDX quote binds (`provider_tee` signature, served at
-//! `GET /v1/signature/{chat_id}`). After a buffered response this backend fetches
-//! that signature, checks the signed text against the exact bytes exchanged,
-//! recovers the signer and reports it as the serving instance, so the receipt
-//! cites that enclave's attested session. The provider verifier seals one session
-//! per verified enclave signer; a signer outside that set has no session to cite
-//! and the receipt falls back to the router session.
-//!
-//! Streaming responses, and responses NEAR's gateway re-signs because it changed
-//! the relayed bytes (`gateway` signatures: aliasing, the Responses API), stay
-//! bound to the router session. The receipt records the outcome either way.
+//! Optional NEAR AI response binding for verified, buffered chat completions.
+//! The router's TLS binding remains the admission boundary.
 
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, VerifyingKey as K256VerifyingKey};
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{json, Value};
 use sha2::Sha256;
 use sha3::{Digest, Keccak256};
 
-use super::openai::request_model_id;
+use super::body::read_buffered_upstream_response;
 use super::{
-    OpenAICompatibleBackend, PreparedUpstreamRequest, UpstreamBackend, UpstreamError,
+    OpenAICompatibleBackend, PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError,
     UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
-use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::endpoint::Endpoint;
+use tokio::sync::Semaphore;
 
 /// Receipt extension event recording the per-response enclave signature.
 pub const EVENT_UPSTREAM_RESPONSE_ATTESTED: &str = "upstream.response_attested";
 
-const SIGNATURE_ATTEMPTS: u32 = 4;
-const SIGNATURE_RETRY_DELAY: Duration = Duration::from_millis(500);
-const SIGNATURE_TIMEOUT: Duration = Duration::from_secs(10);
+const SIGNATURE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_SIGNATURE_BYTES: usize = 8 * 1024;
+const MAX_SIGNATURE_LOOKUPS: usize = 16;
+const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(10);
+const MAX_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 
 /// One `GET /v1/signature/{chat_id}` result.
 #[derive(Debug, Clone, Deserialize)]
@@ -105,10 +95,11 @@ pub fn recover_eip191_signer(message: &str, signature_hex: &str) -> Result<Strin
     if raw.len() != 65 {
         return Err(format!("signature must be 65 bytes, got {}", raw.len()));
     }
-    let mut v = raw[64];
-    if v >= 27 {
-        v -= 27;
-    }
+    let v = match raw[64] {
+        0 | 1 => raw[64],
+        27 | 28 => raw[64] - 27,
+        _ => return Err("invalid recovery id".to_string()),
+    };
     let recid =
         RecoveryId::from_byte(v).ok_or_else(|| format!("invalid recovery id {}", raw[64]))?;
     let signature =
@@ -122,21 +113,33 @@ pub fn recover_eip191_signer(message: &str, signature_hex: &str) -> Result<Strin
     Ok(format!("0x{}", hex::encode(&hash[12..])))
 }
 
+pub(crate) fn is_near_chat_request(req: &PreparedUpstreamRequest) -> bool {
+    req.request
+        .path
+        .as_deref()
+        .unwrap_or(Endpoint::ChatComplete.path())
+        == Endpoint::ChatComplete.path()
+}
+
 pub struct NearAiBackend {
     inner: OpenAICompatibleBackend,
     base_url: String,
-    bearer_token: Option<String>,
+    bearer_token: String,
     client: reqwest::Client,
+    lookups: Semaphore,
+    rate_limited_until: Mutex<Option<Instant>>,
 }
 
 impl NearAiBackend {
     pub fn new(
         inner: OpenAICompatibleBackend,
         base_url: impl Into<String>,
-        bearer_token: Option<String>,
+        bearer_token: String,
     ) -> Result<Self, UpstreamError> {
         let client = reqwest::Client::builder()
             .timeout(SIGNATURE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .build()
             .map_err(|e| UpstreamError::Transport(format!("NEAR signature client: {e}")))?;
         Ok(Self {
@@ -144,131 +147,114 @@ impl NearAiBackend {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             bearer_token,
             client,
+            lookups: Semaphore::new(MAX_SIGNATURE_LOOKUPS),
+            rate_limited_until: Mutex::new(None),
         })
     }
 
-    /// NEAR signs with the serving enclave only when the relayed bytes are the
-    /// enclave's own: no model aliasing, and uncompressed bodies to hash.
-    fn with_signing_headers(mut req: UpstreamRequest) -> UpstreamRequest {
+    fn with_signing_headers(req: &mut UpstreamRequest) {
         req.headers
             .insert("x-no-aliasing".to_string(), "true".to_string());
         req.headers
             .insert("accept-encoding".to_string(), "identity".to_string());
-        req
     }
 
-    async fn fetch_signature(&self, chat_id: &str) -> Result<NearResponseSignature, String> {
-        let url = format!("{}/v1/signature/{chat_id}", self.base_url);
-        let mut last = String::from("no attempt");
-        for attempt in 0..SIGNATURE_ATTEMPTS {
-            if attempt > 0 {
-                tokio::time::sleep(SIGNATURE_RETRY_DELAY * attempt).await;
-            }
-            let mut req = self
-                .client
-                .get(&url)
-                .query(&[("signing_algo", "ecdsa")])
-                .header("accept", "application/json");
-            if let Some(token) = &self.bearer_token {
-                req = req.bearer_auth(token);
-            }
-            match req.send().await {
-                // NEAR documents a brief 404 window before a signature exists.
-                Ok(resp) if resp.status().as_u16() == 404 => {
-                    last = "signature not yet available".to_string()
-                }
-                Ok(resp) if resp.status().is_success() => {
-                    let body: Value = resp
-                        .json()
-                        .await
-                        .map_err(|e| format!("signature body: {e}"))?;
-                    if body.get("error_code").is_some() {
-                        last = format!(
-                            "signature unavailable: {}",
-                            body.get("message").cloned().unwrap_or_default()
-                        );
-                        continue;
-                    }
-                    return serde_json::from_value(body)
-                        .map_err(|e| format!("signature fields: {e}"));
-                }
-                Ok(resp) => {
-                    last = format!("signature fetch returned HTTP {}", resp.status().as_u16())
-                }
-                Err(e) => last = format!("signature fetch failed: {e}"),
-            }
+    async fn fetch_signature(&self, chat_id: &str) -> Result<NearResponseSignature, &'static str> {
+        if !matches!(chat_id.len(), 1..=128)
+            || !chat_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("invalid chat id");
         }
-        Err(last)
+        if self
+            .rate_limited_until
+            .lock()
+            .ok()
+            .and_then(|until| *until)
+            .is_some_and(|until| Instant::now() < until)
+        {
+            return Err("signature lookup in rate-limit cooldown");
+        }
+        let _permit = self
+            .lookups
+            .try_acquire()
+            .map_err(|_| "signature lookup at capacity")?;
+        let url = format!("{}/v1/signature/{chat_id}", self.base_url);
+        let response = self
+            .client
+            .get(url)
+            .query(&[("signing_algo", "ecdsa")])
+            .header("accept", "application/json")
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await
+            .map_err(|_| "signature lookup unavailable")?;
+        match response.status() {
+            reqwest::StatusCode::OK => {}
+            reqwest::StatusCode::NOT_FOUND => return Err("signature not found"),
+            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                let delay = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|seconds| seconds.parse().ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(DEFAULT_RATE_LIMIT_COOLDOWN)
+                    .min(MAX_RATE_LIMIT_COOLDOWN);
+                if let Ok(mut deadline) = self.rate_limited_until.lock() {
+                    *deadline = Some(Instant::now() + delay).max(*deadline);
+                }
+                return Err("signature lookup rate limited");
+            }
+            _ => return Err("signature lookup unavailable"),
+        }
+        let body = read_buffered_upstream_response(response, MAX_SIGNATURE_BYTES)
+            .await
+            .map_err(|_| "signature body unavailable")?;
+        serde_json::from_slice(&body).map_err(|_| "signature fields unavailable")
     }
 
-    /// Bind a buffered 2xx completion to the enclave that signed it. Sets the
-    /// serving instance only on a verified `provider_tee` signature, and always
-    /// records the outcome for the receipt.
     async fn attest_response(
         &self,
-        request_body: &[u8],
-        mut response: UpstreamResponse,
-    ) -> UpstreamResponse {
-        if !(200..300).contains(&response.status_code) {
-            return response;
+        req: &PreparedUpstreamRequest,
+        candidates: &serde_json::Map<String, Value>,
+        response: &mut UpstreamResponse,
+    ) {
+        #[derive(Deserialize)]
+        struct CompletionId<'a> {
+            id: &'a str,
         }
-        let parsed: Option<Value> = serde_json::from_slice(&response.body).ok();
-        let chat_id = parsed
-            .as_ref()
-            .and_then(|v| v.get("id"))
-            .and_then(Value::as_str);
-        let model = request_model_id(request_body);
-        let mut fields = Map::new();
-        fields.insert("provider".to_string(), Value::String("near-ai".to_string()));
-        let (Some(chat_id), Some(model)) = (chat_id, model) else {
-            fields.insert("bound".to_string(), Value::Bool(false));
-            fields.insert(
-                "reason".to_string(),
-                Value::String("response has no chat id or request has no model".to_string()),
-            );
-            response.response_attestation = Some(fields);
-            return response;
+
+        let outcome = match serde_json::from_slice::<CompletionId<'_>>(&response.body) {
+            Ok(completion) => self.fetch_signature(completion.id).await,
+            Err(_) => Err("response has no chat id"),
         };
-        match self.fetch_signature(chat_id).await {
-            Ok(sig) => {
-                fields.insert(
-                    "signature_kind".to_string(),
-                    sig.signature_kind
-                        .clone()
-                        .map(Value::String)
-                        .unwrap_or(Value::Null),
-                );
-                fields.insert(
-                    "signing_algo".to_string(),
-                    Value::String(sig.signing_algo.clone()),
-                );
-                fields.insert(
-                    "signing_address".to_string(),
-                    Value::String(sig.signing_address.to_lowercase()),
-                );
-                fields.insert("text".to_string(), Value::String(sig.text.clone()));
-                fields.insert(
-                    "signature".to_string(),
-                    Value::String(sig.signature.clone()),
-                );
-                match bind_response_signature(&sig, &model, request_body, &response.body) {
-                    Ok(signer) => {
-                        fields.insert("bound".to_string(), Value::Bool(true));
-                        response.served_instance_id = Some(signer);
-                    }
-                    Err(reason) => {
-                        fields.insert("bound".to_string(), Value::Bool(false));
-                        fields.insert("reason".to_string(), Value::String(reason));
-                    }
+        let fields = match outcome {
+            Ok(sig) => match bind_response_signature(
+                &sig,
+                &req.model_id,
+                &req.request.body,
+                &response.body,
+            ) {
+                Ok(signer) if candidates.contains_key(&signer) => {
+                    response.served_instance_id = Some(signer);
+                    json!({
+                        "provider": "near-ai", "bound": true, "signature_kind": sig.signature_kind,
+                        "signing_algo": sig.signing_algo, "signing_address": sig.signing_address,
+                        "text": sig.text, "signature": sig.signature,
+                    })
                 }
-            }
-            Err(reason) => {
-                fields.insert("bound".to_string(), Value::Bool(false));
-                fields.insert("reason".to_string(), Value::String(reason));
-            }
-        }
-        response.response_attestation = Some(fields);
-        response
+                Ok(_) => {
+                    json!({"provider": "near-ai", "bound": false, "reason": "signer absent from verified candidates"})
+                }
+                Err(_) => {
+                    json!({"provider": "near-ai", "bound": false, "reason": "signature does not bind this response to a model enclave"})
+                }
+            },
+            Err(reason) => json!({"provider": "near-ai", "bound": false, "reason": reason}),
+        };
+        response.response_attestation = fields.as_object().cloned();
     }
 }
 
@@ -282,34 +268,47 @@ impl UpstreamBackend for NearAiBackend {
         self.inner.url_origin()
     }
 
-    fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
-        self.inner.prepare(Self::with_signing_headers(req))
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        self.inner.response_protocol(req, operation)
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
-        let req = Self::with_signing_headers(req);
-        let body = req.body.clone();
-        let response = self.inner.forward(req).await?;
-        Ok(self.attest_response(&body, response).await)
-    }
-
-    async fn forward_prepared(
-        &self,
-        req: PreparedUpstreamRequest,
-    ) -> Result<UpstreamResponse, UpstreamError> {
-        let body = req.request.body.clone();
-        let response = self.inner.forward_prepared(req).await?;
-        Ok(self.attest_response(&body, response).await)
+        self.inner.forward(req).await
     }
 
     async fn forward_verified_prepared(
         &self,
-        req: PreparedUpstreamRequest,
+        mut req: PreparedUpstreamRequest,
         event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        let body = req.request.body.clone();
-        let response = self.inner.forward_verified_prepared(req, event).await?;
-        Ok(self.attest_response(&body, response).await)
+        let candidates = event
+            .provider_claims
+            .as_ref()
+            .and_then(|claims| claims.get("model_enclave_candidates"))
+            .and_then(Value::as_object)
+            .filter(|candidates| !candidates.is_empty());
+        let Some(candidates) = candidates.filter(|_| {
+            is_near_chat_request(&req)
+                && event.result == VerificationResult::Verified
+                && event.model_id == req.model_id
+                && !event.channel_bindings.is_empty()
+        }) else {
+            return self.inner.forward_verified_prepared(req, event).await;
+        };
+
+        Self::with_signing_headers(&mut req.request);
+        let mut response = self
+            .inner
+            .forward_verified_prepared(req.clone(), event)
+            .await?;
+        if (200..300).contains(&response.status_code) {
+            self.attest_response(&req, candidates, &mut response).await;
+        }
+        Ok(response)
     }
 
     async fn models(&self) -> Result<UpstreamResponse, UpstreamError> {
@@ -320,16 +319,7 @@ impl UpstreamBackend for NearAiBackend {
         &self,
         req: UpstreamRequest,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        self.inner
-            .forward_stream(Self::with_signing_headers(req))
-            .await
-    }
-
-    async fn forward_stream_prepared(
-        &self,
-        req: PreparedUpstreamRequest,
-    ) -> Result<UpstreamStreamResponse, UpstreamError> {
-        self.inner.forward_stream_prepared(req).await
+        self.inner.forward_stream(req).await
     }
 
     async fn forward_stream_verified_prepared(
@@ -477,7 +467,8 @@ mod tests {
 
     #[test]
     fn signing_headers_are_added() {
-        let req = NearAiBackend::with_signing_headers(UpstreamRequest::default());
+        let mut req = UpstreamRequest::default();
+        NearAiBackend::with_signing_headers(&mut req);
         assert_eq!(
             req.headers.get("x-no-aliasing").map(String::as_str),
             Some("true")
@@ -486,5 +477,104 @@ mod tests {
             req.headers.get("accept-encoding").map(String::as_str),
             Some("identity")
         );
+    }
+
+    #[tokio::test]
+    async fn signature_lookup_has_one_attempt_and_bounds_unavailable_responses() {
+        use axum::http::{header, StatusCode, Uri};
+        use axum::response::IntoResponse;
+        use axum::{Json, Router};
+        use bytes::Bytes;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let lookups = Arc::new(AtomicUsize::new(0));
+        let seen = lookups.clone();
+        let key = SigningKey::random(&mut rand::rngs::OsRng);
+        let signature = signed(
+            &key,
+            "provider_tee",
+            text_for("z-ai/glm-5.3-flash", REQ, RESP),
+        );
+        let signing_address = signature.signing_address.clone();
+        let signature_json = json!({
+            "text": signature.text,
+            "signature": signature.signature,
+            "signing_address": signature.signing_address,
+            "signing_algo": signature.signing_algo,
+            "signature_kind": signature.signature_kind,
+        });
+        let server = Router::new().fallback(move |uri: Uri| {
+            let seen = seen.clone();
+            let signature_json = signature_json.clone();
+            async move {
+                seen.fetch_add(1, Ordering::Relaxed);
+                match uri.path() {
+                    "/v1/signature/chatcmpl-1" => Json(signature_json).into_response(),
+                    "/v1/signature/not-found" => StatusCode::NOT_FOUND.into_response(),
+                    "/v1/signature/big" => "x".repeat(MAX_SIGNATURE_BYTES + 1).into_response(),
+                    "/v1/signature/slow" => {
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                        StatusCode::OK.into_response()
+                    }
+                    "/v1/signature/redirect" => (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(header::LOCATION, "/v1/signature/slow")],
+                    )
+                        .into_response(),
+                    "/v1/signature/throttled" => {
+                        (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "30")])
+                            .into_response()
+                    }
+                    _ => StatusCode::BAD_REQUEST.into_response(),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async { axum::serve(listener, server).await.unwrap() });
+        let inner = OpenAICompatibleBackend::new(base_url.clone()).unwrap();
+        let backend = NearAiBackend::new(inner, base_url, "fixture-token".into()).unwrap();
+        let request = backend
+            .prepare(UpstreamRequest {
+                body: Bytes::from_static(REQ),
+                ..Default::default()
+            })
+            .unwrap();
+        for admitted in [true, false] {
+            let mut response = UpstreamResponse {
+                status_code: 200,
+                body: RESP.to_vec(),
+                ..Default::default()
+            };
+            let candidate = if admitted {
+                signing_address.as_str()
+            } else {
+                "other"
+            };
+            let candidates = serde_json::Map::from_iter([(candidate.into(), Value::Null)]);
+            backend
+                .attest_response(&request, &candidates, &mut response)
+                .await;
+            assert_eq!(response.body, RESP);
+            assert_eq!(
+                response.served_instance_id.as_deref(),
+                admitted.then_some(signing_address.as_str())
+            );
+            assert_eq!(response.response_attestation.unwrap()["bound"], admitted);
+        }
+        for (id, reason) in [
+            ("not-found", "signature not found"),
+            ("big", "signature body unavailable"),
+            ("slow", "signature lookup unavailable"),
+            ("redirect", "signature lookup unavailable"),
+            ("throttled", "signature lookup rate limited"),
+            ("skipped", "signature lookup in rate-limit cooldown"),
+            ("../path", "invalid chat id"),
+        ] {
+            assert_eq!(backend.fetch_signature(id).await.unwrap_err(), reason);
+        }
+        assert_eq!(lookups.load(Ordering::Relaxed), 7);
+        task.abort();
     }
 }

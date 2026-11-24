@@ -1,10 +1,55 @@
+use std::collections::HashSet;
+
 use super::helpers::legacy_signature_text;
-use super::{AciService, LegacySignatureResult, ReceiptOwner, ServiceError};
+use super::{
+    AciService, LegacySignatureResult, ReceiptOwner, ReceiptStore, ServiceError,
+    UpstreamVerificationRequest,
+};
 use crate::aci::keys::{LegacySignature, LEGACY_ALGO_ECDSA};
 use crate::aci::receipt::{ReceiptError, SignedReceipt, EVENT_RESPONSE_RETURNED};
 use crate::aggregator::session::AttestedSession;
+use crate::aggregator::session_store::{sort_sessions_newest_first, SessionLease, SessionStore};
+
+/// Retain the cited session before publishing its receipt, using one deadline.
+pub(super) fn store_receipt(
+    receipt_store: &dyn ReceiptStore,
+    session_store: &dyn SessionStore,
+    receipt: SignedReceipt,
+    requester: Option<ReceiptOwner>,
+    now: u64,
+    ttl_seconds: u64,
+    lease: Option<&SessionLease>,
+) -> Result<(), ServiceError> {
+    let expires_at = now.saturating_add(ttl_seconds);
+    if let Some(lease) = lease {
+        session_store
+            .extend_retention(lease, expires_at)
+            .map_err(|err| {
+                ServiceError::SessionStore(format!("failed to retain cited session: {err}"))
+            })?;
+    }
+    receipt_store.put(receipt, requester, now, expires_at);
+    Ok(())
+}
 
 impl AciService {
+    pub(super) fn store_receipt(
+        &self,
+        receipt: SignedReceipt,
+        requester: Option<ReceiptOwner>,
+        lease: Option<&SessionLease>,
+    ) -> Result<(), ServiceError> {
+        store_receipt(
+            self.receipt_store.as_ref(),
+            self.session_store.as_ref(),
+            receipt,
+            requester,
+            self.clock.now_secs(),
+            self.config.receipt_ttl_seconds,
+            lease,
+        )
+    }
+
     pub fn get_receipt_by_receipt_id(&self, id: &str) -> Option<SignedReceipt> {
         self.receipt_store
             .get_by_receipt_id(id, self.clock.now_secs())
@@ -52,13 +97,37 @@ impl AciService {
             .get_session(session_id, self.clock.now_secs())
     }
 
-    /// List current attested sessions (TEE channels), optionally filtered by
-    /// `upstream_name` (the operator's upstream config name). A model→channel
-    /// lookup belongs to the caller, since a session is per-channel, not
-    /// per-model.
-    pub fn list_attested_sessions(&self, upstream_name: Option<&str>) -> Vec<AttestedSession> {
-        self.session_store
-            .list_sessions(upstream_name, self.clock.now_secs())
+    /// List the sessions accepted by the verifier's current cached state.
+    pub fn list_current_sessions(
+        &self,
+        requests: &[UpstreamVerificationRequest],
+    ) -> Result<Vec<AttestedSession>, ServiceError> {
+        if self.serves_directly() {
+            return Ok(Vec::new());
+        }
+        let Some(verifier) = self.upstream_verifier.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let now = self.clock.now_secs();
+        let mut ids = HashSet::new();
+        let mut sessions = Vec::new();
+        for event in requests.iter().filter_map(|r| verifier.cached(r)) {
+            for sealed in self.record_attested_upstream_session(&event, now)? {
+                let now = self.clock.now_secs();
+                if !ids.insert(sealed.lease.session_id().to_string()) {
+                    continue;
+                }
+                if let Some(session) = self
+                    .session_store
+                    .get_session(sealed.lease.session_id(), now)
+                    .filter(|s| s.document().established_at <= now && now < s.document().expires_at)
+                {
+                    sessions.push(session);
+                }
+            }
+        }
+        sort_sessions_newest_first(&mut sessions);
+        Ok(sessions)
     }
 
     /// E2EE protocol versions this workload has actually wired.

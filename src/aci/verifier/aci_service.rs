@@ -11,15 +11,21 @@ use aci_verify::report::raw_evidence;
 use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::appraisal::{
-    appraise_report, AppraisalInputs, ChannelEvidence, CheckResult, CustodyEvidence, FailureCause,
-    QuoteSource,
+    appraise_report, Appraisal, AppraisalInputs, ChannelEvidence, CheckResult, CustodyEvidence,
+    FailureCause, QuoteSource,
 };
 use super::quote::QuoteStepError;
 use super::report::AciReportValidationError;
-use super::{DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS, DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS};
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use super::{
+    current_unix_secs, DEFAULT_VERIFIER_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::types::{AttestationReport, SourceProvenance, WorkloadKeyset};
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 
@@ -89,7 +95,7 @@ impl AciServiceVerifierPolicy {
     /// free-form subject is otherwise the workload's own claim (§3.1:
     /// "Generic verifiers MUST NOT trust it by itself") — or the report's
     /// source-provenance image digest (uncorroborated; conformance-gaps
-    /// item 17).
+    /// item 11).
     pub(super) fn accepts_measured(
         &self,
         keyset: &WorkloadKeyset,
@@ -126,6 +132,16 @@ pub(super) enum AciServiceVerificationError {
     InvalidJson(String),
     #[error("ACI report binding failed: {0}")]
     AciBinding(#[from] AciReportValidationError),
+    /// A binding failure reported by a §9.1 check, which lends its cause.
+    #[error("ACI report binding failed: {message}")]
+    ReportBinding {
+        failure: VerificationFailure,
+        message: String,
+    },
+    /// Quote bytes that are hex but not a quote: malformed evidence, where
+    /// [`Self::QuoteVerification`] is a quote that was judged.
+    #[error("DCAP quote verification failed: {0}")]
+    UnparsableQuote(String),
     #[error("upstream attestation did not match verifier policy")]
     PolicyRejected,
     #[error(
@@ -172,6 +188,56 @@ pub(super) enum AciServiceVerificationError {
     DownstreamTlsBindingNotInKeyset,
 }
 
+impl AciServiceVerificationError {
+    /// The cause a receipt records for this error.
+    pub(super) fn failure(&self) -> VerificationFailure {
+        use VerificationFailure as F;
+        match self {
+            Self::Transport(_) | Self::HttpStatus { .. } | Self::Collateral(_) | Self::Timeout => {
+                F::EvidenceUnavailable
+            }
+            Self::InvalidJson(_)
+            | Self::MissingQuote
+            | Self::InvalidQuoteHex(_)
+            | Self::InvalidQuoteReportDataHex(_)
+            | Self::UnparsableQuote(_)
+            | Self::InvalidEventLog(_) => F::EvidenceInvalid,
+            Self::QuoteVerification(_) | Self::TeeTypeMismatch { .. } => F::QuoteInvalid,
+            Self::AciBinding(binding) => binding_failure(binding),
+            Self::ReportBinding { failure, .. } => *failure,
+            Self::QuoteReportDataEvidenceMismatch | Self::QuoteReportDataMismatch => {
+                F::BindingMismatch
+            }
+            Self::MissingProvenance => F::ProvenanceNotAccepted,
+            Self::KeyCustody(_) | Self::InvalidKeyCustody(_) | Self::KmsRootRejected => {
+                F::CustodyNotVerified
+            }
+            Self::PolicyRejected => F::PolicyRejected,
+            Self::MissingTlsSpkiBinding
+            | Self::MissingDownstreamTlsBinding
+            | Self::InvalidDownstreamTlsBinding(_)
+            | Self::DownstreamTlsBindingHostMismatch { .. }
+            | Self::DownstreamTlsBindingNotInKeyset => F::NoChannelBinding,
+        }
+    }
+}
+
+/// The cause of a §9.1(2) binding failure: a report that cannot be read is
+/// malformed evidence, and only a comparison that disagrees is a mismatch.
+fn binding_failure(err: &AciReportValidationError) -> VerificationFailure {
+    match err {
+        AciReportValidationError::UnsupportedApiVersion(_)
+        | AciReportValidationError::InvalidKeyset(_)
+        | AciReportValidationError::InvalidReportDataHex(_)
+        | AciReportValidationError::InvalidNonce(_) => VerificationFailure::EvidenceInvalid,
+        AciReportValidationError::WorkloadKeysetDigestMismatch { .. }
+        | AciReportValidationError::ReportDataMismatch { .. } => {
+            VerificationFailure::BindingMismatch
+        }
+        AciReportValidationError::KeysetExpired => VerificationFailure::KeysetExpired,
+    }
+}
+
 /// Fold a §9.1 check result onto this deployment's error surface, so the
 /// messages and metrics that read these variants keep working.
 impl From<&CheckResult> for AciServiceVerificationError {
@@ -186,9 +252,35 @@ impl From<&CheckResult> for AciServiceVerificationError {
             }
         };
         match cause {
-            FailureCause::Binding(_) | FailureCause::Quote(_) => {
-                Self::QuoteVerification(cause.to_string())
+            // Kept apart, and a quote step kept as its own kind: the receipt
+            // names which check failed, and these are different checks.
+            FailureCause::Binding(AciReportValidationError::KeysetExpired) => {
+                Self::AciBinding(AciReportValidationError::KeysetExpired)
             }
+            FailureCause::Binding(binding) => Self::ReportBinding {
+                failure: binding_failure(binding),
+                message: binding.to_string(),
+            },
+            FailureCause::Quote(QuoteStepError::MissingQuote) => Self::MissingQuote,
+            FailureCause::Quote(QuoteStepError::InvalidQuoteHex(m)) => {
+                Self::InvalidQuoteHex(m.clone())
+            }
+            FailureCause::Quote(QuoteStepError::InvalidEvidenceReportDataHex(m)) => {
+                Self::InvalidQuoteReportDataHex(m.clone())
+            }
+            FailureCause::Quote(QuoteStepError::EvidenceReportDataMismatch) => {
+                Self::QuoteReportDataEvidenceMismatch
+            }
+            FailureCause::Quote(QuoteStepError::ReportDataSlotMismatch { .. }) => {
+                Self::QuoteReportDataMismatch
+            }
+            FailureCause::Quote(QuoteStepError::Collateral { reason, .. }) => {
+                Self::Collateral(reason.clone())
+            }
+            FailureCause::Quote(QuoteStepError::UnparsableQuote(m)) => {
+                Self::UnparsableQuote(m.clone())
+            }
+            FailureCause::Quote(quote) => Self::QuoteVerification(quote.to_string()),
             FailureCause::Expired { .. } => {
                 Self::AciBinding(AciReportValidationError::KeysetExpired)
             }
@@ -208,7 +300,7 @@ impl From<QuoteStepError> for AciServiceVerificationError {
         match e {
             QuoteStepError::MissingQuote => Self::MissingQuote,
             QuoteStepError::InvalidQuoteHex(m) => Self::InvalidQuoteHex(m),
-            QuoteStepError::UnparsableQuote(m) => Self::QuoteVerification(m),
+            QuoteStepError::UnparsableQuote(m) => Self::UnparsableQuote(m),
             QuoteStepError::InvalidEvidenceReportDataHex(m) => Self::InvalidQuoteReportDataHex(m),
             QuoteStepError::EvidenceReportDataMismatch => Self::QuoteReportDataEvidenceMismatch,
             QuoteStepError::ReportDataSlotMismatch { .. } => Self::QuoteReportDataMismatch,
@@ -224,12 +316,24 @@ impl From<QuoteStepError> for AciServiceVerificationError {
 
 #[derive(Debug, Clone)]
 pub(super) struct CachedAciServiceVerification {
-    pub(super) expires_at: u64,
+    pub(super) expires_at: Instant,
     pub(super) evidence: Option<Value>,
     pub(super) channel_bindings: Vec<ChannelBinding>,
+    pub(super) identity: aci_verify::report::ReportBinding,
+    pub(super) session_material: Option<Value>,
 }
 
 impl CachedAciServiceVerification {
+    fn remaining(&self) -> Option<Duration> {
+        let ttl = self.expires_at.checked_duration_since(Instant::now())?;
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time is before UNIX_EPOCH");
+        let remaining =
+            ttl.min(Duration::from_secs(self.identity.keyset.not_after).checked_sub(wall)?);
+        (!remaining.is_zero()).then_some(remaining)
+    }
+
     pub(super) fn event_for(
         &self,
         request: UpstreamVerificationRequest,
@@ -237,6 +341,9 @@ impl CachedAciServiceVerification {
     ) -> UpstreamVerifiedEvent {
         UpstreamVerifiedEvent {
             upstream_name: request.upstream_name,
+            provider_type: Some("aci-service".to_string()),
+            aci_identity: Some(self.identity.clone()),
+            provider_claims: self.session_material.clone(),
             model_id: request.model_id,
             url_origin: request.url_origin,
             verifier_id: verifier_id.to_string(),
@@ -308,10 +415,15 @@ pub struct AciServiceUpstreamVerifier {
     cache_ttl_seconds: u64,
     request_timeout_seconds: u64,
     cache: RwLock<Option<CachedAciServiceVerification>>,
+    verify_lock: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    appraisal: Option<fn(&AttestationReport, &str) -> Appraisal>,
     verifier_id: String,
 }
 
 impl AciServiceUpstreamVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "aci-service/v2";
+
     pub fn new(
         report_base_url: impl Into<String>,
         pccs_url: impl Into<String>,
@@ -354,7 +466,10 @@ impl AciServiceUpstreamVerifier {
             cache_ttl_seconds,
             request_timeout_seconds,
             cache: RwLock::new(None),
-            verifier_id: "aci-service/v2".to_string(),
+            verify_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            appraisal: None,
+            verifier_id: Self::VERIFIER_ID.to_string(),
         })
     }
 
@@ -398,9 +513,19 @@ impl AciServiceUpstreamVerifier {
         self
     }
 
+    #[cfg(test)]
+    pub(super) fn with_appraisal(
+        mut self,
+        appraisal: fn(&AttestationReport, &str) -> Appraisal,
+    ) -> Self {
+        self.appraisal = Some(appraisal);
+        self
+    }
+
     async fn verify_uncached(
         &self,
     ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
+        let started = Instant::now();
         let nonce = random_nonce_hex();
         // Canonical report, not the legacy alias: the binding check below expects
         // `report_data = sha256(statement bytes)` (§3.2), which only the canonical
@@ -427,13 +552,16 @@ impl AciServiceUpstreamVerifier {
 
         let report: AttestationReport = serde_json::from_slice(&body)
             .map_err(|e| AciServiceVerificationError::InvalidJson(e.to_string()))?;
-        let verified_at = now_secs();
+        #[cfg(test)]
+        if let Some(appraise) = self.appraisal {
+            return self.finish_verification(started, &body, appraise(&report, &nonce));
+        }
         // One appraisal (`appraisal.rs`): this deployment folds the §9.1
         // outcomes into a single accept/reject.
         let appraisal = appraise_report(AppraisalInputs {
             report: &report,
             nonce: Some(&nonce),
-            now_secs: verified_at,
+            now_secs: current_unix_secs(),
             expiry_waived: false,
             quote: QuoteSource::Online {
                 pccs_url: &self.pccs_url,
@@ -450,46 +578,54 @@ impl AciServiceUpstreamVerifier {
         .await
         .map_err(AciServiceVerificationError::InvalidJson)?;
 
+        self.finish_verification(started, &body, appraisal)
+    }
+
+    fn finish_verification(
+        &self,
+        started: Instant,
+        body: &[u8],
+        appraisal: Appraisal,
+    ) -> Result<CachedAciServiceVerification, AciServiceVerificationError> {
         if let Some(problem) = appraisal.first_problem() {
             return Err(problem.into());
         }
-        let keyset = appraisal
+        let identity = appraisal
             .identity
-            .as_ref()
-            .expect("an accepted appraisal establishes the keyset")
-            .keyset
-            .clone();
+            .expect("an accepted appraisal establishes the keyset");
         // Recency of a cached verification is bounded by the cache TTL and the
         // keyset's own expiry — the report carries no other freshness metadata.
-        let expires_at = verified_at
-            .saturating_add(self.cache_ttl_seconds)
-            .min(keyset.not_after);
-        let evidence = Some(raw_evidence(&body, "application/json", None));
+        if identity.keyset.is_expired_at(current_unix_secs()) {
+            return Err(AciReportValidationError::KeysetExpired.into());
+        }
+        let evidence = Some(raw_evidence(body, "application/json", None));
         let channel_bindings = appraisal.channel_bindings;
 
         Ok(CachedAciServiceVerification {
-            expires_at,
+            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
             evidence,
             channel_bindings,
+            identity,
+            session_material: appraisal.session_material,
         })
     }
-}
 
-#[async_trait]
-impl UpstreamVerifier for AciServiceUpstreamVerifier {
-    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
-        let now_secs = now_secs();
-        if let Some(cached) = self
-            .cache
-            .read()
-            .expect("ACI service verifier cache poisoned")
-            .clone()
-        {
-            if now_secs < cached.expires_at {
-                return cached.event_for(request, &self.verifier_id);
+    async fn verify_serialized(
+        &self,
+        request: UpstreamVerificationRequest,
+        force: bool,
+    ) -> UpstreamVerifiedEvent {
+        if !force {
+            if let Some(event) = self.cached(&request) {
+                return event;
             }
         }
-
+        let _guard = self.verify_lock.lock().await;
+        if !force {
+            if let Some(event) = self.cached(&request) {
+                return event;
+            }
+        }
         match tokio::time::timeout(
             Duration::from_secs(self.request_timeout_seconds),
             self.verify_uncached(),
@@ -512,10 +648,40 @@ impl UpstreamVerifier for AciServiceUpstreamVerifier {
                 verifier_id: self.verifier_id.clone(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some(err.to_string()),
+                failure: err.failure(),
+                diagnostic: Some(err.to_string()),
                 ..Default::default()
             },
         }
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for AciServiceUpstreamVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verify_serialized(request, false).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        let cache = self
+            .cache
+            .read()
+            .expect("ACI service verifier cache poisoned");
+        let cached = cache.as_ref()?;
+        cached.remaining()?;
+        Some(cached.event_for(request.clone(), &self.verifier_id))
+    }
+
+    fn cache_remaining(&self, _request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.cache
+            .read()
+            .expect("ACI service verifier cache poisoned")
+            .as_ref()?
+            .remaining()
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verify_serialized(request, true).await
     }
 
     fn invalidate(&self, _request: &UpstreamVerificationRequest) {
@@ -536,13 +702,6 @@ fn random_nonce_hex() -> String {
     hex::encode(nonce)
 }
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .expect("system time is before UNIX_EPOCH")
-}
-
 /// The `report_data` field of a parsed DCAP quote, across report variants.
 pub fn dcap_report_data(report: &dcap_qvl::quote::Report) -> &[u8; 64] {
     match report {
@@ -559,3 +718,6 @@ pub(super) fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> 
         dcap_qvl::quote::Report::SgxEnclave(_) => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

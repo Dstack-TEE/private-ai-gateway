@@ -25,6 +25,111 @@ fn script_text() -> String {
     std::fs::read_to_string(script_path()).expect("entrypoint.sh must exist at repo root")
 }
 
+fn compose_service<'a>(body: &'a str, name: &str, next_section: &str) -> &'a str {
+    let heading = format!("\n  {name}:\n");
+    body.split(&heading)
+        .nth(1)
+        .and_then(|rest| rest.split(next_section).next())
+        .unwrap_or_else(|| panic!("compose must declare a {name} service"))
+}
+
+#[test]
+fn privatemode_deployment_contract_is_pinned() {
+    let compose = std::fs::read_to_string(repo_root().join("deploy/compose.privatemode.yaml"))
+        .expect("Privatemode deployment compose must exist");
+    let gateway = compose_service(&compose, "private-ai-gateway", "\n  privatemode-proxy:\n");
+    let proxy = compose_service(&compose, "privatemode-proxy", "\nconfigs:\n");
+    let renderer_path = repo_root().join("deploy/render-privatemode-compose.sh");
+    let renderer =
+        std::fs::read_to_string(&renderer_path).expect("Privatemode renderer must exist");
+    let checks: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "proxy service",
+            proxy,
+            &[
+                "ghcr.io/edgelesssys/privatemode/privatemode-proxy@sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334",
+                r#"    command:
+      - --workspace
+      - /var/lib/privatemode
+      - --port
+      - "8080"
+      - --api-key
+      - "@/run/secrets/privatemode-api-key"
+      - --api-key-fallback=always
+      - --disable-prompt-cache=false
+      - --nvidia-ocsp-allow-unknown=false
+      - --nvidia-ocsp-revoked-grace-period=0
+    tmpfs:
+"#,
+                "source: privatemode-api-key",
+                "privatemode-manifests:/var/lib/privatemode/manifests",
+                "ai.private-gateway.privatemode-credential-sha256",
+            ],
+            &["ports:"],
+        ),
+        (
+            "whole compose",
+            &compose,
+            &[
+                r#""base_url": "http://privatemode-proxy:8080""#,
+                r#""manifest_log_path": "/run/privatemode-manifests/log.txt""#,
+                r#""proxy_image_digest": "sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334""#,
+                r#""credential_path": "/run/secrets/privatemode-api-key""#,
+                "PRIVATEMODE_CREDENTIAL_SHA256:?",
+                "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_SHA256:?",
+                "PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE: /run/secrets/private-ai-gateway-admin-token",
+                "environment: PRIVATE_AI_GATEWAY_ADMIN_TOKEN",
+                "environment: PRIVATEMODE_API_KEY",
+            ],
+            &[
+                r#""admin_token": "${PRIVATE_AI_GATEWAY_ADMIN_TOKEN"#,
+                "--api-key=${PRIVATEMODE_API_KEY}",
+                "/dstack/.host-shared",
+                "require_client_e2ee",
+                "inference_token_sha256",
+            ],
+        ),
+        (
+            "gateway service",
+            gateway,
+            &[
+                "ai.private-gateway.source-commit", "ai.private-gateway.admin-token-sha256",
+                "ai.private-gateway.privatemode-credential-sha256",
+                "privatemode-manifests:/run/privatemode-manifests:ro",
+            ],
+            &[],
+        ),
+        (
+            "renderer",
+            &renderer,
+            &[
+                "PRIVATEMODE_CREDENTIAL_SHA256=$(",
+                r#"printf '%s' "$PRIVATEMODE_API_KEY""#,
+                "was embedded in the rendered Compose",
+            ],
+            &[],
+        ),
+    ];
+    for (scope, body, required, forbidden) in checks {
+        for needle in *required {
+            assert!(body.contains(needle), "{scope} missing {needle}");
+        }
+        for needle in *forbidden {
+            assert!(!body.contains(needle), "{scope} contains {needle}");
+        }
+    }
+    assert_eq!(compose.matches("source: privatemode-api-key").count(), 2);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(renderer_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "Privatemode renderer must be executable");
+    }
+}
+
 #[test]
 fn entrypoint_sh_exists_and_is_executable() {
     let p = script_path();
@@ -122,6 +227,10 @@ fn entrypoint_sh_apt_install_is_strict() {
     assert!(
         body.contains("apt-get install -y --no-install-recommends"),
         "apt-get install line must use --no-install-recommends to keep the trust surface minimal"
+    );
+    assert!(
+        body.contains("command -v cc") && body.contains("apt_packages+=(build-essential)"),
+        "entrypoint.sh must install a native compiler/linker when the launcher image only supplies Rust"
     );
     assert!(
         body.contains("rustup default stable"),
@@ -384,7 +493,7 @@ fn deploy_readme_documents_one_command_deploy_and_seed_config() {
 fn docs_include_config_and_env_reference() {
     let reference = repo_text("docs/configuration-reference.md");
     for needle in [
-        "Configuration Reference",
+        "# Configuration reference",
         "Config Fields",
         "Environment Variables",
         "`state_dir`",

@@ -27,15 +27,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use aci_verify::decode_hex_32;
 use private_ai_gateway::aci::keys::{KeyProvider, Quoter};
 use private_ai_gateway::aci::types::{ServiceCapabilities, SourceProvenance, TlsSpki};
 use private_ai_gateway::aci::upstream::{
-    DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS, DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
+    PrivatemodeProxyDeployment, DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
+    DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
 };
 use private_ai_gateway::aci::verifier::DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS;
 use private_ai_gateway::aggregator::service::{
     AciService, AciServiceConfig, Clock, InMemoryReceiptStore, SystemClock, UpstreamVerifier,
-    DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    DEFAULT_ATTESTED_SESSION_TTL_SECONDS, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 use private_ai_gateway::aggregator::session_store::JsonlSessionStore;
 use private_ai_gateway::aggregator::upstream_config::{
@@ -59,6 +61,44 @@ fn env_non_empty(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Read a secret mounted as a file, such as a Compose secret. Errors name the
+/// path only.
+fn secret_file_non_empty(path: &str) -> Result<String, String> {
+    let value = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read secret file {path}: {}", err.kind()))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("secret file {path} is empty"));
+    }
+    Ok(value.to_string())
+}
+
+fn validate_sha256_secret_policy(
+    name: &str,
+    secret: Option<&str>,
+    expected: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected_bytes) = parse_sha256_policy(name, expected)? else {
+        return Ok(());
+    };
+    let secret = secret.ok_or_else(|| format!("{name}_sha256 requires {name}"))?;
+    let actual: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+    if actual != expected_bytes {
+        return Err(format!("{name} does not match static {name}_sha256 policy"));
+    }
+    Ok(())
+}
+
+fn parse_sha256_policy(name: &str, expected: Option<&str>) -> Result<Option<[u8; 32]>, String> {
+    expected
+        .map(|value| {
+            let value = value.trim();
+            decode_hex_32(value.strip_prefix("sha256:").unwrap_or(value))
+                .map_err(|err| format!("invalid {name}_sha256: {err}"))
+        })
+        .transpose()
+}
+
 fn invalid_input(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
@@ -71,9 +111,13 @@ struct GatewayConfigFile {
     upstream_config_seed_path: Option<String>,
     upstream_pull: Option<UpstreamPullConfig>,
     admin_token: Option<String>,
-    /// Keyset lifetime in seconds: `not_after` = launch time + this (§3.4).
-    /// Defaults to [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
+    admin_token_sha256: Option<String>,
+    /// Keyset lifetime in seconds: `not_after` = seal time + this (§3.4),
+    /// renewed in-process at half-life. Defaults to
+    /// [`DEFAULT_KEYSET_NOT_AFTER_SECONDS`] (30 days).
     keyset_not_after_seconds: Option<u64>,
+    /// Validity period for newly sealed sessions, independent of receipt retention.
+    attested_session_ttl_seconds: u64,
     /// Optional policy-interpreted keyset `subject` (§3.1) — e.g. a dstack
     /// app-id URI. Never trusted by generic verifiers.
     subject: Option<String>,
@@ -88,6 +132,22 @@ struct GatewayConfigFile {
     enable_e2ee: bool,
     dstack_endpoint: Option<String>,
     middleware: Option<MiddlewareConfig>,
+    upstream_verification_concurrency: usize,
+    max_buffered_response_bytes: usize,
+    /// Deployment-owned Privatemode sidecar policy. Unlike upstream routes,
+    /// this is static so the admin API cannot redirect plaintext to another
+    /// proxy or change the measured proxy-image pin.
+    privatemode_proxy: Option<PrivatemodeProxyConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrivatemodeProxyConfig {
+    base_url: String,
+    manifest_log_path: String,
+    credential_path: String,
+    credential_sha256: String,
+    proxy_image_digest: String,
 }
 
 impl Default for GatewayConfigFile {
@@ -98,13 +158,19 @@ impl Default for GatewayConfigFile {
             upstream_config_seed_path: None,
             upstream_pull: None,
             admin_token: None,
+            admin_token_sha256: None,
             keyset_not_after_seconds: None,
+            attested_session_ttl_seconds: DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
             subject: None,
             tls: GatewayTlsConfig::default(),
             direct_serving: false,
             enable_e2ee: true,
             dstack_endpoint: None,
             middleware: None,
+            upstream_verification_concurrency: 4,
+            max_buffered_response_bytes:
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            privatemode_proxy: None,
         }
     }
 }
@@ -128,6 +194,14 @@ fn load_gateway_config(path: &str) -> Result<GatewayConfigFile, String> {
         .map_err(|e| format!("failed to read gateway config {}: {e}", path.display()))?;
     let config: GatewayConfigFile = serde_json::from_str(&text)
         .map_err(|e| format!("failed to parse gateway config {}: {e}", path.display()))?;
+    if config.max_buffered_response_bytes == 0 {
+        return Err("gateway max_buffered_response_bytes must be greater than zero".into());
+    }
+    if config.upstream_verification_concurrency == 0 {
+        return Err(
+            "gateway upstream_verification_concurrency must be greater than zero".to_string(),
+        );
+    }
     Ok(config)
 }
 
@@ -149,11 +223,14 @@ fn session_log_path(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions.jsonl")
 }
 
-fn validate_pull_token_separation(config: &GatewayConfigFile) -> Result<(), String> {
+fn validate_pull_token_separation(
+    config: &GatewayConfigFile,
+    admin_token: Option<&str>,
+) -> Result<(), String> {
     let Some(pull) = &config.upstream_pull else {
         return Ok(());
     };
-    if config.admin_token.as_deref() == Some(pull.token.as_str()) {
+    if admin_token == Some(pull.token.as_str()) {
         return Err("upstream_pull.token must be distinct from admin_token".to_string());
     }
     if config
@@ -393,7 +470,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_log_path = session_log_path(&state_dir);
     let upstream_config_seed_path = gateway_config.upstream_config_seed_path.clone();
     let upstream_pull_config = gateway_config.upstream_pull.clone();
-    let admin_token = gateway_config.admin_token.clone();
+    let admin_token = match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN") {
+        Some(token) => Some(token),
+        None => match env_non_empty("PRIVATE_AI_GATEWAY_ADMIN_TOKEN_FILE") {
+            Some(path) => Some(secret_file_non_empty(&path).map_err(invalid_input)?),
+            None => gateway_config.admin_token.clone(),
+        },
+    };
+    validate_sha256_secret_policy(
+        "admin_token",
+        admin_token.as_deref(),
+        gateway_config.admin_token_sha256.as_deref(),
+    )
+    .map_err(invalid_input)?;
     let source_provenance = resolve_source_provenance()?;
     let tls_public_keys = resolve_tls_public_keys(&gateway_config.tls)?;
     let dstack_endpoint = gateway_config.dstack_endpoint.clone();
@@ -405,7 +494,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    validate_pull_token_separation(&gateway_config).map_err(invalid_input)?;
+    validate_pull_token_separation(&gateway_config, admin_token.as_deref())
+        .map_err(invalid_input)?;
+    let privatemode_proxy = gateway_config
+        .privatemode_proxy
+        .as_ref()
+        .map(|config| {
+            PrivatemodeProxyDeployment::new(
+                &config.base_url,
+                &config.manifest_log_path,
+                &config.credential_path,
+                &config.credential_sha256,
+                &config.proxy_image_digest,
+            )
+            .map(Arc::new)
+            .map_err(|err| invalid_input(err.to_string()))
+        })
+        .transpose()?;
 
     let provider = Arc::new(
         DstackAciProvider::new(dstack_endpoint, DstackAciProviderConfig::default()).await?,
@@ -416,6 +521,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let upstream_config = Arc::new(UpstreamConfigManager::load(
         upstream_config_path.clone(),
         UpstreamRuntimeOptions {
+            max_buffered_response_bytes: gateway_config.max_buffered_response_bytes,
             verifier_mode: UpstreamVerifierMode::None,
             accepted_subjects: Vec::new(),
             accepted_image_digests: Vec::new(),
@@ -425,6 +531,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connect_timeout_seconds: DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECONDS,
             read_timeout_seconds: DEFAULT_UPSTREAM_READ_TIMEOUT_SECONDS,
             verifier_request_timeout_seconds: DEFAULT_VERIFIER_REQUEST_TIMEOUT_SECONDS,
+            privatemode_proxy,
         },
     )?);
     let upstream_puller = match upstream_pull_config {
@@ -460,9 +567,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let receipt_store = Arc::new(InMemoryReceiptStore::default());
     let upstream_verifier: Arc<dyn UpstreamVerifier> = upstream_config.verifier();
 
-    // Keyset lifetime (§3.4): launch time plus a configurable duration. The
-    // keyset is sealed once by the service with this absolute expiry; replacing
-    // keys ahead of it means restarting with a fresh keyset and quote.
+    // Keyset lifetime (§3.4): seal time plus a configurable duration. A
+    // background task re-seals the keyset with a later expiry once half of
+    // this lifetime has passed, so a long-running replica never expires.
     let keyset_not_after_seconds = gateway_config
         .keyset_not_after_seconds
         .unwrap_or(DEFAULT_KEYSET_NOT_AFTER_SECONDS);
@@ -475,11 +582,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let provenance_unknown = source_provenance.is_unknown();
     let config = AciServiceConfig {
+        max_buffered_response_bytes: gateway_config.max_buffered_response_bytes,
         tee_type: "tdx".to_string(),
         source_provenance,
         keyset_not_after,
         subject: gateway_config.subject.clone(),
         service_capabilities: ServiceCapabilities {
+            supported_multipart_constraint_endpoints: vec![
+                private_ai_gateway::aggregator::service::AUDIO_TRANSCRIPTIONS_PATH.into(),
+                private_ai_gateway::aggregator::service::IMAGES_EDITS_PATH.into(),
+            ],
             supported_e2ee_versions: if gateway_config.enable_e2ee {
                 vec!["2".to_string()]
             } else {
@@ -491,6 +603,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "aggregator".to_string()
             },
         },
+        attested_session_ttl_seconds: gateway_config.attested_session_ttl_seconds,
         receipt_ttl_seconds: 3600,
         allow_test_keys: false,
         tls_public_keys,
@@ -537,6 +650,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         not_after = keyset_not_after,
         "sealed workload keyset"
     );
+    spawn_keyset_renewal(service.clone(), keyset_not_after_seconds);
     if provenance_unknown {
         // §4.1: a conformant verifier rejects a report without provenance, so
         // a deployment without git-launcher metadata fails every client.
@@ -562,22 +676,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    // The background upstream verification keeps the attested-session store fresh
-    // on the same cadence it re-attests for serving, so `/v1/aci/sessions`
-    // (preflight) is populated before any traffic. (The completion path also
-    // writes the session it served; writes are idempotent + content-addressed.)
-    // Attach the sink before spawning the lifecycle so the boot prewarm populates
-    // the store.
-    upstream_config.set_session_sink(service.clone());
-    spawn_upstream_lifecycle(upstream_config.clone());
+    spawn_upstream_lifecycle(
+        upstream_config.clone(),
+        gateway_config.upstream_verification_concurrency,
+    );
     if let Some((puller, initial_pull_succeeded)) = upstream_puller {
-        spawn_upstream_pull(puller, upstream_config.clone(), initial_pull_succeeded);
+        spawn_upstream_pull(puller, initial_pull_succeeded);
     }
 
     let app = if let Some(middleware_config) = middleware_config {
         let prefix_hash_key = PrefixHashKey::new(provider.prefix_hash_key().await?);
-        let middleware =
-            Arc::new(Middleware::new(prefix_hash_key, &middleware_config).map_err(invalid_input)?);
+        let cache_salt_key =
+            private_ai_gateway::middleware::CacheSaltKey::new(provider.cache_salt_key().await?);
+        let middleware = Arc::new(
+            Middleware::new(prefix_hash_key, cache_salt_key, &middleware_config)
+                .map_err(invalid_input)?,
+        );
         tracing::info!(
             control_url = %middleware_config.control_url,
             "private-ai-gateway middleware enabled"
@@ -622,11 +736,7 @@ fn log_pull_outcome(outcome: &PullRefreshOutcome) {
     }
 }
 
-fn spawn_upstream_pull(
-    puller: UpstreamConfigPuller,
-    upstream_config: Arc<UpstreamConfigManager>,
-    initial_pull_succeeded: bool,
-) {
+fn spawn_upstream_pull(puller: UpstreamConfigPuller, initial_pull_succeeded: bool) {
     tokio::spawn(async move {
         let refresh_seconds = puller.refresh_seconds();
         let initial_failure_delay = 5_u64.min(refresh_seconds);
@@ -640,16 +750,9 @@ fn spawn_upstream_pull(
             tokio::time::sleep(Duration::from_secs(next_delay_seconds)).await;
             match puller.refresh().await {
                 Ok(outcome) => {
-                    let updated = matches!(outcome, PullRefreshOutcome::Updated { .. });
                     log_pull_outcome(&outcome);
                     failure_delay_seconds = initial_failure_delay;
                     next_delay_seconds = jittered_refresh_seconds(refresh_seconds);
-                    if updated {
-                        let manager = upstream_config.clone();
-                        tokio::spawn(async move {
-                            log_prewarm_results(manager.prewarm_upstream_verification().await);
-                        });
-                    }
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -679,25 +782,9 @@ fn jittered_refresh_seconds(refresh_seconds: u64) -> u64 {
         .max(1)
 }
 
-fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
-    let prewarm_config = upstream_config.clone();
-    tokio::spawn(async move {
-        let results = prewarm_config.prewarm_upstream_verification().await;
-        log_prewarm_results(results);
-    });
-
-    let verification_config = upstream_config.clone();
-    tokio::spawn(async move {
-        loop {
-            let Some(seconds) = verification_config.verification_refresh_interval_seconds() else {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            };
-            tokio::time::sleep(Duration::from_secs(seconds)).await;
-            let results = verification_config.refresh_upstream_verification().await;
-            log_prewarm_results(results);
-        }
-    });
+fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>, concurrency: usize) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    tokio::spawn(upstream_config.clone().run_verification_refresh(permits));
 
     let session_config = upstream_config;
     tokio::spawn(async move {
@@ -726,6 +813,28 @@ fn spawn_upstream_lifecycle(upstream_config: Arc<UpstreamConfigManager>) {
                         "upstream provider session refresh finished"
                     ),
                 }
+            }
+        }
+    });
+}
+
+/// Upper bound on how often the background task checks whether the keyset is
+/// due for renewal. Shorter lifetimes are checked at a quarter of the lifetime.
+const KEYSET_RENEWAL_CHECK_INTERVAL_SECONDS: u64 = 3600;
+
+fn spawn_keyset_renewal(service: Arc<AciService>, lifetime_seconds: u64) {
+    let check_seconds = KEYSET_RENEWAL_CHECK_INTERVAL_SECONDS.min((lifetime_seconds / 4).max(1));
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(check_seconds)).await;
+            match service.renew_keyset_if_due(lifetime_seconds) {
+                Ok(Some(not_after)) => tracing::info!(
+                    workload_keyset_digest = %service.workload_keyset_digest(),
+                    not_after,
+                    "renewed workload keyset"
+                ),
+                Ok(None) => {}
+                Err(err) => tracing::error!(error = %err, "workload keyset renewal failed"),
             }
         }
     });
@@ -763,41 +872,16 @@ async fn compact_session_log(store: Arc<JsonlSessionStore>) -> Result<usize, Str
         .map_err(|err| err.to_string())
 }
 
-fn log_prewarm_results(
-    results: Vec<private_ai_gateway::aggregator::upstream_config::UpstreamPrewarmResult>,
-) {
-    for result in results {
-        match result.reason {
-            Some(reason) => tracing::warn!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                reason = %reason,
-                "upstream verification prewarm finished"
-            ),
-            None => tracing::info!(
-                upstream = %result.upstream_name,
-                model = %result.model_id,
-                origin = ?result.url_origin,
-                verifier = %result.verifier_id,
-                result = %result.result,
-                "upstream verification prewarm finished"
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use private_ai_gateway::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
     use super::{
-        load_gateway_config, resolve_state_dir, resolve_tls_public_keys,
-        seed_upstream_config_if_empty, session_log_path,
+        load_gateway_config, parse_sha256_policy, resolve_state_dir, resolve_tls_public_keys,
+        secret_file_non_empty, seed_upstream_config_if_empty, session_log_path,
         source_provenance_from_git_launcher_config, upstream_config_path,
-        validate_pull_token_separation,
+        validate_pull_token_separation, validate_sha256_secret_policy,
+        DEFAULT_ATTESTED_SESSION_TTL_SECONDS,
     };
 
     const TEST_CERT_PEM: &str = r#"-----BEGIN CERTIFICATE-----
@@ -821,33 +905,57 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 -----END CERTIFICATE-----
 "#;
 
-    fn write_temp_cert() -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "private-ai-gateway-test-cert-{}-{:?}.pem",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::write(&path, TEST_CERT_PEM).unwrap();
-        path
+    fn write_temp_cert() -> tempfile::NamedTempFile {
+        use std::io::Write;
+
+        let mut cert = tempfile::NamedTempFile::new().unwrap();
+        cert.write_all(TEST_CERT_PEM.as_bytes()).unwrap();
+        cert
     }
 
-    fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "private-ai-gateway-{name}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+    #[test]
+    fn admin_token_file_is_trimmed_and_digest_bound() {
+        let (_path_dir, path) = temp_path("gateway-admin-token");
+        std::fs::write(&path, "admin token\n").unwrap();
+        let token = secret_file_non_empty(path.to_str().unwrap()).unwrap();
+        assert_eq!(token, "admin token");
+        let digest = private_ai_gateway::aci::digest::sha256_hex(b"admin token");
+        validate_sha256_secret_policy("admin_token", Some(&token), Some(&digest)).unwrap();
+        let err = validate_sha256_secret_policy("admin_token", Some("different"), Some(&digest))
+            .unwrap_err();
+        assert!(err.contains("does not match static admin_token_sha256"));
+
+        std::fs::write(&path, " \n").unwrap();
+        assert!(secret_file_non_empty(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn sha256_policy_accepts_bare_and_prefixed_digests() {
+        let prefixed = private_ai_gateway::aci::digest::sha256_hex(b"admin token");
+        let digest = prefixed.strip_prefix("sha256:").unwrap();
+        let parsed = parse_sha256_policy("admin_token", Some(digest))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.as_slice(), hex::decode(digest).unwrap());
+
+        assert_eq!(
+            parse_sha256_policy("admin_token", Some(&prefixed)).unwrap(),
+            Some(parsed)
+        );
+        let err = parse_sha256_policy("admin_token", Some("00")).unwrap_err();
+        assert!(err.contains("expected 32 bytes"));
+    }
+
+    // Keep the directory guard in the caller, including for paths that start absent.
+    fn temp_path(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(format!("{name}.json"));
+        (directory, path)
     }
 
     #[test]
     fn gateway_config_parses_state_dir() {
-        let config_path = temp_path("gateway-config-state-dir");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-state-dir");
         std::fs::write(
             &config_path,
             r#"{
@@ -859,12 +967,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert_eq!(config.state_dir.as_deref(), Some("/gateway/state"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_parses_upstream_pull_without_debugging_its_token() {
-        let config_path = temp_path("gateway-config-upstream-pull");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-upstream-pull");
         std::fs::write(
             &config_path,
             r#"{
@@ -884,7 +991,44 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let debug = format!("{pull:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("pull-secret"));
-        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_config_parses_static_privatemode_proxy_policy() {
+        let (_config_path_dir, config_path) = temp_path("gateway-config-privatemode");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"{{
+                    "privatemode_proxy": {{
+                        "base_url": "http://privatemode-proxy:8080",
+                        "manifest_log_path": "/run/privatemode-manifests/log.txt",
+                        "credential_path": "/run/secrets/privatemode-api-key",
+                        "credential_sha256": "{}",
+                        "proxy_image_digest": "sha256:{}"
+                    }}
+                }}"#,
+                "33".repeat(32),
+                "22".repeat(32)
+            ),
+        )
+        .unwrap();
+
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        let proxy = config
+            .privatemode_proxy
+            .expect("static Privatemode policy should parse");
+        assert_eq!(proxy.base_url, "http://privatemode-proxy:8080");
+        assert_eq!(
+            proxy.manifest_log_path,
+            "/run/privatemode-manifests/log.txt"
+        );
+        assert_eq!(proxy.credential_path, "/run/secrets/privatemode-api-key");
+        assert_eq!(proxy.credential_sha256, "33".repeat(32));
+        assert_eq!(
+            proxy.proxy_image_digest,
+            format!("sha256:{}", "22".repeat(32))
+        );
     }
 
     #[test]
@@ -914,18 +1058,29 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 }"#,
             ),
         ] {
-            let config_path = temp_path(&format!("reused-pull-{name}"));
+            let (_config_path_dir, config_path) = temp_path(&format!("reused-pull-{name}"));
             std::fs::write(&config_path, body).unwrap();
             let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
-            let err = validate_pull_token_separation(&config).unwrap_err();
+            let err =
+                validate_pull_token_separation(&config, config.admin_token.as_deref()).unwrap_err();
             assert!(err.contains("must be distinct"));
-            let _ = std::fs::remove_file(config_path);
         }
+        let (_config_path_dir, config_path) = temp_path("reused-pull-env-admin");
+        std::fs::write(
+            &config_path,
+            r#"{"upstream_pull":{"url":"https://service.example/config","token":"0123456789abcdef0123456789abcdef"}}"#,
+        )
+        .unwrap();
+        let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
+        assert!(
+            validate_pull_token_separation(&config, Some("0123456789abcdef0123456789abcdef"))
+                .is_err()
+        );
     }
 
     #[test]
     fn gateway_config_parses_middleware_section() {
-        let config_path = temp_path("gateway-config-middleware");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-middleware");
         std::fs::write(
             &config_path,
             r#"{
@@ -944,7 +1099,63 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         assert_eq!(middleware.control_token.as_deref(), Some("secret"));
         // Optional timeouts default to None and fall back inside the client.
         assert_eq!(middleware.control_timeout_ms, None);
-        let _ = std::fs::remove_file(config_path);
+    }
+
+    #[test]
+    fn gateway_buffered_response_limit_defaults_overrides_and_rejects_zero() {
+        let (_directory, path) = temp_path("buffered-response-limit");
+        for (body, expected) in [
+            (
+                "{}",
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            ),
+            (r#"{"max_buffered_response_bytes":134217728}"#, 134217728),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                load_gateway_config(path.to_str().unwrap())
+                    .unwrap()
+                    .max_buffered_response_bytes,
+                expected
+            );
+        }
+        std::fs::write(&path, r#"{"max_buffered_response_bytes":0}"#).unwrap();
+        assert!(load_gateway_config(path.to_str().unwrap())
+            .unwrap_err()
+            .contains("max_buffered_response_bytes must be greater than zero"));
+    }
+
+    #[test]
+    fn gateway_config_rejects_zero_verification_concurrency() {
+        let (_path_dir, path) = temp_path("verification-concurrency");
+        std::fs::write(&path, r#"{"upstream_verification_concurrency":0}"#).unwrap();
+        let err = load_gateway_config(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("upstream_verification_concurrency must be greater than zero"));
+    }
+
+    #[test]
+    fn gateway_config_defaults_and_deserializes_session_ttl() {
+        for (body, expected) in [
+            ("{}", DEFAULT_ATTESTED_SESSION_TTL_SECONDS),
+            (r#"{"attested_session_ttl_seconds":17}"#, 17),
+        ] {
+            let (_dir, path) = temp_path("session-ttl");
+            std::fs::write(&path, body).unwrap();
+            let config = load_gateway_config(path.to_str().unwrap()).unwrap();
+            assert_eq!(config.attested_session_ttl_seconds, expected);
+        }
+        for value in ["-1", "1.5", "18446744073709551616", "null", "\"3600\""] {
+            let (_dir, path) = temp_path("invalid-session-ttl");
+            std::fs::write(
+                &path,
+                format!(r#"{{"attested_session_ttl_seconds":{value}}}"#),
+            )
+            .unwrap();
+            assert!(
+                load_gateway_config(path.to_str().unwrap()).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -968,7 +1179,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 r#"{"keyset_epoch_window_seconds": 1209600}"#,
             ),
         ] {
-            let config_path = temp_path(name);
+            let (_config_path_dir, config_path) = temp_path(name);
             std::fs::write(&config_path, body).unwrap();
 
             let err = load_gateway_config(config_path.to_str().unwrap())
@@ -978,13 +1189,12 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                 err.contains("unknown field"),
                 "unexpected parse error for {name}: {err}"
             );
-            let _ = std::fs::remove_file(config_path);
         }
     }
 
     #[test]
     fn source_provenance_parses_git_launcher_pin() {
-        let config_path = temp_path("git-launcher-config");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config");
         std::fs::write(
             &config_path,
             r#"
@@ -1009,12 +1219,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             Some("0123456789abcdef0123456789abcdef01234567")
         );
         assert!(provenance.image_digest.is_none());
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_rejects_incomplete_git_launcher_pin() {
-        let config_path = temp_path("git-launcher-config-missing-commit");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-missing-commit");
         std::fs::write(
             &config_path,
             "REPO_URL=https://github.com/Dstack-TEE/private-ai-gateway.git\n",
@@ -1025,12 +1234,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             .expect_err("incomplete git-launcher config must fail startup");
 
         assert!(err.contains("COMMIT_SHA"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_rejects_non_full_git_launcher_commit_pin() {
-        let config_path = temp_path("git-launcher-config-short-commit");
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-short-commit");
         std::fs::write(
             &config_path,
             r#"
@@ -1044,13 +1252,11 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             .expect_err("git-launcher config must pin a full commit hash");
 
         assert!(err.contains("full 40- or 64-character hexadecimal commit hash"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn source_provenance_is_unknown_when_git_launcher_pin_is_absent() {
-        let config_path = temp_path("git-launcher-config-missing");
-        let _ = std::fs::remove_file(&config_path);
+        let (_config_path_dir, config_path) = temp_path("git-launcher-config-missing");
 
         let provenance = source_provenance_from_git_launcher_config(&config_path).unwrap();
 
@@ -1078,7 +1284,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn gateway_config_parses_keyset_not_after_and_subject() {
-        let config_path = temp_path("gateway-config-keyset-not-after");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-keyset-not-after");
         std::fs::write(
             &config_path,
             r#"{ "keyset_not_after_seconds": 1209600, "subject": "app-id:0x1234" }"#,
@@ -1089,29 +1295,27 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         assert_eq!(config.keyset_not_after_seconds, Some(1_209_600));
         assert_eq!(config.subject.as_deref(), Some("app-id:0x1234"));
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn gateway_config_enables_e2ee_v2_by_default() {
-        let config_path = temp_path("gateway-config-default-e2ee");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-default-e2ee");
         std::fs::write(&config_path, "{}").unwrap();
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert!(config.enable_e2ee);
-        let _ = std::fs::remove_file(config_path);
+        assert_eq!(config.upstream_verification_concurrency, 4);
     }
 
     #[test]
     fn gateway_config_allows_explicit_e2ee_opt_out() {
-        let config_path = temp_path("gateway-config-disable-e2ee");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-disable-e2ee");
         std::fs::write(&config_path, r#"{ "enable_e2ee": false }"#).unwrap();
 
         let config = load_gateway_config(config_path.to_str().unwrap()).unwrap();
 
         assert!(!config.enable_e2ee);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
@@ -1232,8 +1436,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
     #[test]
     fn seeds_upstream_config_when_target_missing() {
-        let target = temp_path("target");
-        let seed = temp_path("seed");
+        let (_target_dir, target) = temp_path("target");
+        let (_seed_dir, seed) = temp_path("seed");
         std::fs::write(
             &seed,
             r#"[{"name":"gpu-a","base_url":"https://gpu-a.example","models":{"public-a":"upstream-a"}}]"#,
@@ -1244,14 +1448,12 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
 
         let seeded = std::fs::read_to_string(&target).unwrap();
         assert!(seeded.contains("\"public-a\""));
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
     fn seed_does_not_overwrite_existing_upstream_config() {
-        let target = temp_path("target-existing");
-        let seed = temp_path("seed-existing");
+        let (_target_dir, target) = temp_path("target-existing");
+        let (_seed_dir, seed) = temp_path("seed-existing");
         std::fs::write(
             &target,
             r#"[{"name":"kept","base_url":"https://kept.example","models":{"kept":"kept"}}]"#,
@@ -1268,21 +1470,18 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let kept = std::fs::read_to_string(&target).unwrap();
         assert!(kept.contains("\"kept\""));
         assert!(!kept.contains("\"seed\""));
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
     fn seed_rejects_invalid_upstream_config() {
-        let target = temp_path("target-invalid-seed");
-        let seed = temp_path("seed-invalid");
+        let (_target_dir, target) = temp_path("target-invalid-seed");
+        let (_seed_dir, seed) = temp_path("seed-invalid");
         std::fs::write(&seed, r#"[{"name":"","base_url":"","models":{}}]"#).unwrap();
 
         let err = seed_upstream_config_if_empty(&target, Some(seed.to_str().unwrap()))
             .expect_err("invalid seed must fail startup");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(!target.exists());
-        let _ = std::fs::remove_file(seed);
     }
 
     #[test]
@@ -1303,7 +1502,7 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
     fn gateway_config_domain_certificates_parse_as_spki_digests() {
         let api_cert = write_temp_cert();
         let chat_cert = write_temp_cert();
-        let config_path = temp_path("gateway-config-domain-certificates");
+        let (_config_path_dir, config_path) = temp_path("gateway-config-domain-certificates");
         std::fs::write(
             &config_path,
             format!(
@@ -1315,8 +1514,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                         ]
                     }}
                 }}"#,
-                api_cert.display(),
-                chat_cert.display()
+                api_cert.path().display(),
+                chat_cert.path().display()
             ),
         )
         .unwrap();
@@ -1331,15 +1530,13 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
             parsed[0].spki_sha256_hex,
             "c6686007081874ef8a5e8f95b7620e16c0ff0c65235ff8efcf9350cd9c5cf9dd"
         );
-        let _ = std::fs::remove_file(api_cert);
-        let _ = std::fs::remove_file(chat_cert);
-        let _ = std::fs::remove_file(config_path);
     }
 
     #[test]
     fn rejects_duplicate_domain_tls_config_entries() {
         let cert = write_temp_cert();
-        let config_path = temp_path("gateway-config-domain-certificates-duplicate");
+        let (_config_path_dir, config_path) =
+            temp_path("gateway-config-domain-certificates-duplicate");
         std::fs::write(
             &config_path,
             format!(
@@ -1351,8 +1548,8 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
                         ]
                     }}
                 }}"#,
-                cert.display(),
-                cert.display()
+                cert.path().display(),
+                cert.path().display()
             ),
         )
         .unwrap();
@@ -1361,7 +1558,5 @@ kBH1U3IsAJyU8UbZqzFEUGG7Ro3vdOQ=
         let err = resolve_tls_public_keys(&config.tls).unwrap_err();
 
         assert!(err.contains("duplicated"));
-        let _ = std::fs::remove_file(cert);
-        let _ = std::fs::remove_file(config_path);
     }
 }

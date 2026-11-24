@@ -32,7 +32,11 @@ export class AciConnectionError extends AciError {
 }
 
 export interface AciPolicy {
-  /** Appraise the measured dstack OS hash against the production allowlist. */
+  /**
+   * @deprecated This option is accepted for compatibility and ignored. Clients
+   * do not check whether the gateway runs a production or development dstack
+   * OS image.
+   */
   requireProductionOs?: boolean;
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this client. Empty or
@@ -55,7 +59,7 @@ export type AciFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise
 export interface ConnectAciOptions {
   baseURL: string;
   policy?: AciPolicy;
-  /** Gateway serving constraints applied to JSON POST bodies. */
+  /** Gateway serving constraints applied to JSON and supported multipart POSTs. */
   serving?: AciServingPolicy;
   /** Attestation/PCCS request timeout. Default: 10 seconds. */
   timeoutMs?: number;
@@ -66,7 +70,10 @@ export interface ConnectAciOptions {
   proxy?: string;
   /** Additional CA certificate for private gateway deployments. */
   ca?: string | Buffer;
-  /** Number of receipt-bearing POST exchanges retained for audit. Default: 32. */
+  /** Number of receipt-bearing POST exchanges retained for audit. Default: 32.
+   * Set to 0 to disable receipt recording entirely — useful when the client
+   * never calls verifyReceipt() and wants to skip the per-response clone and
+   * digest work. */
   receiptHistorySize?: number;
 }
 

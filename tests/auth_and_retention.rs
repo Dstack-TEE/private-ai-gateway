@@ -32,6 +32,14 @@ struct StubUpstream;
 
 #[async_trait]
 impl UpstreamBackend for StubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "stub-upstream"
     }
@@ -102,6 +110,7 @@ fn harness_with_ttl(receipt_ttl_seconds: u64) -> Harness {
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     cfg.receipt_ttl_seconds = receipt_ttl_seconds;
     // The preverified event carries no enforceable binding; this suite covers
@@ -329,7 +338,7 @@ async fn aci_headers_present_on_success_responses() {
     assert!(headers.get("x-aci-identity").is_none());
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 
@@ -348,7 +357,7 @@ async fn aci_headers_present_on_not_found_error() {
     assert_eq!(headers.get("x-aci-version").unwrap(), "aci/1");
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 
@@ -368,7 +377,7 @@ async fn aci_headers_present_on_bad_request_error() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         headers.get("x-aci-keyset-digest").unwrap(),
-        h.service.workload_keyset_digest()
+        &h.service.workload_keyset_digest()
     );
 }
 

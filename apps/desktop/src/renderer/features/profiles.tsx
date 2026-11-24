@@ -94,7 +94,7 @@ export function ProfilesDialog({ repair, onClose, ...control }: {
                   <ItemDescription className="line-clamp-none truncate text-xs">{serviceHost(profile.remoteUrl)} · {status}</ItemDescription>
                 </ItemContent>
                 {(working || selected) && <ItemActions>
-                  {working ? <LoaderCircle className="animate-control-spin motion-reduce:animate-none" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+                  {working ? <LoaderCircle className="animate-control-spin" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
                 </ItemActions>}
               </ActionItem>
               <IconButton size="icon-sm" className="col-start-2 row-start-1 justify-self-center" aria-haspopup="dialog" label={`Edit ${profile.name}`} disabled={frozen || Boolean(workingProfileId)} onClick={() => editor.show({ profile })}><Pencil /></IconButton>
@@ -223,7 +223,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   const remove = useMutation({
     mutationFn: async () => {
       const current = await desktopApi.getState();
-      const needsStop = !current.configurationVerification && ["verified", "blocked", "verifying"].includes(current.status);
+      const needsStop = !current.configurationVerification && ["verified", "verifying"].includes(current.status);
       const confirmed = await confirm({
         title: `Delete “${draft.name}”?`,
         message: needsStop ? "Protection will stop and connected agent configurations will be restored. This profile will be deleted and its account credential revoked." : "The profile will be deleted. An account credential will also be revoked at its provider.",
@@ -240,7 +240,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   });
   const saveLogin = useMutation({
     mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
-      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, state.config.requireProductionOs, workspace);
+      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, workspace);
       setState(saved);
       account.consume();
       if (startAfterSave) setState(await desktopApi.start(saved.config));
@@ -278,7 +278,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
     mutationFn: async () => {
       if (running && profile?.id === state.activeProfileId && !await confirm(reconnectQuestion)) return;
       const key = authMethod === "apiKey" || !provider.accountLogin ? apiKeyDraft.trim() || undefined : undefined;
-      const saved = await desktopApi.saveConfiguration(draft, state.config.requireProductionOs, key);
+      const saved = await desktopApi.saveConfiguration(draft, key);
       setState(startAfterSave ? await desktopApi.start(saved.config) : saved);
       onClose();
     },
@@ -301,7 +301,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
 
   return (
     <AppDialog {...control} title={isNew ? "New profile" : "Edit profile"} className="sm:max-w-lg" dismissible={!saving && !account.working} onClose={() => void closeEditor()}>
-      <form className="flex min-h-0 flex-col gap-4" onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <form className="flex min-h-0 flex-col gap-4" noValidate onSubmit={(event) => { event.preventDefault(); submit(); }}>
         <AppDialogBody className="py-1">
         <FieldGroup className="gap-4">
         <Field className="gap-2">
@@ -336,10 +336,6 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
                     <Button type="button" variant="ghost" size="sm" disabled={account.working} onClick={() => void account.cancel()}>Cancel</Button>
                   </div>
                   </div>
-                  {provider.callbackUrl && <details>
-                    <summary className="text-sm text-muted-foreground">Paste callback link</summary>
-                    <CallbackForm key={login.id} disabled={account.working} onContinue={account.complete} />
-                  </details>}
                 </div> : selectedAccount ? <>
                   <AccountTools key={login?.id ?? draft.id} provider={draft.provider}
                     target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
@@ -378,16 +374,4 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
       </form>
     </AppDialog>
   );
-}
-
-/** The callback link a sign-in returns to, pasted by hand; each sign-in starts empty. */
-function CallbackForm({ disabled, onContinue }: { disabled: boolean; onContinue(callbackUrl: string): void }): React.JSX.Element {
-  const [callbackUrl, setCallbackUrl] = useState("");
-  return <div className="mt-3 space-y-2">
-    <FormField id="account-callback" className="gap-2" label="Callback URL">
-      <Input id="account-callback" type="password" value={callbackUrl} autoComplete="off" spellCheck={false} disabled={disabled}
-        placeholder="http://127.0.0.1:4181/oauth/callback?…" onChange={(event) => setCallbackUrl(event.target.value)} />
-    </FormField>
-    <Button type="button" variant="outline" disabled={disabled || !callbackUrl.trim()} onClick={() => { setCallbackUrl(""); onContinue(callbackUrl); }}>Continue</Button>
-  </div>;
 }

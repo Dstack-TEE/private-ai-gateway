@@ -2,7 +2,6 @@ import { useEffect, useId, useRef } from "react";
 import { QueryObserver, queryOptions, skipToken, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AccountLoginDetails, ConfidentialProfileInput, LoginPresentation } from "../../shared/contracts";
 import { desktopApi } from "./environment";
-import { AuthoredError } from "./error-message";
 
 export interface Authorization {
   login: LoginPresentation;
@@ -11,7 +10,7 @@ export interface Authorization {
 
 /**
  * Owns a draft authorization, independently of the form's save operation.
- * Starting, cancelling and completing it run one after another (the mutation
+ * Starting and cancelling it run one after another (the mutation
  * scope); failures go to `onError`.
  */
 export function useAccountLogin(onError: (error: unknown) => void) {
@@ -51,15 +50,7 @@ export function useAccountLogin(onError: (error: unknown) => void) {
     onError,
   });
   const cancel = useMutation({ scope, mutationFn: discard, onSuccess: () => start.reset(), onError });
-  const complete = useMutation({
-    scope,
-    mutationFn: (callbackUrl: string) => {
-      if (!pending.current) throw new AuthoredError("Account connection is no longer active");
-      return desktopApi.completeAccountLogin(pending.current.id, callbackUrl);
-    },
-    onError,
-  });
-  const working = start.isPending || cancel.isPending || complete.isPending;
+  const working = start.isPending || cancel.isPending;
   const session = start.data;
 
   // Polls until the browser sign-in completes or fails; pauses while another
@@ -123,6 +114,5 @@ export function useAccountLogin(onError: (error: unknown) => void) {
       pending.current = undefined;
       start.reset();
     },
-    complete: (callbackUrl: string) => complete.mutate(callbackUrl),
   };
 }

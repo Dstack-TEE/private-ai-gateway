@@ -25,6 +25,29 @@ def verify_provider(
     timeout: int = 300,
     artifact_dir: Path | None = None,
 ) -> dict[str, Any]:
+    if provider.provider == "privatemode":
+        # Privatemode verification is inseparable from the official proxy
+        # co-deployed with the gateway. A standalone Python probe would not bind
+        # that service to the measured deployment and must not compete with it.
+        if strict:
+            raise RuntimeError(
+                "strict mode cannot check a gateway-deferred Privatemode "
+                "verification against a reviewed reference"
+            )
+        output = {
+            "status": "deferred_to_gateway",
+            "verifier_id": "privatemode-proxy/co-deployed-contrast/v1",
+            "reason": (
+                "verification occurs when the gateway probes the measured proxy; "
+                "the lifecycle phase exercises that binding with real inference"
+            ),
+        }
+        if artifact_dir:
+            write_json(
+                artifact_dir / provider.name / "provider-verifier-output.json",
+                output,
+            )
+        return output
     # The bridge runs from the gateway project (cwd=ROOT) so it uses the gateway's
     # own uv env and the vendored confidential_verifier package. An external verifier
     # checkout is selected only when PRIVATE_AI_VERIFIER_DIR is set in the environment.
@@ -122,6 +145,19 @@ def assert_strict_reference(
 
 
 def provider_options(provider: Provider, env: dict[str, str]) -> dict[str, str]:
+    if provider.provider == "near-ai":
+        api_key = env.get(provider.api_key_env)
+        return {"near_ai_api_key": api_key} if api_key else {}
+    if provider.provider == "armet-ai":
+        # Mirrors ArmetAiProviderVerifier: lowercased pins, bearer when set.
+        options = {
+            f"armet_ai_accepted_subject:{subject.lower()}": "true"
+            for subject in provider.accepted_subjects
+        }
+        api_key = env.get(provider.api_key_env)
+        if api_key:
+            options["armet_ai_bearer_token"] = api_key
+        return options
     if provider.provider != "chutes":
         return {}
     options: dict[str, str] = {}
@@ -148,7 +184,8 @@ def redact_verifier_request(request: dict[str, Any], api_key_env: str) -> dict[s
     provider_options = redacted.get("provider_options")
     if isinstance(provider_options, dict):
         redacted["provider_options"] = dict(provider_options)
-        if "chutes_api_key" in redacted["provider_options"]:
-            redacted["provider_options"]["chutes_api_key"] = "<redacted>"
+        for secret in ("chutes_api_key", "armet_ai_bearer_token", "near_ai_api_key"):
+            if secret in redacted["provider_options"]:
+                redacted["provider_options"][secret] = "<redacted>"
     redacted["api_key_env"] = api_key_env
     return redacted

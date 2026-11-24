@@ -125,7 +125,6 @@ pub mod requests {
         SaveAccountLogin {
             id: String,
             profile: ConfidentialProfileInput,
-            require_production_os: bool,
             workspace_id: Option<i64>,
         } -> AppStateWire;
         GetOrganizationUrl { organization_slug: String } -> String;
@@ -154,6 +153,8 @@ pub const AGENTS_CHANGED_EVENT: &str = "pap://agents-changed";
 /// A tray or menu item left a `NavigationTarget` for the window, which takes
 /// it with the shell's `take_navigation` command.
 pub const NAVIGATE_EVENT: &str = "pap://navigate";
+/// The menu bar's Check for Updates…: the window checks again now.
+pub const CHECK_FOR_UPDATES_EVENT: &str = "pap://check-for-updates";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,7 +459,6 @@ async fn save_account_login(
             operation_id: operation_id.clone(),
             id: input.id,
             profile: input.profile,
-            require_production_os: input.require_production_os,
             workspace_id: input.workspace_id,
         },
     )

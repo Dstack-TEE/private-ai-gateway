@@ -8,12 +8,14 @@ use serde_json::json;
 
 use super::openai::{request_model_id, rewrite_request_model};
 use super::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    CacheSaltField, PreparedUpstreamRequest, StreamingUsage, UpstreamBackend, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aci::receipt::UpstreamVerifiedEvent;
+use crate::endpoint::Endpoint;
 
 pub struct ModelRoute {
+    pub force_verbose_json: bool,
     pub public_model_id: String,
     pub upstream_model_id: String,
     pub upstream: Arc<dyn UpstreamBackend>,
@@ -24,6 +26,10 @@ pub struct ModelRoute {
     /// caller-supplied path. See [`ModelRouterBackend::prepare`] for the
     /// resolution.
     pub path: Option<String>,
+    /// Usage flags requested from this configured upstream deployment.
+    pub streaming_usage: Option<StreamingUsage>,
+    /// Middleware cache field supported by this provider deployment.
+    pub cache_salt_field: Option<CacheSaltField>,
     /// Whether this route's provider is an attested (TEE) provider. `None`
     /// means unclassified and therefore ineligible for requests constrained by
     /// `provider.aci_verified`. See [`PreparedUpstreamRequest::is_tee`].
@@ -56,11 +62,14 @@ impl ModelRoute {
             ));
         }
         Ok(Self {
+            force_verbose_json: false,
             public_model_id,
             upstream_model_id,
             upstream,
             route_id,
             path: None,
+            streaming_usage: None,
+            cache_salt_field: None,
             is_tee: None,
         })
     }
@@ -74,6 +83,21 @@ impl ModelRoute {
             }
             p
         });
+        self
+    }
+
+    pub fn with_force_verbose_json(mut self, enabled: bool) -> Self {
+        self.force_verbose_json = enabled;
+        self
+    }
+
+    pub fn with_streaming_usage(mut self, policy: Option<StreamingUsage>) -> Self {
+        self.streaming_usage = policy;
+        self
+    }
+
+    pub fn with_cache_salt_field(mut self, field: Option<CacheSaltField>) -> Self {
+        self.cache_salt_field = field;
         self
     }
 
@@ -163,14 +187,31 @@ impl UpstreamBackend for ModelRouterBackend {
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let body_model_id = request_model_id(&req.body).ok_or_else(|| {
-            UpstreamError::Routing("request body must contain a string model field".to_string())
+            UpstreamError::InvalidRequest(
+                "request body must contain a string model field".to_string(),
+            )
         })?;
         let route = match req.target_route_id.as_deref() {
             Some(route_id) => self.route_for_id(route_id)?,
             None => self.route_for(&body_model_id)?,
         };
         let mut request = req;
-        request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?;
+        request.body = rewrite_request_model(&request.body, &route.upstream_model_id)?.into();
+        if route.force_verbose_json
+            && request.form.as_ref().is_some_and(|form| {
+                matches!(
+                    **form,
+                    crate::middleware::media::MediaForm::Transcription { .. }
+                )
+            })
+        {
+            let mut metadata: serde_json::Value = serde_json::from_slice(&request.body)
+                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?;
+            metadata["response_format"] = json!("verbose_json");
+            request.body = serde_json::to_vec(&metadata)
+                .map_err(|e| UpstreamError::InvalidRequest(e.to_string()))?
+                .into();
+        }
         // The chat-shaped downstream surfaces (`/v1/chat/completions` and the
         // Anthropic `/v1/messages`) are converted to the upstream's chat
         // request format before they reach here, so both must target the
@@ -195,6 +236,14 @@ impl UpstreamBackend for ModelRouterBackend {
                     .unwrap_or_else(|| "/v1/chat/completions".to_string()),
             );
         }
+        if let Some(policy) = route.streaming_usage {
+            policy.apply(&mut request)?;
+        }
+        // Consume even on unsupported routes, so no user secret reaches a
+        // provider backend. Re-preparing a request cannot apply the salt twice.
+        if let (Some(salt), Some(field)) = (request.cache_salt.take(), route.cache_salt_field) {
+            field.apply(&mut request, salt)?;
+        }
         Ok(PreparedUpstreamRequest {
             request,
             upstream_name: route.upstream.name().to_string(),
@@ -203,6 +252,22 @@ impl UpstreamBackend for ModelRouterBackend {
             route_id: Some(route.route_id.clone()),
             is_tee: route.is_tee,
         })
+    }
+
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<super::SseProtocol> {
+        self.route_from_prepared(req)
+            .ok()?
+            .upstream
+            .response_protocol(req, operation)
+    }
+
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        self.route_from_prepared(req)
+            .is_ok_and(|route| route.upstream.requires_verified_binding(req))
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -301,12 +366,20 @@ impl UpstreamBackend for ModelRouterBackend {
 mod tests {
     use super::*;
 
-    struct StubBackend {
-        name: &'static str,
+    pub(super) struct StubBackend {
+        pub(super) name: &'static str,
     }
 
     #[async_trait]
     impl UpstreamBackend for StubBackend {
+        fn response_protocol(
+            &self,
+            _req: &crate::aci::upstream::PreparedUpstreamRequest,
+            _operation: Endpoint,
+        ) -> Option<crate::aci::upstream::SseProtocol> {
+            None
+        }
+
         fn name(&self) -> &str {
             self.name
         }
@@ -317,6 +390,193 @@ mod tests {
 
         async fn forward(&self, _req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
             Err(UpstreamError::Transport("not used".to_string()))
+        }
+    }
+
+    #[test]
+    fn cache_salt_respects_resolved_path_and_preserves_direct_requests() {
+        use crate::middleware::CacheSaltKey;
+        let mut router = ModelRouterBackend::new("router");
+        router
+            .add_route(
+                ModelRoute::new(
+                    "public",
+                    "public",
+                    Arc::new(StubBackend { name: "stub" }),
+                    "route",
+                )
+                .unwrap()
+                .with_cache_salt_field(Some(CacheSaltField::CacheSalt("chutes"))),
+            )
+            .unwrap();
+        let original = json!({"model":"public","cache_salt":"caller","user_cache_secret":"raw"});
+        for path in [
+            "/v1/chat/completions",
+            "/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/transcriptions",
+            "/v1/systemone",
+        ] {
+            let input = UpstreamRequest {
+                body: serde_json::to_vec(&original).unwrap().into(),
+                path: Some(path.into()),
+                ..Default::default()
+            };
+            let direct = router.prepare(input.clone()).unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&direct.request.body).unwrap(),
+                original
+            );
+            let middleware = router
+                .prepare(UpstreamRequest {
+                    cache_salt: Some(CacheSaltKey::new([7; 32]).derive(1, None)),
+                    ..input
+                })
+                .unwrap();
+            assert!(middleware.request.cache_salt.is_none());
+            let body: serde_json::Value = serde_json::from_slice(&middleware.request.body).unwrap();
+            if [
+                "/v1/chat/completions",
+                "/completions",
+                "/v1/responses",
+                "/v1/messages",
+            ]
+            .contains(&path)
+            {
+                assert_eq!(body["cache_salt"].as_str().unwrap().len(), 64);
+                assert!(body.get("user_cache_secret").is_none());
+                let once = middleware.request.body.clone();
+                assert_eq!(
+                    router.prepare(middleware.request).unwrap().request.body,
+                    once
+                );
+            } else {
+                assert_eq!(body, original);
+            }
+        }
+        // The configured upstream path, rather than the downstream chat path,
+        // controls injection.
+        let mut custom = ModelRouterBackend::new("router");
+        custom
+            .add_route(
+                ModelRoute::new(
+                    "public",
+                    "public",
+                    Arc::new(StubBackend { name: "stub" }),
+                    "route",
+                )
+                .unwrap()
+                .with_path(Some("/v1/embeddings".into()))
+                .with_cache_salt_field(Some(CacheSaltField::CacheSalt("chutes"))),
+            )
+            .unwrap();
+        let prepared = custom
+            .prepare(UpstreamRequest {
+                body: serde_json::to_vec(&original).unwrap().into(),
+                path: Some("/v1/chat/completions".into()),
+                cache_salt: Some(CacheSaltKey::new([7; 32]).derive(1, None)),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&prepared.request.body).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn streaming_usage_is_owned_by_the_selected_deployment() {
+        let mut router = ModelRouterBackend::new("router");
+        for (id, policy) in [
+            ("a", Some(StreamingUsage::Continuous)),
+            ("b", Some(StreamingUsage::Final)),
+            ("c", None),
+        ] {
+            router
+                .add_route(
+                    ModelRoute::new(
+                        "public",
+                        format!("model-{id}"),
+                        Arc::new(StubBackend { name: "fixture" }),
+                        id,
+                    )
+                    .unwrap()
+                    .with_streaming_usage(policy),
+                )
+                .unwrap();
+        }
+        let body = serde_json::to_vec(&json!({"model":"public", "stream":true,
+            "stream_options":{"include_usage":false,"continuous_usage_stats":false,"custom":7}}))
+        .unwrap();
+        for (id, include, continuous) in
+            [("a", true, true), ("b", true, false), ("c", false, false)]
+        {
+            let prepared = router
+                .prepare(UpstreamRequest {
+                    body: body.clone().into(),
+                    target_route_id: Some(id.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let actual: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+            assert_eq!(actual["model"], format!("model-{id}"));
+            assert_eq!(actual["stream_options"]["include_usage"], include);
+            assert_eq!(
+                actual["stream_options"]["continuous_usage_stats"],
+                continuous
+            );
+            assert_eq!(actual["stream_options"]["custom"], 7);
+        }
+    }
+
+    #[test]
+    fn streaming_usage_respects_wire_surface_and_stream_boolean() {
+        for (downstream, configured, eligible) in [
+            ("/v1/chat/completions", None, true),
+            ("/v1/messages", None, true),
+            ("/v1/messages", Some("/v1/messages"), false),
+            ("/v1/chat/completions", Some("/chat/completions"), true),
+            ("/v1/completions", None, true),
+            ("/v1/responses", None, false),
+            ("/v1/embeddings", None, false),
+        ] {
+            for stream in [json!(true), json!(false), json!("true"), json!(null)] {
+                let mut router = ModelRouterBackend::new("router");
+                router
+                    .add_route(
+                        ModelRoute::new(
+                            "public",
+                            "actual",
+                            Arc::new(StubBackend { name: "fixture" }),
+                            "a",
+                        )
+                        .unwrap()
+                        .with_path(configured.map(str::to_string))
+                        .with_streaming_usage(Some(StreamingUsage::Continuous)),
+                    )
+                    .unwrap();
+                let body = serde_json::to_vec(&json!({"model":"public", "stream":stream})).unwrap();
+                let prepared = router
+                    .prepare(UpstreamRequest {
+                        body: body.into(),
+                        path: Some(downstream.into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let actual: serde_json::Value =
+                    serde_json::from_slice(&prepared.request.body).unwrap();
+                if eligible && stream == json!(true) {
+                    assert_eq!(
+                        actual["stream_options"],
+                        json!({"include_usage":true,"continuous_usage_stats":true})
+                    );
+                } else {
+                    assert!(actual.get("stream_options").is_none());
+                }
+            }
         }
     }
 
@@ -351,7 +611,7 @@ mod tests {
         let body = br#"{"model":"openai/gpt-oss-120b","messages":[]}"#.to_vec();
         let default_prepared = router
             .prepare(UpstreamRequest {
-                body: body.clone(),
+                body: body.clone().into(),
                 ..Default::default()
             })
             .unwrap();
@@ -363,7 +623,7 @@ mod tests {
 
         let targeted_prepared = router
             .prepare(UpstreamRequest {
-                body,
+                body: body.into(),
                 target_route_id: Some("secretai-107:openai/gpt-oss-120b".to_string()),
                 ..Default::default()
             })
@@ -396,7 +656,7 @@ mod tests {
         let body = br#"{"model":"openai/gpt-4o","messages":[]}"#.to_vec();
         router
             .prepare(UpstreamRequest {
-                body,
+                body: body.into(),
                 path: Some(surface.to_string()),
                 ..Default::default()
             })

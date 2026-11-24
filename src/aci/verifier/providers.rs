@@ -3,13 +3,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
 use super::external::ExternalProviderVerifier;
 #[cfg(test)]
 use super::external::ProviderVerifierConfigError;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::UpstreamProvider;
@@ -20,6 +21,8 @@ pub struct ChutesProviderVerifier {
 }
 
 impl ChutesProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/chutes/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -131,6 +134,14 @@ impl UpstreamVerifier for ChutesProviderVerifier {
         self.verifier.verify(request).await
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.refresh(request).await
     }
@@ -146,6 +157,8 @@ pub struct TinfoilProviderVerifier {
 }
 
 impl TinfoilProviderVerifier {
+    pub(crate) const RELEASE_SUBJECT_PREFIX: &str = "tinfoil-release:";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -159,6 +172,18 @@ impl TinfoilProviderVerifier {
                 cache_ttl_seconds,
             ),
         }
+    }
+
+    pub(crate) fn with_accepted_subjects(mut self, subjects: &[String]) -> Self {
+        for subject in subjects
+            .iter()
+            .filter(|subject| subject.starts_with(Self::RELEASE_SUBJECT_PREFIX))
+        {
+            self.verifier = self
+                .verifier
+                .with_option(format!("tinfoil_accepted_subject:{subject}"), "true");
+        }
+        self
     }
 
     #[cfg(test)]
@@ -183,6 +208,14 @@ impl UpstreamVerifier for TinfoilProviderVerifier {
         self.verifier.verify(request).await
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.refresh(request).await
     }
@@ -198,6 +231,8 @@ pub struct NearAiProviderVerifier {
 }
 
 impl NearAiProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/near-ai-gateway/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -215,6 +250,11 @@ impl NearAiProviderVerifier {
 
     pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
         self.verifier = self.verifier.with_option("near_ai_api_key", api_key);
+        self
+    }
+
+    pub(crate) fn with_refresh_lead(mut self, lead: Duration) -> Self {
+        self.verifier = self.verifier.with_near_ai_refresh_lead(lead);
         self
     }
 
@@ -238,6 +278,14 @@ impl NearAiProviderVerifier {
 impl UpstreamVerifier for NearAiProviderVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -308,6 +356,14 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
         self.verifier.verify(request).await
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.refresh(request).await
     }
@@ -317,11 +373,10 @@ impl UpstreamVerifier for SecretAiProviderVerifier {
     }
 }
 
-/// Verifier for `PhalaDirect` upstreams: a Phala dstack-vllm-proxy attestation
-/// endpoint reached directly (per model). The external bridge fetches the
-/// `version=2` attestation report, verifies the dstack TDX quote, GPU evidence,
-/// and the report_data binding (signing address + nonce + custom-domain TLS
-/// SPKI), and returns a `tls_spki_sha256` channel binding the
+/// Verifier for per-model Phala Inference Guard or dstack-vllm-proxy endpoints.
+/// The external bridge checks the version 2 report's dstack TDX quote, measured
+/// compose, and report_data binding (signing address + nonce + custom-domain
+/// TLS SPKI). It returns a `tls_spki_sha256` channel binding the
 /// [`OpenAICompatibleBackend`] pins on the forward connection.
 ///
 /// (Named "direct" because it is expected to be superseded by an ACI-compatible
@@ -332,6 +387,8 @@ pub struct PhalaDirectProviderVerifier {
 }
 
 impl PhalaDirectProviderVerifier {
+    pub(crate) const VERIFIER_ID: &'static str = "private-ai-verifier/phala-direct/v1";
+
     pub fn new(timeout_seconds: u64) -> Self {
         Self::new_with_cache(timeout_seconds, 0)
     }
@@ -356,6 +413,16 @@ impl PhalaDirectProviderVerifier {
         self
     }
 
+    /// Optional measured compose pins (`dstack-compose:sha256:<hex>`).
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        for subject in subjects {
+            self.verifier = self
+                .verifier
+                .with_option(format!("phala_direct_accepted_subject:{subject}"), "true");
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_command(
         command: Vec<String>,
@@ -376,6 +443,117 @@ impl PhalaDirectProviderVerifier {
 impl UpstreamVerifier for PhalaDirectProviderVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.refresh(request).await
+    }
+
+    fn invalidate(&self, request: &UpstreamVerificationRequest) {
+        self.verifier.invalidate(request);
+    }
+}
+
+/// Verifier for `ArmetAi` upstreams: a per-model Intel TDX endpoint that is
+/// not dstack-based. The external bridge fetches a nonce-bound report, verifies
+/// the quote with dcap-qvl, requires the verified report_data to commit to the
+/// nonce, TLS SPKI, GPU evidence and model id, requires the measured TD
+/// (MRTD/RTMR0..3 and launch configuration) to match an operator pin, and
+/// requires NRAS-verified GPU evidence. It returns a `tls_spki_sha256` binding that the
+/// [`OpenAICompatibleBackend`] pins on the forward connection.
+#[derive(Debug, Clone)]
+pub struct ArmetAiProviderVerifier {
+    verifier: ExternalProviderVerifier,
+}
+
+impl ArmetAiProviderVerifier {
+    pub fn new(timeout_seconds: u64) -> Self {
+        Self::new_with_cache(timeout_seconds, 0)
+    }
+
+    pub fn new_with_cache(timeout_seconds: u64, cache_ttl_seconds: u64) -> Self {
+        Self {
+            verifier: ExternalProviderVerifier::private_inference(
+                "armet-ai",
+                UpstreamProvider::ArmetAi.attestation_scope(),
+                timeout_seconds,
+                cache_ttl_seconds,
+            ),
+        }
+    }
+
+    /// Bearer token sent on the attestation report request, when the provider
+    /// requires authorization there.
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.verifier = self.verifier.with_option("armet_ai_bearer_token", token);
+        self
+    }
+
+    /// Measurement pins (`tdx-measurement:sha256:<hex>`). The bridge fails
+    /// closed when none are configured.
+    pub fn with_accepted_subjects(mut self, subjects: impl IntoIterator<Item = String>) -> Self {
+        for subject in subjects {
+            self.verifier = self.verifier.with_option(
+                format!("armet_ai_accepted_subject:{}", subject.to_ascii_lowercase()),
+                "true",
+            );
+        }
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command(
+        command: Vec<String>,
+        timeout_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command(
+                "armet-ai",
+                UpstreamProvider::ArmetAi.attestation_scope(),
+                command,
+                timeout_seconds,
+            )?,
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_command_and_cache(
+        command: Vec<String>,
+        timeout_seconds: u64,
+        cache_ttl_seconds: u64,
+    ) -> Result<Self, ProviderVerifierConfigError> {
+        Ok(Self {
+            verifier: ExternalProviderVerifier::with_command_and_cache(
+                "armet-ai",
+                UpstreamProvider::ArmetAi.attestation_scope(),
+                command,
+                timeout_seconds,
+                cache_ttl_seconds,
+            )?,
+        })
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for ArmetAiProviderVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        self.verifier.verify(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier.cache_remaining(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -452,7 +630,8 @@ impl RoutingUpstreamVerifier {
             verifier_id: "routing-upstream-verifier/v1".to_string(),
             result: VerificationResult::Failed,
             required: request.required,
-            reason: Some(reason),
+            failure: VerificationFailure::NoVerifier,
+            diagnostic: Some(reason),
             ..Default::default()
         }
     }
@@ -473,11 +652,31 @@ impl UpstreamVerifier for RoutingUpstreamVerifier {
         }
     }
 
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.verifier_for(request).ok()?.cached(request)
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.verifier_for(request).ok()?.cache_remaining(request)
+    }
+
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         match self.verifier_for(&request) {
             Ok(verifier) => verifier.refresh(request).await,
             Err(reason) => Self::failed_event(request, reason),
         }
+    }
+
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        self.verifier_for(&request)
+            .ok()?
+            .reverify_instance(request, previous, instance_id)
+            .await
     }
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {

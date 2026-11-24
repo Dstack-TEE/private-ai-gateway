@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from 'node:crypto';
 
+import { jcsEqual } from '../crypto.js';
+
 import {
   bindReportTranscriptChannel,
   computeVerdict,
   receiptTranscriptFromDigests,
   reportTranscript,
 } from '../transcript.js';
-import type { AttestationReport, ReceiptEnvelope, SessionRecord, WorkloadKeyset } from '../types.js';
+import type { AttestationReport, ReceiptEnvelope, SessionRecord, SourceProvenance, WorkloadKeyset } from '../types.js';
 import type {
   PinnedTransport,
   PinnedTransportFactory,
@@ -21,6 +23,9 @@ import {
   type VerifiedAciIdentity,
 } from './types.js';
 
+import { constrainRequestBody, object, validateProviderHeaderMultiplicity } from './constraints.js';
+export { constrainJsonBody } from './constraints.js';
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECEIPT_HISTORY_SIZE = 32;
 
@@ -31,17 +36,27 @@ interface InternalExchange extends RecordedAciExchange {
   authorization?: string;
   completion: Promise<void>;
   identity: VerifiedAciIdentity;
+  members: ReadonlyMap<string, VerifiedAciIdentity>;
   pinnedSessions: string[];
+  requiresVerified: boolean;
 }
 
 export async function connectAciWithTransport(
   options: ConnectAciOptions,
   createPinnedTransport: PinnedTransportFactory,
+  identityProvider: IdentityProvider = establishIdentity,
 ): Promise<AciConnection> {
-  const connection = new RuntimeAciConnection(options, createPinnedTransport);
+  const connection = new RuntimeAciConnection(options, createPinnedTransport, identityProvider);
   await connection.refresh();
   return connection;
 }
+
+type IdentityProvider = (
+  attestationURL: string,
+  origin: string,
+  hostname: string,
+  options: ConnectAciOptions,
+) => Promise<VerifiedAciIdentity>;
 
 class RuntimeAciConnection implements AciConnection {
   readonly baseURL: string;
@@ -52,14 +67,20 @@ class RuntimeAciConnection implements AciConnection {
   private readonly attestationURL: string;
   private readonly options: ConnectAciOptions;
   private readonly createPinnedTransport: PinnedTransportFactory;
+  private readonly identityProvider: IdentityProvider;
   private currentIdentity?: VerifiedAciIdentity;
   private transport: PinnedTransport | undefined;
-  private refreshing: Promise<void> | undefined;
+  private refreshing: Promise<boolean> | undefined;
+  private members = new Map<string, VerifiedAciIdentity>();
   private readonly exchanges: InternalExchange[] = [];
-  private rotationRequired = false;
+  private pendingDigest: string | undefined;
   private closed = false;
 
-  constructor(options: ConnectAciOptions, createPinnedTransport: PinnedTransportFactory) {
+  constructor(
+    options: ConnectAciOptions,
+    createPinnedTransport: PinnedTransportFactory,
+    identityProvider: IdentityProvider,
+  ) {
     validateOptions(options);
     const target = normalizeBaseURL(options.baseURL);
     this.baseURL = target.baseURL;
@@ -68,6 +89,7 @@ class RuntimeAciConnection implements AciConnection {
     this.attestationURL = target.attestationURL;
     this.options = options;
     this.createPinnedTransport = createPinnedTransport;
+    this.identityProvider = identityProvider;
     this.fetch = (input, init) => this.secureFetch(input, init);
   }
 
@@ -100,11 +122,24 @@ class RuntimeAciConnection implements AciConnection {
     const id = exchange.receiptId;
     await exchange.completion;
     await this.ensureFreshIdentity();
-    const identity = exchange.identity;
     const receipt = await this.fetchJsonArtifact<ReceiptEnvelope>(
       `receipts/${encodeURIComponent(id)}`,
       exchange.authorization,
     );
+    let entry = this.receiptIdentity(receipt, exchange);
+    if (!entry) {
+      if (typeof receipt.workload_keyset_digest === 'string') {
+        this.observeDigest(receipt.workload_keyset_digest);
+      }
+      await this.ensureFreshIdentity();
+      entry = this.receiptIdentity(receipt, exchange);
+    }
+    if (!entry) {
+      throw new AciConnectionError(
+        'receipt_verification',
+        'receipt names a digest not established for the admitted renewal family',
+      );
+    }
     const sessionId = citedSessionId(receipt);
     let session: SessionRecord | undefined;
     if (sessionId) {
@@ -114,11 +149,11 @@ class RuntimeAciConnection implements AciConnection {
         if (!(error instanceof AciConnectionError) || error.code !== 'receipt_fetch') throw error;
       }
     }
-    const serving = identity.report.service_capabilities?.serving;
+    const serving = entry.report.service_capabilities?.serving;
     const transcript = await receiptTranscriptFromDigests(
       receipt,
-      identity.keyset,
-      identity.workloadKeysetDigest,
+      entry.keyset,
+      entry.workloadKeysetDigest,
       {
         request: exchange.requestDigest,
         ...(exchange.responseDigest ? { response: exchange.responseDigest } : {}),
@@ -126,8 +161,7 @@ class RuntimeAciConnection implements AciConnection {
       {
         ...(session === undefined ? {} : { session }),
         ...(exchange.pinnedSessions.length ? { pinnedSessions: exchange.pinnedSessions } : {}),
-        requiresVerified:
-          this.options.serving?.requireVerified !== false || exchange.pinnedSessions.length > 0,
+        requiresVerified: exchange.requiresVerified,
         ...(typeof serving === 'string' ? { serving } : {}),
       },
     );
@@ -148,7 +182,11 @@ class RuntimeAciConnection implements AciConnection {
     };
   }
 
-  refresh(): Promise<void> {
+  async refresh(): Promise<void> {
+    await this.refreshIdentity();
+  }
+
+  private refreshIdentity(): Promise<boolean> {
     if (this.closed) {
       return Promise.reject(new AciConnectionError('closed', 'ACI connection is closed'));
     }
@@ -175,8 +213,13 @@ class RuntimeAciConnection implements AciConnection {
     if (transport) await transport.close();
   }
 
-  private async refreshOnce(): Promise<void> {
-    const identity = await establishIdentity(this.attestationURL, this.origin, this.hostname, this.options);
+  private async refreshOnce(): Promise<boolean> {
+    const identity = await this.identityProvider(
+      this.attestationURL,
+      this.origin,
+      this.hostname,
+      this.options,
+    );
     const candidate = this.createPinnedTransport({
       origin: this.origin,
       hostname: this.hostname,
@@ -184,8 +227,9 @@ class RuntimeAciConnection implements AciConnection {
       ...(this.options.proxy === undefined ? {} : { proxy: this.options.proxy }),
       ...(this.options.ca === undefined ? {} : { ca: this.options.ca }),
     });
+    let multipartEndpoints: string[];
     try {
-      await probePinnedChannel(candidate, this.attestationURL, this.options);
+      multipartEndpoints = await probePinnedChannel(candidate, this.attestationURL, this.options);
       if (this.closed) throw new AciConnectionError('closed', 'ACI connection closed during refresh');
     } catch (error) {
       await candidate.close();
@@ -215,29 +259,55 @@ class RuntimeAciConnection implements AciConnection {
         `pinned ACI channel did not satisfy id-6: ${channelCheck?.detail ?? 'check did not run'}`,
       );
     }
-    const boundIdentity: VerifiedAciIdentity = { ...identity, transcript };
+    const boundIdentity: VerifiedAciIdentity = {
+      ...identity,
+      transcript,
+      report: {
+        ...identity.report,
+        service_capabilities: {
+          ...identity.report.service_capabilities,
+          supported_multipart_constraint_endpoints: multipartEndpoints,
+        },
+      },
+    };
 
     const previous = this.transport;
-    this.transport = candidate;
+    const previousIdentity = this.currentIdentity;
+    const renewal = previousIdentity !== undefined
+      && sameIdentityFamily(boundIdentity, previousIdentity);
+    const keepTransport = previous !== undefined && renewal;
+    const now = Date.now();
+    const members = renewal ? new Map(this.members) : new Map<string, VerifiedAciIdentity>();
+    for (const [digest, member] of members) {
+      if (now >= member.expiresAt) members.delete(digest);
+    }
+    members.set(boundIdentity.workloadKeysetDigest, boundIdentity);
+    this.members = members;
+    this.transport = keepTransport ? previous : candidate;
     this.currentIdentity = boundIdentity;
-    this.rotationRequired = false;
-    if (previous) await previous.close();
+    // Any freshly verified member authorizes admission. Receipt audits still
+    // require the exact digest to have been attested within the admitted family.
+    this.pendingDigest = undefined;
+    if (keepTransport) await candidate.close();
+    else if (previous) await previous.close();
+    return previousIdentity !== undefined && !renewal;
   }
 
   private async secureFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     if (this.closed || !this.transport) {
       throw new AciConnectionError('closed', 'ACI connection is closed');
     }
-    await this.ensureFreshIdentity();
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : null);
+    signal?.throwIfAborted();
+    await this.ensureFreshIdentity(signal);
     const transport = this.transport;
     if (!transport) throw new AciConnectionError('closed', 'ACI connection is closed');
     const identity = this.identity;
-    const prepared = await prepareRequest(input, init, this.options);
+    const members = this.members;
+    const prepared = await prepareRequest(input, init, this.options, identity.report.service_capabilities);
     const response = await transport.fetch(prepared.request);
     const observedDigest = response.headers.get('x-aci-keyset-digest');
-    if (observedDigest && observedDigest !== identity.workloadKeysetDigest) {
-      this.rotationRequired = true;
-    }
+    if (observedDigest) this.observeDigest(observedDigest);
     const receiptId = response.headers.get('x-receipt-id');
     if (
       prepared.request.method === 'POST' &&
@@ -256,22 +326,51 @@ class RuntimeAciConnection implements AciConnection {
       );
     }
     if (prepared.request.method === 'POST' && receiptId) {
-      this.recordExchange(receiptId, prepared, response, identity);
+      this.recordExchange(receiptId, prepared, response, identity, members);
     }
     return response;
   }
 
-  private async ensureFreshIdentity(): Promise<void> {
-    if (!this.rotationRequired && Date.now() < this.identity.expiresAt) return;
+  private async ensureFreshIdentity(signal?: AbortSignal | null): Promise<void> {
+    const expired = ![...this.members.values()].some((member) => Date.now() < member.expiresAt);
+    if (!this.pendingDigest && !expired) return;
+    let rotated: boolean;
     try {
-      await this.refresh();
+      rotated = await raceAbortSignal(this.refreshIdentity(), signal);
     } catch (error) {
+      // A caller-side abort must surface as-is so cancellable callers (e.g.
+      // streaming clients) can unwind promptly instead of waiting out the
+      // full inline re-verification.
+      if (isAbortError(error)) throw error;
       throw new AciConnectionError(
-        'identity_expired',
-        'ACI workload identity changed or expired and re-verification failed',
+        expired ? 'identity_expired' : 'attestation_verification',
+        expired
+          ? 'ACI workload identity expired and re-verification failed'
+          : 'ACI response advertised an unestablished digest and re-verification failed',
         { cause: error },
       );
     }
+    if (rotated) {
+      throw new AciConnectionError(
+        'identity_expired',
+        'ACI workload identity rotated; retry after establishing the new identity',
+      );
+    }
+  }
+
+  private observeDigest(digest: string): void {
+    const member = this.members.get(digest);
+    if (!member || Date.now() >= member.expiresAt) this.pendingDigest = digest;
+  }
+
+  private receiptIdentity(
+    receipt: ReceiptEnvelope,
+    exchange: InternalExchange,
+  ): VerifiedAciIdentity | undefined {
+    const digest = receipt.workload_keyset_digest;
+    if (typeof digest !== 'string') return undefined;
+    const member = exchange.members.get(digest) ?? this.members.get(digest);
+    return member && sameIdentityFamily(member, exchange.identity) ? member : undefined;
   }
 
   private recordExchange(
@@ -279,7 +378,10 @@ class RuntimeAciConnection implements AciConnection {
     prepared: PreparedRequest,
     response: Response,
     identity: VerifiedAciIdentity,
+    members: ReadonlyMap<string, VerifiedAciIdentity>,
   ): void {
+    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
+    if (cap === 0) return;
     const entry: InternalExchange = {
       receiptId,
       method: prepared.request.method,
@@ -291,7 +393,9 @@ class RuntimeAciConnection implements AciConnection {
       ...(prepared.authorization === undefined ? {} : { authorization: prepared.authorization }),
       completion: Promise.resolve(),
       identity,
+      members,
       pinnedSessions: prepared.pinnedSessions,
+      requiresVerified: prepared.requiresVerified,
     };
     entry.completion = digestResponse(response.clone()).then((digest) => {
       entry.responseDigest = digest;
@@ -301,7 +405,6 @@ class RuntimeAciConnection implements AciConnection {
       entry.responseComplete = true;
     });
     this.exchanges.push(entry);
-    const cap = this.options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
     if (this.exchanges.length > cap) this.exchanges.splice(0, this.exchanges.length - cap);
   }
 
@@ -333,6 +436,7 @@ interface PreparedRequest {
   request: Request;
   bodyDigest: string;
   pinnedSessions: string[];
+  requiresVerified: boolean;
   authorization?: string;
 }
 
@@ -341,7 +445,9 @@ export async function prepareRequest(
   input: RequestInfo | URL,
   init: RequestInit | undefined,
   options: ConnectAciOptions,
+  capabilities?: AttestationReport['service_capabilities'],
 ): Promise<PreparedRequest> {
+  validateProviderHeaderMultiplicity(init?.headers);
   const original = new Request(input, init);
   const authorization = original.headers.get('authorization')?.trim() || undefined;
   if (original.method !== 'POST') {
@@ -349,97 +455,24 @@ export async function prepareRequest(
       request: original,
       bodyDigest: await digestRequest(original),
       pinnedSessions: [],
+      requiresVerified: false,
       ...(authorization ? { authorization } : {}),
     };
   }
   const bytes = new Uint8Array(await original.clone().arrayBuffer());
-  const constrained = constrainJsonBody(bytes, options);
   const headers = new Headers(original.headers);
+  const constrained = await constrainRequestBody(
+    bytes, headers, new URL(original.url).pathname, options, capabilities,
+  );
   headers.delete('content-length');
-  const request =
-    constrained.body === bytes
-      ? original
-      : new Request(original, { body: Buffer.from(constrained.body), headers });
+  const request = new Request(original, { method: 'POST', body: Buffer.from(constrained.body), headers });
   return {
     request,
     bodyDigest: digestBytes(constrained.body),
     pinnedSessions: constrained.pinnedSessions,
+    requiresVerified: constrained.requiresVerified,
     ...(authorization ? { authorization } : {}),
   };
-}
-
-/** @internal Exported for transport-policy conformance tests. */
-export function constrainJsonBody(
-  body: Uint8Array,
-  options: ConnectAciOptions,
-): { body: Uint8Array; pinnedSessions: string[] } {
-  const fixed = [...(options.serving?.acceptedSessionIds ?? [])];
-  const enforceVerified = options.serving?.requireVerified !== false;
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder().decode(body));
-  } catch {
-    return { body, pinnedSessions: [] };
-  }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return { body, pinnedSessions: [] };
-  }
-  const root = value as Record<string, unknown>;
-  const providerValue = root.provider;
-  if (
-    providerValue !== undefined &&
-    (providerValue === null || typeof providerValue !== 'object' || Array.isArray(providerValue))
-  ) {
-    if (!enforceVerified && fixed.length === 0) return { body, pinnedSessions: [] };
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'provider must be a JSON object when ACI serving constraints are enabled',
-    );
-  }
-  const provider =
-    providerValue !== null && typeof providerValue === 'object' && !Array.isArray(providerValue)
-      ? { ...(providerValue as Record<string, unknown>) }
-      : {};
-  const supplied = parseSessionIds(provider.aci_session_ids);
-  if (!enforceVerified && fixed.length === 0 && supplied.length === 0) {
-    return { body, pinnedSessions: [] };
-  }
-  const pinnedSessions =
-    fixed.length === 0
-      ? supplied
-      : supplied.length === 0
-        ? fixed
-        : supplied.filter((id) => fixed.includes(id));
-  if (fixed.length > 0 && supplied.length > 0 && pinnedSessions.length === 0) {
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'request session ids do not intersect the connection acceptedSessionIds policy',
-    );
-  }
-  if (pinnedSessions.length > 0) provider.aci_session_ids = pinnedSessions;
-  if (enforceVerified || pinnedSessions.length > 0) {
-    provider.aci_verified = true;
-  }
-  root.provider = provider;
-  return {
-    body: new TextEncoder().encode(JSON.stringify(root)),
-    pinnedSessions,
-  };
-}
-
-function parseSessionIds(value: unknown): string[] {
-  if (value === undefined) return [];
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.some((id) => typeof id !== 'string' || !/^[0-9a-f]{64}$/.test(id))
-  ) {
-    throw new AciConnectionError(
-      'invalid_serving_constraints',
-      'provider.aci_session_ids must be a non-empty array of lowercase 64-hex ids',
-    );
-  }
-  return [...new Set(value)];
 }
 
 async function digestRequest(request: Request): Promise<string> {
@@ -461,6 +494,51 @@ async function digestResponse(response: Response): Promise<string> {
 
 function digestBytes(bytes: Uint8Array): string {
   return `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+/**
+ * Await a shared in-flight operation while staying responsive to a caller's
+ * AbortSignal. The underlying operation keeps running (other callers may
+ * still benefit from it), but this waiter rejects as soon as the signal
+ * aborts.
+ */
+async function raceAbortSignal<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | null | undefined,
+): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+  // The promise is typically the deduplicated connection refresh; keep it
+  // handled even when the caller aborts before it settles.
+  void promise.catch(() => {});
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortError(): Error {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
 }
 
 function publicExchange(exchange: InternalExchange): RecordedAciExchange {
@@ -490,10 +568,10 @@ function citedSessionId(receipt: ReceiptEnvelope): string | undefined {
 
 function validateOptions(options: ConnectAciOptions): void {
   const cap = options.receiptHistorySize ?? DEFAULT_RECEIPT_HISTORY_SIZE;
-  if (!Number.isSafeInteger(cap) || cap < 1 || cap > 1_000) {
+  if (!Number.isSafeInteger(cap) || cap < 0 || cap > 1_000) {
     throw new AciConnectionError(
       'invalid_policy',
-      'receiptHistorySize must be an integer between 1 and 1000',
+      'receiptHistorySize must be an integer between 0 and 1000',
     );
   }
   for (const [name, value] of [
@@ -555,9 +633,6 @@ async function establishIdentity(
     transcript = await reportTranscript(report, nonce, {
       online: true,
       ...(options.pccsUrl === undefined ? {} : { pccsUrl: options.pccsUrl }),
-      ...(options.policy?.requireProductionOs === undefined
-        ? {}
-        : { requireProductionOs: options.policy.requireProductionOs }),
       ...(options.policy?.acceptedComposeHashes === undefined
         ? {}
         : { acceptedComposeHashes: options.policy.acceptedComposeHashes }),
@@ -571,7 +646,6 @@ async function establishIdentity(
   }
 
   const required = ['id-1', 'id-2', 'id-3', 'id-4'];
-  if (options.policy?.requireProductionOs) required.push('policy-os');
   const failed = required
     .map((id) => ({ id, line: transcript.lines.find((line) => line.id === id) }))
     .filter(({ line }) => line?.status !== 'pass');
@@ -645,7 +719,7 @@ async function probePinnedChannel(
   transport: PinnedTransport,
   attestationURL: string,
   options: ConnectAciOptions,
-): Promise<void> {
+): Promise<string[]> {
   const url = new URL(attestationURL);
   url.searchParams.set('nonce', randomBytes(32).toString('hex'));
   const response = await timedFetch(
@@ -664,7 +738,17 @@ async function probePinnedChannel(
       `pinned ACI channel probe returned HTTP ${response.status}`,
     );
   }
-  await response.body?.cancel();
+  try {
+    const report: unknown = await response.json();
+    if (!object(report)) return [];
+    const capabilities = report.service_capabilities;
+    if (!object(capabilities)) return [];
+    const endpoints = capabilities.supported_multipart_constraint_endpoints;
+    return Array.isArray(endpoints) && endpoints.every((path): path is string => typeof path === 'string')
+      ? endpoints : [];
+  } catch (error) {
+    throw new AciConnectionError('channel_binding', 'pinned ACI attestation is not valid JSON', { cause: error });
+  }
 }
 
 async function timedFetch(
@@ -676,21 +760,112 @@ async function timedFetch(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new AciConnectionError('attestation_fetch', 'timeoutMs must be a positive number');
   }
+  const deadlineError = () =>
+    new AciConnectionError('attestation_fetch', `ACI request exceeded the ${timeoutMs}ms deadline`);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let expired = false;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let bodyReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const timeout = setTimeout(() => {
+    expired = true;
+    controller.abort(deadlineError());
+    if (bodyController) {
+      try {
+        bodyController.error(deadlineError());
+      } catch {
+        // The wrapped stream already settled.
+      }
+    }
+    void bodyReader?.cancel().catch(() => {});
+  }, timeoutMs);
   timeout.unref();
+  const callerSignal = init.signal ?? null;
+  const onCallerAbort = () => controller.abort(callerSignal?.reason);
+  if (callerSignal) {
+    if (callerSignal.aborted) onCallerAbort();
+    else callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  }
   try {
-    return await fetchImpl(input, { ...init, signal: controller.signal });
+    const response = await fetchImpl(input, { ...init, signal: controller.signal });
+    if (!response.body) {
+      clearTimeout(timeout);
+      return response;
+    }
+    // The deadline covers the whole response, not just its headers: keep the
+    // timer armed until the body is consumed, and surface body-read stalls
+    // as the same deadline failure.
+    const reader = response.body.getReader();
+    bodyReader = reader;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+        if (expired) controller.error(deadlineError());
+      },
+      async pull(controller) {
+        if (expired) {
+          controller.error(deadlineError());
+          return;
+        }
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            clearTimeout(timeout);
+            controller.close();
+          } else {
+            controller.enqueue(value);
+          }
+        } catch (error) {
+          clearTimeout(timeout);
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        clearTimeout(timeout);
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(stream, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   } catch (error) {
+    clearTimeout(timeout);
     if (error instanceof AciConnectionError) throw error;
+    if (expired) throw deadlineError();
     throw new AciConnectionError(
       'attestation_fetch',
       `ACI request failed: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
   } finally {
-    clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
   }
+}
+
+// Normalize the protocol-defined provenance struct, as Rust deserialization does.
+function sourceProvenance(identity: VerifiedAciIdentity): SourceProvenance {
+  const source = identity.report.attestation.source_provenance;
+  return {
+    repo_url: source?.repo_url ?? null,
+    repo_commit: source?.repo_commit ?? null,
+    image_digest: source?.image_digest ?? null,
+    image_provenance: source?.image_provenance ?? null,
+  };
+}
+
+// Origin and verifier policy are fixed by the owning connection.
+function sameIdentityFamily(identity: VerifiedAciIdentity, previous: VerifiedAciIdentity): boolean {
+  return sameKeysetFamily(identity.keyset, previous.keyset)
+    && identity.composeHash === previous.composeHash
+    && identity.report.attestation.tee_type === previous.report.attestation.tee_type
+    && jcsEqual(sourceProvenance(identity), sourceProvenance(previous));
+}
+
+function sameKeysetFamily(keyset: WorkloadKeyset, previous: WorkloadKeyset): boolean {
+  const { not_after: _currentExpiry, ...current } = keyset;
+  const { not_after: _previousExpiry, ...old } = previous;
+  return jcsEqual(current, old);
 }
 
 function tlsPinsForHost(keyset: WorkloadKeyset, hostname: string): string[] {

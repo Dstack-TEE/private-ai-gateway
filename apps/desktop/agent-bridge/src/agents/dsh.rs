@@ -1,13 +1,13 @@
-//! DeepSeek Harness (dsh) 0.1.7-rc.2, tag `dsh-v0.1.7-rc.2` (477b4f42) of
-//! deepseek-ai/deepseek-harness; 0.2.0-rc.1 keeps the same contract.
+//! DeepSeek Harness (dsh) 0.2.1-rc.2, official @deepseek-ai/dsh packages.
 //! app-boot's `readProfilePatches` composes the bundle layers, then
 //! `profiles/<name>/cordis.patch.yml`, then `$DSH_HOME/cordis.patch.yml`, then
 //! `--patch` overlays, and an `{id, config}` patch replaces the row's whole
 //! config. Every profile, the desktop app's included, reads that home layer and
 //! dsh never writes it, so the connection lives there as keyed list items.
-//! llm-pi-ai resolves `apiKeyEnv` per request through credentials-local: the
-//! launch environment, then `.credentials.yaml` refs (owner-only, watched, and
-//! never exported to tool processes), then the `.env` files.
+//! llm-pi-ai resolves `apiKeyEnv` per request through credentials-local:
+//! `.credentials.yaml` refs (owner-only, watched, never exported to tool
+//! processes), then the launch environment and `.env` files. The headless
+//! bundle disables that service, so the home layer enables it explicitly.
 
 use std::{
     io::Write,
@@ -121,6 +121,7 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         set(&["config", "provider"], PROVIDER).in_entry(ACP),
         set(&["config", "model"], model).in_entry(ACP),
         boolean(&["disabled"], true).in_entry(WEB_SEARCH),
+        boolean(&["disabled"], false).in_entry(CREDENTIALS),
     ])
 }
 

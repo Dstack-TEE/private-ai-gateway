@@ -9,6 +9,12 @@ pub fn router(state: Arc<ProxyState>) -> Router {
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/v1/responses", post(responses))
         .route("/v1/responses/compact", post(responses_compact))
+        .route("/v1/systemone", post(systemone))
+        .route(Surface::Images.path(), post(images))
+        .route(
+            Surface::AudioTranscriptions.path(),
+            post(audio_transcriptions),
+        )
         .fallback(not_found)
         .with_state(state)
 }
@@ -26,15 +32,9 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
     let surface = Surface::ChatCompletions;
     let auth = match state.authorize(&headers, "/v1/models") {
         Ok(auth) => auth,
-        Err(rejection) => {
-            return error_response(
-                surface,
-                rejection.status,
-                rejection.code,
-                &rejection.message,
-            )
-        }
+        Err(rejection) => return rejection.response(surface),
     };
+    state.verification_settled().await;
     let session = state.session();
     match (session.verified, session.catalog) {
         (true, Some(catalog)) => {
@@ -43,12 +43,18 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
                 .unwrap_or(catalog);
             Json(catalog.openai_list()).into_response()
         }
-        _ => error_response(
-            surface,
+        _ => Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "gateway_not_verified",
             "The verified model list is not available until verification succeeds",
-        ),
+        )
+        .retry_after(
+            session
+                .session_id
+                .is_some()
+                .then_some(VERIFICATION_RETRY_SECS),
+        )
+        .response(surface),
     }
 }
 
@@ -132,11 +138,66 @@ async fn responses_compact(
     .await
 }
 
+async fn systemone(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        uri,
+        body,
+        Surface::SystemOne,
+        "/v1/systemone",
+    )
+    .await
+}
+
+async fn images(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        uri,
+        body,
+        Surface::Images,
+        Surface::Images.path(),
+    )
+    .await
+}
+
+async fn audio_transcriptions(
+    State(state): State<Arc<ProxyState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Body,
+) -> Response {
+    relay(
+        state,
+        headers,
+        uri,
+        body,
+        Surface::AudioTranscriptions,
+        Surface::AudioTranscriptions.path(),
+    )
+    .await
+}
+
 async fn not_found() -> Response {
     error_response(
         Surface::ChatCompletions,
         StatusCode::NOT_FOUND,
         "not_found",
-        &format!("{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, and /v1/responses"),
+        &format!(
+            "{PRODUCT_NAME} serves /v1/models, /v1/chat/completions, /v1/messages, /v1/messages/count_tokens, /v1/responses, /v1/responses/compact, /v1/systemone, {}, and {}",
+            Surface::Images.path(),
+            Surface::AudioTranscriptions.path()
+        ),
     )
 }

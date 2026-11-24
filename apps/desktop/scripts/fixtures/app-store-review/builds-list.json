@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "type": "builds",
+      "id": "168c235e-f446-46fb-93ce-756dc6385675",
+      "attributes": {
+        "version": "120",
+        "processingState": "VALID"
+      }
+    }
+  ],
+  "included": [],
+  "links": {},
+  "meta": {}
+}

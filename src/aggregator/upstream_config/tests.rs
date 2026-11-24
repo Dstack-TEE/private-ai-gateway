@@ -1,4 +1,4 @@
-use super::builders::build_verifier;
+use super::builders::{build_state, build_verifier};
 use super::dynamic::{DynamicUpstreamVerifier, EmptyUpstreamBackend};
 use super::*;
 use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
@@ -21,6 +21,7 @@ fn test_upstream_config(
         provider,
         base_url: format!("https://{name}.example"),
         path: None,
+        streaming_usage: None,
         models: BTreeMap::from([(public_model.to_string(), upstream_model.to_string())]),
         bearer_token: None,
         basic_auth: false,
@@ -38,60 +39,314 @@ fn test_upstream_config(
         chutes_chute_ids: None,
         chutes_e2ee_discovery_rounds: None,
         chutes_e2ee_discovery_interval_seconds: None,
+        zg_chain_rpc_url: None,
+        zg_serving_contract: None,
     }
 }
 
 #[test]
-fn router_provider_verifies_once_per_channel() {
-    // A router (Tinfoil) with several models yields ONE verification target — the
-    // shared gateway channel — so it seals one session per channel, not one per
-    // model. A per-model provider keeps one target per model.
-    let mut router =
-        test_upstream_config("tinfoil-router", UpstreamProvider::Tinfoil, "pub-a", "up-a");
-    router
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&router)).len(),
-        1,
-        "router collapses its models to one channel target"
-    );
+fn configured_backend_protocol_comes_from_provider_and_wire_operation() {
+    use crate::aci::upstream::{SseProtocol, UpstreamRequest};
+    use crate::middleware::request_transform::Endpoint;
 
-    let mut per_model =
-        test_upstream_config("phala", UpstreamProvider::PhalaDirect, "pub-a", "up-a");
-    per_model
-        .models
-        .insert("pub-b".to_string(), "up-b".to_string());
-    assert_eq!(
-        super::validation::verification_targets(std::slice::from_ref(&per_model)).len(),
-        2,
-        "per-model provider verifies every model"
-    );
+    for (provider, messages_protocol) in [
+        (UpstreamProvider::OpenAiCompatible, None),
+        (UpstreamProvider::Chutes, None),
+        (
+            UpstreamProvider::Anthropic,
+            Some(SseProtocol::AnthropicMessages),
+        ),
+    ] {
+        for token in [None, Some("fixture-token".to_string())] {
+            let mut config = test_upstream_config("protocol", provider, "public", "upstream");
+            config.path = Some("/custom/infer".into());
+            config.bearer_token = token;
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("upstreams.json");
+            std::fs::write(&path, serde_json::to_vec(&vec![config]).unwrap()).unwrap();
+            let manager =
+                UpstreamConfigManager::load(&path, runtime_options(UpstreamVerifierMode::None))
+                    .unwrap();
+            let backend = manager.backend();
+            for (operation, protocol) in [
+                (Endpoint::ChatComplete, Some(SseProtocol::OpenaiChat)),
+                (Endpoint::Messages, messages_protocol),
+                (Endpoint::Complete, Some(SseProtocol::OpenaiChat)),
+                (
+                    Endpoint::CreateModelResponse,
+                    Some(SseProtocol::OpenaiResponses),
+                ),
+                (Endpoint::Embed, None),
+            ] {
+                let prepared = backend
+                    .prepare(UpstreamRequest {
+                        body: bytes::Bytes::from_static(br#"{"model":"public"}"#),
+                        path: Some(operation.path().into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                assert_eq!(backend.response_protocol(&prepared, operation), protocol);
+            }
+        }
+    }
+}
+
+#[test]
+fn verification_targets_follow_provider_model_checks() {
+    for (provider, expected_models) in [
+        (UpstreamProvider::Tinfoil, vec!["up-a"]),
+        (UpstreamProvider::NearAi, vec!["up-a", "up-b"]),
+        (UpstreamProvider::PhalaDirect, vec!["up-a", "up-b"]),
+    ] {
+        let mut config = test_upstream_config("upstream", provider, "pub-a", "up-a");
+        config
+            .models
+            .insert("pub-b".to_string(), "up-b".to_string());
+        let targets = verification_targets(std::slice::from_ref(&config));
+        let models: Vec<_> = targets
+            .iter()
+            .map(|target| target.model_id.as_str())
+            .collect();
+        assert_eq!(models, expected_models, "{provider:?}");
+    }
 }
 
 #[test]
 fn provider_attestation_scopes() {
-    // Tinfoil and SecretAI front many models behind one verified channel, so
-    // they are per-router. NEAR AI's report carries per-model enclave evidence,
-    // so it verifies per model. Phala-direct verifies a TEE per model; Chutes a
-    // key per instance; the rest default to per-model. Only per-router drops the
-    // model from the channel identity.
+    // NEAR AI, Tinfoil, and SecretAI front many models behind one verified
+    // channel, so they are per-router. Phala-direct verifies a TEE per model;
+    // Chutes a key per instance; the rest default to per-model. Only per-router
+    // drops the model from the channel identity.
     use AttestationScope::*;
-    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::NearAi.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::Tinfoil.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::SecretAi.attestation_scope(), PerRouter);
+    assert_eq!(UpstreamProvider::Privatemode.attestation_scope(), PerRouter);
     assert_eq!(UpstreamProvider::PhalaDirect.attestation_scope(), PerModel);
+    assert_eq!(UpstreamProvider::ArmetAi.attestation_scope(), PerModel);
     assert_eq!(UpstreamProvider::Chutes.attestation_scope(), PerInstance);
+    assert_eq!(
+        UpstreamProvider::ZeroGPrivateComputer.attestation_scope(),
+        PerInstance
+    );
     assert_eq!(
         UpstreamProvider::OpenAiCompatible.attestation_scope(),
         PerModel
     );
     assert_eq!(UpstreamProvider::AciService.attestation_scope(), PerModel);
-    assert!(UpstreamProvider::Tinfoil
-        .attestation_scope()
-        .is_per_router());
-    assert!(!UpstreamProvider::NearAi.attestation_scope().is_per_router());
+    assert!(UpstreamProvider::NearAi.attestation_scope().is_per_router());
     assert!(!UpstreamProvider::Chutes.attestation_scope().is_per_router());
+}
+
+#[test]
+fn parse_phala_direct_validates_only_compose_subjects() {
+    let mut config = serde_json::json!({
+        "name": "phala",
+        "provider": "phala-direct",
+        "base_url": "https://model.example",
+        "models": {"public-model": "upstream-model"}
+    });
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    config["accepted_subjects"] = serde_json::json!([]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let foreign_subject = format!("app-id:0x{}", "ab".repeat(20));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    let pin = format!("dstack-compose:sha256:{}", "ab".repeat(32));
+    config["accepted_subjects"] = serde_json::json!([foreign_subject, pin]);
+    assert!(parse_config_text(&format!("[{config}]")).is_ok());
+
+    for malformed in ["dstack-compose:sha256:bad", "dstack-compose:"] {
+        config["accepted_subjects"] = serde_json::json!([foreign_subject, pin, malformed]);
+        let error = parse_config_text(&format!("[{config}]")).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("dstack-compose:sha256:<64 lowercase hex>"));
+    }
+}
+
+#[test]
+fn parse_armet_ai_requires_a_well_formed_measurement_pin() {
+    let pin = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+    let config_with = |subjects: &str, base_url: &str| {
+        format!(
+            r#"[{{
+              "name": "tdx-a",
+              "provider": "armet-ai",
+              "base_url": "{base_url}",
+              "models": {{"public-model": "upstream-model"}}{subjects}
+            }}]"#
+        )
+    };
+
+    let ok = parse_config_text(&config_with(
+        &format!(r#", "accepted_subjects": ["{pin}"]"#),
+        "https://model.example",
+    ))
+    .expect("a pinned HTTPS armet-ai upstream is valid");
+    assert_eq!(ok[0].provider, UpstreamProvider::ArmetAi);
+    assert_eq!(ok[0].accepted_subjects, Some(vec![pin.clone()]));
+
+    // An unpinned TD must never load: the bridge would otherwise have nothing
+    // to compare the measured MRTD/RTMRs against.
+    for subjects in ["", r#", "accepted_subjects": []"#] {
+        let err = parse_config_text(&config_with(subjects, "https://model.example"))
+            .expect_err("armet-ai without a pin must be rejected");
+        assert!(
+            err.to_string()
+                .contains("requires at least one accepted_subjects"),
+            "{subjects:?}: {err}"
+        );
+    }
+
+    for bad in [
+        "app-id:0xabc".to_string(),
+        format!("tdx-measurement:sha256:{}", "AB".repeat(32)),
+        format!("tdx-measurement:sha256:{}", "ab".repeat(31)),
+        format!("tdx-measurement:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(
+            &format!(r#", "accepted_subjects": ["{pin}", "{bad}"]"#),
+            "https://model.example",
+        ))
+        .expect_err("malformed armet-ai pin must be rejected");
+        assert!(
+            err.to_string().contains("must be tdx-measurement:sha256:"),
+            "{bad:?}: {err}"
+        );
+    }
+
+    for base_url in [
+        "http://model.example",
+        "https://user@model.example",
+        "https://model.example/v1",
+    ] {
+        let err = parse_config_text(&config_with(
+            &format!(r#", "accepted_subjects": ["{pin}"]"#),
+            base_url,
+        ))
+        .expect_err("armet-ai must reject an origin the verifier cannot bind");
+        assert!(
+            err.to_string().contains("requires a root HTTPS base_url"),
+            "{base_url:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn tinfoil_release_pins_are_opt_in_and_must_be_well_formed() {
+    let config_with = |subjects: serde_json::Value| {
+        serde_json::json!([{
+            "name": "tinfoil",
+            "provider": "tinfoil",
+            "base_url": "https://inference.tinfoil.sh",
+            "models": {"public-model": "upstream-model"},
+            "accepted_subjects": subjects,
+        }])
+        .to_string()
+    };
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    for subjects in [
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!(["app-id:0xabc"]),
+        serde_json::json!(["app-id:0xabc", pin]),
+    ] {
+        parse_config_text(&config_with(subjects)).expect("valid Tinfoil configuration");
+    }
+    for bad in [
+        "tinfoil-release:sha256:ab".to_string(),
+        format!("tinfoil-release:sha256:{}", "AB".repeat(32)),
+        format!("tinfoil-release:sha384:{}", "ab".repeat(32)),
+    ] {
+        let err = parse_config_text(&config_with(serde_json::json!([pin, bad])))
+            .expect_err("a malformed Tinfoil release pin must be rejected");
+        assert!(err.to_string().contains("tinfoil-release:sha256:"));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tinfoil_release_pin_reaches_bridge_from_config() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    const TEST_DIR: &str = "ACI_TINFOIL_PIN_TEST_DIR";
+    if let Some(directory) = std::env::var_os(TEST_DIR) {
+        let manager = UpstreamConfigManager::load(
+            PathBuf::from(directory).join("upstreams.json"),
+            runtime_options(UpstreamVerifierMode::None),
+        )
+        .unwrap();
+        let event = manager
+            .verifier()
+            .verify(UpstreamVerificationRequest {
+                upstream_name: "tinfoil".into(),
+                url_origin: Some("https://tinfoil.example".into()),
+                model_id: "upstream".into(),
+                forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+                required: true,
+            })
+            .await;
+        assert_eq!(
+            event.failure,
+            crate::aci::receipt::VerificationFailure::ProvenanceNotAccepted
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let pin = format!("tinfoil-release:sha256:{}", "ab".repeat(32));
+    let mut config =
+        test_upstream_config("tinfoil", UpstreamProvider::Tinfoil, "public", "upstream");
+    config.accepted_subjects = Some(vec!["app-id:0xabc".into(), pin.clone()]);
+    fs::write(
+        directory.path().join("upstreams.json"),
+        serde_json::to_vec(&[config]).unwrap(),
+    )
+    .unwrap();
+    let uv = directory.path().join("uv");
+    fs::write(
+        &uv,
+        r#"#!/bin/sh
+set -e
+/bin/cat > "$ACI_TINFOIL_PIN_TEST_DIR/bridge-request.json"
+printf '%s' '{"result":"failed","failure":"provenance_not_accepted"}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&uv, fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Isolate PATH so parallel tests still use the real bridge command.
+    let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .env(TEST_DIR, directory.path())
+        .env("PATH", directory.path())
+        .args([
+            "--exact",
+            "aggregator::upstream_config::tests::tinfoil_release_pin_reaches_bridge_from_config",
+        ])
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let request: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("bridge-request.json")).unwrap())
+            .unwrap();
+    assert_eq!(request["provider"], "tinfoil");
+    let option = format!("tinfoil_accepted_subject:{pin}");
+    assert_eq!(
+        request["provider_options"],
+        serde_json::json!({(option): "true"})
+    );
 }
 
 #[test]
@@ -137,19 +392,157 @@ fn parse_secret_ai_rejects_invalid_origins() {
     }
 }
 
+#[test]
+fn parse_config_forbids_privatemode_credentials_and_keeps_deployment_fields_static() {
+    let valid_text = r#"[{
+          "name": "privatemode",
+          "provider": "privatemode",
+          "base_url": "http://privatemode-proxy:8080",
+          "models": {"public-model": "provider-model"}
+        }]"#;
+    let valid = parse_config_text(valid_text).expect("Privatemode route should parse");
+    assert_eq!(valid[0].provider, UpstreamProvider::Privatemode);
+
+    for (field, expected) in [
+        (
+            r#""bearer_token": "must-not-cross-the-internal-hop""#,
+            "forbids bearer_token",
+        ),
+        (r#""path": "/v1/models""#, "forbids path"),
+        (
+            r#""privatemode_manifest_path": "/run/privatemode/manifest.json""#,
+            "unknown field",
+        ),
+    ] {
+        let candidate = valid_text.replace(
+            r#""models": {"public-model": "provider-model"}"#,
+            &format!(r#""models": {{"public-model": "provider-model"}}, {field}"#),
+        );
+        let err = parse_config_text(&candidate).expect_err("field must be rejected");
+        assert!(err.to_string().contains(expected), "{field}: {err}");
+    }
+}
+
+#[test]
+fn parse_zero_g_requires_router_key_chain_rpc_contract_and_boot_chain() {
+    let valid_text = r#"[{
+          "name": "zero-g",
+          "provider": "0g-private-computer",
+          "base_url": "https://router-api-cloud.0g.ai",
+          "bearer_token": "zg-key",
+          "zg_chain_rpc_url": "https://evmrpc.0g.ai",
+          "zg_serving_contract": "0x47340d900bdFec2BD393c626E12ea0656F938d84",
+          "accepted_subjects": ["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"],
+          "models": {"glm-5.3": "glm-5.3"}
+        }]"#;
+    let valid = parse_config_text(valid_text).expect("0G route should parse");
+    assert_eq!(valid[0].provider, UpstreamProvider::ZeroGPrivateComputer);
+    // The RPC URL may embed a credential, so the admin view omits it.
+    assert!(!serde_json::to_string(&valid[0].redacted())
+        .unwrap()
+        .contains("evmrpc"));
+    let state = build_state(&valid, &runtime_options(UpstreamVerifierMode::None))
+        .expect("0G route should build");
+    assert!(state.verifier.is_some());
+
+    for (from, to) in [
+        (
+            "https://router-api-cloud.0g.ai",
+            "http://router-api-cloud.0g.ai",
+        ),
+        (r#""bearer_token": "zg-key","#, ""),
+        ("https://evmrpc.0g.ai", "http://evmrpc.0g.ai"),
+        ("0x47340d900bdFec2BD393c626E12ea0656F938d84", "0x47340d"),
+        (r#""models""#, r#""path": "/v1/messages", "models""#),
+        (r#""0g-private-computer""#, r#""openai-compatible""#),
+        (
+            r#"["tdx-boot-chain:sha256:536a92e7c6204087b2c2910e4c17083b7a9f8b3aa455b6bc14c6df3df2f1a7fc"]"#,
+            "[]",
+        ),
+        ("tdx-boot-chain:", "tdx-measurement:"),
+    ] {
+        assert!(
+            parse_config_text(&valid_text.replace(from, to)).is_err(),
+            "{to}"
+        );
+    }
+}
+
+#[test]
+fn privatemode_route_must_match_the_static_proxy_deployment() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest_log_path = directory.path().join("manifest-log.txt");
+    let credential_path = manifest_log_path.with_extension("credential");
+    std::fs::write(&credential_path, b"secret").unwrap();
+    let deployment = Arc::new(
+        crate::aci::upstream::PrivatemodeProxyDeployment::new(
+            "http://privatemode-proxy:8080",
+            &manifest_log_path,
+            &credential_path,
+            crate::aci::digest::sha256_hex(b"secret"),
+            format!("sha256:{}", "22".repeat(32)),
+        )
+        .unwrap(),
+    );
+
+    let mut route = test_upstream_config(
+        "privatemode",
+        UpstreamProvider::Privatemode,
+        "public-model",
+        "provider-model",
+    );
+    route.base_url = deployment.base_url().to_string();
+    let mut options = runtime_options(UpstreamVerifierMode::None);
+
+    let err = match build_state(&[route.clone()], &options) {
+        Ok(_) => panic!("Privatemode route without static deployment must fail"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("requires static privatemode_proxy"));
+
+    options.privatemode_proxy = Some(deployment);
+    build_state(&[route.clone()], &options)
+        .expect("matching static Privatemode deployment should build");
+    route.base_url = "http://different-proxy:8080".to_string();
+    let err = match build_state(&[route], &options) {
+        Ok(_) => panic!("mutable route must not redirect the static proxy"),
+        Err(err) => err,
+    };
+    assert!(err
+        .to_string()
+        .contains("does not match static proxy endpoint"));
+}
+
+fn runtime_options(verifier_mode: UpstreamVerifierMode) -> UpstreamRuntimeOptions {
+    UpstreamRuntimeOptions {
+        max_buffered_response_bytes: crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+        verifier_mode,
+        accepted_subjects: Vec::new(),
+        accepted_image_digests: Vec::new(),
+        accepted_dstack_kms_root_public_keys: Vec::new(),
+        pccs_url: None,
+        verifier_cache_seconds: 300,
+        connect_timeout_seconds: 10,
+        read_timeout_seconds: 600,
+        verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
+    }
+}
+
 #[async_trait]
 impl UpstreamVerifier for CountingVerifier {
     async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         self.verifications.fetch_add(1, Ordering::SeqCst);
-        UpstreamVerifiedEvent {
-            upstream_name: request.upstream_name,
-            model_id: request.model_id,
-            url_origin: request.url_origin,
-            verifier_id: "counting-verifier/v1".to_string(),
-            result: VerificationResult::Verified,
-            required: request.required,
-            ..Default::default()
-        }
+        crate::aci::verifier::PreverifiedUpstreamVerifier::new("counting-verifier/v1")
+            .verify(request)
+            .await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        crate::aci::verifier::PreverifiedUpstreamVerifier::new("counting-verifier/v1")
+            .cached(request)
     }
 
     fn invalidate(&self, _request: &UpstreamVerificationRequest) {
@@ -237,17 +630,7 @@ fn global_aci_service_does_not_require_policy_for_plain_openai_compatible_upstre
             "secret-model",
         ),
     ];
-    let options = UpstreamRuntimeOptions {
-        verifier_mode: UpstreamVerifierMode::AciService,
-        accepted_subjects: Vec::new(),
-        accepted_image_digests: Vec::new(),
-        accepted_dstack_kms_root_public_keys: Vec::new(),
-        pccs_url: None,
-        verifier_cache_seconds: 300,
-        connect_timeout_seconds: 10,
-        read_timeout_seconds: 600,
-        verifier_request_timeout_seconds: 60,
-    };
+    let options = runtime_options(UpstreamVerifierMode::AciService);
 
     let verifier = build_verifier(&config, &options, &ProviderSessionRegistry::default())
         .expect("plain OpenAI-compatible upstreams should not require ACI service policy");
@@ -283,73 +666,635 @@ async fn dynamic_verifier_forwards_invalidation_to_current_verifier() {
     assert_eq!(invalidations.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn prewarm_verification_deduplicates_upstream_models() {
-    let verifications = Arc::new(AtomicUsize::new(0));
-    let invalidations = Arc::new(AtomicUsize::new(0));
-    let config = vec![UpstreamConfig {
-        name: "provider-a".to_string(),
-        // Per-model provider (not a router): two public models sharing one
-        // upstream model dedup to one target; a third yields a second.
-        provider: UpstreamProvider::PhalaDirect,
-        base_url: "https://provider-a.example/".to_string(),
-        path: None,
-        models: BTreeMap::from([
-            ("public-a".to_string(), "upstream-a".to_string()),
-            ("public-b".to_string(), "upstream-a".to_string()),
-            ("public-c".to_string(), "upstream-c".to_string()),
-        ]),
-        bearer_token: None,
-        basic_auth: false,
-        accepted_subjects: None,
-        accepted_image_digests: None,
-        accepted_dstack_kms_root_public_keys: None,
-        pccs_url: None,
-        verifier_cache_seconds: None,
-        connect_timeout_seconds: None,
-        read_timeout_seconds: None,
-        verifier_request_timeout_seconds: None,
-        verification_refresh_seconds: None,
-        session_refresh_seconds: None,
-        chutes_e2ee_api_base: None,
-        chutes_chute_ids: None,
-        chutes_e2ee_discovery_rounds: None,
-        chutes_e2ee_discovery_interval_seconds: None,
-    }];
-    let state = Arc::new(RwLock::new(Arc::new(ConfiguredUpstreams {
-        config,
-        config_digest: "fixture".to_string(),
-        backend: Arc::new(EmptyUpstreamBackend),
-        verifier: Some(Arc::new(CountingVerifier {
-            verifications: verifications.clone(),
-            invalidations,
-        })),
-        sessions: Arc::new(ProviderSessionRegistry::default()),
-    })));
-    let manager = UpstreamConfigManager {
-        path: PathBuf::from("/tmp/upstreams.json"),
-        options: UpstreamRuntimeOptions {
-            verifier_mode: UpstreamVerifierMode::None,
-            accepted_subjects: Vec::new(),
-            accepted_image_digests: Vec::new(),
-            accepted_dstack_kms_root_public_keys: Vec::new(),
-            pccs_url: None,
-            verifier_cache_seconds: 300,
-            connect_timeout_seconds: 10,
-            read_timeout_seconds: 600,
-            verifier_request_timeout_seconds: 60,
-        },
-        state,
+#[derive(Default)]
+struct RefreshObservations {
+    starts: HashMap<(String, String), Vec<(Instant, bool)>>,
+    replacements: Vec<(Instant, Instant)>,
+    active: HashMap<String, usize>,
+    peak: HashMap<String, usize>,
+    global_peak: usize,
+}
+
+struct FakeVerifier {
+    ttl: Duration,
+    latency: Duration,
+    service_cache: bool,
+    failed_model: Option<(String, Duration)>,
+    fail: std::sync::atomic::AtomicBool,
+    cache: Mutex<HashMap<String, Instant>>,
+    observations: Arc<Mutex<RefreshObservations>>,
+}
+
+impl FakeVerifier {
+    fn new(ttl: u64, latency: u64) -> Self {
+        Self {
+            ttl: Duration::from_secs(ttl),
+            latency: Duration::from_secs(latency),
+            service_cache: false,
+            failed_model: None,
+            fail: std::sync::atomic::AtomicBool::new(false),
+            cache: Mutex::new(HashMap::new()),
+            observations: Arc::new(Mutex::new(RefreshObservations::default())),
+        }
+    }
+
+    fn key(&self, request: &UpstreamVerificationRequest) -> String {
+        if self.service_cache {
+            String::new()
+        } else {
+            request.model_id.clone()
+        }
+    }
+
+    fn event(
+        request: &UpstreamVerificationRequest,
+        result: VerificationResult,
+    ) -> UpstreamVerifiedEvent {
+        UpstreamVerifiedEvent {
+            upstream_name: request.upstream_name.clone(),
+            model_id: request.model_id.clone(),
+            url_origin: request.url_origin.clone(),
+            result,
+            ..Default::default()
+        }
+    }
+}
+
+struct ActiveRefresh<'a>(&'a FakeVerifier, String);
+impl Drop for ActiveRefresh<'_> {
+    fn drop(&mut self) {
+        *self
+            .0
+            .observations
+            .lock()
+            .unwrap()
+            .active
+            .get_mut(&self.1)
+            .unwrap() -= 1;
+    }
+}
+
+#[async_trait]
+impl UpstreamVerifier for FakeVerifier {
+    async fn verify(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        if let Some(event) = self.cached(&request) {
+            return event;
+        }
+        self.refresh(request).await
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.cache_remaining(request)
+            .map(|_| Self::event(request, VerificationResult::Verified))
+    }
+
+    fn cache_remaining(&self, request: &UpstreamVerificationRequest) -> Option<Duration> {
+        self.cache
+            .lock()
+            .unwrap()
+            .get(&self.key(request))?
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
+        let started = Instant::now();
+        let cold = self.cache_remaining(&request).is_none();
+        {
+            let mut observations = self.observations.lock().unwrap();
+            observations
+                .starts
+                .entry((request.upstream_name.clone(), request.model_id.clone()))
+                .or_default()
+                .push((started, cold));
+            let active = observations
+                .active
+                .entry(request.upstream_name.clone())
+                .or_default();
+            *active += 1;
+            let active = *active;
+            let peak = observations
+                .peak
+                .entry(request.upstream_name.clone())
+                .or_default();
+            *peak = (*peak).max(active);
+            observations.global_peak = observations
+                .global_peak
+                .max(observations.active.values().sum());
+        }
+        let _active = ActiveRefresh(self, request.upstream_name.clone());
+        let failed_model = self
+            .failed_model
+            .as_ref()
+            .filter(|(model, _)| *model == request.model_id);
+        tokio::time::sleep(failed_model.map_or(self.latency, |(_, latency)| *latency)).await;
+        let result = if self.fail.load(Ordering::SeqCst) || failed_model.is_some() {
+            VerificationResult::Failed
+        } else {
+            let previous_expiry = self
+                .cache
+                .lock()
+                .unwrap()
+                .insert(self.key(&request), started + self.ttl);
+            if let Some(expiry) = previous_expiry {
+                self.observations
+                    .lock()
+                    .unwrap()
+                    .replacements
+                    .push((Instant::now(), expiry));
+            }
+            VerificationResult::Verified
+        };
+        Self::event(&request, result)
+    }
+}
+
+fn refresh_test_manager(
+    config: Vec<UpstreamConfig>,
+    verifier: Arc<dyn UpstreamVerifier>,
+) -> Arc<UpstreamConfigManager> {
+    let options = runtime_options(UpstreamVerifierMode::None);
+    let mut state = build_state(&config, &options).unwrap();
+    state.verifier = Some(verifier);
+    Arc::new(UpstreamConfigManager {
+        path: PathBuf::from("/unused/upstreams.json"),
+        options,
+        state: Arc::new(RwLock::new(Arc::new(state))),
         update_lock: Arc::new(Mutex::new(())),
-        session_sink: Arc::new(RwLock::new(None)),
-    };
+        reload: watch::channel(()).0,
+    })
+}
 
-    let results = manager.prewarm_upstream_verification().await;
+async fn advance(seconds: u64) {
+    for _ in 0..seconds {
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+    }
+}
 
-    assert_eq!(results.len(), 2);
-    assert_eq!(verifications.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        results[0].url_origin.as_deref(),
-        Some("https://provider-a.example")
+fn start_refresh(
+    manager: Arc<UpstreamConfigManager>,
+    permits: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(manager.run_verification_refresh(Arc::new(Semaphore::new(permits))))
+}
+
+async fn stop_refresh(task: tokio::task::JoinHandle<()>) {
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::task::yield_now().await;
+}
+
+async fn run_refresh(
+    config: Vec<UpstreamConfig>,
+    verifier: Arc<dyn UpstreamVerifier>,
+    seconds: u64,
+) {
+    let task = start_refresh(refresh_test_manager(config, verifier), 4);
+    tokio::task::yield_now().await;
+    advance(seconds).await;
+    stop_refresh(task).await;
+}
+
+fn starts<'a>(o: &'a RefreshObservations, upstream: &str, model: &str) -> &'a [(Instant, bool)] {
+    &o.starts[&(upstream.to_string(), model.to_string())]
+}
+
+#[tokio::test(start_paused = true)]
+async fn eleven_sequential_targets_replace_caches_before_expiry() {
+    let mut cfg = test_upstream_config(
+        "provider",
+        UpstreamProvider::PhalaDirect,
+        "public-00",
+        "model-00",
     );
+    for i in 1..11 {
+        cfg.models
+            .insert(format!("public-{i:02}"), format!("model-{i:02}"));
+    }
+    cfg.models
+        .insert("duplicate".to_string(), "model-00".to_string());
+    let verifier = Arc::new(FakeVerifier::new(300, 24));
+    run_refresh(vec![cfg], verifier.clone(), 1800).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(observations.starts.len(), 11);
+    assert_eq!(observations.peak["provider"], 1);
+    let mut total = 0;
+    for starts in observations.starts.values() {
+        assert!(starts.len() >= 6);
+        assert!(starts[1..].iter().all(|(_, cold)| !cold));
+        total += starts.len();
+    }
+    assert!(total <= 1800_u64.div_ceil(250) as usize * 11 + 11);
+    assert!(!observations.replacements.is_empty());
+    for (completed, previous_expiry) in &observations.replacements {
+        assert!(
+            completed < previous_expiry,
+            "replacement completion relative to previous expiry: {:?}",
+            completed.checked_duration_since(*previous_expiry)
+        );
+    }
+    assert!(verifier
+        .cache
+        .lock()
+        .unwrap()
+        .values()
+        .all(|expiry| Instant::now() < *expiry));
+}
+
+#[tokio::test(start_paused = true)]
+async fn twenty_upstreams_share_four_background_permits_without_early_refreshes() {
+    let observations = Arc::new(Mutex::new(RefreshObservations::default()));
+    let mut routing = crate::aci::verifier::RoutingUpstreamVerifier::new();
+    let mut config: Vec<_> = (0..20)
+        .map(|i| {
+            let cfg = test_upstream_config(
+                &format!("provider-{i}"),
+                UpstreamProvider::PhalaDirect,
+                "public",
+                "model",
+            );
+            let mut verifier = FakeVerifier::new(300, 25);
+            verifier.observations = observations.clone();
+            routing = std::mem::take(&mut routing).add_route(
+                &cfg.name,
+                &cfg.base_url,
+                Arc::new(verifier),
+            );
+            cfg
+        })
+        .collect();
+    let plain = test_upstream_config(
+        "plain",
+        UpstreamProvider::OpenAiCompatible,
+        "public",
+        "model",
+    );
+    let mut plain_verifier = FakeVerifier::new(300, 25);
+    plain_verifier.observations = observations.clone();
+    routing = routing.add_route(&plain.name, &plain.base_url, Arc::new(plain_verifier));
+    config.push(plain);
+    run_refresh(config, Arc::new(routing), 900).await;
+    let observations = observations.lock().unwrap();
+    assert_eq!(observations.starts.len(), 20);
+    assert!(!observations
+        .starts
+        .keys()
+        .any(|(upstream, _)| upstream == "plain"));
+    assert_eq!(observations.global_peak, 4);
+    assert!(observations.peak.values().all(|peak| *peak == 1));
+    assert!(observations.active.values().all(|active| *active == 0));
+    for starts in observations.starts.values() {
+        assert!(starts.len() >= 3);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(240)));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn hot_reload_aborts_old_tasks_and_refreshes_new_verifiers_immediately() {
+    let mut cfg =
+        test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+    let old = Arc::new(FakeVerifier::new(300, 25));
+    let manager = refresh_test_manager(vec![cfg.clone()], old.clone());
+    let task = start_refresh(manager.clone(), 4);
+    tokio::task::yield_now().await;
+    advance(245).await; // An old verification is in flight.
+    let changed_at = Instant::now();
+    cfg.verifier_cache_seconds = Some(60);
+    cfg.verifier_request_timeout_seconds = Some(10);
+    let new = Arc::new(FakeVerifier::new(60, 1));
+    let mut state = build_state(&[cfg], &manager.options).unwrap();
+    state.verifier = Some(new.clone());
+    manager.install_state(Arc::new(state));
+    tokio::task::yield_now().await;
+    advance(201).await;
+    stop_refresh(task).await;
+    let old = old.observations.lock().unwrap();
+    assert_eq!(starts(&old, "provider", "model").len(), 2);
+    assert_eq!(old.active["provider"], 0);
+    let new = new.observations.lock().unwrap();
+    let starts = starts(&new, "provider", "model");
+    assert_eq!(starts[0].0, changed_at);
+    assert_eq!(starts.len(), 5);
+    assert!(starts
+        .windows(2)
+        .all(|pair| pair[1].0 - pair[0].0 == Duration::from_secs(50)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_refresh_retries_at_expiry_then_once_per_period() {
+    let cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+    let verifier = Arc::new(FakeVerifier::new(300, 0));
+    let request = verification_targets(std::slice::from_ref(&cfg))[0].request();
+    let epoch = Instant::now();
+    let task = start_refresh(refresh_test_manager(vec![cfg], verifier.clone()), 4);
+    tokio::task::yield_now().await;
+    advance(1).await;
+    verifier.fail.store(true, Ordering::SeqCst);
+    advance(239).await;
+    assert!(verifier.cached(&request).is_some());
+    advance(59).await;
+    assert!(verifier.cached(&request).is_some());
+    advance(1).await;
+    assert!(verifier.cached(&request).is_none());
+    advance(481).await;
+    stop_refresh(task).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(
+        starts(&observations, "provider", "model")
+            .iter()
+            .map(|(time, _)| (*time - epoch).as_secs())
+            .collect::<Vec<_>>(),
+        [0, 240, 300, 540, 780]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_failed_target_does_not_starve_a_healthy_sibling() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
+    cfg.models.insert("b".to_string(), "b".to_string());
+    let mut verifier = FakeVerifier::new(300, 1);
+    verifier.failed_model = Some(("a".to_string(), Duration::from_secs(240)));
+    let verifier = Arc::new(verifier);
+    let epoch = Instant::now();
+    run_refresh(vec![cfg], verifier.clone(), 1800).await;
+    let observations = verifier.observations.lock().unwrap();
+    let healthy = starts(&observations, "provider", "b");
+    assert!(healthy.len() >= 2);
+    assert!(healthy
+        .windows(2)
+        .all(|pair| pair[1].0 - pair[0].0 < Duration::from_secs(300)));
+    assert!(starts(&observations, "provider", "a").len() >= 3);
+    assert!(
+        healthy[1..].iter().all(|(_, cold)| !cold),
+        "healthy starts (seconds, cold): {:?}",
+        healthy
+            .iter()
+            .map(|(time, cold)| ((*time - epoch).as_secs(), *cold))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn aci_service_models_share_one_verification_per_period() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::AciService, "a", "x");
+    cfg.accepted_subjects = Some(vec!["test-subject".to_string()]);
+    let root = k256::ecdsa::SigningKey::from_slice(&[1; 32]).unwrap();
+    cfg.accepted_dstack_kms_root_public_keys = Some(vec![hex::encode(
+        root.verifying_key().to_encoded_point(false).as_bytes(),
+    )]);
+    cfg.models.extend([
+        ("b".to_string(), "y".to_string()),
+        ("c".to_string(), "z".to_string()),
+    ]);
+    let mut verifier = FakeVerifier::new(300, 1);
+    verifier.service_cache = true;
+    let verifier = Arc::new(verifier);
+    run_refresh(vec![cfg], verifier.clone(), 721).await;
+    let observations = verifier.observations.lock().unwrap();
+    let starts: Vec<_> = observations.starts.values().flatten().collect();
+    assert_eq!(starts.len(), 4);
+    assert_eq!(observations.peak["provider"], 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
+    for (cache, ttl, latency, period) in [
+        (300, 300, 25, 10),
+        (300, 30, 0, 240),
+        (30, 30, 40, 30),
+        (300, 0, 0, 240),
+    ] {
+        let mut cfg =
+            test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+        cfg.verifier_cache_seconds = Some(cache);
+        cfg.verification_refresh_seconds = Some(period);
+        let verifier = Arc::new(FakeVerifier::new(ttl, latency));
+        run_refresh(vec![cfg], verifier.clone(), 1800).await;
+        let observations = verifier.observations.lock().unwrap();
+        let starts = starts(&observations, "provider", "model");
+        assert!(starts.len() >= 3, "expired successes must remain scheduled");
+        assert!(starts.len() <= 1800 / period as usize + 1);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(period)));
+        if ttl == 0 {
+            assert_eq!(starts.len(), 1800 / period as usize + 1);
+            assert!(starts.iter().all(|(_, cold)| *cold));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn refresh_configuration_controls_actual_start_times() {
+    for (timeout, refresh, period) in [(None, None, 240), (Some(90), None, 210), (None, Some(0), 0)]
+    {
+        let mut cfg =
+            test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+        cfg.verifier_request_timeout_seconds = timeout;
+        cfg.verification_refresh_seconds = refresh;
+        let verifier = Arc::new(FakeVerifier::new(300, 0));
+        run_refresh(vec![cfg], verifier.clone(), 600).await;
+        let observations = verifier.observations.lock().unwrap();
+        if period == 0 {
+            assert!(observations.starts.is_empty());
+        } else {
+            let starts = starts(&observations, "provider", "model");
+            assert_eq!(starts.len(), 600 / period as usize + 1);
+            assert!(starts
+                .windows(2)
+                .all(|pair| pair[1].0 - pair[0].0 == Duration::from_secs(period)));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn permit_wait_reselects_the_most_urgent_sibling() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
+    cfg.models.insert("b".to_string(), "b".to_string());
+    let verifier = Arc::new(FakeVerifier::new(300, 25));
+    let permits = Arc::new(Semaphore::new(1));
+    let manager = refresh_test_manager(vec![cfg], verifier.clone());
+    let task = tokio::spawn(manager.run_verification_refresh(permits.clone()));
+    tokio::task::yield_now().await;
+    advance(50).await; // Both targets have completed their initial attempt.
+    let held = permits.acquire_owned().await.unwrap();
+    advance(215).await; // A is queued; B now also meets its minimum start interval.
+    verifier
+        .cache
+        .lock()
+        .unwrap()
+        .insert("b".to_string(), Instant::now() + Duration::from_secs(10));
+    drop(held);
+    advance(1).await;
+    stop_refresh(task).await;
+    let observations = verifier.observations.lock().unwrap();
+    assert_eq!(starts(&observations, "provider", "a").len(), 1);
+    assert_eq!(starts(&observations, "provider", "b").len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn cache_ttl_at_or_below_timeout_has_bounded_failed_retries() {
+    for ttl in [30, 60] {
+        let mut cfg =
+            test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
+        cfg.verifier_cache_seconds = Some(ttl);
+        let verifier = Arc::new(FakeVerifier::new(ttl, 0));
+        verifier.fail.store(true, Ordering::SeqCst);
+        run_refresh(vec![cfg], verifier.clone(), 10).await;
+        let observations = verifier.observations.lock().unwrap();
+        let starts = starts(&observations, "provider", "model");
+        assert!(starts.len() <= 11);
+        assert!(starts
+            .windows(2)
+            .all(|pair| pair[1].0 - pair[0].0 >= Duration::from_secs(1)));
+    }
+}
+
+#[test]
+fn current_requests_exclude_plain_routes_even_with_a_global_verifier() {
+    let plain = test_upstream_config("plain", UpstreamProvider::OpenAiCompatible, "shared", "m");
+    let tee = test_upstream_config("tee", UpstreamProvider::PhalaDirect, "shared", "m");
+    let verifier = Arc::new(crate::aci::verifier::StaticUpstreamVerifier::new(
+        UpstreamVerifiedEvent {
+            result: VerificationResult::Verified,
+            ..Default::default()
+        },
+    ));
+    assert!(verifier
+        .cached(&verification_targets(std::slice::from_ref(&plain))[0].request())
+        .is_some());
+    let manager = refresh_test_manager(vec![plain, tee], verifier);
+    for all_routes in [false, true] {
+        let requests = manager.current_verification_requests(None, None, all_routes);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].upstream_name, "tee");
+    }
+    assert!(manager
+        .current_verification_requests(Some("shared"), None, false)
+        .is_empty());
+    assert_eq!(
+        manager
+            .current_verification_requests(Some("shared"), None, true)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn streaming_usage_config_is_validated_and_visible_without_secrets() {
+    let mut config = test_upstream_config("endpoint", UpstreamProvider::OpenAiCompatible, "a", "b");
+    assert!(serde_json::to_value(config.redacted())
+        .unwrap()
+        .get("streaming_usage")
+        .is_none());
+    config.streaming_usage = Some(StreamingUsage::Continuous);
+    let serialized = serde_json::to_string(&vec![config.clone()]).unwrap();
+    let parsed = parse_config_text(&serialized).unwrap();
+    assert_eq!(parsed[0].streaming_usage, Some(StreamingUsage::Continuous));
+    assert_eq!(
+        serde_json::to_value(config.redacted()).unwrap()["streaming_usage"],
+        "continuous"
+    );
+    assert!(parse_config_text(&serialized.replace("continuous", "automatic")).is_err());
+    config.path = Some("/v1/messages".into());
+    assert!(super::validation::validate_config(&[config]).is_err());
+}
+
+#[test]
+fn audio_transcription_config_rejects_unsupported_adapters() {
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::ZeroGPrivateComputer,
+        UpstreamProvider::Anthropic,
+    ] {
+        let mut config = test_upstream_config("audio", provider, "whisper", "whisper");
+        config.path = Some("/v1/audio/transcriptions".into());
+        assert!(validate_config(&[config]).is_err());
+    }
+}
+
+#[test]
+fn near_audio_always_requests_verbose_duration_without_affecting_json_requests() {
+    use crate::aci::upstream::UpstreamRequest;
+    use crate::middleware::media::{ImageFile, ImageFormat, MediaForm};
+    use bytes::Bytes;
+    let transcription = MediaForm::Transcription {
+        file: Bytes::from_static(b"audio"),
+        extension: "wav".into(),
+    };
+    for (provider, form, expected_format) in [
+        (
+            UpstreamProvider::NearAi,
+            Some(transcription.clone()),
+            "verbose_json",
+        ),
+        (UpstreamProvider::NearAi, None, "json"),
+        (
+            UpstreamProvider::OpenAiCompatible,
+            Some(transcription),
+            "json",
+        ),
+        (
+            UpstreamProvider::NearAi,
+            Some(MediaForm::ImageEdit {
+                images: vec![ImageFile {
+                    data: Bytes::from_static(b"\xff\xd8\xffimage"),
+                    format: ImageFormat::Jpeg,
+                }],
+                overlay: None,
+            }),
+            "json",
+        ),
+    ] {
+        let config = test_upstream_config("audio", provider, "whisper", "upstream-whisper");
+        let state = build_state(&[config], &runtime_options(UpstreamVerifierMode::None)).unwrap();
+        let prepared = state
+            .backend
+            .prepare(UpstreamRequest {
+                body: Bytes::from_static(br#"{"model":"whisper","response_format":"json"}"#),
+                path: Some(
+                    if matches!(form, Some(MediaForm::ImageEdit { .. })) {
+                        "/v1/images/edits"
+                    } else {
+                        "/v1/audio/transcriptions"
+                    }
+                    .into(),
+                ),
+                form: form.map(Arc::new),
+                ..Default::default()
+            })
+            .unwrap();
+        let fields: serde_json::Value = serde_json::from_slice(&prepared.request.body).unwrap();
+        assert_eq!(fields["response_format"], expected_format);
+    }
+}
+
+#[test]
+fn cache_salt_provider_mapping_uses_stable_serde_tags() {
+    use crate::aci::upstream::CacheSaltField;
+    for provider in [
+        UpstreamProvider::Chutes,
+        UpstreamProvider::Privatemode,
+        UpstreamProvider::Tinfoil,
+        UpstreamProvider::PhalaDirect,
+        UpstreamProvider::NearAi,
+        UpstreamProvider::ArmetAi,
+        UpstreamProvider::ZeroGPrivateComputer,
+    ] {
+        let tag = match builders::provider_cache_salt_field(provider).unwrap() {
+            CacheSaltField::CacheSalt(tag) | CacheSaltField::UserCacheSecret(tag) => tag,
+        };
+        assert_eq!(serde_json::to_value(provider).unwrap(), tag);
+    }
+    for provider in [
+        UpstreamProvider::OpenAiCompatible,
+        UpstreamProvider::Anthropic,
+        UpstreamProvider::AciService,
+        UpstreamProvider::SecretAi,
+    ] {
+        assert!(builders::provider_cache_salt_field(provider).is_none());
+    }
 }

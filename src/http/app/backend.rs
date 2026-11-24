@@ -11,23 +11,22 @@ use futures_util::StreamExt;
 use rand::RngCore;
 use serde_json::Value;
 
-use crate::aci::upstream::UpstreamError;
+use crate::aci::upstream::{read_buffered_upstream_response, UpstreamError};
 use crate::aggregator::service::{
     AciService, ChatCompletionRequest, E2eeRequestContext, E2eeResponseInfo, GatewayRequestContext,
-    ReceiptOwner, ServiceError, StreamingForwardResult, UpstreamVerificationError,
+    ReceiptOwner, ServiceError, StreamingForwardResult,
 };
 use crate::aggregator::upstream_config::{AttestationUpstreamTarget, UpstreamProvider};
+use crate::endpoint::Endpoint;
 
-use super::error_responses::{
-    e2ee_error_response, error_response, gateway_timeout_response, insert_str_header,
-    internal_error_response, refusal_error_body,
-};
-use crate::middleware::errors::{normalize_upstream_error, surface_for_path};
+use super::error_responses::{insert_str_header, internal_error_response};
+use crate::middleware::errors::{self, normalize_upstream_error, surface_for_path};
 
 pub(super) struct BackendForwardInput {
     pub(super) context: GatewayRequestContext,
     pub(super) endpoint_path: &'static str,
-    pub(super) received_body: Vec<u8>,
+    pub(super) received_body: axum::body::Bytes,
+    pub(super) form: Option<Arc<crate::middleware::media::MediaForm>>,
     pub(super) forwarded_body: Option<Vec<u8>>,
     pub(super) aci_required: bool,
     pub(super) aci_session_ids: Vec<String>,
@@ -37,6 +36,17 @@ pub(super) struct BackendForwardInput {
 }
 
 pub(super) async fn forward_to_backend(
+    service: Arc<AciService>,
+    input: BackendForwardInput,
+) -> Response {
+    let request_id = input.context.request_id.clone();
+    let endpoint_path = input.endpoint_path;
+    let mut response = forward_to_backend_inner(service, input).await;
+    crate::middleware::apply_request_id_header(&mut response, endpoint_path, &request_id);
+    response
+}
+
+async fn forward_to_backend_inner(
     service: Arc<AciService>,
     input: BackendForwardInput,
 ) -> Response {
@@ -51,6 +61,7 @@ pub(super) async fn forward_to_backend(
     if input.stream {
         let result = service
             .forward_chat_completion_stream_request(ChatCompletionRequest {
+                form: input.form.clone(),
                 context: input.context,
                 endpoint_path: input.endpoint_path,
                 received_body: &input.received_body,
@@ -68,6 +79,11 @@ pub(super) async fn forward_to_backend(
                     &forward.receipt_id,
                     "text/event-stream",
                     forward.e2ee.as_ref(),
+                );
+                insert_str_header(
+                    &mut resp_headers,
+                    "x-aci-keyset-digest",
+                    &forward.keyset_digest,
                 );
                 resp_headers.insert(
                     HeaderName::from_static("x-accel-buffering"),
@@ -107,16 +123,17 @@ pub(super) async fn forward_to_backend(
                 // directly. This used to relay the upstream's status, headers and
                 // error body verbatim, which handed the client the provider's own
                 // error vocabulary; `normalize_upstream_error` scrubs it and subsumes
-                // the image-URL remap this arm used to do on its own. (The buffered
-                // branch below still returns the upstream error body as-is on this
-                // no-middleware path — see the note there.)
-                normalize_upstream_error(
+                // the image-URL remap this arm used to do on its own. The service
+                // applies the same normalization to a buffered error.
+                let mut response = normalize_upstream_error(
                     surface_for_path(input.endpoint_path),
                     forward.upstream_status,
                     &forward.upstream_body,
                     &input.received_body,
                     None,
-                )
+                );
+                errors::relay_retry_after(&mut response, &forward.upstream_headers);
+                response
             }
             // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
             Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -125,25 +142,20 @@ pub(super) async fn forward_to_backend(
                 user_model,
                 &input.received_body,
                 requester,
+                &request_id,
                 err,
             ),
-            Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
-            Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
-                routing_error_response(message)
-            }
-            Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => {
-                gateway_timeout_response(
-                    surface_for_path(input.endpoint_path),
-                    Some(&request_id),
-                    message,
-                )
-            }
-            Err(other) => internal_error_response(other),
+            Err(err) => errors::service_error_response(
+                surface_for_path(input.endpoint_path),
+                &err,
+                Some(&request_id),
+            ),
         };
     }
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
+            form: input.form.clone(),
             context: input.context,
             endpoint_path: input.endpoint_path,
             received_body: &input.received_body,
@@ -157,20 +169,34 @@ pub(super) async fn forward_to_backend(
         .await;
     match result {
         Ok(forward) => {
-            // The service already remapped a client image-URL fetch failure to a
-            // surface-correct 400 (with a matching receipt + E2EE wire body), so the
-            // buffered response is returned uniformly here. A non-image upstream
-            // error body is returned as-is: on this no-middleware path the receipt is
-            // built over that body, so scrubbing it would have to move into the
-            // service (before the receipt), which is out of scope here.
-            let resp_headers = chat_response_headers(
+            // The service already normalized an upstream error into the gateway's
+            // envelope (with a matching receipt + E2EE wire body), so the buffered
+            // response is returned uniformly here.
+            let content_type = if Endpoint::from_path(input.endpoint_path) == Endpoint::AudioSpeech
+            {
+                forward
+                    .upstream_headers
+                    .get("content-type")
+                    .map(String::as_str)
+                    .unwrap_or("application/json")
+            } else {
+                "application/json"
+            };
+            let mut resp_headers = chat_response_headers(
                 &forward.receipt.receipt_id,
-                "application/json",
+                content_type,
                 forward.e2ee.as_ref(),
+            );
+            insert_str_header(
+                &mut resp_headers,
+                "x-aci-keyset-digest",
+                &forward.receipt.workload_keyset_digest,
             );
 
             let status = StatusCode::from_u16(forward.upstream_status).unwrap_or(StatusCode::OK);
-            (status, resp_headers, forward.upstream_body).into_response()
+            let mut response = (status, resp_headers, forward.upstream_body).into_response();
+            errors::relay_retry_after(&mut response, &forward.upstream_headers);
+            response
         }
         // Both fail-closed refusals (§1.2, §5.3) carry a receipt.
         Err(err @ ServiceError::UpstreamVerification(_)) => refusal_response(
@@ -179,66 +205,55 @@ pub(super) async fn forward_to_backend(
             user_model,
             &input.received_body,
             requester,
+            &request_id,
             err,
         ),
-        Err(ServiceError::E2ee(err)) => e2ee_error_response(err),
-        Err(ServiceError::Upstream(UpstreamError::Routing(message))) => {
-            routing_error_response(message)
-        }
-        Err(ServiceError::Upstream(UpstreamError::Timeout(message))) => gateway_timeout_response(
+        Err(err) => errors::service_error_response(
             surface_for_path(input.endpoint_path),
+            &err,
             Some(&request_id),
-            message,
         ),
-        Err(other) => internal_error_response(other),
     }
 }
 
 /// A fail-closed refusal (§7.5): the error body is finalized into a refusal
 /// receipt and served with `X-Receipt-Id`, so the client can fetch the signed
-/// record. §5.3's pinned-session miss is a distinct §10 status: verification
-/// did not fail, the pinned ids just are not the current ones.
+/// record.
 fn refusal_response(
     service: &AciService,
     endpoint_path: &'static str,
     user_model: Option<String>,
     received_body: &[u8],
     requester: Option<ReceiptOwner>,
+    request_id: &str,
     err: ServiceError,
 ) -> Response {
-    let ServiceError::UpstreamVerification(uv) = err else {
-        return internal_error_response(err);
-    };
-    let (status, error_type) = match uv {
-        UpstreamVerificationError::NoEligibleAttestedSession(_) => {
-            (StatusCode::PRECONDITION_FAILED, "session_not_accepted")
-        }
-        _ => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "upstream_verification_failed",
-        ),
-    };
-    let reason = uv.to_string();
-    let body = refusal_error_body(error_type, reason.clone());
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    let surface = surface_for_path(endpoint_path);
+    let error = errors::client_error(surface, &err, Some(request_id));
+    let body = error.body(surface, Some(request_id));
     match service.issue_upstream_refusal_receipt(
         endpoint_path,
         user_model,
         received_body,
-        &reason,
+        &error.message,
         &body,
         requester,
     ) {
-        Ok(receipt) => insert_str_header(&mut headers, "x-receipt-id", &receipt.receipt_id),
+        Ok(receipt) => {
+            let mut response = errors::parts_response(error.status, body);
+            let headers = response.headers_mut();
+            insert_str_header(headers, "x-receipt-id", &receipt.receipt_id);
+            insert_str_header(
+                headers,
+                "x-aci-keyset-digest",
+                &receipt.workload_keyset_digest,
+            );
+            response
+        }
         // The receipt is part of the refusal contract (§5.2, §7.5): a refusal
         // this workload cannot commit to is a server error, not a bare 503.
-        Err(err) => return internal_error_response(err),
+        Err(err) => errors::service_error_response(surface, &err, Some(request_id)),
     }
-    (status, headers, body).into_response()
 }
 
 pub(super) fn strip_empty_tool_calls(mut payload: Value) -> (Value, bool) {
@@ -272,7 +287,7 @@ pub(super) fn generate_request_id() -> String {
 
 pub(super) fn chat_response_headers(
     receipt_id: &str,
-    content_type: &'static str,
+    content_type: &str,
     e2ee: Option<&E2eeResponseInfo>,
 ) -> HeaderMap {
     let mut resp_headers = HeaderMap::new();
@@ -294,13 +309,8 @@ pub(super) fn chat_response_headers(
         }
     }
 
-    // Ours, not the upstream's. Relaying the upstream `content-type` leaked a
-    // small fingerprint of its own (whether it appends `; charset=utf-8`), and
-    // the caller already knows which content type this path emits.
-    resp_headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    // JSON/SSE callers supply the gateway type; speech supplies validated audio.
+    insert_str_header(&mut resp_headers, "content-type", content_type);
     resp_headers
 }
 
@@ -403,9 +413,11 @@ async fn fetch_report_nvidia_payload(
         tracing::warn!(upstream = %target.upstream_name, status = %resp.status(), "upstream attestation report non-2xx");
         return None;
     }
-    let body: Value = resp
-        .json()
+    let bytes = read_buffered_upstream_response(resp, target.max_buffered_response_bytes)
         .await
+        .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "read upstream attestation report"))
+        .ok()?;
+    let body: Value = serde_json::from_slice(&bytes)
         .map_err(|e| tracing::warn!(upstream = %target.upstream_name, error = %e, "parse upstream attestation report"))
         .ok()?;
     match target.provider {
@@ -451,13 +463,6 @@ pub(super) fn upstream_direct_response(
     (status, headers, upstream.body).into_response()
 }
 
-pub(super) fn upstream_proxy_error_response(err: crate::aci::upstream::UpstreamError) -> Response {
-    tracing::warn!(error = %err, "upstream proxy request failed");
-    error_response(StatusCode::BAD_GATEWAY, "upstream_error", err.to_string())
-}
-
-pub(super) fn routing_error_response(message: String) -> Response {
-    // §10: malformed/unroutable requests use the OpenAI-inherited types; the
-    // middleware path serves the same miss as a 404 `not_found_error`.
-    error_response(StatusCode::NOT_FOUND, "not_found_error", message)
+pub(super) fn upstream_proxy_error_response(err: UpstreamError) -> Response {
+    internal_error_response(ServiceError::Upstream(err))
 }

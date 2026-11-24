@@ -1,4 +1,4 @@
-# Router-Mode Soundness Review
+# Router-mode soundness review
 
 > [!NOTE]
 > This is a point-in-time audit of the revisions listed below, dated 2026-05-18.
@@ -133,7 +133,7 @@ missing.
 - NEAR cloud verifier README:
   `/tmp/nearai-cloud-verifier/README.md`
 - Local Private AI Gateway router-mode review guide:
-  `docs/router-mode-provider-review.md`
+  `docs/reviews/router-mode-provider-review.md`
 
 ## Evidence Table - Tinfoil `inference.tinfoil.sh`
 

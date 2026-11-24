@@ -5,6 +5,7 @@
 //! hand-built JSON. Pricing is carried as an opaque value, interpreted by the
 //! cost computation.
 
+use super::request_features::SessionKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -325,6 +326,10 @@ pub enum ErrorClass {
     RequestShapingFailed,
     /// No attested route or session was eligible; no prompt was forwarded.
     NoEligibleAttestedRoute,
+    /// The gateway has no capacity for another media request.
+    GatewayCapacity,
+    /// The keyset committed in early headers expired before a new admission.
+    KeysetExpired,
     /// The upstream answered with a non-2xx status.
     UpstreamHttpError,
     /// The upstream declared that this gateway's account with it is unpaid.
@@ -368,9 +373,15 @@ impl From<&UpstreamError> for ErrorClass {
     fn from(err: &UpstreamError) -> Self {
         match err {
             UpstreamError::Routing(_) => Self::InternalError,
-            UpstreamError::Transport(_) => Self::UpstreamTransport,
+            UpstreamError::InvalidRequest(_) => Self::RequestShapingFailed,
+            UpstreamError::Transport(_)
+            | UpstreamError::SseLineOverflow
+            | UpstreamError::SseTruncated
+            | UpstreamError::EnvelopeTruncated
+            | UpstreamError::ResponseTooLarge => Self::UpstreamTransport,
             UpstreamError::Timeout(_) => Self::UpstreamTimeout,
-            UpstreamError::ChannelBindingMismatch(_) => Self::UpstreamChannelBindingMismatch,
+            UpstreamError::ChannelBindingMismatch(_)
+            | UpstreamError::ResponseBindingMismatch { .. } => Self::UpstreamChannelBindingMismatch,
             UpstreamError::Upstream { .. } => Self::UpstreamHttpError,
         }
     }
@@ -379,6 +390,7 @@ impl From<&UpstreamError> for ErrorClass {
 impl From<&ServiceError> for ErrorClass {
     fn from(err: &ServiceError) -> Self {
         match err {
+            ServiceError::EarlyResponseKeysetExpired => Self::KeysetExpired,
             ServiceError::UpstreamVerification(
                 UpstreamVerificationError::NoEligibleAttestedRoute(_)
                 | UpstreamVerificationError::NoEligibleAttestedSession(_),
@@ -392,9 +404,11 @@ impl From<&ServiceError> for ErrorClass {
             ServiceError::Receipt(_) | ServiceError::NoReceiptKey => Self::ReceiptFailed,
             ServiceError::TestKeysInProduction
             | ServiceError::InvalidSourceProvenance
+            | ServiceError::InvalidAttestedSessionTtl
             | ServiceError::Keyset(_)
             | ServiceError::InvalidNonce(_)
             | ServiceError::Key(_)
+            | ServiceError::AdmissionInvariant(_)
             | ServiceError::SessionStore(_)
             | ServiceError::Metrics(_)
             | ServiceError::DownstreamTlsDomainMissing
@@ -431,8 +445,12 @@ pub struct PostReport {
     /// that carry a route.
     pub selected_route_id: Option<String>,
     pub request_model: String,
-    /// Raw upstream usage before any cost injection, or `null`.
+    /// Upstream usage before cost injection, gateway character usage for speech, or `null`.
     pub usage: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<super::images::ImageUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio: Option<super::audio::AudioUsage>,
     pub pricing: Option<PricingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spend_mode: Option<SpendMode>,
@@ -445,10 +463,19 @@ pub struct PostReport {
     /// Serialized as `errorMessage`: the class's fixed token, never free text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<ErrorClass>,
-    /// Echo of the pre-consult request features' prefix hash, so billing can
-    /// record which deployment actually served this prefix (cache affinity).
+    /// The upstream's own identifier for this attempt: its request-id response
+    /// header, or the `id` of a success body when it sent no such header. A
+    /// bounded plain identifier, never free text (see
+    /// `aci::upstream::request_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_id: Option<String>,
+    /// Echo of the pre-consult request features' session key, so billing can
+    /// record which deployment actually served this session (cache affinity).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_hash: Option<String>,
+    /// Echo of how that key was obtained (see `SessionKind`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_kind: Option<SessionKind>,
 }
 
 #[cfg(test)]

@@ -10,6 +10,10 @@
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+    },
     "allow-show-edit-menu",
     "allow-get-appearance",
     "allow-get-state",
@@ -31,8 +35,6 @@
     "allow-set-launch-preference",
     "allow-start",
     "allow-stop",
-    "allow-set-require-production-os",
-    "allow-complete-account-login",
     "allow-begin-account-login",
     "allow-poll-account-login",
     "allow-save-account-login",

@@ -1,5 +1,5 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, open_browser};
+use super::{args::AccountLoginOptions, graphical_session, open_browser};
 use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
@@ -7,7 +7,7 @@ use desktop_core::{
     protocol::rpc,
 };
 use std::{
-    io::{self, IsTerminal, Read, Write},
+    io::{self, Write},
     time::{Duration, Instant},
 };
 
@@ -51,9 +51,6 @@ pub(super) fn login(
                 .into(),
         );
     }
-    if options.callback_stdin && provider != ServiceProvider::Redpill {
-        return Err("Phala uses a browser device code; omit --callback-stdin.".into());
-    }
     let label = provider.label();
     let remote_url = provider
         .preset_url()
@@ -79,15 +76,8 @@ pub(super) fn login(
     if let Some(code) = &login.user_code {
         eprintln!("Confirm device code: {code}");
     }
-    if !options.no_browser && open_browser(&login.url).is_err() {
+    if !options.no_browser && graphical_session() && open_browser(&login.url).is_err() {
         eprintln!("Browser did not open. Open the URL above manually.");
-    }
-    if options.callback_stdin {
-        let callback = read_callback()?;
-        client.call(rpc::CompleteAccountLogin {
-            id: login.id.clone(),
-            callback_url: callback,
-        })?;
     }
     let deadline = Instant::now() + Duration::from_secs(options.timeout);
     let details: AccountLoginDetails = loop {
@@ -107,7 +97,6 @@ pub(super) fn login(
         operation_id: operation_id.clone(),
         id: login.id,
         profile,
-        require_production_os: state.config.require_production_os,
         workspace_id,
     });
     // Once submitted, an uncertain response must be reconciled by operation ID.
@@ -181,28 +170,12 @@ fn workspace(
     }
 }
 
-fn read_callback() -> Result<String, String> {
-    if io::stdin().is_terminal() {
-        return rpassword::prompt_password("Paste callback URL: ")
-            .map_err(|_| "Cannot read callback URL".into());
-    }
-    let mut bytes = Vec::new();
-    io::stdin()
-        .take(16385)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Cannot read callback URL")?;
-    if bytes.len() > 16384 {
-        return Err("Callback URL is too long".into());
-    }
-    String::from_utf8(bytes).map_err(|_| "Callback URL must be UTF-8".into())
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
 
     #[test]
-    fn oauth_login_supports_headless_callback_without_a_secret_argument() {
+    fn oauth_login_supports_headless_device_code() {
         let parsed = crate::Cli::try_parse_from([
             "private-ai-proxy",
             "--yes",
@@ -214,7 +187,6 @@ mod tests {
             "--workspace",
             "123",
             "--no-browser",
-            "--callback-stdin",
         ])
         .unwrap();
         let crate::Command::Manage(super::super::Action::Profiles {
@@ -225,14 +197,13 @@ mod tests {
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
-        assert!(options.no_browser && options.callback_stdin);
+        assert!(options.no_browser);
         assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",
             "profiles",
             "login",
             "work",
-            "--callback-url",
-            "secret"
+            "--callback-stdin",
         ])
         .is_err());
     }

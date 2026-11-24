@@ -14,7 +14,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # build-essential: Hermes builds native Node modules (node-pty).
 apt-get install -y -qq --no-install-recommends \
-  build-essential ca-certificates curl git procps xz-utils >/dev/null
+  build-essential ca-certificates curl git procps unzip xz-utils >/dev/null
 
 echo "Installing Node.js $NODE_VERSION"
 node_tarball="node-v${NODE_VERSION}-linux-x64.tar.xz"

@@ -24,7 +24,7 @@ impl Inputs<'_> {
 /// The fields this app owns for the agent and the values a connection writes.
 pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
     let catalog = inputs.catalog.ok_or(AgentError::InvalidState)?;
-    let catalog = catalog.for_agent_surface(agent.surface());
+    let catalog = catalog.for_surface(agent.surface());
     if catalog.models.is_empty() {
         return Err(AgentError::NoCompatibleModels);
     }
@@ -96,6 +96,7 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
             let mut fields = vec![
                 set(&["env", "ANTHROPIC_BASE_URL"], inputs.endpoint),
                 set(&["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1"),
+                set(&["env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1"),
                 generated_catalog(
                     &["modelPicker"],
                     serde_json::json!({
@@ -341,7 +342,7 @@ pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, Stri
     let models = catalog
         .models
         .iter()
-        .filter(|model| model.supports_agent(Surface::Responses))
+        .filter(|model| model.supports(Surface::Responses))
         .enumerate()
         .map(|(index, model)| {
             let leaf = model.id().rsplit('/').next().unwrap_or(model.id());

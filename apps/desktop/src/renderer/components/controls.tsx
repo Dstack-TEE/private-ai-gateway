@@ -1,5 +1,4 @@
 import type { ComponentProps } from "react";
-import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { Hint } from "./hint";
@@ -16,13 +15,12 @@ type SwitchControlProps = {
   label: string;
   checked: boolean;
   disabled?: boolean;
-  developmentMode?: boolean;
   size?: "sm" | "default";
   "aria-describedby"?: string;
   "aria-busy"?: boolean;
   onToggle(): void;
 };
 
-export function SwitchControl({ label, developmentMode = false, className, onToggle, ...props }: SwitchControlProps): React.JSX.Element {
-  return <Switch className={cn(developmentMode && "data-checked:border-warning data-checked:bg-warning group-has-[:focus-visible]/field-label:data-checked:border-warning", className)} aria-label={label} onCheckedChange={onToggle} {...props} />;
+export function SwitchControl({ label, className, onToggle, ...props }: SwitchControlProps): React.JSX.Element {
+  return <Switch className={className} aria-label={label} onCheckedChange={onToggle} {...props} />;
 }

@@ -206,6 +206,8 @@ mod tests {
             UpstreamConfigManager::load(
                 path,
                 UpstreamRuntimeOptions {
+                    max_buffered_response_bytes:
+                        crate::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
                     verifier_mode: UpstreamVerifierMode::None,
                     accepted_subjects: Vec::new(),
                     accepted_image_digests: Vec::new(),
@@ -215,6 +217,7 @@ mod tests {
                     connect_timeout_seconds: 10,
                     read_timeout_seconds: 600,
                     verifier_request_timeout_seconds: 60,
+                    privatemode_proxy: None,
                 },
             )
             .unwrap(),
@@ -228,17 +231,6 @@ mod tests {
             refresh_seconds: 300,
             request_timeout_seconds: 90,
         }
-    }
-
-    fn temp_path(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "private-ai-gateway-pull-{label}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
     }
 
     #[test]
@@ -266,7 +258,8 @@ mod tests {
 
     #[test]
     fn valid_pull_updates_once_and_an_identical_pull_does_not_rewrite() {
-        let path = temp_path("update");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upstreams.json");
         let puller = UpstreamConfigPuller::new(manager(path.clone()), config()).unwrap();
         let body = br#"{
           "schema_version": 1,
@@ -292,12 +285,12 @@ mod tests {
         assert!(std::fs::read_to_string(&path)
             .unwrap()
             .contains("provider-secret"));
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn invalid_pull_never_replaces_the_last_valid_config() {
-        let path = temp_path("retain");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("upstreams.json");
         let initial = r#"[{
           "name":"old",
           "base_url":"https://old.example",
@@ -321,6 +314,5 @@ mod tests {
                 .unwrap()
                 .contains("old-secret"));
         }
-        let _ = std::fs::remove_file(path);
     }
 }

@@ -3,16 +3,16 @@ use std::sync::Arc;
 use aci_verify::dstack::verify_dstack_app_compose;
 use k256::ecdsa::SigningKey;
 use serde_json::{json, Value};
-use sha2::{Sha256, Sha384};
 use sha3::{Digest, Keccak256};
 
 use super::aci_service::{declared_tls_channel_bindings, CachedAciServiceVerification};
-use super::appraisal::appraise_provenance;
 use super::dstack::verify_dstack_kms_receipt_custody;
 use super::external::ExternalProviderVerifier;
 use super::*;
 use crate::aci::keys::ALGO_ED25519;
-use crate::aci::receipt::{ChannelBinding, UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{
+    ChannelBinding, UpstreamVerifiedEvent, VerificationFailure, VerificationResult,
+};
 use crate::aci::types::{
     AttestationEnvelope, AttestationReport, KeyedPublicKey, SourceProvenance, TlsSpki,
     WorkloadKeyset,
@@ -21,7 +21,11 @@ use crate::aci::upstream::ChutesSessionStore;
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
 use crate::aggregator::upstream_config::AttestationScope;
 
-fn signing_key(byte: u8) -> SigningKey {
+pub(super) mod aci_service;
+pub(super) mod session_pinning;
+mod zero_g;
+
+pub(super) fn signing_key(byte: u8) -> SigningKey {
     SigningKey::from_slice(&[byte; 32]).unwrap()
 }
 
@@ -29,16 +33,40 @@ fn public_key_uncompressed_hex(key: &SigningKey) -> String {
     hex::encode(key.verifying_key().to_encoded_point(false).as_bytes())
 }
 
-fn public_key_compressed_hex(key: &SigningKey) -> String {
+pub(super) fn public_key_compressed_hex(key: &SigningKey) -> String {
     hex::encode(key.verifying_key().to_sec1_bytes())
 }
 
-fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
+pub(super) fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
     let digest = Keccak256::new_with_prefix(message);
     let (signature, recid) = key.sign_digest_recoverable(digest).unwrap();
     let mut out = signature.to_vec();
     out.push(recid.to_byte());
     hex::encode(out)
+}
+
+fn report_binding(not_after: u64) -> ReportBinding {
+    use crate::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
+    let mut keyset = keyset_with_tls(Vec::new());
+    keyset.not_after = not_after;
+    let sealed = SealedWorkloadKeyset::seal(keyset).unwrap();
+    let statement = attestation_statement(sealed.digest(), None).unwrap();
+    aci_verify::report::verify_report_binding(
+        &AttestationReport {
+            api_version: "aci/1".to_string(),
+            workload_keyset_digest: sealed.digest().to_string(),
+            attestation: AttestationEnvelope {
+                tee_type: "tdx".to_string(),
+                workload_keyset: sealed.to_value(),
+                report_data_hex: hex::encode(report_data(&statement)),
+                source_provenance: SourceProvenance::default(),
+                evidence: json!({}),
+            },
+            service_capabilities: Default::default(),
+        },
+        None,
+    )
+    .unwrap()
 }
 
 fn keyset_with_tls(tls_public_keys: Vec<TlsSpki>) -> WorkloadKeyset {
@@ -55,7 +83,7 @@ fn keyset_with_tls(tls_public_keys: Vec<TlsSpki>) -> WorkloadKeyset {
 /// 32-byte KMS scalar in `receipt_scalar`: the keyset lists its Ed25519
 /// public key, and the evidence publishes the k256 counterpart the KMS chain
 /// covers.
-fn receipt_custody_fixture(
+pub(super) fn receipt_custody_fixture(
     receipt_scalar: [u8; 32],
     signature_chain: Vec<String>,
 ) -> (WorkloadKeyset, Value) {
@@ -90,14 +118,13 @@ fn receipt_custody_fixture(
     (keyset, evidence)
 }
 
-/// The scope token a stub verifier declares. Routers declare a scope in
-/// production (Tinfoil / SecretAI), and so does NEAR AI (model); other per-model
-/// and per-instance verifiers omit it and the seam accepts `None`. Stubs mirror
-/// that so the real accept paths run.
+/// The scope token a stub verifier declares. Only routers declare a scope in
+/// production (near.ai / Tinfoil / SecretAI); per-model and per-instance verifiers omit it
+/// and the seam accepts `None`. Stubs mirror that so the real accept paths run.
 fn declared_scope(provider: &str) -> Option<&'static str> {
     match provider {
-        "tinfoil" | "secret-ai" => Some("router"),
-        "near-ai" => Some("model"),
+        "near-ai" | "tinfoil" | "secret-ai" | "privatemode" => Some("router"),
+        "armet-ai" => Some("model"),
         _ => None,
     }
 }
@@ -107,7 +134,7 @@ fn provider_script(provider: &str, verifier_id: &str, binding: Value) -> Vec<Str
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -150,7 +177,7 @@ fn counting_provider_script(
         "result": "verified",
         "verifier_id": verifier_id,
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [binding],
@@ -246,7 +273,7 @@ async fn chutes_provider_verifier_records_provider_session_material() {
         "result": "verified",
         "verifier_id": "chutes/external-test/v1",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -350,7 +377,7 @@ async fn secret_ai_provider_verifier_passes_workload_pin_to_the_bridge() {
         "verifier_id": "private-ai-verifier/secret-ai/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -450,7 +477,7 @@ async fn routing_verifier_keeps_policy_isolated_for_shared_origins() {
         .await;
     assert_eq!(wrong_origin.result, VerificationResult::Failed);
     assert!(wrong_origin
-        .reason
+        .diagnostic
         .as_deref()
         .is_some_and(|reason| reason.contains("expected \"https://shared.example\"")));
 }
@@ -483,6 +510,166 @@ async fn phala_direct_provider_verifier_runs_provider_owned_external_verifier() 
 }
 
 #[tokio::test]
+async fn armet_ai_provider_verifier_runs_provider_owned_external_verifier() {
+    let verifier = ArmetAiProviderVerifier::with_command(
+        provider_script(
+            "armet-ai",
+            "armet-ai/external-test/v1",
+            json!({
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }),
+        ),
+        5,
+    )
+    .unwrap();
+    assert_provider_script_verifier(
+        &verifier,
+        "armet-ai",
+        "armet-ai/external-test/v1",
+        ChannelBinding::TlsSpkiSha256 {
+            origin: "https://provider.example".to_string(),
+            spki_sha256: "aa".repeat(32),
+        },
+    )
+    .await;
+}
+
+fn armet_ai_request() -> UpstreamVerificationRequest {
+    UpstreamVerificationRequest {
+        upstream_name: "tdx-a".to_string(),
+        url_origin: Some("https://provider.example".to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    }
+}
+
+#[tokio::test]
+async fn armet_ai_passes_pins_and_bearer_token_to_the_bridge() {
+    // The pin must reach the bridge lowercased, and the bearer token under the
+    // armet-ai option name; anything else is treated as an unpinned request.
+    let subject = format!("tdx-measurement:sha256:{}", "ab".repeat(32));
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "armet-ai/options-test/v1",
+        "evidence": {
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+        },
+        "attested_scope": "model",
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://provider.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+    });
+    let script = format!(
+        r#"payload="$(cat)"
+case "$payload" in
+  *'"armet_ai_accepted_subject:{subject}":"true"'*) ;;
+  *) printf '%s' '{{"result":"failed","reason":"pin missing"}}'; exit 0 ;;
+esac
+case "$payload" in
+  *'"armet_ai_bearer_token":"tok"'*) printf '%s' '{output}' ;;
+  *) printf '%s' '{{"result":"failed","reason":"bearer missing"}}' ;;
+esac"#
+    );
+    let verifier = ArmetAiProviderVerifier::with_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        5,
+    )
+    .unwrap()
+    .with_accepted_subjects([format!("tdx-measurement:sha256:{}", "AB".repeat(32))])
+    .with_bearer_token("tok");
+    let event = verifier.verify(armet_ai_request()).await;
+    assert_eq!(
+        event.result,
+        VerificationResult::Verified,
+        "{:?}",
+        event.diagnostic
+    );
+    assert_eq!(event.provider_type.as_deref(), Some("armet-ai"));
+}
+
+#[tokio::test]
+async fn armet_ai_exposes_its_verifier_cache() {
+    // The session list and the deadline-driven refresh read the verifier cache
+    // through `cached` / `cache_remaining`; a wrapper that does not delegate
+    // them hides every ArmetAI session from GET /v1/aci/sessions.
+    let verifier = ArmetAiProviderVerifier::with_command_and_cache(
+        provider_script(
+            "armet-ai",
+            "armet-ai/cache-test/v1",
+            json!({
+                "type": "tls_spki_sha256",
+                "origin": "https://provider.example",
+                "spki_sha256": "AA".repeat(32),
+            }),
+        ),
+        5,
+        60,
+    )
+    .unwrap();
+    let request = armet_ai_request();
+    assert!(verifier.cached(&request).is_none());
+    assert!(verifier.cache_remaining(&request).is_none());
+
+    let event = verifier.verify(request.clone()).await;
+    assert_eq!(
+        event.result,
+        VerificationResult::Verified,
+        "{:?}",
+        event.diagnostic
+    );
+    let cached = verifier
+        .cached(&request)
+        .expect("verified result is cached");
+    assert_eq!(cached.result, VerificationResult::Verified);
+    assert!(verifier.cache_remaining(&request).is_some());
+
+    verifier.invalidate(&request);
+    assert!(verifier.cached(&request).is_none());
+}
+
+#[tokio::test]
+async fn armet_ai_rejects_a_bridge_claiming_router_scope() {
+    // A per-model TD must not be sealed as a shared router channel: that would
+    // let one model's verification cover every model behind the origin.
+    let output = json!({
+        "result": "verified",
+        "verifier_id": "armet-ai/scope-test/v1",
+        "evidence": {
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
+            "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
+        },
+        "attested_scope": "router",
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://provider.example",
+            "spki_sha256": "AA".repeat(32),
+        }],
+    });
+    let script = format!("cat >/dev/null; printf '%s' '{output}'");
+    let verifier = ArmetAiProviderVerifier::with_command(
+        vec!["/bin/sh".to_string(), "-c".to_string(), script],
+        5,
+    )
+    .unwrap();
+    let event = verifier.verify(armet_ai_request()).await;
+    assert_eq!(event.result, VerificationResult::Failed);
+    assert!(
+        event
+            .diagnostic
+            .as_deref()
+            .is_some_and(|r| r.contains("per-model")),
+        "{:?}",
+        event.diagnostic
+    );
+}
+
+#[tokio::test]
 async fn provider_external_verifier_rejects_verified_without_binding() {
     let verifier = ChutesProviderVerifier::with_command(
         vec![
@@ -506,18 +693,55 @@ async fn provider_external_verifier_rejects_verified_without_binding() {
 
     assert_eq!(event.result, VerificationResult::Failed);
     assert!(event
-        .reason
+        .diagnostic
         .unwrap()
         .contains("without an enforceable channel binding"));
 }
 
+/// What a provider verifier says went wrong reaches the event as a cause from
+/// the closed set, and its own words only as the diagnostic. A verifier that
+/// could not run at all judged nothing.
+#[tokio::test]
+async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_apart() {
+    let request = || UpstreamVerificationRequest {
+        upstream_name: "provider-upstream".to_string(),
+        url_origin: Some("https://provider.example".to_string()),
+        model_id: "provider-model".to_string(),
+        forwarded_body_hash: format!("sha256:{}", "22".repeat(32)),
+        required: true,
+    };
+    let run = |script: &str| {
+        ExternalProviderVerifier::with_command(
+            "tinfoil",
+            AttestationScope::PerRouter,
+            vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+            5,
+        )
+        .unwrap()
+    };
+
+    let judged = run(
+        r#"cat >/dev/null; printf '%s' '{"result":"failed","failure":"policy_rejected","reason":"TCB status is OutOfDate"}'"#,
+    )
+    .verify(request())
+    .await;
+    assert_eq!(judged.failure, VerificationFailure::PolicyRejected);
+    assert_eq!(
+        judged.diagnostic.as_deref(),
+        Some("TCB status is OutOfDate")
+    );
+
+    let crashed = run("cat >/dev/null; echo boom >&2; exit 3")
+        .verify(request())
+        .await;
+    assert_eq!(crashed.result, VerificationResult::Failed);
+    assert_eq!(crashed.failure, VerificationFailure::EvidenceUnavailable);
+}
+
 #[tokio::test]
 async fn external_provider_verifier_caches_verified_bindings() {
-    let counter_path = std::env::temp_dir().join(format!(
-        "private-ai-gateway-provider-cache-test-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&counter_path);
+    let directory = tempfile::tempdir().unwrap();
+    let counter_path = directory.path().join("counter");
     let verifier = ExternalProviderVerifier::with_command_and_cache(
         "tinfoil",
         AttestationScope::PerRouter,
@@ -553,6 +777,8 @@ async fn external_provider_verifier_caches_verified_bindings() {
     assert_eq!(first.result, VerificationResult::Verified);
     assert_eq!(second.result, VerificationResult::Verified);
     assert!(!second.required);
+    assert!(first.verification_round.is_some());
+    assert_eq!(first.verification_round, second.verification_round);
     assert_eq!(
         std::fs::read_to_string(&counter_path).unwrap(),
         "1",
@@ -562,22 +788,22 @@ async fn external_provider_verifier_caches_verified_bindings() {
     verifier.invalidate(&second_request);
     let third = verifier.verify(second_request).await;
     assert_eq!(third.result, VerificationResult::Verified);
+    assert_eq!(first.evidence, third.evidence);
+    assert_ne!(first.verification_round, third.verification_round);
     assert_eq!(
         std::fs::read_to_string(&counter_path).unwrap(),
         "2",
         "invalidating the provider verifier cache should force a fresh external verifier run"
     );
-    let _ = std::fs::remove_file(counter_path);
 }
 
 #[tokio::test]
-async fn router_shares_one_channel_verification_across_models() {
-    // Security-critical: a router keys its verifier cache on the channel, not the
-    // model, so verifying a second model reuses the first model's verification
-    // (one external run) and event_for re-tags it with the requesting model. A
-    // per-model provider must NOT share — each model is its own channel.
+async fn provider_verifier_cache_respects_model_checks() {
+    // NEAR AI must run its model selection check even with a cached router
+    // channel verification for a different model.
     for (provider, scope, expected_runs) in [
         ("tinfoil", AttestationScope::PerRouter, "1"),
+        ("near-ai", AttestationScope::PerRouter, "2"),
         ("phala-direct", AttestationScope::PerModel, "2"),
     ] {
         // The stub declares the provider's scope (routers) or omits it (per-model)
@@ -586,7 +812,7 @@ async fn router_shares_one_channel_verification_across_models() {
             "result": "verified",
             "verifier_id": "router-cache-test/v1",
             "evidence": {
-                "digest": format!("sha256:{}", "11".repeat(32)),
+                "digest": "sha256:1002ddd41f83cd5c03a5996c33385a9e55666861f126b9ce8d0f920bab742123",
                 "data": "data:application/json;base64,eyJmaXh0dXJlIjoicm91dGVyIn0=",
             },
             "channel_bindings": [{
@@ -608,11 +834,8 @@ count="$((count + 1))"
 printf '%s' "$count" > "$1"
 printf '%s' '{output}'"#
         );
-        let counter_path = std::env::temp_dir().join(format!(
-            "private-ai-gateway-router-cache-test-{}-{provider}",
-            std::process::id(),
-        ));
-        let _ = std::fs::remove_file(&counter_path);
+        let directory = tempfile::tempdir().unwrap();
+        let counter_path = directory.path().join("counter");
         let verifier = ExternalProviderVerifier::with_command_and_cache(
             provider,
             scope,
@@ -648,11 +871,140 @@ printf '%s' '{output}'"#
         assert_eq!(
             std::fs::read_to_string(&counter_path).unwrap(),
             expected_runs,
-            "{provider}: external verifier runs (a router reuses one channel \
-             verification across models; a per-model provider verifies each)"
+            "{provider}: external verifier runs"
         );
-        let _ = std::fs::remove_file(counter_path);
     }
+}
+
+#[tokio::test]
+async fn near_ai_caches_model_failures_and_refreshes_healthy_siblings() {
+    let directory = tempfile::tempdir().unwrap();
+    let calls = directory.path().join("calls");
+    let verified = json!({
+        "result": "verified",
+        "attested_scope": "router",
+        "evidence": {
+            "digest": crate::aci::digest::sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://router.example",
+            "spki_sha256": "ab".repeat(32),
+        }],
+    });
+    let script = r#"payload="$(cat)"
+case "$payload" in
+  *'"upstream_name":"primary"'*'"model_id":"alias"'*)
+    printf '%s\n' alias >> "$1"
+    printf '%s' '{"result":"failed","failure":"binding_mismatch"}'
+    ;;
+  *'"model_id":"unavailable"'*)
+    printf '%s\n' unavailable >> "$1"
+    sleep 1
+    printf '%s' '{"result":"failed","failure":"evidence_unavailable"}'
+    ;;
+  *)
+    printf '%s\n' verified >> "$1"
+    printf '%s' "$2"
+    ;;
+esac"#;
+    let refresh_lead = std::time::Duration::from_secs(3);
+    let verifier = ExternalProviderVerifier::with_command_and_cache(
+        "near-ai",
+        AttestationScope::PerRouter,
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            "near-ai-negative-cache-test".to_string(),
+            calls.display().to_string(),
+            verified.to_string(),
+        ],
+        5,
+        300,
+    )
+    .unwrap()
+    .with_near_ai_refresh_lead(refresh_lead);
+    let request = |upstream_name: &str, model_id: &str| UpstreamVerificationRequest {
+        upstream_name: upstream_name.to_string(),
+        url_origin: Some("https://router.example".to_string()),
+        model_id: model_id.to_string(),
+        forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+        required: true,
+    };
+    let alias = request("primary", "alias");
+    let healthy = request("primary", "canonical");
+    assert_eq!(
+        verifier.verify(alias.clone()).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert!(verifier.cached(&alias).is_none());
+    assert!(verifier.cache_remaining(&alias).is_none());
+    for sibling in [healthy.clone(), request("secondary", "alias")] {
+        assert_eq!(
+            verifier.verify(sibling).await.result,
+            VerificationResult::Verified
+        );
+    }
+    let unavailable = request("primary", "unavailable");
+    let mut stalled = Box::pin(verifier.verify(unavailable.clone()));
+    assert!(futures_util::poll!(&mut stalled).is_pending());
+    let (failed, repeated, refreshed) = tokio::time::timeout(refresh_lead, async {
+        assert_eq!(
+            verifier.verify(healthy.clone()).await.result,
+            VerificationResult::Verified
+        );
+        tokio::join!(
+            stalled,
+            verifier.verify(unavailable.clone()),
+            verifier.refresh(healthy.clone()),
+        )
+    })
+    .await
+    .expect("healthy model must refresh within the refresh lead");
+    assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(repeated.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(refreshed.result, VerificationResult::Verified);
+    assert!(verifier.cached(&unavailable).is_none());
+    assert!(verifier.cache_remaining(&unavailable).is_none());
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap(),
+        "alias\nverified\nverified\nunavailable\nverified\n"
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(refresh_lead).await;
+    tokio::time::resume();
+    assert_eq!(
+        verifier.verify(unavailable).await.failure,
+        VerificationFailure::EvidenceUnavailable
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(30)).await;
+    assert_eq!(
+        verifier.verify(alias.clone()).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert_eq!(
+        verifier.verify(healthy).await.result,
+        VerificationResult::Verified
+    );
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap(),
+        "alias\nverified\nverified\nunavailable\nverified\nunavailable\n"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert_eq!(
+        verifier.verify(alias).await.failure,
+        VerificationFailure::BindingMismatch
+    );
+    assert!(std::fs::read_to_string(calls)
+        .unwrap()
+        .ends_with("unavailable\nalias\n"));
 }
 
 #[tokio::test]
@@ -669,6 +1021,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
         let mut output = json!({
             "result": "verified",
             "verifier_id": "scope-seam-test/v1",
+            "evidence": {
+                "digest": "sha256:07bb47d210221ac3d4f98e79ee4e60aad10755302bb1a73f31b90eda0271b6e4",
+                "data": "data:application/json;base64,eyJmaXh0dXJlIjoic2NvcGUifQ==",
+            },
             "channel_bindings": [{
                 "type": "tls_spki_sha256",
                 "origin": "https://provider.example",
@@ -698,23 +1054,19 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     }
 
     // Router declaring the wrong (model) scope → rejected.
-    let mismatch = verify_with_scope("tinfoil", AttestationScope::PerRouter, Some("model")).await;
+    let mismatch = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("model")).await;
     assert_eq!(mismatch.result, VerificationResult::Failed);
-    assert!(mismatch.reason.unwrap().contains("per-router"));
+    assert!(mismatch.diagnostic.unwrap().contains("per-router"));
 
     // Router declaring no scope at all → rejected (it must declare).
-    let missing = verify_with_scope("tinfoil", AttestationScope::PerRouter, None).await;
+    let missing = verify_with_scope("near-ai", AttestationScope::PerRouter, None).await;
     assert_eq!(missing.result, VerificationResult::Failed);
-    assert!(missing.reason.unwrap().contains("did not declare"));
+    assert!(missing.diagnostic.unwrap().contains("did not declare"));
 
     // Any verifier returning a garbage token → rejected.
-    let unknown = verify_with_scope("tinfoil", AttestationScope::PerRouter, Some("galaxy")).await;
+    let unknown = verify_with_scope("near-ai", AttestationScope::PerRouter, Some("galaxy")).await;
     assert_eq!(unknown.result, VerificationResult::Failed);
-    assert!(unknown.reason.unwrap().contains("unrecognized"));
-
-    // NEAR AI declares the per-model scope its model-scoped report carries.
-    let near = verify_with_scope("near-ai", AttestationScope::PerModel, Some("model")).await;
-    assert_eq!(near.result, VerificationResult::Verified);
+    assert!(unknown.diagnostic.unwrap().contains("unrecognized"));
 
     // Per-instance provider declaring its matching scope → accepted.
     let instance =
@@ -726,7 +1078,10 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
     let instance_mismatch =
         verify_with_scope("chutes", AttestationScope::PerInstance, Some("router")).await;
     assert_eq!(instance_mismatch.result, VerificationResult::Failed);
-    assert!(instance_mismatch.reason.unwrap().contains("per-instance"));
+    assert!(instance_mismatch
+        .diagnostic
+        .unwrap()
+        .contains("per-instance"));
 
     // Per-model provider that omits the scope → accepted (Phala-direct / Chutes
     // don't declare one).
@@ -735,18 +1090,13 @@ async fn scope_seam_rejects_mismatched_missing_and_unknown_scopes() {
 }
 
 #[tokio::test]
-async fn external_provider_refresh_keeps_existing_cache_on_failure() {
-    let counter_path = std::env::temp_dir().join(format!(
-        "private-ai-gateway-provider-refresh-cache-test-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_file(&counter_path);
+async fn external_provider_refresh_distinguishes_near_ai_model_rejection() {
     let output = json!({
         "result": "verified",
-        "verifier_id": "tinfoil/external-test/v1",
+        "verifier_id": "router/external-test/v1",
         "attested_scope": "router",
         "evidence": {
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:a70b9a3cf4004870baf0343cec2e20dfd21db6f23ad27a26da9a625f399e1b1f",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJvdmlkZXItbW9kZWwifQ==",
         },
         "channel_bindings": [{
@@ -764,24 +1114,9 @@ printf '%s' "$count" > "$1"
 if [ "$count" -eq 1 ]; then
   printf '%s' '{output}'
 else
-  printf '%s\n' 'refresh failed' >&2
-  exit 42
+  printf '%s' "$2"
 fi"#
     );
-    let verifier = ExternalProviderVerifier::with_command_and_cache(
-        "tinfoil",
-        AttestationScope::PerRouter,
-        vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            script,
-            "provider-refresh-cache-test".to_string(),
-            counter_path.display().to_string(),
-        ],
-        5,
-        300,
-    )
-    .unwrap();
     let request = UpstreamVerificationRequest {
         upstream_name: "provider-upstream".to_string(),
         url_origin: Some("https://provider.example".to_string()),
@@ -790,27 +1125,58 @@ fi"#
         required: true,
     };
 
-    let first = verifier.verify(request.clone()).await;
-    let refresh = verifier.refresh(request.clone()).await;
-    let after_failed_refresh = verifier.verify(request).await;
+    for (provider, failure, keep_cache) in [
+        ("tinfoil", VerificationFailure::EvidenceUnavailable, true),
+        ("near-ai", VerificationFailure::EvidenceUnavailable, true),
+        ("near-ai", VerificationFailure::BindingMismatch, false),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let counter_path = directory.path().join("counter");
+        let verifier = ExternalProviderVerifier::with_command_and_cache(
+            provider,
+            AttestationScope::PerRouter,
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                script.clone(),
+                "provider-refresh-cache-test".to_string(),
+                counter_path.display().to_string(),
+                json!({"result": "failed", "failure": failure.code()}).to_string(),
+            ],
+            5,
+            300,
+        )
+        .unwrap();
+        let original = verifier.verify(request.clone()).await;
+        assert_eq!(original.result, VerificationResult::Verified);
+        let remaining = verifier.cache_remaining(&request).unwrap();
+        let refresh = verifier.refresh(request.clone()).await;
+        assert_eq!(refresh.result, VerificationResult::Failed);
+        assert_eq!(refresh.failure, failure);
 
-    assert_eq!(first.result, VerificationResult::Verified);
-    assert_eq!(refresh.result, VerificationResult::Failed);
-    assert_eq!(after_failed_refresh.result, VerificationResult::Verified);
-    assert_eq!(
-        std::fs::read_to_string(&counter_path).unwrap(),
-        "2",
-        "failed refresh must not remove the previous verified cache entry"
-    );
-    let _ = std::fs::remove_file(counter_path);
+        let from_cache = verifier.verify(request.clone()).await;
+        if keep_cache {
+            assert_eq!(from_cache.result, VerificationResult::Verified);
+            assert_eq!(from_cache.channel_bindings, original.channel_bindings);
+            assert_eq!(from_cache.evidence, original.evidence);
+            assert!(verifier.cache_remaining(&request).unwrap() <= remaining);
+        } else {
+            assert_eq!(from_cache.result, VerificationResult::Failed);
+            assert_eq!(from_cache.failure, failure);
+            assert!(verifier.cached(&request).is_none());
+        }
+        assert_eq!(std::fs::read_to_string(counter_path).unwrap(), "2");
+    }
 }
 
 #[test]
 fn cached_aci_service_verification_preserves_channel_bindings() {
     let cached = CachedAciServiceVerification {
-        expires_at: 10,
+        identity: report_binding(u64::MAX),
+        session_material: None,
+        expires_at: tokio::time::Instant::now(),
         evidence: Some(json!({
-            "digest": format!("sha256:{}", "11".repeat(32)),
+            "digest": "sha256:91e6e5801d0dfe51430cd6de68e48925ea49d48aeaba4bf83e09d1acf49ed51d",
             "data": "data:application/json;base64,eyJwcm92aWRlciI6ImdwdS1hIiwiZml4dHVyZSI6ImF0dGVzdGF0aW9uLXJlcG9ydCJ9",
         })),
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
@@ -833,8 +1199,8 @@ fn cached_aci_service_verification_preserves_channel_bindings() {
     assert_eq!(event.channel_bindings, cached.channel_bindings);
 }
 
-#[tokio::test]
-async fn aci_service_refresh_bypasses_the_cached_verification() {
+#[tokio::test(start_paused = true)]
+async fn aci_service_refresh_failure_preserves_cache_until_expiry() {
     // Nothing listens on port 1, so any fresh verification fails fast.
     let verifier = AciServiceUpstreamVerifier::new_with_timeouts(
         "http://127.0.0.1:1",
@@ -851,7 +1217,9 @@ async fn aci_service_refresh_bypasses_the_cached_verification() {
     )
     .unwrap()
     .with_cached(CachedAciServiceVerification {
-        expires_at: u64::MAX,
+        identity: report_binding(u64::MAX),
+        session_material: None,
+        expires_at: tokio::time::Instant::now() + std::time::Duration::from_secs(300),
         evidence: None,
         channel_bindings: vec![ChannelBinding::TlsSpkiSha256 {
             origin: "http://127.0.0.1:1".to_string(),
@@ -867,14 +1235,25 @@ async fn aci_service_refresh_bypasses_the_cached_verification() {
     };
 
     let cached = verifier.verify(request.clone()).await;
-    let refreshed = verifier.refresh(request).await;
+    tokio::time::advance(std::time::Duration::from_secs(240)).await;
+    let refreshed = verifier.refresh(request.clone()).await;
 
     assert_eq!(cached.result, VerificationResult::Verified);
+    assert_eq!(refreshed.result, VerificationResult::Failed);
+    let retained = verifier
+        .cached(&request)
+        .expect("failed refresh keeps the old cache");
+    assert_eq!(retained.channel_bindings, cached.channel_bindings);
     assert_eq!(
-        refreshed.result,
-        VerificationResult::Failed,
-        "refresh must re-verify instead of returning the cached event"
+        verifier.verify(request.clone()).await.channel_bindings,
+        cached.channel_bindings
     );
+    let remaining = verifier.cache_remaining(&request).unwrap();
+    tokio::time::advance(remaining - std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_some());
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    assert!(verifier.cached(&request).is_none());
+    assert!(verifier.cache_remaining(&request).is_none());
 }
 
 #[test]
@@ -1161,134 +1540,4 @@ fn subject_anchor_requires_the_measured_app_id() {
     assert!(!policy.accepts_measured(&keyset, &provenance, &unlisted));
     keyset.subject = Some(format!("app-id:0x{}", hex::encode(unlisted)));
     assert!(!policy.accepts_measured(&keyset, &provenance, &unlisted));
-}
-
-// ---- §9.1(4) compose measurement (moved with the logic from the CLI) ----
-
-fn td10_report(rt_mr3: [u8; 48]) -> dcap_qvl::quote::Report {
-    dcap_qvl::quote::Report::TD10(dcap_qvl::quote::TDReport10 {
-        tee_tcb_svn: [0; 16],
-        mr_seam: [0; 48],
-        mr_signer_seam: [0; 48],
-        seam_attributes: [0; 8],
-        td_attributes: [0; 8],
-        xfam: [0; 8],
-        mr_td: [0; 48],
-        mr_config_id: [0; 48],
-        mr_owner: [0; 48],
-        mr_owner_config: [0; 48],
-        rt_mr0: [0; 48],
-        rt_mr1: [0; 48],
-        rt_mr2: [0; 48],
-        rt_mr3,
-        report_data: [0; 64],
-    })
-}
-
-fn provenance_report(evidence: Value, provenance: SourceProvenance) -> AttestationReport {
-    AttestationReport {
-        api_version: "aci/1".to_string(),
-        workload_keyset_digest: String::new(),
-        attestation: AttestationEnvelope {
-            tee_type: "tdx".to_string(),
-            workload_keyset: Value::Null,
-            report_data_hex: String::new(),
-            source_provenance: provenance,
-            evidence,
-        },
-        service_capabilities: Default::default(),
-    }
-}
-
-fn provenance_inputs<'a>(
-    report: &'a AttestationReport,
-    accepted_composes: &'a [String],
-) -> AppraisalInputs<'a> {
-    AppraisalInputs {
-        report,
-        nonce: None,
-        now_secs: 0,
-        expiry_waived: false,
-        quote: QuoteSource::Online {
-            pccs_url: "https://pccs.invalid",
-        },
-        accepted_composes,
-        custody: CustodyEvidence::Unimplemented {
-            reason: "not under test",
-        },
-        channel: ChannelEvidence::Unobservable {
-            reason: "not under test",
-        },
-        explain: false,
-    }
-}
-
-#[tokio::test]
-async fn compose_measurement_passes_and_an_allowlist_pins_the_measured_value() {
-    // Two RTMR3 boot events, measured the way dstack does: a runtime event's
-    // digest is SHA-384 over `event_type:event:payload`, and RTMR3 is the
-    // SHA-384 chain over those digests from a 48-byte-zero start.
-    let app_compose = "services:\n  gateway:\n    image: demo\n";
-    let compose_hash = hex::encode(Sha256::digest(app_compose.as_bytes()));
-    const RUNTIME_EVENT: u32 = 0x0800_0001;
-    let event_digest = |event: &str, payload_hex: &str| -> Vec<u8> {
-        let mut hasher = Sha384::new();
-        hasher.update(RUNTIME_EVENT.to_ne_bytes());
-        hasher.update(b":");
-        hasher.update(event.as_bytes());
-        hasher.update(b":");
-        hasher.update(hex::decode(payload_hex).unwrap());
-        hasher.finalize().to_vec()
-    };
-    let digests = [
-        event_digest("compose-hash", &compose_hash),
-        event_digest("system-ready", ""),
-    ];
-    let mut mr = vec![0u8; 48];
-    for d in &digests {
-        mr.extend_from_slice(d);
-        mr = Sha384::digest(&mr).to_vec();
-    }
-    let quote_report = td10_report(mr.as_slice().try_into().unwrap());
-    let mut evidence = json!({
-        "event_log": serde_json::to_string(&json!([
-            { "imr": 3, "event_type": RUNTIME_EVENT, "digest": hex::encode(&digests[0]),
-              "event": "compose-hash", "event_payload": compose_hash },
-            { "imr": 3, "event_type": RUNTIME_EVENT, "digest": hex::encode(&digests[1]),
-              "event": "system-ready", "event_payload": "" },
-        ]))
-        .unwrap(),
-        "app_compose": app_compose,
-    });
-    let provenance = SourceProvenance {
-        repo_url: Some("https://example.com/repo".to_string()),
-        repo_commit: Some("abc123".to_string()),
-        image_digest: None,
-        image_provenance: None,
-    };
-
-    let report = provenance_report(evidence.clone(), provenance.clone());
-    let (result, app_id) =
-        appraise_provenance(&provenance_inputs(&report, &[]), Some(&quote_report)).await;
-    assert!(result.passed(), "{}", result.detail);
-    assert!(app_id.is_none(), "this log carries no app-id event");
-
-    // An allowlist pins the measured value: the real hash passes, any other
-    // list fails even though the measurement itself verified.
-    let accepted = vec![compose_hash.clone()];
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&report, &accepted), Some(&quote_report)).await;
-    assert!(result.passed(), "{}", result.detail);
-
-    let rejected = vec!["00".repeat(32)];
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&report, &rejected), Some(&quote_report)).await;
-    assert!(!result.passed(), "an unlisted compose must not pass");
-
-    // A different app_compose no longer matches the measured compose-hash.
-    evidence["app_compose"] = Value::String("tampered".to_string());
-    let tampered = provenance_report(evidence, provenance);
-    let (result, _) =
-        appraise_provenance(&provenance_inputs(&tampered, &[]), Some(&quote_report)).await;
-    assert!(!result.passed(), "a tampered compose must not pass");
 }

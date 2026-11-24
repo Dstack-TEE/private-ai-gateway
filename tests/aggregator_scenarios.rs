@@ -112,6 +112,14 @@ impl MockUpstream {
 
 #[async_trait]
 impl UpstreamBackend for MockUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         let model_id = serde_json::from_slice::<Value>(&req.body)
             .ok()
@@ -143,7 +151,7 @@ impl UpstreamBackend for MockUpstream {
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
         self.calls.lock().unwrap().push(UpstreamCall {
-            body: req.body,
+            body: req.body.to_vec(),
             headers: req.headers,
             path: req.path,
         });
@@ -191,7 +199,7 @@ impl ScriptedVerifier {
                 result,
                 reason,
                 evidence: Some(serde_json::json!({
-                    "digest": format!("sha256:{}", "ab".repeat(32)),
+                    "digest": "sha256:afe38bd8c24e1191e4829d61e25d23e0f3c6df3afdd83974008cb0e1ecfffb8a",
                     "data": "data:application/json;base64,eyJmaXh0dXJlIjoidXBzdHJlYW0tMSJ9",
                 })),
                 calls: calls.clone(),
@@ -207,7 +215,7 @@ impl UpstreamVerifier for ScriptedVerifier {
         self.calls.lock().unwrap().push(request.clone());
         UpstreamVerifiedEvent {
             verifier_id: "mock-verifier/v1".to_string(),
-            reason: self.reason.clone(),
+            diagnostic: self.reason.clone(),
             evidence: self.evidence.clone(),
             ..event_from_request(&request, self.result)
         }
@@ -307,6 +315,7 @@ fn make_harness_full(
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec![],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -644,10 +653,10 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 
@@ -658,10 +667,10 @@ async fn required_upstream_verification_failure_blocks_before_forwarding() {
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], true);
-    assert!(uv["reason"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        uv["reason"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert_eq!(
         event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
         sha256_hex(&response.body)
@@ -683,7 +692,7 @@ async fn optional_verification_is_best_effort_and_receipt_records_failed_not_req
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], false);
-    assert_eq!(uv["reason"], "cached evidence stale");
+    assert_eq!(uv["reason"], "the upstream's attestation was not verified");
 }
 
 #[tokio::test]
@@ -740,7 +749,7 @@ async fn request_rewrite_receipt_distinguishes_received_and_forwarded_bytes() {
         url_origin: Some("https://mock-upstream.example".to_string()),
         verifier_id: "mock-verifier/v1".to_string(),
         evidence: Some(serde_json::json!({
-            "digest": format!("sha256:{}", "cd".repeat(32)),
+            "digest": "sha256:85687d7058f885f5918a9a38343545062f9fbc7f8075b6275ab7c8d142b10622",
             "data": "data:application/json;base64,eyJmaXh0dXJlIjoicHJpdmF0ZS11cHN0cmVhbS1uYW1lIn0=",
         })),
         ..verified_event("mock-upstream", "private-upstream-name")
@@ -829,14 +838,17 @@ async fn non_2xx_upstream_response_is_still_bound_to_a_receipt() {
 
     let response = h.requester.post_chat(CHAT_REQUEST, &[]).await;
     assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(response.body, upstream_body);
+    // The client gets the gateway's envelope, not the provider's wording, and
+    // the receipt binds exactly that body.
+    assert_eq!(json_body(&response)["error"]["type"], "rate_limit_error");
+    assert_ne!(response.body, upstream_body);
     assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
 
     let receipt_id = header_str(&response.headers, "x-receipt-id");
     let receipt = h.service.get_receipt_by_receipt_id(receipt_id).unwrap();
     assert_eq!(
         event(&receipt, EVENT_RESPONSE_RETURNED)["body_hash"],
-        sha256_hex(upstream_body)
+        sha256_hex(&response.body)
     );
     assert_valid_receipt_signature(&receipt, &h.receipt_keys[0]);
 }
@@ -870,10 +882,10 @@ async fn aci_verified_failure_blocks_before_forwarding() {
         json_body(&response)["error"]["type"],
         "upstream_verification_failed"
     );
-    assert!(json_body(&response)["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("quote app-id mismatch"));
+    assert_eq!(
+        json_body(&response)["error"]["message"],
+        "upstream verification failed: the upstream's attestation was not verified"
+    );
     assert!(h.upstream_calls.lock().unwrap().is_empty());
     assert_eq!(verifier_calls.lock().unwrap().len(), 1);
 }
@@ -892,5 +904,5 @@ async fn unconstrained_request_is_best_effort_and_receipt_records_failed_not_req
     let uv = event(&receipt, EVENT_UPSTREAM_VERIFIED);
     assert_eq!(uv["result"], "failed");
     assert_eq!(uv["required"], false);
-    assert_eq!(uv["reason"], "cached evidence stale");
+    assert_eq!(uv["reason"], "the upstream's attestation was not verified");
 }

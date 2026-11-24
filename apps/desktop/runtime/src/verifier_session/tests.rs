@@ -45,111 +45,6 @@ fn http_service(base_url: &str) -> Arc<dyn agent_bridge::proxy::VerifiedService>
     })
 }
 
-#[tokio::test]
-async fn compatibility_refresh_is_background_work_and_cannot_resurrect_a_stopped_session() {
-    use axum::{routing::get, Json, Router};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let reached = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let mut inventory = serde_json::to_value(EndpointInventory::bundled().unwrap()).unwrap();
-    inventory["checkedAt"] = "2027-01-01T00:00:00Z".into();
-    for observation in inventory["results"].as_array_mut().unwrap() {
-        if observation["model"] == "z-ai/glm-5.3" {
-            observation["status"] = "inconclusive".into();
-        }
-    }
-    let app = Router::new()
-        .route(
-            "/v1/models",
-            get(|| async { Json(serde_json::json!({"data":[{"id":"z-ai/glm-5.3"}]})) }),
-        )
-        .route(
-            "/inventory",
-            get({
-                let reached = reached.clone();
-                let release = release.clone();
-                move || {
-                    let reached = reached.clone();
-                    let release = release.clone();
-                    let inventory = inventory.clone();
-                    async move {
-                        reached.notify_one();
-                        release.notified().await;
-                        Json(inventory)
-                    }
-                }
-            }),
-        );
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    let directory = tempfile::tempdir().unwrap();
-    let updater = InventoryUpdater::new(directory.path().join("inventory.json"))
-        .unwrap()
-        .with_source(format!("{base}/inventory"));
-    let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
-    let manager = Arc::new(
-        SessionManager::new(
-            proxy.clone(),
-            Arc::new(UsageStore::memory().unwrap()),
-            Arc::new(WaitingSidecar),
-            Handle::current(),
-            AppState::default(),
-        )
-        .with_endpoint_inventory(updater),
-    );
-    {
-        let mut runtime = manager.lock().unwrap();
-        runtime.generation = 1;
-        runtime.epoch = 1;
-        runtime.identity_ready = true;
-        runtime.service = Some(http_service(&base));
-        runtime.state.remote_url = Some("https://tee.redpill.ai".into());
-    }
-    proxy.publish(Session {
-        generation: 1,
-        epoch: 1,
-        service: Some(http_service(&base)),
-        ..Session::default()
-    });
-    tokio::time::timeout(Duration::from_secs(2), manager.load_catalog(1, 1))
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(proxy.session().verified);
-    tokio::time::timeout(Duration::from_secs(2), reached.notified())
-        .await
-        .unwrap();
-    assert!(proxy.session().catalog.unwrap().models[0]
-        .supports(agent_bridge::catalog::Surface::Responses));
-    // A second catalog read also stays responsive while the shared download waits.
-    tokio::time::timeout(Duration::from_secs(2), manager.refresh_catalog())
-        .await
-        .unwrap()
-        .unwrap();
-    let mut states = manager.subscribe();
-    release.notify_one();
-    tokio::time::timeout(Duration::from_secs(2), states.changed())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(proxy
-        .session()
-        .catalog
-        .unwrap()
-        .for_surface(agent_bridge::catalog::Surface::Responses)
-        .models
-        .is_empty());
-    assert_eq!(proxy.session().epoch, 1);
-    manager.stop().unwrap();
-    manager.apply_inventory(1, 1).unwrap();
-    assert!(!proxy.session().verified);
-    server.abort();
-    let _ = server.await;
-}
-
 struct WaitingSidecar;
 
 #[tokio::test]
@@ -186,7 +81,7 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
         axum::serve(listener, app).await.unwrap();
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -236,6 +131,70 @@ async fn late_catalog_failure_cannot_override_a_newer_success_or_security_stop()
     server.abort();
     let _ = server.await;
 }
+/// The backend refreshes on a timer, so a refresh must neither raise an
+/// error over a working session nor clear one something else reported.
+#[tokio::test]
+async fn a_refresh_of_a_verified_session_changes_only_its_catalog() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/models",
+        get({
+            let calls = calls.clone();
+            move || {
+                let body = match calls.fetch_add(1, Ordering::SeqCst) {
+                    0 => serde_json::json!({"data": [{"id": "first"}]}),
+                    1 => serde_json::json!({"error": "unavailable"}),
+                    _ => serde_json::json!({"data": [{"id": "second"}]}),
+                };
+                async move { Json(body) }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    {
+        let mut runtime = manager.lock().unwrap();
+        runtime.identity_ready = true;
+        runtime.service = Some(http_service(&base));
+    }
+    proxy.publish(Session {
+        service: Some(http_service(&base)),
+        ..Session::default()
+    });
+    manager.refresh_catalog().await.unwrap();
+    manager.report_error("agents failed".into());
+
+    manager.refresh_catalog().await.unwrap_err();
+    let kept = manager.snapshot();
+    assert_eq!(kept.status, VerificationStatus::Verified);
+    assert_eq!(kept.error.as_deref(), Some("agents failed"));
+    assert_eq!(kept.catalog.unwrap().models[0].id, "first");
+    assert!(proxy.session().verified);
+
+    let refreshed = manager.refresh_catalog().await.unwrap();
+    assert_eq!(refreshed.error.as_deref(), Some("agents failed"));
+    let catalog = refreshed.catalog.unwrap();
+    assert_eq!(catalog.models[0].id, "second");
+    assert_eq!(catalog.removed, ["first"]);
+    assert!(proxy.session().catalog.unwrap().get("second").is_some());
+    server.abort();
+    let _ = server.await;
+}
+
 struct WaitingTask;
 impl VerifierTask for WaitingTask {
     fn stop(&mut self) -> Result<(), String> {
@@ -294,7 +253,7 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
         .unwrap();
     });
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -305,7 +264,6 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let identity = identity_event(serde_json::json!({
@@ -349,6 +307,128 @@ async fn ready_event_loads_catalog_before_opening_the_session() {
     assert_eq!(state.status, VerificationStatus::Verified);
     assert_eq!(state.catalog.unwrap().models[0].id, "test-model");
     assert!(proxy.session().verified);
+    let renewed = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:renewed",
+        "keyset_not_after": 2_100_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {
+            "serving": "aggregator",
+            "supported_e2ee_versions": []
+        },
+        "verification": { "checks": [] }
+    }));
+    let before_epoch = manager.lock().unwrap().epoch;
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::IdentityRenewed { identity: renewed },
+        )
+        .unwrap();
+    let after = manager.snapshot();
+    let after_epoch = manager.lock().unwrap().epoch;
+    assert_eq!(after.status, VerificationStatus::Verified);
+    assert_eq!(after_epoch, before_epoch);
+    assert!(after.catalog.is_some());
+    assert!(proxy.session().verified);
+    manager.stop().unwrap();
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn a_failed_reverification_retires_the_verifier_for_a_retry() {
+    use axum::{routing::get, Json, Router};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/v1/models",
+        get({
+            let calls = calls.clone();
+            move || {
+                let id = format!("model-{}", calls.fetch_add(1, Ordering::SeqCst));
+                async move { Json(serde_json::json!({"data": [{"id": id}]})) }
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://inference.phala.com".into(),
+        })
+        .unwrap();
+    let session_id = started.session_id.unwrap();
+    let generation = proxy.session().generation;
+    let identity = IdentityEvent {
+        tee_type: "tdx".into(),
+        trust_level: "hardware_verified".into(),
+        keyset_digest: "sha256:initial".into(),
+        keyset_not_after: 2_000_000_000,
+        tls_spki: None,
+        source_provenance: IdentitySourceProvenance::default(),
+        service_capabilities: ServiceCapabilities::default(),
+        verification: serde_json::json!({"checks": []}),
+    };
+    manager
+        .handle_event(
+            generation,
+            VerifierEvent::Ready {
+                identity: identity.clone(),
+                remote_url: base.clone(),
+                service: http_service(&base),
+            },
+        )
+        .unwrap();
+    manager
+        .wait_for_verification(&session_id, Duration::from_secs(2))
+        .await
+        .unwrap();
+    let verified_epoch = proxy.session().epoch;
+
+    manager
+        .handle_event(
+            generation,
+            VerifierEvent::Blocked {
+                code: None,
+                reason: "re-verification failed: network unavailable".into(),
+            },
+        )
+        .unwrap();
+    // Agents are refused from here on, so no request can make this verifier
+    // verify again: it is retired and recovery starts a fresh one.
+    let lost = manager.snapshot();
+    assert_eq!(lost.status, VerificationStatus::Error);
+    assert!(lost.catalog.is_none());
+    assert!(lost.reconnecting && crate::recovery::should_retry(&lost));
+    assert!(!proxy.session().verified);
+    assert!(!manager.is_running().unwrap());
+
+    // What the retired verifier still reports cannot reopen the session.
+    for event in [
+        VerifierEvent::IdentityRenewed {
+            identity: identity.clone(),
+        },
+        VerifierEvent::IdentityUpdated { identity },
+    ] {
+        manager.handle_event(generation, event).unwrap();
+        assert_eq!(manager.snapshot().status, VerificationStatus::Error);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(proxy.session().epoch > verified_epoch);
     manager.stop().unwrap();
     server.abort();
     let _ = server.await;
@@ -361,7 +441,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     use desktop_core::protocol::{self, ErrorCode};
 
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -373,7 +453,6 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
         .begin_verification(
             StartConfig {
                 remote_url: "https://unreachable.invalid".into(),
-                require_production_os: true,
             },
             false,
         )
@@ -387,6 +466,7 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
             proxy.session().generation,
             VerifierEvent::Fatal {
                 error: failure.clone().into(),
+                verification: None,
             },
         )
         .unwrap();
@@ -405,11 +485,136 @@ async fn an_authored_verifier_failure_answers_the_waiting_caller() {
     manager.stop().unwrap();
 }
 
+/// A service that answers but fails a check, here channel binding (id-6),
+/// keeps forwarding closed and is retried; the state names the failed check
+/// and the authored reason, which also answers a waiting caller. A retry
+/// keeps showing them until a verified identity replaces them.
+#[tokio::test]
+async fn a_failed_channel_binding_is_recorded_and_stays_closed() {
+    use desktop_core::protection::{Protection, ProtectionPhase};
+    use desktop_core::protocol::{self, ErrorCode};
+
+    let (events, _) = tokio::sync::mpsc::channel(8);
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
+    let manager = Arc::new(SessionManager::new(
+        proxy.clone(),
+        Arc::new(UsageStore::memory().unwrap()),
+        Arc::new(WaitingSidecar),
+        Handle::current(),
+        AppState::default(),
+    ));
+    let started = manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+        })
+        .unwrap();
+    let failure = protocol::Error::new(
+        ErrorCode::ServiceVerificationFailed,
+        "Service verification failed: id-6 … protection stays off.",
+    );
+    let verification = serde_json::json!({"checks": [
+        {"id": "id-2", "section": "9.1(2)", "title": "binding chain", "status": "pass", "detail": "ok"},
+        {"id": "id-6", "section": "9.1(6)", "title": "channel bound to the attested keyset", "status": "fail",
+         "detail": "observed SPKI sha256:ab is NOT an attested entry clients pin"},
+    ]});
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Fatal {
+                error: failure.clone().into(),
+                verification: Some(verification),
+            },
+        )
+        .unwrap();
+
+    let error = manager
+        .wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(protocol::Error::from(error), failure);
+    let state = manager.snapshot();
+    assert_eq!(state.status, VerificationStatus::Error);
+    assert!(state.verification_failed);
+    assert_eq!(state.error.as_deref(), Some(failure.message.as_str()));
+    let failed: Vec<_> = state
+        .checks
+        .iter()
+        .filter(|check| check.status == "fail")
+        .collect();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        (failed[0].id.as_str(), failed[0].section.as_str()),
+        ("id-6", "9.1(6)")
+    );
+    assert!(!proxy.session().verified);
+    assert!(crate::recovery::should_retry(&state));
+    assert_eq!(
+        Protection::of(&state).phase,
+        ProtectionPhase::VerificationFailed
+    );
+
+    // The verifier ends; a retry in progress still shows the failure.
+    let generation = proxy.session().generation;
+    manager
+        .terminated(generation, Some("rejected".into()))
+        .unwrap();
+    manager
+        .start(StartConfig {
+            remote_url: "https://tee.example".into(),
+        })
+        .unwrap();
+    let retrying = manager.snapshot();
+    assert_eq!(retrying.status, VerificationStatus::Verifying);
+    assert!(retrying.reconnecting && retrying.verification_failed);
+    assert_eq!(retrying.error.as_deref(), Some(failure.message.as_str()));
+    assert!(retrying.checks.iter().any(|check| check.id == "id-6"));
+    assert_eq!(
+        Protection::of(&retrying).phase,
+        ProtectionPhase::VerificationFailed
+    );
+    assert!(!proxy.session().verified);
+
+    // A verified identity replaces it.
+    let identity = identity_event(serde_json::json!({
+        "tee_type": "tdx",
+        "trust_level": "hardware_verified",
+        "keyset_digest": "sha256:keyset",
+        "keyset_not_after": 2_000_000_000_u64,
+        "tls_spki": null,
+        "source_provenance": {},
+        "service_capabilities": {"serving": "aggregator", "supported_e2ee_versions": []},
+        "verification": {"checks": [
+            {"id": "id-6", "section": "9.1(6)", "title": "channel", "status": "pass", "detail": "ok"},
+        ]},
+    }));
+    manager
+        .handle_event(
+            proxy.session().generation,
+            VerifierEvent::Ready {
+                identity,
+                remote_url: "https://tee.example".into(),
+                service: http_service("http://127.0.0.1:1"),
+            },
+        )
+        .unwrap();
+    let identified = manager.snapshot();
+    assert!(!identified.verification_failed && identified.error.is_none());
+    assert!(identified.checks.iter().all(|check| check.status == "pass"));
+    assert_eq!(
+        Protection::of(&identified).phase,
+        ProtectionPhase::Reconnecting
+    );
+    manager.stop().unwrap();
+}
+
 #[test]
 fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -420,7 +625,6 @@ fn unexpected_termination_revokes_forwarding_and_requests_reconnect() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let generation = proxy.session().generation;
@@ -448,7 +652,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -460,7 +664,6 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let state = manager.stop().unwrap();
@@ -474,7 +677,7 @@ fn explicit_stop_stops_the_task_and_ends_the_session() {
 #[tokio::test(start_paused = true)]
 async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -484,7 +687,6 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.start(config.clone()).unwrap();
     tokio::task::yield_now().await;
@@ -518,7 +720,7 @@ async fn silent_verifier_times_out_without_stopping_a_completed_verification() {
 fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -530,7 +732,6 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
     manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     manager
@@ -551,11 +752,11 @@ fn keyset_change_requests_fresh_verification_without_ending_the_session() {
 }
 
 #[test]
-fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() {
+fn a_lost_verification_keeps_the_session_until_stopped() {
     for verification_only in [false, true] {
         let executor = tokio::runtime::Runtime::new().unwrap();
         let (events, _) = tokio::sync::mpsc::channel(8);
-        let proxy = ProxyState::new(events).unwrap();
+        let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
         let usage = Arc::new(UsageStore::memory().unwrap());
         let manager = Arc::new(SessionManager::new(
             proxy.clone(),
@@ -566,7 +767,6 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
         ));
         let config = StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         };
         manager.start(config.clone()).unwrap();
         if verification_only {
@@ -584,7 +784,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             )
             .unwrap();
         assert!(usage.active_session().unwrap().is_some());
-        let running = manager.is_running().unwrap();
+        assert!(!manager.is_running().unwrap());
         manager
             .handle_event(
                 generation,
@@ -594,14 +794,13 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
                 },
             )
             .unwrap();
-        assert_eq!(manager.snapshot().status, VerificationStatus::Blocked);
         assert!(usage.active_session().unwrap().is_some());
-        assert_eq!(manager.is_running().unwrap(), running);
         manager
             .handle_event(
                 generation,
                 VerifierEvent::Fatal {
                     error: "task failed".into(),
+                    verification: None,
                 },
             )
             .unwrap();
@@ -610,11 +809,11 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
             .fail(generation, "event sink failed".into())
             .unwrap();
         let state = manager.snapshot();
-        assert_eq!(state.status, VerificationStatus::Blocked);
+        assert_eq!(state.status, VerificationStatus::Error);
         assert_eq!(state.configuration_verification, verification_only);
-        assert!(!crate::recovery::should_retry(&state));
+        assert_eq!(crate::recovery::should_retry(&state), !verification_only);
         assert!(!proxy.session().verified);
-        // A relaunch resumes the blocked session; only a stop ends it.
+        // A retry or relaunch resumes the session; only a stop ends it.
         assert!(state.session_active);
         manager.stop().unwrap();
         assert!(usage.active_session().unwrap().is_none());
@@ -625,7 +824,7 @@ fn security_blocks_survive_process_failure_and_keep_the_session_until_stopped() 
 fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -635,7 +834,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     manager.restore_snapshot(AppState {
         status: VerificationStatus::Verified,
@@ -683,7 +881,6 @@ fn reconnection_preserves_session_history_but_requires_fresh_verification() {
     manager.stop_with_reconnect(true).unwrap();
     let candidate = StartConfig {
         remote_url: "https://tee.redpill.ai".into(),
-        ..config.clone()
     };
     let verification = manager.begin_verification(candidate.clone(), true).unwrap();
     assert_eq!(verification.session_id, resumed.session_id);
@@ -718,7 +915,7 @@ fn stopping_preserves_usage_but_not_the_protection_clock() {
 #[tokio::test]
 async fn stale_verifier_generation_cannot_record_activity() {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = SessionManager::new(
         proxy,
         Arc::new(UsageStore::memory().unwrap()),
@@ -767,7 +964,7 @@ async fn stale_verifier_generation_cannot_record_activity() {
 async fn a_verdict_saves_the_checked_receipt_with_its_record() {
     let (events, _) = tokio::sync::mpsc::channel(8);
     let manager = SessionManager::new(
-        ProxyState::new(events).unwrap(),
+        ProxyState::new(events, std::time::Duration::ZERO).unwrap(),
         Arc::new(UsageStore::memory().unwrap()),
         Arc::new(WaitingSidecar),
         Handle::current(),
@@ -950,7 +1147,7 @@ fn proxy_receipt_and_usage_events_merge_into_one_complete_activity() {
 fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy,
         Arc::new(UsageStore::memory().unwrap()),
@@ -966,7 +1163,6 @@ fn published_and_returned_states_carry_this_backend_and_an_increasing_sequence()
     let started = manager
         .start(StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         })
         .unwrap();
     let stopped = manager.stop().unwrap();
@@ -995,7 +1191,7 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
     let executor = tokio::runtime::Runtime::new().unwrap();
     let stopped = Arc::new(AtomicBool::new(false));
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
         Arc::new(UsageStore::memory().unwrap()),
@@ -1005,7 +1201,6 @@ fn termination_and_failure_revoke_the_session_under_a_new_epoch() {
     ));
     let config = StartConfig {
         remote_url: "https://inference.phala.com".into(),
-        require_production_os: true,
     };
     let revoked = |epoch| {
         let session = proxy.session();
@@ -1091,6 +1286,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         session_id: Some("session".into()),
         protected_since: Some(100),
         reconnecting: true,
+        verification_failed: true,
         session_active: true,
         session_usage: UsageSummary {
             requests: 3,
@@ -1100,7 +1296,6 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         error: Some("Verification failed".into()),
         config: StartConfig {
             remote_url: "https://tee.example".into(),
-            require_production_os: false,
         },
         profiles: vec![ConfidentialProfile {
             id: "profile".into(),
@@ -1145,6 +1340,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         "checks",
         "protectedSince",
         "reconnecting",
+        "verificationFailed",
         "error",
     ];
     let json = |state: &AppState| serde_json::to_value(state).unwrap();
@@ -1153,7 +1349,7 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         json(&SessionManager::carried(&previous)),
         json(&AppState::default()),
     );
-    assert_eq!(fixture.as_object().unwrap().len(), 31);
+    assert_eq!(fixture.as_object().unwrap().len(), 32);
     for (field, value) in fixture.as_object().unwrap() {
         // Differs from its default, so keeping it is observable.
         assert_ne!(Some(value), defaults.get(field), "{field}");
@@ -1164,4 +1360,31 @@ fn a_stop_keeps_the_session_and_settings_but_not_the_verification() {
         };
         assert_eq!(carried.get(field), expected, "{field}");
     }
+}
+
+#[test]
+fn catalog_summary_gates_chat_endpoints_by_output_modality() {
+    let catalog = Catalog::from_remote(
+        &json!({ "data": [
+            { "id": "kev-4b", "output_modalities": ["decisions"] },
+            { "id": "chat", "output_modalities": ["text"] },
+            { "id": "legacy" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    let summary = catalog_summary(&catalog, None);
+
+    let endpoints = |id| {
+        summary
+            .models
+            .iter()
+            .find(|model| model.id == id)
+            .unwrap()
+            .supported_endpoints
+            .clone()
+    };
+    assert_eq!(endpoints("kev-4b"), Some(Vec::new()));
+    assert_eq!(endpoints("chat"), None);
+    assert_eq!(endpoints("legacy"), None);
 }

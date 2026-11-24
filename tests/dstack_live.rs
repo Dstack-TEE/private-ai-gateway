@@ -61,6 +61,14 @@ impl LiveStubUpstream {
 
 #[async_trait]
 impl UpstreamBackend for LiveStubUpstream {
+    fn response_protocol(
+        &self,
+        _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
+        _operation: private_ai_gateway::middleware::request_transform::Endpoint,
+    ) -> Option<private_ai_gateway::aci::upstream::SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "live-stub-upstream"
     }
@@ -241,6 +249,14 @@ async fn dstack_live_provider_keys_are_stable_for_same_paths() {
         a.prefix_hash_key().await.unwrap(),
         b.prefix_hash_key().await.unwrap()
     );
+    assert!(
+        a.cache_salt_key().await.unwrap() == b.cache_salt_key().await.unwrap(),
+        "cache salt keys must be stable between replicas"
+    );
+    assert!(
+        a.cache_salt_key().await.unwrap() != a.prefix_hash_key().await.unwrap(),
+        "cache isolation and prefix hashing must use different keys"
+    );
 }
 
 #[tokio::test]
@@ -267,6 +283,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
     cfg.service_capabilities = ServiceCapabilities {
         supported_e2ee_versions: vec!["2".to_string()],
         serving: "aggregator".to_string(),
+        ..Default::default()
     };
     cfg.allow_test_keys = false;
 
@@ -319,6 +336,7 @@ async fn dstack_live_aci_report_and_receipt_chain_verify() {
 
     let result = service
         .forward_chat_completion_request(ChatCompletionRequest {
+            form: None,
             context: GatewayRequestContext::default(),
             endpoint_path: CHAT_COMPLETIONS_PATH,
             received_body: CHAT_REQUEST,
@@ -429,7 +447,7 @@ async fn dstack_live_aci_service_upstream_verifier_accepts_real_aci_service() {
         event.result,
         private_ai_gateway::aci::receipt::VerificationResult::Verified,
         "{:?}",
-        event.reason
+        event.diagnostic
     );
     assert_eq!(event.verifier_id, "aci-service/v2");
     assert!(event.evidence.is_some());

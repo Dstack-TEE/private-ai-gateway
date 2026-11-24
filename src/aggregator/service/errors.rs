@@ -1,6 +1,6 @@
 use crate::aci::identity::InvalidStatementInput;
 use crate::aci::keys::KeyError;
-use crate::aci::receipt::ReceiptError;
+use crate::aci::receipt::{ReceiptError, VerificationFailure};
 use crate::aci::upstream::UpstreamError;
 
 #[derive(Debug, thiserror::Error)]
@@ -10,6 +10,15 @@ pub enum ServiceError {
          allow_test_keys only in tests"
     )]
     TestKeysInProduction,
+    #[error("attested_session_ttl_seconds must be positive and its expiry representable as u64")]
+    InvalidAttestedSessionTtl,
+    /// The invariant detail is available via Debug, never in client-facing Display.
+    #[error("internal service error")]
+    AdmissionInvariant(&'static str),
+    #[error(
+        "the keyset committed in the response headers expired before forwarding; retry the request"
+    )]
+    EarlyResponseKeysetExpired,
     #[error(
         "invalid source provenance: repo provenance must include both repo_url and repo_commit; \
          runtime source provenance is loaded from git-launcher or omitted when unknown"
@@ -45,8 +54,10 @@ pub enum ServiceError {
 pub enum UpstreamVerificationError {
     #[error("upstream verification required but no verifier result supplied")]
     NoVerifierResult,
-    #[error("upstream verifier reported failed: {0}")]
-    VerifierFailed(String),
+    /// The cause comes from a closed set, so this text is safe to serve and
+    /// to sign into a refusal receipt.
+    #[error("upstream verification failed: {0}")]
+    VerifierFailed(VerificationFailure),
     /// The request is restricted to ACI-verified upstreams and no
     /// route was eligible to serve it. Distinct from [`Self::VerifierFailed`]:
     /// no verifier ran and no upstream failed — the routes on offer were never
@@ -55,7 +66,7 @@ pub enum UpstreamVerificationError {
     NoEligibleAttestedRoute(String),
     /// The request pins one or more attested session ids, but none matches the
     /// route's current verified channel bindings. No prompt was forwarded.
-    #[error("none of the requested attested sessions is available for model {0}")]
+    #[error("none of the requested attested sessions is available for model {0}; pinned sessions may have been superseded by re-verification, so re-list /v1/aci/sessions and retry")]
     NoEligibleAttestedSession(String),
 }
 

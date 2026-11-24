@@ -22,8 +22,7 @@ use crate::aci::keys::verify_receipt_signature;
 use crate::aci::receipt::receipt_signing_input;
 use crate::aci::types::{AttestationReport, WorkloadKeyset};
 use crate::aci::verifier::{
-    appraise_report, dstack_rtmr3_event, AppraisalInputs, CheckId, CheckResult, CustodyEvidence,
-    CustodyPolicy, DstackEventLog, Outcome,
+    appraise_report, AppraisalInputs, CheckId, CheckResult, CustodyEvidence, CustodyPolicy, Outcome,
 };
 pub use crate::aci::verifier::{ChannelEvidence, QuoteSource};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -31,24 +30,9 @@ use serde_json::Value;
 
 use crate::client::{AciClient, HttpResult};
 use crate::transcript::{
-    Transcript, ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, POLICY_OS, RECEIPT_1, RECEIPT_2, RECEIPT_3,
-    RECEIPT_4, RECEIPT_NOTE, UPSTREAM_1, UPSTREAM_2,
+    Transcript, ID_1, ID_2, ID_3, ID_4, ID_5, ID_6, RECEIPT_1, RECEIPT_2, RECEIPT_3, RECEIPT_4,
+    RECEIPT_NOTE, UPSTREAM_1, UPSTREAM_2,
 };
-
-// Source: the `is_dev: false` entries returned by `phala os-images --json` on
-// 2026-08-13 (dstack 0.5.8–0.5.9, standard and NVIDIA). Before adding an entry,
-// verify the published archive independently with:
-//   uv run python scripts/dstack_os_image.py <os-image-hash>
-const PRODUCTION_DSTACK_OS_IMAGES: &[&str] = &[
-    // dstack-0.5.9 (standard)
-    "bd369a8c2f9edb2b52dad48ac8e0b32dde5f1337c423a506b48d07403a7d8033",
-    // dstack-nvidia-0.5.9
-    "806a352e16175d90568de97dff563f31f680239e6b90e9b5b2e9141d0955b0d9",
-    // dstack-0.5.8 (standard)
-    "6427f4f5ded88b72d326bd973e581c1689c5080c6444a0cf90fec7d9e4c8b92a",
-    // dstack-nvidia-0.5.8
-    "5d286131b20689d0d59bae1b34cd91cb78149016a9ef50afff51fb1a04cad5e4",
-];
 
 pub struct ReportCheckContext<'a> {
     /// The nonce this verifier supplied on the report fetch (§3.2).
@@ -60,10 +44,6 @@ pub struct ReportCheckContext<'a> {
     pub quote: QuoteSource<'a>,
     pub channel: ChannelEvidence<'a>,
     pub policy: &'a VerifierPolicy,
-    /// Verifier policy (§1.3): appraise the RTMR3 `os-image-hash` against the
-    /// reviewed production allowlist. A separate dstack verifier must first
-    /// bind that hash to MRTD/RTMR0-2 for the same evidence.
-    pub require_production_os: bool,
     pub explain: bool,
 }
 
@@ -165,21 +145,6 @@ pub async fn run_report_checks(
     for result in &appraisal.results {
         render(transcript, result);
     }
-    if cx.require_production_os {
-        let provenance_verified = appraisal
-            .results
-            .iter()
-            .find(|result| result.id == CheckId::Provenance)
-            .is_some_and(CheckResult::passed);
-        if provenance_verified {
-            run_production_os_policy(transcript, report);
-        } else {
-            transcript.fail(
-                POLICY_OS,
-                "production OS allowlist cannot be evaluated until RTMR3 verifies",
-            );
-        }
-    }
     Ok(ReportOutcome {
         identity: appraisal.identity.map(|binding| EstablishedIdentity {
             keyset: binding.keyset,
@@ -187,38 +152,6 @@ pub async fn run_report_checks(
         }),
         tls_pins: appraisal.tls_pins,
     })
-}
-
-fn run_production_os_policy(transcript: &mut Transcript, report: &AttestationReport) {
-    let result = (|| {
-        let event_log = report.attestation.evidence["event_log"]
-            .as_str()
-            .ok_or("attestation evidence carries no dstack event_log")?;
-        // id-4 already established that this exact log replays to the quote.
-        let events = serde_json::from_str::<Vec<DstackEventLog>>(event_log)
-            .map_err(|e| format!("invalid dstack event_log evidence: {e}"))?;
-        let event = dstack_rtmr3_event(&events, "os-image-hash")
-            .map_err(|e| format!("dstack event log rejected: {e}"))?
-            .ok_or("verified event log carries no os-image-hash event")?;
-        let hash = event.event_payload.to_ascii_lowercase();
-        PRODUCTION_DSTACK_OS_IMAGES
-            .iter()
-            .any(|allowed| hash.eq_ignore_ascii_case(allowed))
-            .then_some(())
-            .ok_or_else(|| format!("OS-image hash {hash} is not a reviewed production image"))?;
-        Ok::<_, String>(hash)
-    })();
-
-    match result {
-        Ok(hash) => transcript.pass(
-            POLICY_OS,
-            format!("RTMR3 os-image-hash {hash} is in the reviewed production allowlist"),
-        ),
-        Err(error) => transcript.fail(
-            POLICY_OS,
-            format!("RTMR3 os-image-hash did not satisfy the production allowlist: {error}"),
-        ),
-    }
 }
 
 /// Parse the §7.2 receipt document and gate its `api_version` (Appendix B).
@@ -299,10 +232,7 @@ fn event_by_type<'a>(payload: &'a Value, event_type: &str) -> Option<&'a Value> 
     events(payload).find(|event| event["type"].as_str() == Some(event_type))
 }
 
-/// The `session_id` the serving (verified) `upstream.verified` event commits
-/// to — the handle for the §9.3 deep audit. Filtering on the verified result
-/// keeps the fetch and upstream-2 on the same session upstream-1 blessed, even when §7.5
-/// prior-attempt events are also present.
+/// The session id admitted for the committed forwarding attempt.
 pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
     events(payload)
         .filter(|event| {
@@ -312,10 +242,7 @@ pub fn session_id_from_receipt(payload: &Value) -> Option<String> {
         .find_map(|event| event["session_id"].as_str().map(str::to_string))
 }
 
-/// Fetch the attested session record the receipt commits to — the live
-/// artifact source for the upstream-2 deep audit. Returns the raw 2xx response (the
-/// document hashes to the session id, §8) and otherwise the reason
-/// upstream-2 cites for skipping.
+/// Fetch the cited snapshot, returning its raw 2xx response or a reason.
 pub async fn fetch_live_session(
     client: &AciClient,
     base_url: &str,
@@ -345,21 +272,25 @@ pub fn run_receipt_checks(transcript: &mut Transcript, cx: ReceiptContext<'_>) {
     // receipt-1 — the signature over JCS(document minus `signature`), under the
     // attested keyset entry `key_id` names; that entry decides the
     // algorithm (§7.2).
+    let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
+    let served_at = cx.receipt["served_at"].as_u64();
     check_signature(transcript, &cx);
 
-    // receipt-2 — the payload binds back to the established keyset digest.
-    let payload_digest = cx.receipt["workload_keyset_digest"].as_str();
-    if payload_digest == Some(cx.workload_keyset_digest) {
+    // receipt-2 — the payload binds back to this established digest, and its
+    // keyset was still valid when the service served it.
+    if payload_digest == Some(cx.workload_keyset_digest)
+        && served_at.is_some_and(|served_at| served_at < cx.keyset.not_after)
+    {
         transcript.pass(
             RECEIPT_2,
-            "payload workload_keyset_digest matches the established digest",
+            "payload workload_keyset_digest matches the established keyset valid at served_at",
         );
     } else {
         transcript.fail(
             RECEIPT_2,
             format!(
-                "payload carries workload_keyset_digest {payload_digest:?}, established {}",
-                cx.workload_keyset_digest
+                "payload workload_keyset_digest {payload_digest:?}, established {}; served_at {served_at:?} must be a nonnegative integer before not_after {}",
+                cx.workload_keyset_digest, cx.keyset.not_after
             ),
         );
     }
@@ -646,7 +577,7 @@ pub fn audit_session_record(
         record["expires_at"].as_u64(),
     );
     let in_window = match (at, window) {
-        (Some(at), (Some(from), Some(until))) => from <= at && at <= until,
+        (Some(at), (Some(from), Some(until))) => from <= at && at < until,
         _ => false,
     };
     let evidence = evidence_check(record.get("evidence"));
@@ -729,10 +660,8 @@ fn check_upstream_event(
     }
 }
 
-/// upstream-2 — deep audit of the attested session record: the parsed document's
-/// JCS form hashes to the cited id (§8), the receipt's served_at falls in
-/// the session's validity window, and the evidence data hashes to its
-/// digest.
+/// Session integrity, validity and pin-membership checks; does not perform
+/// provider-specific verification of the establishing evidence (§9.2(4)).
 fn check_session_audit(
     transcript: &mut Transcript,
     payload: &Value,
@@ -759,7 +688,12 @@ fn check_session_audit(
         // §8 retention: a cited session must stay resolvable for as long as
         // the receipt citing it. A client demanding verified serving cannot
         // accept "the record was there, trust us".
-        if requires_verified && session_id_from_receipt(payload).is_some() {
+        if !required_claims.is_empty() {
+            transcript.fail(
+                UPSTREAM_2,
+                format!("required claims cannot be checked: {no_session_reason} (spec 9.2(3))"),
+            );
+        } else if requires_verified && session_id_from_receipt(payload).is_some() {
             transcript.fail(
                 UPSTREAM_2,
                 format!(
@@ -849,7 +783,7 @@ fn claims_summary(claims: Option<&Value>) -> String {
 
 /// §9.2(2): `evidence.data` decodes and hashes to `evidence.digest` (§8.2:
 /// a record whose data does not match its digest MUST be rejected). Missing
-/// or malformed evidence rejects too — the deep audit never assumes.
+/// or malformed evidence rejects too — integrity checks never assume.
 fn evidence_check(evidence: Option<&Value>) -> Result<(), String> {
     let (Some(digest), Some(data_uri)) = (
         evidence.and_then(|e| e["digest"].as_str()),
@@ -894,7 +828,6 @@ mod tests {
                 reason: "quote collateral offline",
             },
             policy: &NO_POLICY,
-            require_production_os: false,
             channel: ChannelEvidence::Unobservable {
                 reason: "offline audit: no live TLS channel observed",
             },
@@ -919,6 +852,13 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(
+            t.checks
+                .iter()
+                .map(|check| check.def.id)
+                .collect::<Vec<_>>(),
+            ["id-1", "id-2", "id-3", "id-4", "id-5", "id-6"]
+        );
         assert_eq!(status_of(&t, "id-2"), Status::Pass);
         assert_eq!(status_of(&t, "id-3"), Status::Pass);
         // The fixture report carries no hardware quote and no provenance, so
@@ -1124,6 +1064,38 @@ mod tests {
     }
 
     #[test]
+    fn receipt_two_requires_matching_digest_and_unexpired_keyset() {
+        use ed25519_dalek::Signer;
+
+        let mut receipt = vector_receipt_envelope();
+        let identity = established_identity(&vector_report()).unwrap();
+        let resign = |receipt: &mut Value| {
+            let input = receipt_signing_input(receipt).unwrap();
+            receipt["signature"] = serde_json::json!(hex::encode(
+                ed25519_dalek::SigningKey::from_bytes(&[2; 32])
+                    .sign(&input)
+                    .to_bytes()
+            ));
+        };
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Pass);
+
+        receipt["workload_keyset_digest"] = serde_json::json!("unknown");
+        resign(&mut receipt);
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Fail);
+
+        receipt["workload_keyset_digest"] = serde_json::json!(identity.keyset_digest);
+        receipt["served_at"] = serde_json::json!(KEYSET_NOT_AFTER);
+        resign(&mut receipt);
+        let mut t = Transcript::default();
+        run_receipt_checks(&mut t, fixture_context(&receipt, &identity));
+        assert_eq!(status_of(&t, "receipt-2"), Status::Fail);
+    }
+
+    #[test]
     fn rewrite_note_appears_only_when_forwarded_differs() {
         let identity = established_identity(&vector_report()).unwrap();
 
@@ -1270,6 +1242,27 @@ mod tests {
             },
         );
         assert_eq!(status_of(&t, "upstream-2"), Status::Fail);
+    }
+
+    #[test]
+    fn session_audit_uses_admission_time_and_excludes_the_expiry_boundary() {
+        let bytes = vector_session_bytes();
+        let id = crate::aci::digest::sha256_bare_hex(&bytes);
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        let expires_at = record["expires_at"].as_u64().unwrap();
+        // Auditing after completion still evaluates the receipt's admission time.
+        let admitted = audit_session_record(&bytes, &id, Some(expires_at - 1)).unwrap();
+        assert!(admitted.integrity_ok());
+        assert!(
+            !audit_session_record(&bytes, &id, Some(expires_at))
+                .unwrap()
+                .in_window
+        );
+        assert!(
+            !audit_session_record(&bytes, &id, Some(expires_at + 1))
+                .unwrap()
+                .in_window
+        );
     }
 
     #[test]
@@ -1433,5 +1426,45 @@ mod tests {
         );
         assert_eq!(status_of(&t, "upstream-1"), Status::Fail);
         assert_eq!(status_of(&t, "upstream-2"), Status::Skip);
+    }
+
+    #[test]
+    fn required_claims_fail_without_an_auditable_session() {
+        let receipt = parse_receipt_document(vector_receipt_envelope()).unwrap();
+        let required = [RequiredClaim::parse("tee_attested").unwrap()];
+        for serving in ["aggregator", "direct"] {
+            let mut t = Transcript::default();
+            run_upstream_checks(
+                &mut t,
+                &receipt,
+                UpstreamContext {
+                    session_bytes: None,
+                    no_session_reason: "no session record",
+                    pinned: None,
+                    requires_verified: serving != "direct",
+                    serving,
+                    required_claims: &required,
+                },
+            );
+            assert_eq!(status_of(&t, "upstream-2"), Status::Fail, "{serving}");
+        }
+
+        // An unverified receipt without a cited session cannot satisfy a
+        // claims policy either, even when verified serving was not demanded.
+        let payload = serde_json::json!({ "served_at": SERVED_AT, "event_log": [] });
+        let mut t = Transcript::default();
+        run_upstream_checks(
+            &mut t,
+            &payload,
+            UpstreamContext {
+                session_bytes: None,
+                no_session_reason: "receipt has no verified session",
+                pinned: None,
+                requires_verified: false,
+                serving: "aggregator",
+                required_claims: &required,
+            },
+        );
+        assert_eq!(status_of(&t, "upstream-2"), Status::Fail);
     }
 }

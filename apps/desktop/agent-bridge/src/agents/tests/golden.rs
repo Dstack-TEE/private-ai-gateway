@@ -76,7 +76,11 @@ impl Golden {
             .to_string();
         let mut text = text.replace(&canonical, "$HOME").replace(&home, "$HOME");
         for (value, name) in &self.names {
-            text = text.replace(value, name);
+            // YAML quotes a token that reads as a number, such as one that
+            // starts with `0b`; that is the same token.
+            text = text
+                .replace(&format!("'{value}'"), name)
+                .replace(value, name);
         }
         text
     }
@@ -534,10 +538,10 @@ fn config(agent: Agent) -> String {
         .to_string()
 }
 
-/// Models with every projected attribute, and Chat Completions models without
-/// any: no text or image input, and zero limits.
+/// A model with every projected attribute, models with few or none, and a
+/// zero-limit transcription model that agents never see.
 fn rich_catalog(completion: &str) -> Catalog {
-    let mut catalog = Catalog::from_remote(
+    Catalog::from_remote(
         &json!({"data": [
             {"id": "openai/gpt-oss-120b", "name": "GPT OSS 120B", "is_tee": true,
              "context_length": 131072, "max_output_length": 32768,
@@ -548,15 +552,11 @@ fn rich_catalog(completion: &str) -> Catalog {
             {"id": "gpt-5.4", "name": "GPT 5.4", "context_length": 400000},
             {"id": "phala/qwen", "input_modalities": ["text"]},
             {"id": "vendor/audio", "context_length": 0, "max_output_length": 0,
-             "input_modalities": ["audio"]}
+             "input_modalities": ["audio"], "output_modalities": ["transcription"]}
         ]}),
         1,
     )
-    .unwrap();
-    for model in &mut catalog.models[2..] {
-        model.agent_surfaces = Some(vec![Surface::ChatCompletions]);
-    }
-    catalog
+    .unwrap()
 }
 
 /// A user's own config and companion files, with comments where the format
@@ -827,49 +827,6 @@ fn catalog_scenarios_match_their_golden_transcript() {
     g.connect(Agent::Codex, Some(&overlay), Some("openai/gpt-5.4"));
     scenarios.push(g);
 
-    let mut g = Golden::new("an inventory refresh updates the catalog without rotating the token");
-    g.write(&config(Agent::Pi), r#"{"custom":true}"#);
-    let inventory = crate::catalog::EndpointInventory::bundled().unwrap();
-    let value = serde_json::to_value(&inventory).unwrap();
-    let model = value["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| {
-            entry["endpoint"].as_str() == Some("/v1/chat/completions")
-                && entry["status"].as_str() == Some("supported")
-                && entry["checks"].as_object().is_some_and(|checks| {
-                    checks.values().all(|check| check["status"] == "supported")
-                })
-        })
-        .and_then(|entry| entry["model"].as_str())
-        .unwrap();
-    let mut probed = Catalog::from_remote(
-        &json!({"data": [{"id": model}, {"id": "unprobed/model"}]}),
-        1,
-    )
-    .unwrap();
-    g.connect(Agent::Pi, Some(&probed), None);
-    probed
-        .apply_endpoint_inventory("https://tee.redpill.ai", &inventory)
-        .unwrap();
-    g.reconcile(Some(&probed));
-    g.reconcile(Some(&probed));
-    g.disconnect(Agent::Pi);
-    scenarios.push(g);
-
-    let mut g = Golden::new("claude selects a Messages model");
-    g.write(
-        &config(Agent::ClaudeCode),
-        r#"{"model":"opus","env":{"KEEP":"value"}}"#,
-    );
-    let mut surfaces = catalog();
-    surfaces.models[0].supported_surfaces = Some(vec![Surface::Responses]);
-    surfaces.models[1].supported_surfaces = Some(vec![Surface::Messages]);
-    g.connect(Agent::ClaudeCode, Some(&surfaces), None);
-    g.disconnect(Agent::ClaudeCode);
-    scenarios.push(g);
-
     let mut g = Golden::new("agents require a verified model and the helper");
     g.preview(Agent::ClaudeCode, true, Some(&cat), None);
     g.preview(
@@ -897,21 +854,6 @@ fn catalog_scenarios_match_their_golden_transcript() {
     g.move_endpoint("http://127.0.0.1:5190");
     g.reconcile(Some(&cat));
     g.scan(Agent::ClaudeCode, Some(&cat));
-    scenarios.push(g);
-
-    let mut g = Golden::new("projections and codex defaults use the same endpoint filter");
-    g.mkdir(".codex");
-    let mut filtered = catalog();
-    filtered.models[0].supported_surfaces = Some(vec![Surface::ChatCompletions]);
-    filtered.models[1].supported_surfaces = Some(vec![Surface::Responses]);
-    g.connect(Agent::Codex, Some(&filtered), None);
-    g.connect(Agent::Pi, Some(&filtered), None);
-    g.preview(Agent::ClaudeCode, true, Some(&filtered), None);
-    g.preview(Agent::Codex, true, Some(&filtered), Some(MODEL));
-    filtered.models[0].supported_surfaces = Some(vec![Surface::Responses]);
-    filtered.models[1].supported_surfaces = Some(vec![]);
-    filtered.revision = "responses-model-changed".into();
-    g.reconcile(Some(&filtered));
     scenarios.push(g);
 
     let mut g = Golden::new("connect creates the official config from scratch");

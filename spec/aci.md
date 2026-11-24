@@ -76,7 +76,8 @@ surface**, not its routing policy:
 
 - Every upstream that offers TEE attestation is verified before it serves,
   and the aggregator reaches it only over the channel that verification
-  bound — a TLS key pin or an upstream E2EE key. Each receipt records the
+  bound — a TLS key pin, an upstream E2EE key, or a binding a published
+  extension defines (Appendix B). Each receipt records the
   outcome (§7.5). Nothing a client sends skips this.
 - Verified serving is required when the operator configures the serving
   endpoint TEE-only, or when the request carries `aci_verified` (§5.3).
@@ -87,8 +88,10 @@ surface**, not its routing policy:
   commercial API), so a client can deliberately choose one. The receipt
   records the serving as unverified (`required: false`, §7.5) and no
   attested session exists (§8).
-- Each successful verification is captured as an immutable, content-addressed
-  **attested session** (§8) that a verifier can fetch and re-check.
+- A successful verification establishes an immutable, content-addressed
+  attested session (§8), or revalidates the verified channel material
+  represented by an unexpired session. The session preserves the evidence used
+  to establish it.
 
 How the aggregator verifies a given upstream (which quote formats, which
 measurements, which provenance) is verifier-specific and out of scope.
@@ -240,9 +243,12 @@ Rules:
 - `subject` is naming metadata — a dstack app-id URI, SPIFFE ID, or DNS
   name — meaningful only under a verifier policy. Generic verifiers MUST
   NOT trust it by itself.
-- `not_after` is required: a Unix timestamp after which verifiers stop
-  accepting the keyset entirely (reports, TLS, E2EE, receipts). A verifier
-  SHOULD reject an implausibly distant `not_after`.
+- `not_after` is required: a Unix timestamp after which verifiers MUST NOT
+  establish the keyset from a new report or use it to authorize new TLS,
+  E2EE, or inference sends. A previously established keyset MAY still verify
+  a historical receipt whose `served_at` is earlier than that keyset's
+  `not_after`, subject to all of §9.3. A verifier SHOULD reject an implausibly
+  distant `not_after`.
 - `receipt_signing_keys` hold the keys that sign receipts (§7.2) —
   `ed25519` baseline (Appendix B).
 - `e2ee_public_keys` contains keys for separately specified E2EE extensions
@@ -258,11 +264,38 @@ Rules:
 - Entries whose `algo` is not recognized are ignored. Clients select
   keys by `algo`.
 
-Any keyset change — a rotated key, a changed subject, a new expiry —
-produces a new digest and a fresh attestation report binding it; a quote
-over the old digest cannot bind a fresh nonce. Historical receipts keep
-referencing the digest current when they were signed; whether to accept an
-archived keyset when re-checking old receipts is local policy.
+Changing any key or identity field produces a new identity and requires a
+fresh attestation report. A **renewal** changes only `not_after` within the
+family defined below. It has a new digest; a quote over the old digest cannot
+bind a fresh nonce.
+
+Within one API origin and an unchanged verifier policy, two verified reports
+belong to the same **renewal family** exactly when:
+
+- Their complete `workload_keyset` objects, including extension fields, have
+  identical JCS forms after removing only `not_after`. This includes `subject`
+  and every entry, algorithm, identifier, key value, and domain in all key
+  roles. Array order remains significant.
+- Their `attestation.tee_type` values are identical.
+- Their complete protocol-defined `source_provenance` structs are equal:
+  `repo_url`, `repo_commit`, `image_digest`, and `image_provenance`, with
+  missing fields normalized to null and structured values compared by JCS.
+  Unknown provenance extension fields are outside this struct.
+- Their policy-verified measured workload is identical. For the dstack policy
+  (§4.2), this is the same policy-verified measured `sha256(app_compose)`.
+  Fresh quote bytes, nonce bindings, and other changing verification evidence
+  are not family identifiers; each report still MUST pass §9.1.
+
+Replicas can expose members of one renewal family with different expiry times.
+A fresh verification of any same-family keyset keeps continuity while that
+keyset is unexpired, even when its `not_after` is earlier than the previous
+member's. A digest header is only a re-verification hint: fresh verification
+of any unexpired same-family member authorizes future sends, even when it
+reaches a different replica. A changed family revokes the old delivery gate.
+A receipt still requires its exact digest to have been established (§9.3);
+failure to resolve that digest fails its audit without blocking sends under
+the freshly verified family. This rule provides no monotonic version or
+rollback protection.
 
 ### 3.2 Attestation binding
 
@@ -320,10 +353,10 @@ attested keyset. ACI defines no key sharing between replicas.
 
 ### 3.4 Expiry and deny-listing
 
-**Bounded lifetime.** Every keyset expires (`not_after`, §3.1), and an
-expired keyset stops producing acceptable reports on its own — no
-coordinated revocation. To replace keys ahead of expiry, the service
-publishes a new keyset and a fresh report (§3.1).
+**Bounded lifetime.** Every keyset expires (`not_after`, §3.1). A service may
+renew a keyset before expiry by publishing the same keys and identity with a
+later `not_after` and a fresh report. A real key rotation publishes a new
+keyset and report.
 
 **Relying-party deny-list.** To drop a compromised workload faster than
 expiry, a relying party deny-lists its stable identifiers (provenance,
@@ -365,6 +398,7 @@ other freshness metadata.
   },
   "service_capabilities": {
     "supported_e2ee_versions": ["2"],
+    "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions", "/v1/images/edits"],
     "serving": "direct"
   }
 }
@@ -397,6 +431,12 @@ per-field bindings below (Appendix A). Field rules:
   this attested workload and `"aggregator"` when the service forwards to
   upstreams (§1.2). A direct service has no upstream hop, so it publishes no
   attested sessions and its receipts carry no `upstream.verified` event.
+- `service_capabilities.supported_multipart_constraint_endpoints` lists paths
+  implementing the §5.3 multipart constraint carrier. Absent or empty means
+  unsupported. Clients MUST obtain this capability over the attested,
+  SPKI-pinned channel and accept the workload's code provenance; it is not
+  independently committed by the hardware quote. A service MUST advertise a
+  path only when it implements all carrier validation and enforcement rules.
 
 ### 4.2 Evidence
 
@@ -417,16 +457,21 @@ one for the hostname it actually uses.
 
 ## 5. Inference Endpoints
 
-ACI v1 covers prompt endpoints: OpenAI-compatible completions and similar
-formats such as Anthropic messages. Requests and responses follow the
-underlying API unless a separately specified transport extension says
-otherwise. ACI adds headers and artifacts.
+ACI v1 covers inference endpoints, including OpenAI-compatible completions,
+audio transcriptions, and formats such as Anthropic messages.
+Requests and responses follow the underlying API unless a separately
+specified transport extension says otherwise. ACI adds headers and artifacts.
 
 | Endpoint | Status |
 | --- | --- |
 | `POST /v1/chat/completions` | REQUIRED |
 | `POST /v1/completions` | OPTIONAL |
+| `POST /v1/rerank` | OPTIONAL (non-streaming JSON; prompt-token usage) |
 | `POST /v1/embeddings` | OPTIONAL (non-streaming only) |
+| `POST /v1/images/edits` | OPTIONAL (`multipart/form-data`, non-streaming, inline base64 output; constraints via §5.3) |
+| `POST /v1/images/generations` | OPTIONAL (non-streaming only; inline base64 output; request up to `n` images, 1..10, default 1; providers may return fewer; image charges use the returned count) |
+| `POST /v1/audio/speech` | OPTIONAL (non-streaming binary `audio/*`; character usage) |
+| `POST /v1/audio/transcriptions` | OPTIONAL (`multipart/form-data`, non-streaming, `response_format` of `json` or `verbose_json`; constraints via §5.3) |
 | Other prompt endpoints (e.g. OpenAI-format `/v1/responses`, Anthropic-format `/v1/messages`) | OPTIONAL (`/v1/responses` may be served through Chat Completions conversion or native passthrough) |
 | `GET /v1/models` | OpenAI-compatible. ACI adds no required fields |
 
@@ -438,6 +483,7 @@ MUST NOT infer trust from `/v1/models` entries.
 | Header | When | Meaning |
 | --- | --- | --- |
 | `Authorization: Bearer <key>` | inherited | Service authentication. Also binds the receipt to this credential (§7.6). |
+| `X-ACI-Provider: <JSON>` | multipart endpoints listed in `service_capabilities.supported_multipart_constraint_endpoints` | Serving constraints with the JSON `provider` schema (§5.3). |
 
 ### 5.2 Response headers
 
@@ -456,10 +502,11 @@ after that early commit issues no receipt. Requests carrying §5.3
 constraints are never committed early, so constrained clients always
 see the header.
 
-Headers are unauthenticated hints. Only the attested keyset and the
-signed receipt bind anything. On a changed `X-ACI-Keyset-Digest`, the
-client SHOULD re-verify the attestation report before sending further
-sensitive data.
+Headers are unauthenticated hints. Only the attested keyset and the signed
+receipt bind anything. The header and receipt for one exchange carry the
+digest established for that exchange. A changed digest gates new sends until
+the client re-verifies according to §3.1; responses already in flight
+continue unaffected.
 
 ### 5.3 Serving constraints (aggregators)
 
@@ -492,6 +539,35 @@ constraints:
 - A transport extension defines how its protected request carries serving
   constraints and which restored bytes the `request.received` hash commits to.
 
+For `multipart/form-data`, the carrier is a single HTTP header
+`X-ACI-Provider: <JSON>`. Its value MUST be a JSON object using exactly the
+same schema and semantics as the JSON `provider` field above, including
+non-empty session lists, boolean `aci_verified`, and rejection of unknown
+`aci_` members. The v1 multipart paths are `POST /v1/audio/transcriptions` and
+`POST /v1/images/edits`.
+The field value MUST contain only US-ASCII bytes for HTTP
+field interoperability (RFC 9110 §5.5); use JSON `\uXXXX` escapes, including
+surrogate pairs where needed, for non-ASCII characters in strings.
+The service MUST reject duplicate carrier headers, malformed JSON or a
+non-object value, non-ASCII bytes, values larger than 8192 bytes, and any
+multipart form part named `provider`, with HTTP 400 (`invalid_request_error`).
+It MUST also reject the carrier on JSON endpoints or any endpoint not
+supporting it.
+The carrier is consumed in its entirety and MUST NOT be forwarded upstream.
+Deployment-level verified-serving requirements apply independently.
+
+Receipts commit to the raw multipart **body bytes**, not the contents of
+`X-ACI-Provider`. Clients MUST intersect caller session pins with their local
+accepted set, refuse disjoint sets, retain the effective verified-serving
+requirement and session pins, and check the receipt's cited session against
+them (§9.3). Caller constraints remain effective when local verified serving
+is disabled. A successful body-hash check alone does not prove that header
+constraints were honored. Before uploading constrained multipart, clients
+MUST refuse locally unless the service advertises support for that exact
+path, obtained under the capability trust rules in §4.1. When constrained,
+malformed or non-object JSON and other non-empty body media types that cannot
+carry constraints MUST likewise be refused locally.
+
 ## 6. E2EE Transport Extensions
 
 > **Warning:** E2EE v2 is a temporary compatibility extension and will be
@@ -523,9 +599,54 @@ GET /v1/aci/receipts/{id}
 `{id}` is the `X-Receipt-Id` header value (preferred), or the
 OpenAI-compatible response `id` when the response body contains one.
 `X-Receipt-Id` arrives with the response, so the client holds the id before
-the receipt is queryable. A receipt is finalized when the response
-completes: a streamed response has no in-flight receipt (its hashes cover
-the whole stream). Receipts are retained for a bounded,
+the receipt is queryable. For a streamed response, publication at the first
+destination protocol terminal requires acceptance of the source protocol's own
+terminal on a route with an established source protocol, or clean EOF from the
+provider adapter, after any adapter authentication barrier. If either boundary
+has been reached when that terminal is produced, the gateway MUST finalize and
+publish the receipt before returning its bytes. The body stays open and continues
+reading the source until EOF, emitting no bytes after the destination terminal.
+Accounting observes allowlisted upstream usage in the source protocol through
+EOF or disconnect, regardless of terminals, failures or malformed records. The
+final cumulative value counts once; Messages start and delta usage is merged.
+Settlement remains at EOF. The
+`response.received` hash covers the accepted source bytes through its terminal
+block, or all source bytes at clean EOF; `response.returned` includes the
+destination terminal's final wire bytes.
+Bytes after that source boundary are excluded from the received hash. SSE dispatch
+at CR includes that CR; a following LF is outside the accepted prefix.
+
+The selected backend declares its source wire protocol for the prepared request
+and typed upstream operation, independently of the URL path and control-plane
+format. This backend method is required: routing and configuration wrappers
+delegate to the serving backend, while a backend without that knowledge returns
+unknown explicitly. Shaping derives the wire operation once: Chat requests in
+Anthropic format send Messages, and Messages requests in OpenAI format send Chat.
+Response transforms retain the client-facing operation. The OpenAI-compatible
+backend declares Chat for typed Chat or legacy-completion operations, Responses
+for a typed Responses operation, and Messages only for a typed Messages operation
+on the native Anthropic provider. Other providers' Messages operations are unknown.
+Chutes delegates to its OpenAI-compatible backend; the 0G adapter only serves
+Chat and declares it for every operation. The route protocol always controls decoding and source accounting.
+For every streaming operation, backend evidence that contradicts that route
+protocol is a routing failure; matching evidence permits terminal publication.
+Unknown evidence keeps the declared format and forwarding behavior, but requires
+clean adapter EOF for publication. Custom paths do not change this evidence.
+
+A bridge-generated failure terminal without an accepted source terminal does
+not permit early publication: the source retains its normal EOF or failure path.
+At clean source EOF, synthesized terminals publish in the poll that returns
+them. Middleware source-read, decoder or transform failures before publication
+can prevent completion and leave no receipt. Later failures retain their report
+status while an already-published receipt remains available. Publication failure
+withholds the successful terminal and continues source observation through EOF or
+disconnect before reporting the failure. Cancellation or failure can leave a reserved
+id unpublished even if an error terminal was returned. A receipt records the
+gateway's observed exchange; it does not prove client delivery or
+model-generation completeness.
+Cancellation after a terminal returned with a published receipt settles as
+completed, retaining any failure status and the usage observed so far.
+Receipts are retained for a bounded,
 implementation-defined period. Clients SHOULD fetch receipts promptly. An
 unknown or expired id returns `not_found`.
 
@@ -571,6 +692,13 @@ service extracts it from a protected request. Events are flat objects — `type`
 plus type-specific fields — and event order is the array order. The first event
 MUST be `request.received`.
 
+For an aggregator receipt that records forwarding, `served_at` is the time of
+the forwarding decision for the attempt whose upstream response the receipt
+records. The service MUST admit that attempt against its current verification
+state before forwarding. Response completion and receipt publication may occur
+later, including after the cited session expires. For a refusal without
+forwarding, `served_at` is the time the refusal is recorded.
+
 ### 7.4 Event vocabulary
 
 All hashes are computed inside the TEE over bytes the workload actually
@@ -587,7 +715,10 @@ receipt hashes.
 Services MAY add events with implementation-specific types (the reference
 implementation records routing decisions, for example), but MUST NOT reuse
 the required types. Verifiers ignore event types they don't recognize
-unless local policy cares.
+unless local policy cares. The reference speech endpoint adds a signed
+`usage.reported` extension event on success with
+`{"usage":{"type":"characters","characters":N}}`, derived from the request's
+Unicode scalar count (1..4096).
 
 ### 7.5 `upstream.verified`
 
@@ -610,20 +741,29 @@ forms:
   this request: `true` when the serving endpoint is TEE-only (§1.2) or the
   request carried the §5.3 constraint, `false` when neither applies — the
   request was served best-effort and the recorded result is informational.
-  When required verification fails, the service refuses to forward with
-  `upstream_verification_failed` (§1.2). When no pinned session can
-  serve, it refuses with `session_not_accepted` (§5.3). Either refusal
-  error carries `X-Receipt-Id` (§5.2) so the refusal receipt can be
-  fetched.
-- A verified event carries `session_id`, the content address of the
-  attested session (§8) holding every verification detail.
-- A failed event carries `reason` instead of a `session_id`, because no
-  session served the request. With `required: false` the response still
-  proceeds, and the receipt shows the inference was served unverified.
+  If required verification fails before dispatch, the service refuses to
+  forward with `upstream_verification_failed` (§1.2). When no pinned session
+  can serve, it refuses with `session_not_accepted` (§5.3). Either refusal
+  error carries `X-Receipt-Id` (§5.2), and its receipt omits
+  `request.forwarded` because nothing was dispatched.
+- A verified event carries `session_id`, the content address of the attested
+  session (§8) admitted for the forwarding attempt recorded by this receipt.
+  The session contains the establishing verification's evidence and claims.
+  The service MUST NOT substitute a session established after that forwarding
+  decision.
+- A failed event carries `reason` instead of a `session_id`, because the
+  response cannot be attributed to a verified session. This can record a
+  refusal before dispatch, best-effort serving with `required: false`, or
+  an unauthenticated response after an admitted request was dispatched.
+  In the last case, `required` still records the effective policy and the
+  receipt MUST include `request.forwarded`. The failed event MUST NOT imply
+  that nothing was forwarded or that an unauthenticated response was verified.
 
-To a generic verifier this event proves only that the attested aggregator
-*asserted* the outcome. Deep audit (§9.2) upgrades it to independently
-checked.
+A verified event is the attested aggregator's assertion that its verification
+policy authorized the forwarding attempt and that it enforced the cited
+session's channel binding. Deep audit (§9.2) independently checks the
+establishing evidence. It does not independently prove a later revalidation or
+reconstruct the verification round that authorized a particular request.
 
 ### 7.6 Access control
 
@@ -637,21 +777,36 @@ unauthenticated requests MAY be publicly retrievable.
 
 ## 8. Attested Sessions
 
-An aggregator forwards prompts to upstream TEE services. Before trusting
-one, it verifies that upstream's attestation (§1.2). An **attested
-session** is the saved proof of one such verification: which upstream,
-what was checked, the evidence itself, and the period it covers. Receipts
-cite the session by id, so every request can point at the proof without
-carrying it. Only a verified TEE upstream yields a session: serving
-through an upstream with no TEE (§1.2) appears on the receipt as
-unverified, with no session to cite (§7.5).
+An aggregator verifies an upstream's attestation before trusting its channel
+(§1.2). An attested session is an immutable snapshot of the verification used
+to establish that channel: the upstream, verified identity and channel
+material, claims, evidence, and validity period. Receipts cite this snapshot
+by id. Only a verified TEE upstream yields a session; serving through an
+upstream with no TEE appears as unverified, with no session to cite (§7.5).
 
-Sessions are per channel and per validity period, not per model or per
-request: a router-style upstream serving many models behind one TEE yields
-one session, and the model served is recorded on each receipt.
-Re-verification, after `expires_at` or whenever the verified material
-changes, produces a new session document with a new period and a new
-id. Sessions are never updated in place.
+Sessions are per verified channel and validity period, rather than per
+request. A router serving several models through the same verified channel may
+share one session; the receipt records the model served.
+
+A service MAY reuse an unexpired session when a successful verification
+establishes equivalent channel material. Equivalence MUST preserve the
+verified workload identity, channel bindings, security-relevant measurements
+and attributes, and recorded claims. Differences confined to
+verification-round freshness or evidence encoding do not by themselves require
+a new session. A verifier whose projection does not establish this equivalence
+MUST treat changed evidence as changed material.
+
+Reuse MUST NOT modify the session document or extend its `expires_at`. Changed
+material cannot be served under the old session. After expiry, a subsequent
+admission requires a new session. A temporary verification failure does not
+revoke an immutable session; successful recovery with equivalent material may
+reuse it while unexpired.
+
+Session validity, verifier-cache freshness, and evidence age are distinct.
+`established_at` records session creation, not necessarily evidence
+collection. Creating a session from a currently usable cached verification
+does not make its evidence newly collected. Every forwarding decision remains
+subject to the service's current verification and channel-enforcement rules.
 
 A session is immutable and content-addressed:
 
@@ -669,6 +824,11 @@ as the service still serves any receipt citing it (§7.1), and SHOULD
 remain available longer for receipts clients have archived. `expires_at`
 ends the validity period for new forwarding decisions, not the retention
 obligation.
+
+An admitted request MUST keep its cited session available while its response
+or receipt is pending. Publishing the receipt MUST retain that session through
+the receipt's retention deadline. Keeping a session available does not extend
+its validity for new forwarding decisions.
 
 ### 8.1 Endpoints
 
@@ -713,10 +873,12 @@ full record to verify (§9.2).
 - `identity` records the verified identity keys of the upstream (for
   example a response-signing address), when the verifier established
   one. Its fields are verifier-specific.
-- `evidence.data` is a data URI preserving the exact bytes the verifier
-  consumed (a multipart bundle when there were several inputs).
-  `evidence.digest` is the SHA-256 of those decoded bytes. A verifier MUST
-  reject a record whose `data` does not hash to `digest`.
+- `evidence.data` is a data URI preserving the evidence bytes retained for the
+  establishing verification, including a bundle when several inputs are
+  required. `evidence.digest` is the SHA-256 of those decoded bytes. A
+  verifier MUST reject a record whose data does not hash to its digest. Reuse
+  of a session does not replace this evidence with evidence from later
+  verification rounds.
 
 `channel_binding` states what the aggregator enforced when it connected to
 the upstream. Defined shapes:
@@ -725,6 +887,14 @@ the upstream. Defined shapes:
 { "type": "tls_spki_sha256",        "origin": "<https-origin>", "spki_sha256": "<hex>" }
 { "type": "e2ee_public_key_sha256", "provider": "<label>", "key_id": "<optional>", "algorithm": "<algo>", "public_key_sha256": "<hex>" }
 ```
+
+A session may represent a logical TLS channel with several accepted keys. Its
+`channel_binding` array then records the complete verified set of alternatives
+enforced for that channel; a connection uses one of those alternatives.
+Changing the set changes the session material. Distinct independently
+selectable upstream instances remain distinct sessions.
+
+A published extension may define another binding type; see Appendix B.
 
 ### 8.3 Typed claims
 
@@ -805,10 +975,12 @@ anything sensitive:
   (check 4) names it.
 - From now on, talk to the service only through the keyset: TLS pinned to a
   listed SPKI, or content encrypted to a listed E2EE key under a separately
-  specified extension (§6), on every connection. Re-establish identity when
-  `not_after` passes, when the
-  served `X-ACI-Keyset-Digest` changes (§5.2), or when your policy
-  deny-lists the workload (§3.4).
+  specified extension (§6), on every connection. Before a new send, re-verify
+  through the same single-flight path when `not_after` has passed or the
+  served `X-ACI-Keyset-Digest` changes (§5.2). A renewing service changes its
+  digest well before expiry, so a client normally re-verifies during the
+  renewal according to §3.1 rather than cutting an in-flight response. Also
+  re-establish it when your policy deny-lists the workload (§3.4).
 - Behind an aggregator, the session list (§8.1) shows which upstreams
   currently back a model. Verify the ones you would accept (§9.2) before
   you send, and pin them with `aci_session_ids` (§5.3).
@@ -831,8 +1003,13 @@ checks are the same:
 3. Shallow audit: the channel bindings and typed claims meet your policy
    — for example, `tee_attested` is `asserted` with source
    `hardware_proven`.
-4. Deep audit: re-verify the evidence itself under your policy for that
-   provider.
+4. Deep audit: re-verify the establishing evidence under your policy for that
+   provider, including its support for the recorded identity, bindings and
+   claims. Evaluate freshness using the evidence and the provider's verification
+   rules; session creation time alone is not evidence of collection time. Later
+   revalidation is the aggregator's assertion (§7.5). A policy requiring
+   independently verifiable evidence from each authorizing round MUST reject a
+   session snapshot as insufficient for that requirement.
 
 Pin the sessions that pass (`aci_session_ids`, §5.3). The service then
 refuses to serve you through anything else, and the receipt's cited id
@@ -851,7 +1028,15 @@ Given an established keyset, plus a response and its receipt:
    names in the established keyset's `receipt_signing_keys`, with that
    entry's algorithm (§7.2).
 2. **Document.** The document's `api_version` is `aci/1` (Appendix B) and
-   its `workload_keyset_digest` equals the established digest.
+   its `workload_keyset_digest` equals a digest the client established in
+   §9.1 in the admitted identity's renewal family (§3.1), with that keyset
+   unexpired at `served_at`. Verify the signature under that keyset. Current
+   wall-clock expiry does not invalidate this historical receipt check.
+   A client MAY perform a fresh verification to resolve an unseen digest,
+   but MUST reject the receipt if that exact digest remains unestablished
+   (§3.1). The client MAY
+   retain established members for historical audits or discard them, in
+   which case it cannot accept receipts whose necessary evidence it lacks.
 3. **Request.** `request.received.body_hash` matches the wire body for a
    plaintext request. For a protected request, follow the advertised transport
    extension's receipt-integration rules (§6, §7.4).
@@ -866,8 +1051,10 @@ Behind an aggregator, additionally:
    `session_id`. A client that requires verified serving rejects
    `"failed"` and `required: false`.
 6. The cited session verifies (§9.2), ideally one you verified before
-   sending. The receipt's `served_at` falls within the session's validity
-   window. If you pinned sessions (§5.3), the cited id is in your list.
+   sending. The receipt's `served_at` MUST satisfy `established_at <=
+   served_at < expires_at`. Response completion need not fall within that
+   window.
+   If you pinned sessions (§5.3), the cited id is in your list.
    `served_at` is self-asserted (§11), so this catches an honest service
    citing an expired session. Against a dishonest one, the fail-closed
    rule (§1.2) rests on the attested code.
@@ -895,6 +1082,10 @@ ACI defines these types, with the HTTP status a service SHOULD use:
 | `upstream_verification_failed` | 503 | Upstream verification was required and did not produce an enforceable verified binding. The prompt was not forwarded. |
 | `session_not_accepted` | 412 | The request pinned sessions (§5.3) and none of them could serve it. The prompt was not forwarded. |
 
+A service MAY set `code` to a token that narrows the type, for example the
+cause of an `upstream_verification_failed`. Clients that do not recognize a
+`code` ignore it.
+
 A service MAY use a different status where an HTTP intermediary requires it
 (for example 429 for rate limiting), but SHOULD preserve the `type` so
 clients can branch on it. Unrecognized types are treated as opaque, and
@@ -917,6 +1108,7 @@ Limits that remain after every §9 check passes:
 
 Normative for the wire formats in this document:
 
+- RFC 9110 — HTTP semantics and field values.
 - RFC 8032 — Ed25519 signatures.
 - RFC 4648 — base64 encoding.
 - RFC 8785 — JSON Canonicalization Scheme (JCS): the form the keyset,
@@ -1011,6 +1203,9 @@ Extension points:
   types they don't recognize unless local policy cares. The signature
   covers the whole document, so unknown events don't break verification.
 - **Session records** — the `claims.extra` map (§8.3).
+- **Channel bindings** — a published extension defines each further binding
+  type (§8.2), such as [`proxy_image_sha256`](proxy-image-binding.md) for a
+  provider proxy co-deployed in the aggregator's attested workload.
 - **Non-ACI surfaces** — implementations MAY keep pre-ACI compatibility
   endpoints, headers, and report fields. These MUST NOT alter ACI
   artifacts: report, receipt, and session content, digests, and

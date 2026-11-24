@@ -30,15 +30,6 @@ evidence) exactly as observed.
   compose measurement (check 4) when the service publishes `app_compose`.
   Returns `{ verdict, lines, verification, composeHash }`. `verifyQuote` and
   `verifyComposeMeasurement` are the individual checks.
-- **Production OS allowlist (§1.3):** pass `requireProductionOs: true` to
-  require the RTMR3 `os-image-hash` to be in this release's reviewed production
-  allowlist. Development and unknown hashes fail closed. This package does not
-  reconstruct MRTD/RTMR0-2 from a dstack OS image, so a pass is meaningful only
-  together with a dstack verifier result of `is_valid: true` for the same
-  quote, event log, and VM configuration. See
-  [Build a verifier policy](../../docs/attested-confidential-inference.md#build-a-verifier-policy)
-  and the
-  [Phala-direct verification algorithm](../../docs/providers/phala-direct/verification.md#verification-algorithm).
 - **Reviewed release allowlist (§1.3):** pass `acceptedComposeHashes` to accept
   only reviewed `sha256(app_compose)` values measured into RTMR3. Without an
   allowlist the measurement is verified and reported, but the verifier does
@@ -71,6 +62,8 @@ evidence) exactly as observed.
   not encrypt or decrypt content fields. Callers can implement that
   field-level wire contract or use a v2-capable client.
 
+A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
+
 ## Current limits
 
 - **No dstack boot-measurement reconstruction.** Quote verification
@@ -84,7 +77,7 @@ evidence) exactly as observed.
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
   stops there; neither in-tree verifier appraises the evidence itself
-  (conformance gaps item 5).
+  (conformance gaps item 12).
 - **Ed25519 receipts only.** A receipt keyed to any other algorithm is
   reported as a failed signature check, not verified.
 
@@ -95,16 +88,20 @@ Verification failures return `{ ok: false, checks }`; malformed input throws.
 > Types Wrong, and publishes it with npm provenance from a `clients-v<version>`
 > GitHub Release.
 
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier. The deprecated
+`requireProductionOs` option remains accepted for compatibility and is ignored.
+
 ## Usage
 
-One call runs the ACI checks and OS-hash appraisal:
+One call runs the ACI checks:
 
 ```ts
 import { verifyService } from '@phala/aci-verifier';
 
-const { verdict, lines } = await verifyService('https://tee.redpill.ai', {
-  requireProductionOs: true,
-});
+const { verdict, lines } = await verifyService('https://tee.redpill.ai');
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
@@ -126,9 +123,8 @@ if (!apiKey) throw new Error('ACI_API_KEY is required');
 
 const aci = await connectAci({
   baseURL: 'https://tee.redpill.ai/v1',
-  policy: { requireProductionOs: true },
   serving: {
-    // Every successful JSON POST must carry a receipt and cite verified serving.
+    // Every successful POST must carry a receipt and cite verified serving.
     requireVerified: true,
     requireReceipt: true,
   },
@@ -144,7 +140,7 @@ const openai = new OpenAI({
 });
 
 const response = await openai.chat.completions.create({
-  model: 'z-ai/glm-5.2',
+  model: 'z-ai/glm-5.3',
   messages: [{ role: 'user', content: 'Hello' }],
 });
 
@@ -168,6 +164,18 @@ The SDK adds it to the inference request; `aci.fetch` retains that request's
 authorization in its bounded exchange history and reuses it only for the
 matching private receipt lookup.
 
+Serving constraints support multipart `POST /v1/audio/transcriptions`
+requests (including `FormData`); see [ACI §5.3](../../spec/aci.md#53-serving-constraints-aggregators).
+The `X-ACI-Provider` carrier must be US-ASCII; use JSON `\uXXXX` escapes for
+non-ASCII string values.
+
+Compatibility change: constrained JSON requests must set
+`Content-Type: application/json` (or `application/*+json`). JSON bytes with a
+missing or different content type are now refused. In particular, passing
+`JSON.stringify(...)` as a `fetch` string body defaults to `text/plain`;
+`curl -d` defaults to `application/x-www-form-urlencoded`. Set the JSON content
+type explicitly when calling `aci.fetch` or the local proxy.
+
 For release-level pinning, add the reviewed deployment's compose hash under
 `policy.acceptedComposeHashes`. Take the hash from authenticated release
 metadata, never from the endpoint you are verifying: a hash copied from the
@@ -183,7 +191,9 @@ receipt, session, rotation, and lifecycle implementation. Use `/node` or
 `aci.receipts()` lists the bounded in-memory exchange history. A receipt can
 only receive a complete transport audit while its exchange is retained; an
 unknown id fails instead of returning a misleading verdict with skipped body
-hashes.
+hashes. Failed re-verification after an unestablished digest hint reports
+`attestation_verification`; `identity_expired` still covers expiry and a send
+refused after a verified rotation. Both codes remain in the existing error API.
 
 #### OpenAI Agents SDK
 

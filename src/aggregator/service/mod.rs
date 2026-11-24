@@ -3,6 +3,8 @@
 //! `AciService` is thin:
 //!
 //! * `attestation_report(nonce)` builds a fresh report over the sealed keyset.
+//! * `renew_keyset_if_due(lifetime)` re-seals the same keys with a later
+//!   `not_after` once half the lifetime has passed (§3.4).
 //! * `forward_chat_completion(...)` runs the receipt-issuing hot path for
 //!   buffered responses.
 //! * `forward_chat_completion_stream_request(...)` runs the same path
@@ -27,12 +29,18 @@ use crate::aggregator::session_store::{InMemorySessionStore, SessionStore};
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
 pub const COMPLETIONS_PATH: &str = "/v1/completions";
+pub const AUDIO_SPEECH_PATH: &str = "/v1/audio/speech";
+pub const RERANK_PATH: &str = "/v1/rerank";
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
 pub const MESSAGES_PATH: &str = "/v1/messages";
 pub const RESPONSES_PATH: &str = "/v1/responses";
+pub use crate::aci::types::{AUDIO_TRANSCRIPTIONS_PATH, IMAGES_EDITS_PATH};
+pub const IMAGES_GENERATIONS_PATH: &str = "/v1/images/generations";
+pub const SYSTEMONE_PATH: &str = "/v1/systemone";
 const CHANNEL_BINDING_REVERIFY_ATTEMPTS: usize = 2;
 
 mod claims;
+pub(crate) use claims::reviewed_session_material;
 mod clock;
 mod config;
 mod e2ee;
@@ -49,7 +57,8 @@ mod wire;
 
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::{
-    validate_source_provenance, AciServiceConfig, ReceiptOwner, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
+    validate_source_provenance, AciServiceConfig, ReceiptOwner,
+    DEFAULT_ATTESTED_SESSION_TTL_SECONDS, DEFAULT_KEYSET_NOT_AFTER_SECONDS,
 };
 pub use errors::{E2eeError, ServiceError, UpstreamVerificationError};
 pub use receipt_store::{InMemoryReceiptStore, ReceiptStore};
@@ -71,7 +80,7 @@ pub struct AciService {
     upstream_verifier: Option<Arc<dyn UpstreamVerifier>>,
     receipt_store: Arc<dyn ReceiptStore>,
     session_store: Arc<dyn SessionStore>,
-    keyset: SealedWorkloadKeyset,
+    keyset: RwLock<Arc<SealedWorkloadKeyset>>,
     default_receipt_key_id: String,
     config: AciServiceConfig,
     clock: Arc<dyn Clock>,
@@ -81,7 +90,6 @@ pub struct AciService {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct E2eeReplayKey {
-    client_public_key_hex: String,
     model_public_key_hex: String,
     nonce: String,
 }
@@ -131,6 +139,14 @@ impl AciService {
             return Err(ServiceError::TestKeysInProduction);
         }
         validate_source_provenance(&config.source_provenance)?;
+        if config.attested_session_ttl_seconds == 0
+            || clock
+                .now_secs()
+                .checked_add(config.attested_session_ttl_seconds)
+                .is_none()
+        {
+            return Err(ServiceError::InvalidAttestedSessionTtl);
+        }
 
         let tls_public_keys = config
             .tls_public_keys
@@ -144,8 +160,8 @@ impl AciService {
             tls_public_keys,
         };
         validate_keyset(&unsealed, &config)?;
-        // Sealed once: these exact bytes (and their digest) are what every
-        // report serves for the lifetime of the process (Appendix A, §3.1).
+        // These exact bytes (and their digest) are what every report serves
+        // until the keyset is renewed (Appendix A, §3.1).
         let keyset = SealedWorkloadKeyset::seal(unsealed)
             .map_err(|e| ServiceError::Keyset(e.to_string()))?;
 
@@ -163,7 +179,7 @@ impl AciService {
             upstream_verifier,
             receipt_store,
             session_store: Arc::new(InMemorySessionStore::default()),
-            keyset,
+            keyset: RwLock::new(Arc::new(keyset)),
             default_receipt_key_id,
             config,
             clock,
@@ -181,12 +197,40 @@ impl AciService {
         self
     }
 
-    pub fn workload_keyset_digest(&self) -> &str {
-        self.keyset.digest()
+    /// Snapshot the current sealed keyset for one report or exchange.
+    pub(crate) fn current_keyset(&self) -> Arc<SealedWorkloadKeyset> {
+        Arc::clone(&self.keyset.read().expect("keyset lock poisoned"))
     }
 
-    pub fn keyset(&self) -> &WorkloadKeyset {
-        self.keyset.keyset()
+    pub fn workload_keyset_digest(&self) -> String {
+        self.current_keyset().digest().to_string()
+    }
+
+    pub fn keyset(&self) -> WorkloadKeyset {
+        self.current_keyset().keyset().clone()
+    }
+
+    /// Bounded lifetime (§3.4): once at most half of `lifetime_seconds`
+    /// remains before `not_after`, re-seal the same keys with
+    /// `not_after = now + lifetime_seconds` and serve the new keyset. The keys
+    /// are the ones a restart would load again, so this only moves the
+    /// expiry; clients see the new `X-ACI-Keyset-Digest` and re-verify
+    /// (§5.2). Returns the new `not_after` when the keyset was renewed.
+    pub fn renew_keyset_if_due(&self, lifetime_seconds: u64) -> Result<Option<u64>, ServiceError> {
+        let now = self.clock.now_secs();
+        let mut guard = self.keyset.write().expect("keyset lock poisoned");
+        let current = guard.keyset();
+        if current.not_after.saturating_sub(now) > lifetime_seconds / 2 {
+            return Ok(None);
+        }
+        let not_after = now.saturating_add(lifetime_seconds);
+        let renewed = SealedWorkloadKeyset::seal(WorkloadKeyset {
+            not_after,
+            ..current.clone()
+        })
+        .map_err(|e| ServiceError::Keyset(e.to_string()))?;
+        *guard = Arc::new(renewed);
+        Ok(Some(not_after))
     }
 
     /// Inference runs inside this attested workload: no upstream hop, so no
@@ -197,11 +241,15 @@ impl AciService {
 
     /// The keyset object the report serves as `workload_keyset` (§4.1).
     pub fn keyset_value(&self) -> serde_json::Value {
-        self.keyset.to_value()
+        self.current_keyset().to_value()
     }
 
     pub fn upstream(&self) -> &dyn UpstreamBackend {
         self.upstream.as_ref()
+    }
+
+    pub fn record_audio_failure(&self, reason: &str) {
+        self.metrics.record_audio_failure(reason);
     }
 
     pub fn metrics(&self) -> Result<MetricsSnapshot, ServiceError> {
@@ -290,3 +338,10 @@ fn validate_keyset(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use streaming::{
+    decode_source, done_record, error_records, ResponseContext, StreamControl, TerminalPublication,
+};

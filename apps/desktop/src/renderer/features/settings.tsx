@@ -104,18 +104,17 @@ export function SettingsPage(): React.JSX.Element {
   const launch = useLaunchPreferences();
   const locked = shell.applying || shell.agents.changing;
   const profile = activeProfile(state);
-  const required = state.config.requireProductionOs;
   const starting = state.protection.phase === "starting";
   return (
     <div className="mx-auto min-h-full max-w-230">
       {state.configFiles.error && <Alert variant="destructive" className="mb-5">
         <AlertTitle>Settings file not applied</AlertTitle>
-        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
+        <AlertDescription className="select-text whitespace-pre-wrap font-mono text-xs">{state.configFiles.error}</AlertDescription>
         <AlertDescription>The previous settings stay in effect until the file is fixed.</AlertDescription>
       </Alert>}
       {state.configFiles.warnings.length > 0 && <Alert role="status" className="mb-5">
         <AlertTitle>Check your settings</AlertTitle>
-        <AlertDescription className="whitespace-pre-wrap font-mono text-xs">{state.configFiles.warnings.join("\n")}</AlertDescription>
+        <AlertDescription className="select-text whitespace-pre-wrap font-mono text-xs">{state.configFiles.warnings.join("\n")}</AlertDescription>
       </Alert>}
 
       <SettingsSection title="General">
@@ -135,13 +134,12 @@ export function SettingsPage(): React.JSX.Element {
         <CollapsibleTrigger render={<Button variant="ghost" className="mb-2" />}><ChevronRight className="group-aria-expanded/button:rotate-90" size={15} aria-hidden="true" /><span>Advanced</span></CollapsibleTrigger>
         <CollapsibleContent>
           <SettingsList>
-          <SettingsToggle label="Allow development OS" checked={!required} developmentMode={!required} disabled={locked} onToggle={() => shell.changeRequireProductionOs(!required)} />
           {distribution.nativeUpdates && <UpdateChannelControl updates={updates} />}
           {distribution.cliRegistration && <CliRegistrationControl />}
           {state.configFiles.configPath && <SettingsItem>
             <ItemContent>
               <ItemTitle>Settings file</ItemTitle>
-              <ItemDescription className="break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
+              <ItemDescription className="select-text break-all">{state.configFiles.configPath}. API keys and the web UI password are in credentials.toml beside it.</ItemDescription>
             </ItemContent>
           </SettingsItem>}
           <ExportDiagnostics />

@@ -4,6 +4,7 @@ import { useLocation, useRouter, useSearch } from "@tanstack/react-router";
 import { brand } from "../brand/brand";
 import { errorMessage } from "../lib/error-message";
 import { session } from "../lib/environment";
+import { useDocumentTitle } from "../hooks/use-document-title";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "./ui/field";
@@ -16,12 +17,14 @@ export function SignInPage() {
   const notice = useLocation({ select: (location) => location.state.notice });
   const [password, setPassword] = useState("");
   const errorId = useId();
+  useDocumentTitle("Sign In");
   const signIn = useMutation({
     mutationFn: async () => {
       if (!session) throw new Error("Sign-in is only needed in the web UI");
       await session.signIn(password);
     },
-    onSuccess: () => router.history.push(redirect ?? "/"),
+    // Replaces this page, so Back doesn't return to the form.
+    onSuccess: () => router.history.replace(redirect ?? "/"),
   });
   // Stays busy after signing in, until the page asked for replaces this one.
   const busy = signIn.isPending || signIn.isSuccess;
@@ -39,6 +42,8 @@ export function SignInPage() {
       </CardHeader>
       <CardContent>
         <form onSubmit={(event) => { event.preventDefault(); signIn.mutate(); }}>
+          {/* Password managers save a password with a username; this one has none to type. */}
+          <input type="text" name="username" autoComplete="username" value={brand.productName} readOnly hidden />
           <FieldGroup>
             <Field data-invalid={Boolean(error)}>
               <FieldLabel htmlFor="web-ui-sign-in-password">Password</FieldLabel>

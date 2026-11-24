@@ -10,6 +10,9 @@
 //! read, right before anything leaves the process. Request attribution is
 //! passed directly to the verifier and never appears on an HTTP hop.
 
+mod request;
+use request::model_of;
+pub use request::{check_carrier_headers, multipart};
 mod routes;
 #[cfg(test)]
 use routes::models;
@@ -68,8 +71,20 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_secs(660);
 #[cfg(test)]
 const VERIFIER_CALL_TIMEOUT: Duration = Duration::from_millis(100);
+/// How long requests wait for a session that stopped being verified, so a
+/// re-verification of a few seconds delays agents instead of failing them.
+pub const VERIFICATION_WAIT: Duration = Duration::from_secs(30);
+/// The `Retry-After` of a request refused while a session awaits verification.
+const VERIFICATION_RETRY_SECS: u64 = 5;
+/// The error code for a model the catalog lacks.
+const MODEL_NOT_FOUND: &str = "model_not_found";
+/// An unknown model reads the catalog again at most this often, so a model
+/// the service just added works at once and a misspelled one costs one read.
+const CATALOG_MISS_REFRESH: Duration = Duration::from_secs(60);
 // Match the gateway's SSE limit: Responses terminal events repeat the full output.
 const MAX_USAGE_CAPTURE_BYTES: usize = desktop_core::sse::MAX_LINE_BYTES;
+// Image JSON includes base64 output; match the gateway's buffered response cap.
+const MAX_IMAGE_USAGE_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const HOP_BY_HOP: [&str; 9] = [
     "connection",
     "proxy-connection",
@@ -109,6 +124,21 @@ pub struct ForwardContext {
 
 pub type VerifiedResponse = Pin<Box<dyn Future<Output = Response> + Send + 'static>>;
 
+/// Marks a response the verifier wrote itself instead of relaying one from
+/// the service. Its plain-text body is the reason.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum VerifierRefusal {
+    /// Refused before anything was sent.
+    NotSent,
+    /// Stopped while being sent; it may have reached the service.
+    Interrupted,
+    /// The service could not be reached or dropped the connection; the
+    /// request may have reached it.
+    Unreachable,
+}
+pub type CatalogRefresher =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> + Send + Sync>;
+
 /// An already-attested forwarding service. Implementations must retain the
 /// verifier's TLS pinning, policy and receipt-audit behavior.
 pub trait VerifiedService: Send + Sync {
@@ -117,6 +147,12 @@ pub trait VerifiedService: Send + Sync {
         request: Request<Body>,
         context: Option<ForwardContext>,
     ) -> VerifiedResponse;
+
+    /// Attests the service again with a fresh nonce, without interrupting
+    /// what it forwards: an unchanged identity keeps its delivery gate.
+    fn verify_again(self: Arc<Self>) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async { Err("This service cannot be verified in place".to_string()) })
+    }
 }
 
 /// One stage of a request observed by the local proxy. Forwarded requests can
@@ -159,6 +195,11 @@ struct Credentials {
 
 pub struct ProxyState {
     session: RwLock<Session>,
+    /// Wakes the requests waiting for a verification on every publication.
+    session_published: tokio::sync::Notify,
+    verification_wait: Duration,
+    /// When the session the user intends last stopped being verified.
+    pending_since: RwLock<Option<tokio::time::Instant>>,
     credentials: RwLock<Credentials>,
     /// Bumped on every token or key change; a request admitted under an
     /// older epoch is refused before it is sent.
@@ -169,6 +210,10 @@ pub struct ProxyState {
     gate: RwLock<CancellationToken>,
     events: mpsc::Sender<ProxyEvent>,
     in_flight: Arc<Semaphore>,
+    /// Reads and publishes the catalog again; set by the session's owner.
+    catalog_refresher: std::sync::OnceLock<CatalogRefresher>,
+    /// When an unknown model last made the catalog be read again.
+    catalog_miss: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     #[cfg(test)]
     pause: std::sync::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
@@ -176,17 +221,44 @@ pub struct ProxyState {
 impl ProxyState {
     /// `events` is bounded; when it is full, low-value rejection events are
     /// dropped rather than blocking a request.
-    pub fn new(events: mpsc::Sender<ProxyEvent>) -> Result<Arc<Self>, String> {
+    pub fn new(
+        events: mpsc::Sender<ProxyEvent>,
+        verification_wait: Duration,
+    ) -> Result<Arc<Self>, String> {
         Ok(Arc::new(Self {
             session: RwLock::new(Session::default()),
+            session_published: tokio::sync::Notify::new(),
+            verification_wait,
+            pending_since: RwLock::new(None),
             credentials: RwLock::new(Credentials::default()),
             credential_epoch: AtomicU64::new(1),
             gate: RwLock::new(CancellationToken::new()),
             events,
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+            catalog_refresher: std::sync::OnceLock::new(),
+            catalog_miss: tokio::sync::Mutex::new(None),
             #[cfg(test)]
             pause: std::sync::Mutex::new(None),
         }))
+    }
+
+    /// How a request for a model the catalog lacks has it read again.
+    pub fn set_catalog_refresher(&self, refresher: CatalogRefresher) {
+        let _ = self.catalog_refresher.set(refresher);
+    }
+
+    /// Reads the catalog again for an unknown model, unless one just did.
+    /// Requests that arrive meanwhile wait for that read and share it.
+    async fn refresh_catalog_for_miss(&self) {
+        let Some(refresh) = self.catalog_refresher.get() else {
+            return;
+        };
+        let mut last = self.catalog_miss.lock().await;
+        if last.is_some_and(|last| last.elapsed() < CATALOG_MISS_REFRESH) {
+            return;
+        }
+        refresh().await;
+        *last = Some(tokio::time::Instant::now());
     }
 
     /// Cancel every delivery admitted so far; called after any state change
@@ -208,9 +280,36 @@ impl ProxyState {
             || current.service.is_some() != session.service.is_some()
             || current.verified != session.verified
             || current.catalog.is_some() != session.catalog.is_some();
+        // A stopped session publishes no session id; one that goes on does.
+        let pending = session.session_id.is_some()
+            && !(session.verified && session.service.is_some() && session.catalog.is_some());
         *current = session;
+        {
+            let mut since = write(&self.pending_since);
+            *since = pending.then(|| since.unwrap_or_else(tokio::time::Instant::now));
+        }
+        drop(current);
         if revoke {
             self.revoke_deliveries();
+        }
+        self.session_published.notify_waiters();
+    }
+
+    /// Waits while a session the user intends is starting, re-verifying or
+    /// being retried, until `verification_wait` after it stopped being
+    /// verified. Once an outage lasts longer, requests are refused at once.
+    async fn verification_settled(&self) {
+        loop {
+            let published = self.session_published.notified();
+            tokio::pin!(published);
+            published.as_mut().enable();
+            let Some(since) = *read(&self.pending_since) else {
+                return;
+            };
+            let deadline = since + self.verification_wait;
+            if tokio::time::timeout_at(deadline, published).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -307,7 +406,16 @@ impl ProxyState {
             _ => Err(Rejection::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "gateway_not_verified",
-                "The gateway is not verified; requests are blocked until verification succeeds",
+                format!(
+                    "{PRODUCT_NAME} is not protecting right now, so the request was not sent. \
+                     It is retried automatically; `pap status` shows the reason"
+                ),
+            )
+            .retry_after(
+                session
+                    .session_id
+                    .is_some()
+                    .then_some(VERIFICATION_RETRY_SECS),
             )),
         }
     }
@@ -339,7 +447,8 @@ impl ProxyState {
                     StatusCode::UNAUTHORIZED,
                     "unauthorized",
                     format!(
-                        "The agent token is not recognized; reconnect the agent in {PRODUCT_NAME}"
+                        "The agent token is not active. If protection is off, start it \
+                         (`pap start`); otherwise reconnect the agent in {PRODUCT_NAME}"
                     ),
                 )
             })?;
@@ -420,6 +529,8 @@ struct Rejection {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// Seconds after which the same request may succeed.
+    retry_after: Option<u64>,
 }
 
 impl Rejection {
@@ -428,7 +539,23 @@ impl Rejection {
             status,
             code,
             message: message.into(),
+            retry_after: None,
         }
+    }
+
+    fn retry_after(mut self, seconds: Option<u64>) -> Self {
+        self.retry_after = seconds;
+        self
+    }
+
+    fn response(&self, surface: Surface) -> Response {
+        let mut response = error_response(surface, self.status, self.code, &self.message);
+        if let Some(seconds) = self.retry_after {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
     }
 }
 
@@ -463,17 +590,25 @@ async fn relay(
     surface: Surface,
     path: &'static str,
 ) -> Response {
+    // Only a recognized caller waits.
+    if let Err(rejection) = state.authorize(&headers, path) {
+        return reject(&state, None, "POST", path, None, surface, rejection);
+    }
+    state.verification_settled().await;
+    // The restart that ends an outage changes the credential epoch; what was
+    // read before the wait would refuse the request it waited for.
     let auth = match state.authorize(&headers, path) {
         Ok(auth) => auth,
         Err(rejection) => return reject(&state, None, "POST", path, None, surface, rejection),
     };
     let agent = auth.agent.clone();
-    let Ok(_permit) = state.in_flight.clone().try_acquire_owned() else {
+    let Ok(mut permit) = state.in_flight.clone().try_acquire_owned() else {
         let rejection = Rejection::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
             "Too many requests are in flight through the Local API; retry shortly",
-        );
+        )
+        .retry_after(Some(1));
         return reject(&state, Some(agent), "POST", path, None, surface, rejection);
     };
     let lease = match state.verified_session() {
@@ -505,8 +640,36 @@ async fn relay(
             return reject(&state, Some(agent), "POST", path, None, surface, rejection);
         }
     };
-    let model = model_of(&bytes);
-    if let Err(rejection) = check_catalog(&state, model.as_deref(), surface) {
+    let model = match model_of(&headers, &bytes, surface).await {
+        Ok(model) => model,
+        Err(rejection) => {
+            return reject(&state, Some(agent), "POST", path, None, surface, rejection)
+        }
+    };
+    let mut admitted = check_catalog(&state, model.as_deref(), surface);
+    if admitted
+        .as_ref()
+        .is_err_and(|rejection| rejection.code == MODEL_NOT_FOUND)
+    {
+        // The read may take a while and must not hold a place in flight.
+        drop(permit);
+        state.refresh_catalog_for_miss().await;
+        admitted = check_catalog(&state, model.as_deref(), surface);
+        permit = match state.in_flight.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let rejection = Rejection::new(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "rate_limited",
+                    "Too many requests are in flight through the Local API; retry shortly",
+                )
+                .retry_after(Some(1));
+                return reject(&state, Some(agent), "POST", path, model, surface, rejection);
+            }
+        };
+    }
+    let _permit = permit;
+    if let Err(rejection) = admitted {
         return reject(&state, Some(agent), "POST", path, model, surface, rejection);
     }
     // Take the delivery token first, then re-validate session and credentials:
@@ -564,7 +727,7 @@ fn check_catalog(
         Rejection::new(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
-            "The request body must be a JSON object with a string `model`",
+            "The request body must contain a string `model`",
         )
     })?;
     let session = read(&state.session);
@@ -578,8 +741,8 @@ fn check_catalog(
     let entry = catalog.get(model).ok_or_else(|| {
         Rejection::new(
             StatusCode::NOT_FOUND,
-            "model_not_found",
-            format!("`{model}` is not in the verified model list"),
+            MODEL_NOT_FOUND,
+            format!("`{model}` is not in the verified model list; `pap models list` shows the available ones"),
         )
     })?;
     if !entry.supports(surface) {
@@ -692,8 +855,8 @@ async fn forward(
         let rejection = Rejection::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "revoked",
-            "Credentials or the verified session were revoked while the request was being sent; \
-             its delivery could not be confirmed",
+            "Credentials or the verified session were revoked before the service answered; \
+             whether the request was delivered is unknown",
         );
         return reject_after_send(
             &state, generation, request_id, session_id, agent, path, model, surface, rejection,
@@ -722,6 +885,72 @@ async fn forward(
             );
         }
     };
+    if let Some(refusal) = upstream.extensions().get::<VerifierRefusal>().copied() {
+        // Agents parse the provider's error envelope, not plain text.
+        let status = upstream.status();
+        let reason = to_bytes(upstream.into_body(), 4096)
+            .await
+            .map(|body| String::from_utf8_lossy(&body).trim().to_string())
+            .unwrap_or_default();
+        let (code, message, retry) = match status {
+            StatusCode::BAD_GATEWAY => (
+                "upstream_unreachable",
+                format!(
+                    "{PRODUCT_NAME} could not reach the service ({reason}); check the network. \
+                     `pap status` shows details"
+                ),
+                None,
+            ),
+            // Only a request that provably never left is safe to send again.
+            StatusCode::SERVICE_UNAVAILABLE if refusal == VerifierRefusal::Interrupted => (
+                "revoked",
+                format!("{PRODUCT_NAME} stopped the request: {reason}"),
+                None,
+            ),
+            StatusCode::SERVICE_UNAVAILABLE => (
+                "gateway_not_verified",
+                format!("{PRODUCT_NAME} did not send the request: {reason}"),
+                Some(VERIFICATION_RETRY_SECS),
+            ),
+            _ => ("invalid_request_error", reason, None),
+        };
+        let rejection = Rejection::new(status, code, message).retry_after(retry);
+        return reject_with_context(
+            &state,
+            generation,
+            request_id,
+            session_id.to_string(),
+            Some(agent.to_string()),
+            "POST",
+            path,
+            model,
+            surface,
+            rejection,
+            refusal != VerifierRefusal::NotSent,
+        );
+    }
+    if upstream.status() == StatusCode::UNAUTHORIZED {
+        // The agent's token was exchanged for the saved key, so the service
+        // refused that key. Its own wording alone reads as the agent's fault.
+        let reason = to_bytes(upstream.into_body(), 4096)
+            .await
+            .ok()
+            .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+            .and_then(|body| Some(format!(" ({})", body["error"]["message"].as_str()?)))
+            .unwrap_or_default();
+        let rejection = Rejection::new(
+            StatusCode::UNAUTHORIZED,
+            "service_key_rejected",
+            format!(
+                "The service rejected the API key saved in {PRODUCT_NAME}{reason}; the agent's \
+                 token is fine. Replace the key (`pap profiles verify <profile> --replace-key`) \
+                 or sign in again (`pap profiles login <profile>`)"
+            ),
+        );
+        return reject_after_send(
+            &state, generation, request_id, session_id, agent, path, model, surface, rejection,
+        );
+    }
     let status = upstream.status().as_u16();
     let streamed = upstream
         .headers()
@@ -775,7 +1004,7 @@ async fn forward(
     let event_receipt_id = receipt_id;
     let body = async_stream::stream! {
         let mut report = UsageReport {
-            capture: Some(UsageCapture::new(streamed)),
+            capture: Some(UsageCapture::new(streamed, surface)),
             state: event_state,
             event: ProxyEvent {
                 generation,
@@ -947,12 +1176,7 @@ fn reject_with_context(
         cache_write_tokens: None,
         cost_usd: None,
     });
-    error_response(
-        surface,
-        rejection.status,
-        rejection.code,
-        &rejection.message,
-    )
+    rejection.response(surface)
 }
 
 /// An error in the surface's own envelope so the agent can display it.
@@ -990,14 +1214,6 @@ fn presented_token(headers: &HeaderMap) -> Option<String> {
         .or(api_key)
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .map(str::to_string)
-}
-
-fn model_of(bytes: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(bytes)
-        .ok()?
-        .get("model")?
-        .as_str()
         .map(str::to_string)
 }
 

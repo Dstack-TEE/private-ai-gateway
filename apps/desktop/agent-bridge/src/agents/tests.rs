@@ -3,6 +3,7 @@ mod contracts;
 mod discovery;
 #[cfg(target_os = "linux")]
 mod golden;
+mod projection;
 mod recovery;
 
 use super::*;

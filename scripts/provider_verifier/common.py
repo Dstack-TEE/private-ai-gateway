@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
+import re
 import sys
 from typing import Any
 
@@ -28,6 +30,8 @@ __all__ = [
     "provider_options",
     "request_timeout_seconds",
     "tdx_debug_enabled",
+    "tdx_session_material",
+    "verified_nras_gpu_claims",
 ]
 
 
@@ -42,6 +46,18 @@ def verifier_id_for(provider: str) -> str:
 
 
 def failed(provider: str, reason: str, **extra: Any) -> None:
+    """Report a failed verification.
+
+    `reason` is for the gateway's log and the operator; it may quote whatever
+    failed. Receipts and clients never see it: they get the gateway's fixed
+    sentence for `failure`, which a caller passes as
+    `failure="evidence_unavailable"` at the one operation that fetches the
+    evidence, when that operation failed. Without it the gateway says only
+    that the upstream was not verified, which is also the answer for evidence
+    that arrived malformed and for an exception whose cause is unknown.
+    """
+    if extra.get("failure") is None:
+        extra.pop("failure", None)
     emit(
         {
             "result": "failed",
@@ -183,3 +199,72 @@ def tdx_debug_enabled(quote_bytes: bytes) -> bool:
     if len(td_attributes) != 8:
         raise ValueError(f"invalid TDX td_attributes length: {len(td_attributes)}")
     return td_attributes[0] != 0
+
+
+_NONCE_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def verified_nras_gpu_claims(
+    gpu_result: Any, gpu_nonce: str, label: str
+) -> tuple[list[str], int]:
+    """Signed GPU models and count from a ``secretvm.verify`` NRAS result.
+
+    Gates on the NRAS-signed report, never on the unsigned request payload: the
+    overall result must be true, the signed nonce must equal ``gpu_nonce``, and
+    every per-GPU report must verify that nonce. ``label`` prefixes errors.
+    """
+    report = getattr(gpu_result, "report", None)
+    if not isinstance(report, dict):
+        raise ValueError(f"{label} NRAS result is missing its signed report")
+    if report.get("overall_result") is not True:
+        raise ValueError(f"{label} NRAS signed overall attestation result is not true")
+    verified_nonce = str(report.get("nonce") or "").lower()
+    if not _NONCE_HEX_RE.fullmatch(verified_nonce) or not hmac.compare_digest(
+        verified_nonce, gpu_nonce
+    ):
+        raise ValueError(f"{label} NRAS nonce does not match the CPU-bound GPU nonce")
+
+    gpu_reports = report.get("gpus")
+    if not isinstance(gpu_reports, dict) or not gpu_reports:
+        raise ValueError(f"{label} NRAS result contains no signed per-GPU reports")
+    models: set[str] = set()
+    for gpu_id, gpu_report in gpu_reports.items():
+        if not isinstance(gpu_report, dict):
+            raise ValueError(f"{label} NRAS report for GPU {gpu_id!r} is malformed")
+        if gpu_report.get("attestation_report_nonce_match") is not True:
+            raise ValueError(f"{label} NRAS report for GPU {gpu_id!r} does not verify the nonce")
+        model = gpu_report.get("model")
+        if isinstance(model, str) and model:
+            models.add(model)
+    return sorted(models), len(gpu_reports)
+
+
+def tdx_session_material(quote: bytes | str) -> dict[str, Any]:
+    """Project an already authenticated quote; parsing adds no verification.
+
+    These ASCII-only fields have the same sorted JSON encoding as JCS. Unknown
+    report forms or malformed input leave the adapter evidence-sensitive.
+    """
+    import dcap_qvl
+
+    try:
+        quote_bytes = bytes.fromhex(quote) if isinstance(quote, str) else quote
+        report = dcap_qvl.Quote.parse(quote_bytes).report
+        if isinstance(report, dcap_qvl.TdReport15):
+            report_format = "td15"
+        elif isinstance(report, dcap_qvl.TdReport10):
+            report_format = "td10"
+        else:
+            return {}
+        fields = [
+            "tee_tcb_svn", "mr_seam", "mr_signer_seam", "seam_attributes",
+            "td_attributes", "xfam", "mr_td", "mr_config_id", "mr_owner",
+            "mr_owner_config", "rt_mr0", "rt_mr1", "rt_mr2", "rt_mr3",
+        ]
+        if report_format == "td15":
+            fields += ["tee_tcb_svn2", "mr_service_td"]
+        material = {"report_format": report_format}
+        material.update({name: getattr(report, name).hex() for name in fields})
+        return {"tdx_report": material, "tdx_report_sha256": sha256_json_prefixed(material)}
+    except (ValueError, TypeError, AttributeError):
+        return {}

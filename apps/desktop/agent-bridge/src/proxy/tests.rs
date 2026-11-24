@@ -1,4 +1,5 @@
 use super::*;
+use crate::tokens::LOCAL_TOOLS_AGENT;
 
 struct HttpService {
     base_url: String,
@@ -61,7 +62,7 @@ async fn spawn(router: Router) -> String {
 
 /// A stand-in verified upstream that echoes what it received.
 async fn mock_upstream() -> String {
-    let echo = |headers: HeaderMap, body: Bytes| async move {
+    let echo = |uri: Uri, headers: HeaderMap, body: Bytes| async move {
         let header = |name: &str| {
             headers
                 .get(name)
@@ -77,7 +78,11 @@ async fn mock_upstream() -> String {
                 "anthropic-beta": header("anthropic-beta"),
                 "x-aci-tag": header("x-aci-tag"),
                 "proxy-connection": header("proxy-connection"),
+                "content-type": header("content-type"),
+                "x-aci-provider": header("x-aci-provider"),
+                "path": uri.to_string(),
                 "body": String::from_utf8_lossy(&body),
+                "body_bytes": body.as_ref(),
             })),
         )
     };
@@ -85,6 +90,9 @@ async fn mock_upstream() -> String {
         .route("/v1/chat/completions", post(echo))
         .route("/v1/responses", post(echo))
         .route("/v1/messages/count_tokens", post(echo))
+        .route("/v1/systemone", post(echo))
+        .route("/v1/images/generations", post(echo))
+        .route("/v1/audio/transcriptions", post(echo))
         .route(
             "/v1/models",
             get(|| async {
@@ -98,7 +106,10 @@ async fn mock_upstream() -> String {
 
 fn state() -> (Arc<ProxyState>, mpsc::Receiver<ProxyEvent>) {
     let (sender, receiver) = mpsc::channel(4);
-    (ProxyState::new(sender).unwrap(), receiver)
+    (
+        ProxyState::new(sender, std::time::Duration::ZERO).unwrap(),
+        receiver,
+    )
 }
 
 fn tokens() -> TokenSet {
@@ -106,36 +117,40 @@ fn tokens() -> TokenSet {
     set.insert("codex-token".to_string(), "codex".to_string());
     set.insert("claude-token".to_string(), "claude-code".to_string());
     set.insert("opencode-token".to_string(), "opencode".to_string());
+    set.insert(
+        "local-tools-token".to_string(),
+        LOCAL_TOOLS_AGENT.to_string(),
+    );
     set
 }
 
 #[tokio::test]
-async fn discovery_and_request_admission_share_endpoint_capabilities() {
+async fn discovery_and_request_admission_keep_non_text_models_from_agents() {
     let (state, _events) = state();
     state.set_tokens(tokens());
-    let mut catalog = Catalog::from_remote(
+    let catalog = Catalog::from_remote(
         &json!({"data": [
-            {"id": "responses-only"}, {"id": "messages-only"}, {"id": "chat-only"}
+            {"id": "text", "output_modalities": ["text"]},
+            {"id": "decisions", "output_modalities": ["decisions"]},
+            {"id": "image", "output_modalities": ["image"]},
+            {"id": "audio", "output_modalities": ["transcription"]}
         ]}),
         1,
     )
     .unwrap();
-    for (model, surface) in catalog.models.iter_mut().zip([
-        Surface::Responses,
-        Surface::Messages,
-        Surface::ChatCompletions,
-    ]) {
-        model.supported_surfaces = Some(vec![surface]);
-    }
     state.publish(Session {
         verified: true,
         catalog: Some(catalog),
         ..Session::default()
     });
     for (token, expected) in [
-        ("codex-token", "responses-only"),
-        ("claude-token", "messages-only"),
-        ("opencode-token", "chat-only"),
+        ("codex-token", &["text"][..]),
+        ("claude-token", &["text"]),
+        ("opencode-token", &["text"]),
+        (
+            "local-tools-token",
+            &["audio", "decisions", "image", "text"],
+        ),
     ] {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -146,12 +161,76 @@ async fn discovery_and_request_admission_share_endpoint_capabilities() {
         assert_eq!(response.status(), StatusCode::OK);
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-        assert_eq!(body["data"].as_array().unwrap().len(), 1);
-        assert_eq!(body["data"][0]["id"], expected);
+        let ids: Vec<_> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{token}");
     }
-    assert!(check_catalog(&state, Some("messages-only"), Surface::Messages).is_ok());
-    let error = check_catalog(&state, Some("messages-only"), Surface::Responses).unwrap_err();
+    assert!(check_catalog(&state, Some("text"), Surface::Messages).is_ok());
+    let error = check_catalog(&state, Some("decisions"), Surface::Messages).unwrap_err();
     assert_eq!(error.code, "model_endpoint_unavailable");
+}
+
+/// A request that arrives while a session is being verified waits for it.
+/// Once the session has been unverified for longer than the wait, requests
+/// are refused at once and told when to come back; a stopped session
+/// refuses at once too.
+#[tokio::test(start_paused = true)]
+async fn requests_wait_out_a_brief_verification_only() {
+    let wait = Duration::from_secs(30);
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, wait).unwrap();
+    state.set_tokens(tokens());
+    let request = || {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer codex-token".parse().unwrap());
+        models(State(state.clone()), headers)
+    };
+    let pending = || Session {
+        session_id: Some("session".into()),
+        ..Session::default()
+    };
+    let refused_after = |response: Response, started: tokio::time::Instant| {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        (
+            started.elapsed(),
+            response.headers().get(header::RETRY_AFTER).cloned(),
+        )
+    };
+
+    let started = tokio::time::Instant::now();
+    let stopped = refused_after(request().await, started);
+    assert_eq!(stopped, (Duration::ZERO, None));
+
+    state.publish(pending());
+    let waiting = tokio::spawn(request());
+    tokio::time::sleep(wait / 2).await;
+    assert!(!waiting.is_finished());
+    state.publish(Session {
+        verified: true,
+        service: Some(http_service("http://127.0.0.1:1")),
+        catalog: Some(Catalog::from_remote(&json!({"data": [{"id": "text"}]}), 1).unwrap()),
+        ..pending()
+    });
+    assert_eq!(waiting.await.unwrap().status(), StatusCode::OK);
+
+    let retry = Some(HeaderValue::from(VERIFICATION_RETRY_SECS));
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (wait, retry.clone())
+    );
+    // A retry of the same outage republishes the session and waits no more.
+    state.publish(pending());
+    let started = tokio::time::Instant::now();
+    assert_eq!(
+        refused_after(request().await, started),
+        (Duration::ZERO, retry)
+    );
 }
 
 async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u64) {
@@ -172,6 +251,194 @@ async fn verified(state: &ProxyState, upstream: &str, generation: u64, epoch: u6
         verified: true,
         catalog: Some(catalog),
     });
+}
+
+/// A model the service added since the last read works on its first
+/// request; a misspelled one costs a single read.
+#[tokio::test]
+async fn an_unknown_model_reads_the_catalog_again_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let reads = Arc::new(AtomicUsize::new(0));
+    state.set_catalog_refresher(Box::new({
+        let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+        move || {
+            let (state, upstream, reads) = (state.clone(), upstream.clone(), reads.clone());
+            Box::pin(async move {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let catalog =
+                    Catalog::from_remote(&json!({"data": [{"id": "new-model"}]}), 2).unwrap();
+                state.publish(Session {
+                    generation: 1,
+                    epoch: 1,
+                    session_id: Some("test-session".to_string()),
+                    service: Some(http_service(&upstream)),
+                    verified: true,
+                    catalog: Some(catalog),
+                });
+            })
+        }
+    }));
+    let proxy = spawn(router(state.clone())).await;
+    let status = |model: &'static str| {
+        let request = reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": model, "messages": [] }));
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(status("new-model").await, 200);
+    assert_eq!(status("misspelled").await, 404);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+/// The service's 401 is about the key this proxy sent, not the agent's token.
+#[tokio::test]
+async fn a_rejected_service_key_is_reported_as_such() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/models",
+                get(|| async { Json(json!({"data": [{"id": "text"}]})) }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"error": {"message": "Invalid API key provided"}})),
+                    )
+                }),
+            ),
+    )
+    .await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-revoked".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "service_key_rejected");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("the agent's token is fine"));
+}
+
+struct RefusingService;
+
+impl VerifiedService for RefusingService {
+    fn call(
+        self: Arc<Self>,
+        request: Request<Body>,
+        _context: Option<ForwardContext>,
+    ) -> VerifiedResponse {
+        Box::pin(async move {
+            if request.method() == "GET" {
+                return Json(json!({"data": [{"id": "text"}]})).into_response();
+            }
+            let mut response =
+                (StatusCode::BAD_GATEWAY, "upstream connection failed\n").into_response();
+            response
+                .extensions_mut()
+                .insert(VerifierRefusal::Unreachable);
+            response
+        })
+    }
+}
+
+/// What the verifier refuses in plain text reaches an agent in the error
+/// format it parses, on either API.
+#[tokio::test]
+async fn a_verifier_refusal_reaches_agents_in_their_error_format() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let session = |catalog: Option<Catalog>| Session {
+        generation: 1,
+        epoch: 1,
+        session_id: Some("test-session".to_string()),
+        service: Some(Arc::new(RefusingService) as Arc<dyn VerifiedService>),
+        verified: catalog.is_some(),
+        catalog,
+    };
+    state.publish(session(None));
+    let catalog = state.fetch_catalog(1, 1).await.unwrap();
+    state.publish(session(Some(catalog)));
+    state.set_api_key(Some("sk-real".to_string()));
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let openai: Value = client
+        .post(format!("{proxy}/v1/chat/completions"))
+        .bearer_auth("opencode-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(openai["error"]["code"], "upstream_unreachable");
+    let anthropic = client
+        .post(format!("{proxy}/v1/messages"))
+        .bearer_auth("claude-token")
+        .json(&json!({ "model": "text", "messages": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anthropic.status().as_u16(), 502);
+    let anthropic: Value = anthropic.json().await.unwrap();
+    assert_eq!(anthropic["type"], "error");
+    assert!(anthropic["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("could not reach the service"));
+}
+
+/// A restart ends most outages, and a restart replaces the service key.
+/// A request that waited through it is sent with the new one.
+#[tokio::test]
+async fn a_request_that_waited_through_a_restart_is_sent() {
+    let (sender, _events) = mpsc::channel(4);
+    let state = ProxyState::new(sender, Duration::from_secs(10)).unwrap();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-before".to_string()));
+    state.publish(Session {
+        generation: 1,
+        epoch: 2,
+        session_id: Some("test-session".to_string()),
+        ..Session::default()
+    });
+    let proxy = spawn(router(state.clone())).await;
+    let waiting = tokio::spawn(
+        reqwest::Client::new()
+            .post(format!("{proxy}/v1/chat/completions"))
+            .bearer_auth("opencode-token")
+            .json(&json!({ "model": "openai/gpt-oss-20b", "messages": [] }))
+            .send(),
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!waiting.is_finished());
+    state.set_api_key(None);
+    state.set_api_key(Some("sk-after".to_string()));
+    verified(&state, &upstream, 2, 1).await;
+    let response = waiting.await.unwrap().unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let echoed: Value = response.json().await.unwrap();
+    assert_eq!(echoed["authorization"], "Bearer sk-after");
 }
 
 #[test]
@@ -400,6 +667,311 @@ async fn verified_catalog_models_are_forwarded_with_the_real_key() {
 }
 
 #[tokio::test]
+async fn systemone_is_local_tools_only_and_uses_catalog_membership() {
+    let (state, _events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["decisions"]));
+    state.publish(session);
+
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let body = r#"{"model":"openai/gpt-oss-20b","state":{"step":1},"questions":[]}"#;
+    let response = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["authorization"], json!("Bearer sk-real"));
+    assert_eq!(forwarded["path"], "/v1/systemone");
+    assert_eq!(forwarded["body"], body);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".to_string(), json!(["text"]));
+    state.publish(session);
+    let chat_model = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"openai/gpt-oss-20b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_model.status(), StatusCode::BAD_REQUEST);
+    let error: Value = chat_model.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+
+    let coding_agent = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("codex-token")
+        .json(&json!({"model":"openai/gpt-oss-20b"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(coding_agent.status(), StatusCode::FORBIDDEN);
+    let error: Value = coding_agent.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "forbidden");
+
+    let unknown = client
+        .post(format!("{proxy}/v1/systemone"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"unknown/model","state":{},"questions":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let error: Value = unknown.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_not_found");
+}
+
+#[tokio::test]
+async fn images_are_local_tools_only_and_require_advertised_image_output() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let mut session = state.session();
+    let model = &mut session.catalog.as_mut().unwrap().models[0];
+    model
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["image"]));
+    state.publish(session);
+
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    let body =
+        r#"{"model":"openai/gpt-oss-20b", "prompt":"A quiet lake", "response_format":"b64_json"}"#;
+    let response = client
+        .post(format!("{proxy}/v1/images/generations?trace=true"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-receipt-id"], "rcpt-1");
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["authorization"], "Bearer sk-real");
+    assert_eq!(forwarded["path"], "/v1/images/generations?trace=true");
+    assert_eq!(forwarded["body"], body);
+    let initial = events.recv().await.unwrap();
+    let usage = events.recv().await.unwrap();
+    assert_eq!(usage.request_id, initial.request_id);
+    assert_eq!(usage.input_tokens, None);
+    assert_eq!(usage.output_tokens, None);
+    assert_eq!(usage.cost_usd, None);
+
+    for token in ["codex-token", "claude-token", "opencode-token"] {
+        let response = client
+            .post(format!("{proxy}/v1/images/generations"))
+            .bearer_auth(token)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "forbidden");
+    }
+    for modalities in [Some(json!(["text"])), None] {
+        let mut session = state.session();
+        let extra = &mut session.catalog.as_mut().unwrap().models[0].remote.extra;
+        if let Some(modalities) = modalities {
+            extra.insert("output_modalities".into(), modalities);
+        } else {
+            extra.remove("output_modalities");
+        }
+        state.publish(session);
+        let response = client
+            .post(format!("{proxy}/v1/images/generations"))
+            .bearer_auth("local-tools-token")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+    }
+    let unknown = client
+        .post(format!("{proxy}/v1/images/generations"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"unknown/model", "prompt":"A quiet lake"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let error: Value = unknown.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_not_found");
+}
+
+#[tokio::test]
+async fn transcriptions_gate_tokens_and_models_and_preserve_multipart_bytes_and_carrier() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let upstream = mock_upstream().await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let mut session = state.session();
+    let model = &mut session.catalog.as_mut().unwrap().models[0];
+    model
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["transcription"]));
+    state.publish(session);
+    let proxy = spawn(router(state.clone())).await;
+    let client = reqwest::Client::new();
+    // Put the binary file first to exercise draining before model extraction.
+    let mut body = b"--audio-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF\x00\xff\x80\r\n".to_vec();
+    body.extend_from_slice(b"--audio-boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nopenai/gpt-oss-20b\r\n--audio-boundary--\r\n");
+    let content_type = "multipart/form-data; boundary=\"audio-boundary\"";
+    let carrier = r#"{"aci_verified":true,"aci_session_ids":["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#;
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions?trace=true"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", content_type)
+        .header("x-aci-provider", carrier)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-receipt-id"], "rcpt-1");
+    let forwarded: Value = response.json().await.unwrap();
+    assert_eq!(forwarded["path"], "/v1/audio/transcriptions?trace=true");
+    assert_eq!(forwarded["authorization"], "Bearer sk-real");
+    assert_eq!(forwarded["content-type"], content_type);
+    assert_eq!(forwarded["x-aci-provider"], carrier);
+    assert_eq!(forwarded["body_bytes"], json!(body));
+    let initial = events.recv().await.unwrap();
+    assert_eq!(initial.model.as_deref(), Some("openai/gpt-oss-20b"));
+    assert!(initial.left_device);
+    let _usage = events.recv().await.unwrap();
+
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("codex-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!events.recv().await.unwrap().left_device);
+
+    let mut session = state.session();
+    session.catalog.as_mut().unwrap().models[0]
+        .remote
+        .extra
+        .insert("output_modalities".into(), json!(["text"]));
+    state.publish(session);
+    let response = client
+        .post(format!("{proxy}/v1/audio/transcriptions"))
+        .bearer_auth("local-tools-token")
+        .header("content-type", content_type)
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value = response.json().await.unwrap();
+    assert_eq!(error["error"]["code"], "model_endpoint_unavailable");
+    assert!(!events.recv().await.unwrap().left_device);
+
+    for connection in ["X-ACI-Provider", "Content-Type"] {
+        let response = client
+            .post(format!("{proxy}/v1/audio/transcriptions"))
+            .bearer_auth("local-tools-token")
+            .header("content-type", content_type)
+            .header("x-aci-provider", carrier)
+            .header("connection", connection)
+            .body(body.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!events.recv().await.unwrap().left_device);
+    }
+}
+
+#[tokio::test]
+async fn large_image_responses_pass_through_and_record_usage() {
+    let (state, mut events) = state();
+    state.set_tokens(tokens());
+    let payload = Bytes::from(format!(
+        r#"{{"created":1,"data":[{{"b64_json":"{}"}}],"usage":{{"input_tokens":12,"output_tokens":34,"cost":"0.02"}}}}"#,
+        "A".repeat(MAX_USAGE_CAPTURE_BYTES + 1024)
+    ));
+    let expected = payload.clone();
+    let upstream = spawn(
+        Router::new()
+            .route(
+                "/v1/images/generations",
+                post(move || {
+                    let payload = payload.clone();
+                    async move {
+                        Response::builder()
+                            .status(StatusCode::CREATED)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .header("x-receipt-id", "image-receipt")
+                            .body(Body::from(payload))
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({"data":[{"id":"image-model", "output_modalities":["image"]}]}))
+                }),
+            ),
+    )
+    .await;
+    verified(&state, &upstream, 1, 1).await;
+    state.set_api_key(Some("sk-real".to_string()));
+    let proxy = spawn(router(state)).await;
+    let response = reqwest::Client::new()
+        .post(format!("{proxy}/v1/images/generations"))
+        .bearer_auth("local-tools-token")
+        .json(&json!({"model":"image-model", "prompt":"A quiet lake"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    assert_eq!(response.headers()["x-receipt-id"], "image-receipt");
+    assert_eq!(response.bytes().await.unwrap(), expected);
+    let initial = events.recv().await.unwrap();
+    let usage = events.recv().await.unwrap();
+    assert_eq!(usage.request_id, initial.request_id);
+    assert_eq!(usage.path, "/v1/images/generations");
+    assert_eq!(usage.agent.as_deref(), Some(LOCAL_TOOLS_AGENT));
+    assert_eq!(usage.receipt_id.as_deref(), Some("image-receipt"));
+    assert!(!usage.streamed);
+    assert!(usage.left_device);
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(34));
+    assert_eq!(usage.cost_usd, Some(0.02));
+}
+
+#[tokio::test]
 async fn send_failures_are_not_reported_as_local_rejections() {
     let (state, mut events) = state();
     state.set_tokens(tokens());
@@ -575,7 +1147,7 @@ async fn every_path_is_relayed_without_rewriting_request_or_response() {
 
 #[test]
 fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     stream.push(b"event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":12,");
     stream.push(
         b"\"output_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":3},\"cost\":\"0.004\"}}}\n\n",
@@ -586,7 +1158,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
     assert_eq!(usage.cache_read_tokens, Some(3));
     assert_eq!(usage.cost_usd, Some(0.004));
 
-    let mut json = UsageCapture::new(false);
+    let mut json = UsageCapture::new(false, Surface::ChatCompletions);
     json.push(br#"{"usage":{"prompt_tokens":21,"completion_tokens":8,"cache_creation_input_tokens":4,"prompt_tokens_details":{"cached_tokens":7},"cost":-1}}"#);
     let usage = json.finish();
     assert_eq!(usage.input_tokens, Some(21));
@@ -595,7 +1167,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
     assert_eq!(usage.cache_write_tokens, Some(4));
     assert_eq!(usage.cost_usd, None);
 
-    let mut messages = UsageCapture::new(true);
+    let mut messages = UsageCapture::new(true, Surface::Messages);
     messages.push(b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":144,\"cache_read_input_tokens\":32,\"cache_creation_input_tokens\":8}}}\n\n");
     messages.push(b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":21}}\n\n");
     let usage = messages.finish();
@@ -607,7 +1179,7 @@ fn usage_capture_parses_streamed_and_json_usage_without_inventing_values() {
 
 #[test]
 fn oversized_usage_body_stays_unknown() {
-    let mut capture = UsageCapture::new(false);
+    let mut capture = UsageCapture::new(false, Surface::Responses);
     capture.push(&vec![b'x'; MAX_USAGE_CAPTURE_BYTES + 1]);
     let usage = capture.finish();
     assert_eq!(usage.input_tokens, None);
@@ -616,8 +1188,34 @@ fn oversized_usage_body_stays_unknown() {
 }
 
 #[test]
+fn image_usage_capture_accepts_the_response_limit_and_discards_overflow() {
+    let prefix = br#"{"data":[{"b64_json":""#;
+    let suffix = br#""}],"usage":{"cost":"0.03"}}"#;
+    let chunk = [b'A'; 64 * 1024];
+    for overflow in [false, true] {
+        let mut capture = UsageCapture::new(false, Surface::Images);
+        capture.push(prefix);
+        let mut remaining = MAX_IMAGE_USAGE_CAPTURE_BYTES - prefix.len() - suffix.len();
+        while remaining > 0 {
+            let len = remaining.min(chunk.len());
+            capture.push(&chunk[..len]);
+            remaining -= len;
+        }
+        capture.push(suffix);
+        if overflow {
+            capture.push(b" ");
+            assert_eq!(capture.body.capacity(), 0);
+        }
+        let usage = capture.finish();
+        assert_eq!(usage.cost_usd, if overflow { None } else { Some(0.03) });
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+}
+
+#[test]
 fn large_responses_preserve_usage_without_reading_output_as_usage() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     let event = format!(
         "data: {}\n\n",
         json!({
@@ -632,7 +1230,7 @@ fn large_responses_preserve_usage_without_reading_output_as_usage() {
     assert_eq!(usage.input_tokens, Some(1200));
     assert_eq!(usage.output_tokens, Some(450));
 
-    let mut body = UsageCapture::new(false);
+    let mut body = UsageCapture::new(false, Surface::Responses);
     body.push(
         json!({"output": "x".repeat(2 * 1024 * 1024),
         "usage": {"input_tokens": 800, "output_tokens": 400}})
@@ -645,7 +1243,7 @@ fn large_responses_preserve_usage_without_reading_output_as_usage() {
 
 #[test]
 fn oversized_sse_lines_are_discarded_before_the_next_event() {
-    let mut stream = UsageCapture::new(true);
+    let mut stream = UsageCapture::new(true, Surface::Responses);
     stream.push(b"data: {\"usage\":{\"input_tokens\":999}}");
     stream.push(&vec![b' '; desktop_core::sse::MAX_LINE_BYTES]);
     stream.push(b"invalid\n\n");

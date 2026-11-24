@@ -55,6 +55,7 @@ pub fn vector_report() -> AttestationReport {
             // keyset with domain-scoped TLS entries declares which one clients
             // pin (spec 4.2).
             evidence: json!({
+                "app_compose": "{}",
                 "downstream_tls_binding": {
                     "domain": "api.example.com",
                     "spki_sha256": "c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
@@ -64,6 +65,7 @@ pub fn vector_report() -> AttestationReport {
         service_capabilities: ServiceCapabilities {
             supported_e2ee_versions: vec!["2".to_string()],
             serving: "aggregator".to_string(),
+            ..Default::default()
         },
     }
 }

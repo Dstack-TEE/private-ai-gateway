@@ -37,6 +37,12 @@ use crate::{
 mod legacy;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Bounds the initial version handshake, including response headers and body.
+/// This follows the legacy protocol's HELLO timeout so a live but wedged
+/// backend cannot make management commands hang indefinitely.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bounds the response headers when opening an event stream.
+const EVENTS_HEADER_TIMEOUT: Duration = HELLO_TIMEOUT;
 /// The service sends an SSE comment every 15 s; silence past this means it hung.
 const EVENTS_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a client waits to retry an event stream the backend has no room for.
@@ -51,7 +57,7 @@ const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// reports it instead of waiting.
 const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
-const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run private-ai-proxy service start to replace it.";
+const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run pap service start to replace it.";
 const OTHER_INSTALLATION: &str = "The running backend belongs to another installation. Update it through its owning package manager.";
 
 /// Why a management call failed.
@@ -194,6 +200,10 @@ impl Client {
                     return Err("The bundled backend started with a different build. Reinstall the app and try again.".into());
                 }
                 Err(error) if absent(&error) => {}
+                // A live backend can accept the socket and then stall before
+                // answering /api/version. Keep the startup deadline as the
+                // outer bound instead of returning early on one HELLO timeout.
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
                 Err(error) => {
                     reap(child);
                     return Err(connection_error(error));
@@ -227,10 +237,10 @@ impl Client {
                     let _ = child.wait();
                 }
                 return Err(match diagnostic {
-                    Some(diagnostic) => format!(
-                        "Backend readiness timed out: {diagnostic}. Run private-ai-proxy doctor."
-                    ),
-                    None => "Backend readiness timed out. Run private-ai-proxy doctor.".into(),
+                    Some(diagnostic) => {
+                        format!("Backend readiness timed out: {diagnostic}. Run pap doctor.")
+                    }
+                    None => "Backend readiness timed out. Run pap doctor.".into(),
                 });
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -323,14 +333,10 @@ impl Client {
             // The connection stays open while its event stream is read.
             let (connection, response) = loop {
                 let mut connection = open_current().await?;
-                let response = send(
-                    &mut connection.sender,
-                    Method::GET,
-                    protocol::EVENTS_PATH,
-                    None,
-                )
-                .await
-                .map_err(connection_error)?;
+                let response = connection
+                    .events(EVENTS_HEADER_TIMEOUT)
+                    .await
+                    .map_err(connection_error)?;
                 if response.status() == StatusCode::SERVICE_UNAVAILABLE {
                     if !receive(Watched::Busy) {
                         return Ok(());
@@ -420,6 +426,13 @@ impl Client {
         self.shutdown_owned(None, ShutdownMode::Quit)
     }
 
+    /// Stops this installation's backend as a restart does: the protection
+    /// session stays for the next backend to resume, and connected agents
+    /// stay pointed at the Local API.
+    pub fn stop_for_restart(&self) -> Result<(), String> {
+        self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::UpdateRestart)
+    }
+
     pub fn restart_service(&self) -> Result<(), String> {
         let expected = installed_backend()?;
         if self.is_running()? {
@@ -431,7 +444,7 @@ impl Client {
     /// Stops the running backend, of this build or another, and waits for it
     /// to exit. With `expected`, only a backend of that installation.
     fn shutdown_owned(&self, expected: Option<&Path>, mode: ShutdownMode) -> Result<(), String> {
-        let process_id = block_on(async {
+        let process = block_on(async {
             let mut connection = match open().await {
                 Ok(connection) => connection,
                 Err(error) if absent(&error) => return legacy::shutdown(expected, mode).await,
@@ -443,6 +456,7 @@ impl Client {
                     return Err(OTHER_INSTALLATION.into());
                 }
             }
+            let process = crate::launch::observe_exit(before.process_id)?;
             self.expect_shutdown(Some(before.instance_id.clone()))?;
             let shutdown = Command::Shutdown {
                 instance_id: before.instance_id,
@@ -450,23 +464,20 @@ impl Client {
             };
             match connection.call(&shutdown).await {
                 // Busy: another client's shutdown of this instance is under way.
-                Ok(_) => Ok(before.process_id),
-                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => {
-                    Ok(before.process_id)
-                }
+                Ok(_) => Ok(process),
+                Err(CallError::Api(error)) if error.code == ErrorCode::Busy => Ok(process),
                 Err(error) => {
                     self.expect_shutdown(None)?;
                     Err(error.to_string())
                 }
             }
         })??;
-        let stopped =
-            crate::launch::wait_for_exit(process_id, BACKEND_EXIT_TIMEOUT).and_then(|()| {
-                match block_on(open())? {
-                    Err(error) if absent(&error) => Ok(()),
-                    Err(error) => Err(connection_error(error)),
-                    Ok(_) => Err("Another backend started during shutdown".into()),
-                }
+        let stopped = process
+            .wait(BACKEND_EXIT_TIMEOUT)
+            .and_then(|()| match block_on(open())? {
+                Err(error) if absent(&error) => Ok(()),
+                Err(error) => Err(connection_error(error)),
+                Ok(_) => Err("Another backend started during shutdown".into()),
             });
         if stopped.is_err() {
             self.expect_shutdown(None)?;
@@ -495,7 +506,7 @@ impl Client {
         if was_running {
             self.shutdown_owned(Some(&expected), ShutdownMode::UpdateRestart)?;
         }
-        let ownership = crate::lock::instance(&data)
+        let ownership = crate::lock::instance_within(&data, crate::lock::INSTANCE_RELEASE_WAIT)
             .map_err(|_| "Cannot secure update ownership")?
             .ok_or("Another backend started before the update. Stop it before retrying.")?;
         let result = install();
@@ -545,6 +556,14 @@ struct Connection {
 }
 
 impl Connection {
+    async fn events(&mut self, timeout: Duration) -> io::Result<hyper::Response<Incoming>> {
+        bounded(
+            timeout,
+            send(&mut self.sender, Method::GET, protocol::EVENTS_PATH, None),
+        )
+        .await
+    }
+
     async fn call(&mut self, command: &Command) -> Result<Value, CallError> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -575,28 +594,45 @@ impl Connection {
     }
 }
 
-async fn open() -> io::Result<Connection> {
-    let stream = transport::connect(&transport::endpoint_path()?).await?;
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+async fn bounded<T>(
+    timeout: Duration,
+    future: impl Future<Output = io::Result<T>>,
+) -> io::Result<T> {
+    tokio::time::timeout(timeout, future)
         .await
-        .map_err(http_error)?;
-    tokio::spawn(connection);
-    let response = send(&mut sender, Method::GET, protocol::VERSION_PATH, None).await?;
-    let (status, body) = read(response).await?;
-    let version = serde_json::from_slice::<Version>(&body)
-        .ok()
-        .filter(|version| {
-            status == StatusCode::OK
-                && version.api_version == protocol::API_VERSION
-                && version.product == crate::brand::APP_IDENTIFIER
-        })
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Incompatible Private AI Proxy backend; update the client and backend together",
-            )
-        })?;
-    Ok(Connection { sender, version })
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+async fn open() -> io::Result<Connection> {
+    let endpoint = transport::endpoint_path()?;
+    open_at(&endpoint, HELLO_TIMEOUT).await
+}
+
+async fn open_at(endpoint: &Path, timeout: Duration) -> io::Result<Connection> {
+    bounded(timeout, async {
+        let stream = transport::connect(endpoint).await?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .map_err(http_error)?;
+        tokio::spawn(connection);
+        let response = send(&mut sender, Method::GET, protocol::VERSION_PATH, None).await?;
+        let (status, body) = read(response).await?;
+        let version = serde_json::from_slice::<Version>(&body)
+            .ok()
+            .filter(|version| {
+                status == StatusCode::OK
+                    && version.api_version == protocol::API_VERSION
+                    && version.product == crate::brand::APP_IDENTIFIER
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Incompatible Private AI Proxy backend; update the client and backend together",
+                )
+            })?;
+        Ok(Connection { sender, version })
+    })
+    .await
 }
 
 /// A connection to a backend of this build. A backend of another build,
@@ -702,9 +738,16 @@ fn absent(error: &io::Error) -> bool {
 }
 
 fn connection_error(error: io::Error) -> String {
+    #[cfg(unix)]
+    if error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<transport::RuntimeDirectoryOwnerError>())
+    {
+        return error.to_string();
+    }
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
-            "Backend is not running. Run private-ai-proxy service start.".into()
+            "Backend is not running. Run pap service start.".into()
         }
         io::ErrorKind::PermissionDenied => {
             "Management endpoint access denied. Use the same OS user as the backend.".into()
@@ -717,16 +760,113 @@ fn connection_error(error: io::Error) -> String {
             "Incompatible or invalid management protocol. Update the client and backend together."
                 .into()
         }
-        _ => "Management connection failed. Run private-ai-proxy doctor; do not automatically retry mutations."
+        _ => "Management connection failed. Run pap doctor; do not automatically retry mutations."
             .into(),
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
-    use super::{acquire_startup, STARTUP_IN_PROGRESS};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::{acquire_startup, open_at, STARTUP_IN_PROGRESS};
+
+    fn local_endpoint() -> (tempfile::TempDir, PathBuf, tokio::net::UnixListener) {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        crate::private_fs::create_private_dir(&runtime).unwrap();
+        let endpoint = runtime.join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        (temp, endpoint, listener)
+    }
+
+    async fn request_headers(stream: &mut tokio::net::UnixStream) {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 256];
+        while !bytes.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(read, 0, "client closed before sending request headers");
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    #[tokio::test]
+    async fn version_handshake_timeout_covers_a_connected_silent_endpoint() {
+        let (_temp, endpoint, listener) = local_endpoint();
+        let (requested, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            request_headers(&mut stream).await;
+            requested.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            open_at(&endpoint, Duration::from_millis(50)),
+        )
+        .await
+        .expect("version exchange exceeded its handshake deadline");
+        let error = match result {
+            Ok(_) => panic!("silent endpoint unexpectedly completed the handshake"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        received
+            .try_recv()
+            .expect("backend did not receive the request");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn events_headers_timeout_after_a_successful_version_exchange() {
+        let (_temp, endpoint, listener) = local_endpoint();
+        let (requested, mut received) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            request_headers(&mut stream).await;
+            let version = serde_json::json!({
+                "apiVersion": crate::protocol::API_VERSION,
+                "product": crate::brand::APP_IDENTIFIER,
+                "version": crate::protocol::BUILD_VERSION,
+                "instanceId": "test-instance",
+                "processId": 1,
+                "executable": "test-backend"
+            });
+            let body = serde_json::to_vec(&version).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: keep-alive\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.flush().await.unwrap();
+            request_headers(&mut stream).await;
+            requested.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let mut connection = open_at(&endpoint, Duration::from_secs(1)).await.unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            connection.events(Duration::from_millis(50)),
+        )
+        .await
+        .expect("events request exceeded its header deadline")
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        received
+            .try_recv()
+            .expect("backend did not receive the request");
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 
     #[test]
     fn startup_reports_an_installer_gate() {

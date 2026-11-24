@@ -151,12 +151,33 @@ fn recorded_paths_restore_original_files_after_location_changes() {
 }
 
 #[test]
+fn claude_keeps_preexisting_gateway_flags_through_reconnect_and_disconnect() {
+    let sandbox = sandbox("claude-existing-flags");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1","CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY":"1"}}"#,
+    );
+    for _ in 0..2 {
+        assert!(connect(&sandbox).authorized);
+    }
+    disconnect(&sandbox, Agent::ClaudeCode);
+    let restored = doc(&sandbox, Agent::ClaudeCode);
+    for flag in [
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
+    ] {
+        assert_eq!(restored.get_str(&["env", flag]).as_deref(), Some("1"));
+    }
+}
+
+#[test]
 fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     let sandbox = sandbox("claude");
     let path = sandbox.home.join(".claude").join("settings.json");
     write(
         &path,
-        r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret"}}"#,
+        r#"{"model": "opus", "env": {"ANTHROPIC_AUTH_TOKEN": "sk-old-secret", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"}}"#,
     );
     let preview = sandbox
         .projector
@@ -178,6 +199,11 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     assert!(status.connected);
     let doc = doc(&sandbox, Agent::ClaudeCode);
     assert_eq!(doc.get_str(&["env", "ANTHROPIC_AUTH_TOKEN"]), None);
+    assert_eq!(
+        doc.get_str(&["env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"])
+            .as_deref(),
+        Some("1")
+    );
     assert_eq!(
         doc.get_str(&["env", "ANTHROPIC_BASE_URL"]).as_deref(),
         Some(ENDPOINT)
@@ -226,6 +252,10 @@ fn claude_takes_over_credentials_via_the_secret_store_and_restores_them() {
     assert!(text.contains("\"ANTHROPIC_AUTH_TOKEN\": \"sk-old-secret\""));
     assert!(!text.contains("apiKeyHelper"));
     let restored: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        restored["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],
+        "0"
+    );
     assert!(restored.get("modelPicker").is_none());
     assert!(sandbox.secrets.is_empty(), "restore entry released");
     assert!(sandbox

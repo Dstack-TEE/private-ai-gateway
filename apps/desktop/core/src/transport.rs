@@ -16,6 +16,8 @@ mod platform;
 #[cfg(not(any(unix, windows)))]
 compile_error!("desktop local IPC is supported only on Unix and Windows");
 
+#[cfg(unix)]
+pub(crate) use platform::RuntimeDirectoryOwnerError;
 pub use platform::{connect, ClientStream, Listener, Stream};
 
 const ENDPOINT_HASH_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;

@@ -14,6 +14,9 @@
 //!   Buffered-only; any client-sent `stream:true` is forced back to
 //!   buffered before forwarding. The aggregator hashes the body and
 //!   issues a receipt the same way as `/v1/chat/completions`.
+//! * `POST /v1/audio/transcriptions` - bounded multipart audio transcription.
+//! * `POST /v1/images/generations` - buffered image generation with inline
+//!   base64 output and receipts; E2EE and streaming are rejected.
 //! * `GET  /v1/models` - proxy the upstream OpenAI-compatible model list.
 //! * `GET  /v1/models/*` - relay model sub-catalogs to the middleware, which
 //!   owns the routing: `/v1/models/:namespace` (alias-prefix catalog) and
@@ -81,21 +84,26 @@ use tower_http::cors::CorsLayer;
 /// unlimited.
 pub(super) const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 
-use crate::aggregator::service::AciService;
+use crate::aggregator::service::{
+    AciService, AUDIO_SPEECH_PATH, AUDIO_TRANSCRIPTIONS_PATH, IMAGES_EDITS_PATH,
+    IMAGES_GENERATIONS_PATH, RERANK_PATH,
+};
 use crate::aggregator::upstream_config::UpstreamConfigManager;
 use crate::middleware::Middleware;
 
 mod backend;
 mod error_responses;
 mod handlers;
+mod rejected_body;
 mod util;
 mod write_idle_timeout;
 
 use handlers::{
     aci_attestation_report, aci_list_sessions, aci_receipt, admin_get_upstreams,
-    admin_put_upstreams, attestation_report, attested_session, chat_completions, completions,
-    embeddings, embeddings_models, health, messages, metrics, models, models_subpath,
-    receipt_by_chat_id, responses, root,
+    admin_put_upstreams, attestation_report, attested_session, audio_speech, audio_transcriptions,
+    chat_completions, completions, embeddings, embeddings_models, health, images_edits,
+    images_generations, messages, metrics, models, models_subpath, receipt_by_chat_id, rerank,
+    responses, root, systemone,
 };
 
 /// Serve the public entry, wrapping each connection's IO with a write-idle
@@ -225,6 +233,14 @@ fn build_router_inner(
         .route("/v1/embeddings", post(embeddings))
         .route("/v1/messages", post(messages))
         .route("/v1/responses", post(responses))
+        .route("/v1/systemone", post(systemone))
+        .route(AUDIO_TRANSCRIPTIONS_PATH, post(audio_transcriptions))
+        .route(AUDIO_SPEECH_PATH, post(audio_speech))
+        .route(IMAGES_GENERATIONS_PATH, post(images_generations))
+        .route(IMAGES_EDITS_PATH, post(images_edits))
+        .route(RERANK_PATH, post(rerank))
+        .route("/v2/rerank", post(rerank))
+        .route("/rerank", post(rerank))
         // Gateway operations.
         .route("/v1/metrics", get(metrics))
         .route(
@@ -274,8 +290,10 @@ async fn aci_headers_middleware(
         HeaderName::from_static("x-aci-version"),
         HeaderValue::from_static("aci/1"),
     );
-    if let Ok(v) = HeaderValue::from_str(state.service.workload_keyset_digest()) {
-        headers.insert(HeaderName::from_static("x-aci-keyset-digest"), v);
+    if !headers.contains_key("x-aci-keyset-digest") {
+        if let Ok(v) = HeaderValue::from_str(&state.service.workload_keyset_digest()) {
+            headers.insert(HeaderName::from_static("x-aci-keyset-digest"), v);
+        }
     }
     resp
 }

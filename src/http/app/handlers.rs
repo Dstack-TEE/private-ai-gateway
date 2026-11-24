@@ -21,10 +21,10 @@ use crate::aci::types::{
     AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
 use crate::aggregator::service::{
-    E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
-    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    E2eeRequestContext, E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError,
+    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
+    SYSTEMONE_PATH,
 };
-use crate::aggregator::session_store::sort_sessions_newest_first;
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
 use super::backend::{
@@ -34,9 +34,10 @@ use super::backend::{
 };
 use super::error_responses::{
     admin_not_found_response, e2ee_error_response, error_response, insert_str_header,
-    internal_error_response, invalid_signing_algo_response, unknown_downstream_host_response,
-    unsupported_e2ee_response, upstream_config_error_response,
+    internal_error_response, unknown_downstream_host_response, unsupported_e2ee_response,
+    upstream_config_error_response,
 };
+use super::rejected_body::discard_before_reply;
 use super::util::{
     enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
     request_host_domain,
@@ -101,6 +102,12 @@ fn tee_only_catalog_query(
     }
 }
 
+/// The hash of the key a catalog request carried, relayed so the control
+/// plane can answer for that caller. A request with no key sends none.
+fn caller_key_hash(headers: &HeaderMap) -> Option<String> {
+    extract_bearer(headers).as_deref().map(hash_api_key)
+}
+
 pub(super) async fn models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -109,7 +116,10 @@ pub(super) async fn models(
     if let Some(middleware) = state.middleware.clone() {
         let query = tee_only_catalog_query(&middleware, &headers, query);
         return middleware
-            .handle_catalog(&catalog_path("/v1/models", query))
+            .handle_catalog(
+                &catalog_path("/v1/models", query),
+                caller_key_hash(&headers).as_deref(),
+            )
             .await;
     }
     match state.service.upstream().models().await {
@@ -137,7 +147,10 @@ pub(super) async fn models_subpath(
     };
     let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
-        .handle_catalog(&catalog_path(&format!("/v1/models/{rest}"), query))
+        .handle_catalog(
+            &catalog_path(&format!("/v1/models/{rest}"), query),
+            caller_key_hash(&headers).as_deref(),
+        )
         .await
 }
 
@@ -157,7 +170,10 @@ pub(super) async fn embeddings_models(
     };
     let query = tee_only_catalog_query(&middleware, &headers, query);
     middleware
-        .handle_catalog(&catalog_path("/v1/embeddings/models", query))
+        .handle_catalog(
+            &catalog_path("/v1/embeddings/models", query),
+            caller_key_hash(&headers).as_deref(),
+        )
         .await
 }
 
@@ -211,34 +227,7 @@ pub(super) async fn admin_put_upstreams(
         Err(e) => return upstream_config_error_response(e),
     };
     match manager.replace(config) {
-        Ok(snapshot) => {
-            let manager = manager.clone();
-            tokio::spawn(async move {
-                let results = manager.prewarm_upstream_verification().await;
-                for result in results {
-                    match result.reason {
-                        Some(reason) => tracing::warn!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            reason = %reason,
-                            "upstream verification prewarm finished"
-                        ),
-                        None => tracing::info!(
-                            upstream = %result.upstream_name,
-                            model = %result.model_id,
-                            origin = ?result.url_origin,
-                            verifier = %result.verifier_id,
-                            result = %result.result,
-                            "upstream verification prewarm finished"
-                        ),
-                    }
-                }
-            });
-            Json(snapshot).into_response()
-        }
+        Ok(snapshot) => Json(snapshot).into_response(),
         Err(e) => upstream_config_error_response(e),
     }
 }
@@ -368,11 +357,6 @@ pub(super) async fn aci_attestation_report(
         .await
     {
         Ok(report) => Json(report).into_response(),
-        Err(ServiceError::InvalidNonce(e)) => error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            e.to_string(),
-        ),
         Err(
             e @ (ServiceError::DownstreamTlsDomainMissing
             | ServiceError::DownstreamTlsDomainUnknown(_)),
@@ -495,9 +479,10 @@ pub(super) async fn responses(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    // Native OpenAI Responses API passthrough (create only). The frontend treats
-    // the body as opaque plaintext (extracts `model`/`stream`); the path flows
-    // through to the upstream as `base_url + /v1/responses`. E2EE v2 is not
+    // OpenAI Responses API (create only): routes that implement it receive the
+    // request as is, Chat-only routes through the Chat Completions bridge. The
+    // frontend treats the body as opaque plaintext (extracts `model`/`stream`).
+    // E2EE v2 is not
     // supported on this endpoint yet — its body uses `input`, not `messages` —
     // so reject E2EE requests cleanly instead of failing later in field decryption.
     if has_e2ee_headers(&headers) {
@@ -508,6 +493,220 @@ pub(super) async fn responses(
         );
     }
     openai_completion_endpoint(state, headers, body, RESPONSES_PATH, false).await
+}
+
+pub(super) async fn systemone(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if has_e2ee_headers(&headers) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "e2ee_unsupported_endpoint",
+            "E2EE v2 is not supported on /v1/systemone",
+        );
+    }
+    openai_completion_endpoint(state, headers, body, SYSTEMONE_PATH, true).await
+}
+
+pub(super) async fn rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::Rerank).await
+}
+
+pub(super) async fn images_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesEdits).await
+}
+
+pub(super) async fn images_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::ImagesGenerations).await
+}
+
+pub(super) async fn audio_speech(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioSpeech).await
+}
+
+pub(super) async fn audio_transcriptions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    buffered_native_endpoint(state, headers, body, Endpoint::AudioTranscriptions).await
+}
+
+async fn buffered_native_endpoint(
+    state: AppState,
+    headers: HeaderMap,
+    body: Body,
+    endpoint: Endpoint,
+) -> Response {
+    if !headers.contains_key(axum::http::header::AUTHORIZATION) {
+        let mut response = error_response(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "inference bearer token required",
+        );
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            HeaderValue::from_static("Bearer"),
+        );
+        return discard_before_reply(&headers, body, super::MAX_REQUEST_BODY_BYTES, response).await;
+    }
+    // Decide before parsing or admission. Bounded discard preserves the JSON refusal.
+    if has_e2ee_headers(&headers)
+        || headers
+            .keys()
+            .any(|key| key.as_str().starts_with("x-e2ee-"))
+    {
+        return discard_before_reply(
+            &headers,
+            body,
+            super::MAX_REQUEST_BODY_BYTES,
+            error_response(
+                StatusCode::BAD_REQUEST,
+                "e2ee_unsupported_endpoint",
+                format!("E2EE is not supported on {}", endpoint.path()),
+            ),
+        )
+        .await;
+    }
+    let request_id = generate_request_id();
+    use crate::middleware::media::{IMAGE_EDIT, TRANSCRIPTION};
+    let media = match endpoint {
+        Endpoint::AudioTranscriptions => Some(&TRANSCRIPTION),
+        Endpoint::ImagesEdits => Some(&IMAGE_EDIT),
+        _ => None,
+    };
+    if media.is_none() && headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+        return reject_json_provider_header(&headers, body).await;
+    }
+    let (received_body, parsed, form, upload_permit) = if let Some(spec) = media {
+        let provider = match multipart_provider(&headers) {
+            Ok(value) => value,
+            Err(message) => {
+                return discard_before_reply(
+                    &headers,
+                    body,
+                    spec.max_body_bytes,
+                    error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message),
+                )
+                .await;
+            }
+        };
+        let upload = async {
+            let (bytes, permit) =
+                crate::middleware::media::read_upload(&headers, body, spec).await?;
+            let content_type = header_str(&headers, "content-type").unwrap_or("");
+            let (params, form) = if endpoint == Endpoint::AudioTranscriptions {
+                crate::middleware::audio::parse(bytes.clone(), content_type).await?
+            } else {
+                crate::middleware::image_edits::parse(bytes.clone(), content_type).await?
+            };
+            Ok::<_, crate::middleware::media::MediaError>((bytes, permit, params, form))
+        }
+        .await;
+        let (bytes, permit, mut params, form) = match upload {
+            Ok(upload) => upload,
+            Err(err) => {
+                if endpoint == Endpoint::AudioTranscriptions {
+                    state.service.record_audio_failure("upload_rejection");
+                }
+                return err.into_response();
+            }
+        };
+        if let Some(provider) = provider {
+            params["provider"] = provider;
+        }
+        (bytes, params, Some(form), Some(permit))
+    } else {
+        let bytes = match read_json_body(&headers, body, Surface::Openai, &request_id).await {
+            Ok(bytes) => bytes,
+            Err(response) => return *response,
+        };
+        let parsed = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "invalid JSON request body",
+                )
+            }
+        };
+        (bytes, parsed, None, None)
+    };
+    let mut input = match completion_input(
+        &state,
+        &headers,
+        received_body,
+        parsed,
+        endpoint,
+        None,
+        request_id,
+    ) {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    input.form = form;
+    input.upload_permit = upload_permit;
+    if state.middleware.is_some() {
+        return dispatch_completion(state, input, true).await;
+    }
+    match crate::middleware::validate_buffered(endpoint, &input.params) {
+        Ok(Some(params)) => input.params = params,
+        Ok(None) => {}
+        Err(err) => return err.into_response(),
+    }
+    // Uploads and invalid requests do not reserve generation capacity.
+    // Middleware admission happens after its control-plane consult instead.
+    let permit = match crate::middleware::admission::try_acquire(endpoint) {
+        Ok(permit) => permit,
+        Err(_) => {
+            if endpoint == Endpoint::AudioTranscriptions {
+                state.service.record_audio_failure("admission_rejection");
+            }
+            return crate::middleware::admission::capacity_response();
+        }
+    };
+    let response = dispatch_completion(state, input, true).await;
+    crate::middleware::admission::hold_permit(response, permit)
+}
+
+// The carrier is consumed here. It is routing policy, never an upstream header.
+fn multipart_provider(headers: &HeaderMap) -> Result<Option<Value>, String> {
+    use crate::aci::types::{MAX_MULTIPART_PROVIDER_BYTES, MULTIPART_PROVIDER_HEADER};
+    let mut values = headers.get_all(MULTIPART_PROVIDER_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() || value.as_bytes().len() > MAX_MULTIPART_PROVIDER_BYTES {
+        return Err("duplicate or oversized X-ACI-Provider".into());
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| "X-ACI-Provider must contain only ASCII bytes")?;
+    let provider: Value = serde_json::from_str(value).map_err(|_| "invalid X-ACI-Provider JSON")?;
+    if !provider.is_object() {
+        return Err("X-ACI-Provider must be an object".into());
+    }
+    aci_constraint(&json!({"provider":provider}))?;
+    Ok(Some(provider))
 }
 
 #[derive(Debug, Default)]
@@ -628,6 +827,10 @@ fn body_too_large_response(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    headers.insert(
+        axum::http::header::CONNECTION,
+        HeaderValue::from_static("close"),
+    );
     (StatusCode::PAYLOAD_TOO_LARGE, headers, body).into_response()
 }
 
@@ -647,38 +850,12 @@ pub(super) async fn openai_completion_endpoint(
     } else {
         Surface::Openai
     };
-    // Reject on a declared length before reading anything; this is the common
-    // case (a client that sets content-length) and avoids buffering the body.
-    if let Some(declared) =
-        header_str(&headers, "content-length").and_then(|value| value.parse::<usize>().ok())
-    {
-        if declared > super::MAX_REQUEST_BODY_BYTES {
-            return body_too_large_response(surface, &request_id);
-        }
+    if headers.contains_key(crate::aci::types::MULTIPART_PROVIDER_HEADER) {
+        return reject_json_provider_header(&headers, body).await;
     }
-    let body = match axum::body::to_bytes(body, super::MAX_REQUEST_BODY_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            // `to_bytes` fails either because the body ran past the limit or
-            // because the transport broke mid-read. Only the former is a 413;
-            // the response is written without draining the rest of the upload,
-            // so a client still sending may still see a reset after the 413
-            // headers — the content-length check above catches the usual case.
-            // The limit error can sit at any depth of the wrapper chain, so
-            // walk the whole chain rather than trusting one `source()` level.
-            let mut source = std::error::Error::source(&err);
-            while let Some(current) = source {
-                if current.is::<http_body_util::LengthLimitError>() {
-                    return body_too_large_response(surface, &request_id);
-                }
-                source = current.source();
-            }
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                "could not read request body",
-            );
-        }
+    let body = match read_json_body(&headers, body, surface, &request_id).await {
+        Ok(body) => body,
+        Err(response) => return *response,
     };
     let has_e2ee = has_e2ee_headers(&headers);
     // `supported_e2ee_versions` advertises client-facing E2EE extensions (ACI
@@ -713,110 +890,197 @@ pub(super) async fn openai_completion_endpoint(
             body.as_ref(),
             endpoint_path,
         ) {
-            Ok(prepared) => (prepared.decrypted_body, Some(prepared.context)),
+            Ok(prepared) => (Bytes::from(prepared.decrypted_body), Some(prepared.context)),
             Err(err) => return e2ee_error_response(err),
         }
     } else {
-        (body.to_vec(), None)
+        (body, None)
     };
 
     // Surface obviously-broken bodies early; we still hash exactly
     // the bytes visible after TLS / E2EE termination.
     let parsed = match serde_json::from_slice::<Value>(&service_body) {
         Ok(value) => value,
-        Err(e) => {
+        Err(_) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
-                format!("invalid json: {e}"),
-            );
+                "invalid JSON request body",
+            )
         }
     };
     let (parsed, normalized) = strip_empty_tool_calls(parsed);
 
+    let endpoint = match endpoint_path {
+        COMPLETIONS_PATH => Endpoint::Complete,
+        EMBEDDINGS_PATH => Endpoint::Embed,
+        MESSAGES_PATH => Endpoint::Messages,
+        RESPONSES_PATH => Endpoint::CreateModelResponse,
+        SYSTEMONE_PATH => Endpoint::SystemOne,
+        CHAT_COMPLETIONS_PATH => Endpoint::ChatComplete,
+        _ => return error_response(StatusCode::NOT_FOUND, "not_found", "unknown endpoint"),
+    };
+    let mut input = match completion_input(
+        &state,
+        &headers,
+        service_body,
+        parsed,
+        endpoint,
+        e2ee,
+        request_id,
+    ) {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    input.stream = !force_buffered
+        && input
+            .params
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    dispatch_completion(state, input, normalized).await
+}
+
+async fn reject_json_provider_header(headers: &HeaderMap, body: Body) -> Response {
+    discard_before_reply(
+        headers,
+        body,
+        super::MAX_REQUEST_BODY_BYTES,
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "X-ACI-Provider is only supported on multipart media requests",
+        ),
+    )
+    .await
+}
+
+async fn read_json_body(
+    headers: &HeaderMap,
+    body: Body,
+    surface: Surface,
+    request_id: &str,
+) -> Result<Bytes, Box<Response>> {
+    // Reject on a declared length before reading anything; this is the common
+    // case (a client that sets content-length) and avoids buffering the body.
+    if let Some(declared) =
+        header_str(headers, "content-length").and_then(|value| value.parse::<usize>().ok())
+    {
+        if declared > super::MAX_REQUEST_BODY_BYTES {
+            return Err(Box::new(body_too_large_response(surface, request_id)));
+        }
+    }
+    let body = match axum::body::to_bytes(body, super::MAX_REQUEST_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            // `to_bytes` fails either because the body ran past the limit or
+            // because the transport broke mid-read. Only the former is a 413;
+            // the response is written without draining the rest of the upload,
+            // so a client still sending may still see a reset after the 413
+            // headers — the content-length check above catches the usual case.
+            // The limit error can sit at any depth of the wrapper chain, so
+            // walk the whole chain rather than trusting one `source()` level.
+            let mut source = std::error::Error::source(&err);
+            while let Some(current) = source {
+                if current.is::<http_body_util::LengthLimitError>() {
+                    return Err(Box::new(body_too_large_response(surface, request_id)));
+                }
+                source = current.source();
+            }
+            return Err(Box::new(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "could not read request body",
+            )));
+        }
+    };
+    Ok(body)
+}
+
+fn completion_input(
+    state: &AppState,
+    headers: &HeaderMap,
+    received_body: Bytes,
+    parsed: Value,
+    endpoint: Endpoint,
+    e2ee: Option<E2eeRequestContext>,
+    request_id: String,
+) -> Result<CompletionInput, Box<Response>> {
     if headers.contains_key("x-upstream-verification") {
-        return error_response(
+        return Err(Box::new(error_response(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "X-Upstream-Verification is no longer supported; use provider.aci_verified",
-        );
+        )));
     }
 
     let aci = match aci_constraint(&parsed) {
         Ok(constraint) => constraint,
         Err(message) => {
-            return error_response(StatusCode::BAD_REQUEST, "invalid_request_error", message)
+            return Err(Box::new(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                message,
+            )))
         }
     };
 
-    let requester = extract_bearer(&headers)
+    let requester = extract_bearer(headers)
         .as_deref()
         .map(ReceiptOwner::from_bearer);
-    let context = GatewayRequestContext {
-        request_id: request_id.clone(),
-        // The receipt `model` is the model the client requested: under E2EE
-        // the clear top-level `model` bound into E2EE v2 §6 AAD, otherwise the body's.
-        user_model: e2ee
-            .as_ref()
-            .map(|ctx| ctx.request_model().to_string())
-            .or_else(|| {
-                parsed
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            }),
-        target_route_id: None,
-        // Populated from the x-user-tier header on the internal-forward path.
-        user_tier: None,
-    };
-
-    let stream = !force_buffered
-        && parsed
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-    if let Some(middleware) = state.middleware.clone() {
-        let endpoint = match endpoint_path {
-            COMPLETIONS_PATH => Endpoint::Complete,
-            EMBEDDINGS_PATH => Endpoint::Embed,
-            MESSAGES_PATH => Endpoint::Messages,
-            RESPONSES_PATH => Endpoint::CreateModelResponse,
-            _ => Endpoint::ChatComplete,
-        };
-        let api_key_hash = extract_bearer(&headers).as_deref().map(hash_api_key);
-        // TEE-only host: force attested serving. The `tee_only` flag is carried
-        // to the control plane so a non-TEE model is a 404 before any forward,
-        // while `aci_required` makes verification fail closed at serve time.
-        // Client `provider.aci_verified:false` is ignored.
-        let tee_only = match request_host_domain(&headers).as_deref() {
+    let user_model = e2ee
+        .as_ref()
+        .map(|ctx| ctx.request_model().to_string())
+        .or_else(|| {
+            parsed
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    // A missing host fails closed when TEE-only domains are configured.
+    let tee_only = state.middleware.as_ref().is_some_and(|middleware| {
+        match request_host_domain(headers).as_deref() {
             Some(host) => middleware.is_tee_only_domain(host),
             // §1.2 fail closed: with TEE-only hosts configured, a request
             // whose host cannot be resolved is treated as TEE-only rather
             // than unrestricted. The component in front must forward the
             // original `Host` (see the deployment guide).
             None => middleware.has_tee_only_domains(),
-        };
-        let aci_required = aci.required || tee_only;
-        let input = CompletionInput {
-            endpoint,
-            endpoint_path,
-            surface,
-            params: parsed,
-            received_body: service_body,
-            api_key_hash,
-            requester,
-            e2ee,
-            aci_required,
-            aci_session_ids: aci.session_ids,
-            request_id: context.request_id,
-            user_model: context.user_model,
-            stream,
-            tee_only,
-        };
+        }
+    });
+    Ok(CompletionInput {
+        form: None,
+        upload_permit: None,
+        endpoint,
+        endpoint_path: endpoint.path(),
+        surface: if endpoint == Endpoint::Messages {
+            Surface::Anthropic
+        } else {
+            Surface::Openai
+        },
+        params: parsed,
+        received_body,
+        api_key_hash: extract_bearer(headers).as_deref().map(hash_api_key),
+        requester,
+        e2ee,
+        aci_required: aci.required || tee_only,
+        aci_session_ids: aci.session_ids,
+        request_id,
+        user_model,
+        stream: false,
+        tee_only,
+    })
+}
+
+async fn dispatch_completion(
+    state: AppState,
+    input: CompletionInput,
+    normalized: bool,
+) -> Response {
+    if let Some(middleware) = state.middleware {
         return middleware.handle_completion(&state.service, input).await;
     }
-
-    let (direct_params, aci_stripped) = strip_aci_constraint(parsed);
+    let (direct_params, aci_stripped) = strip_aci_constraint(input.params);
     let forwarded_body = if normalized || aci_stripped {
         match serde_json::to_vec(&direct_params) {
             Ok(bytes) => Some(bytes),
@@ -832,23 +1096,31 @@ pub(super) async fn openai_completion_endpoint(
     } else {
         None
     };
-
+    drop(input.upload_permit);
     forward_to_backend(
         state.service,
         BackendForwardInput {
-            context,
-            endpoint_path,
-            received_body: service_body,
+            form: input.form,
+            context: GatewayRequestContext {
+                request_id: input.request_id,
+                user_model: input.user_model,
+                target_route_id: None,
+                user_tier: None,
+                cache_salt: None,
+            },
+            endpoint_path: input.endpoint_path,
+            received_body: input.received_body,
             forwarded_body,
-            aci_required: aci.required,
-            aci_session_ids: aci.session_ids,
-            requester,
-            e2ee,
-            stream,
+            aci_required: input.aci_required,
+            aci_session_ids: input.aci_session_ids,
+            requester: input.requester,
+            e2ee: input.e2ee,
+            stream: input.stream,
         },
     )
     .await
 }
+
 pub(super) async fn completions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -907,29 +1179,27 @@ pub(super) async fn aci_list_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionListQuery>,
 ) -> Response {
-    let sessions = match q.model.as_deref() {
-        // Resolve the model to the upstream(s) serving it, then list each
-        // channel's sessions (honoring an upstream_name filter if both are given).
-        Some(model) => {
-            let names = state
-                .upstream_config
-                .as_ref()
-                .map(|c| c.upstream_names_for_model(model))
-                .unwrap_or_default();
-            let mut merged = names
-                .iter()
-                .filter(|n| q.upstream_name.as_deref().is_none_or(|p| p == n.as_str()))
-                .flat_map(|n| state.service.list_attested_sessions(Some(n)))
-                .collect::<Vec<_>>();
-            // Each per-upstream list is already sorted, but the fan-out just
-            // concatenates them — re-sort the merge so it matches the ordering of
-            // the single-channel path.
-            sort_sessions_newest_first(&mut merged);
-            merged
+    let requests = state
+        .upstream_config
+        .as_ref()
+        .map(|config| {
+            config.current_verification_requests(
+                q.model.as_deref(),
+                q.upstream_name.as_deref(),
+                state.middleware.is_some(),
+            )
+        })
+        .unwrap_or_default();
+    let sessions = match state.service.list_current_sessions(&requests) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::error!(error = %err, "failed to list attested sessions");
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "failed to list attested sessions",
+            );
         }
-        None => state
-            .service
-            .list_attested_sessions(q.upstream_name.as_deref()),
     };
     // List entries add a `session_id` member for lookup and keep the digest as
     // the integrity anchor while dropping the raw evidence `data` (§8.1). Only
@@ -993,7 +1263,6 @@ pub(super) async fn receipt_by_chat_id(
             "receipt": receipt.document_json().unwrap_or(serde_json::Value::Null),
         }))
         .into_response(),
-        Err(ServiceError::Key(KeyError::UnsupportedAlgo(_))) => invalid_signing_algo_response(),
         Err(other) => internal_error_response(other),
     }
 }

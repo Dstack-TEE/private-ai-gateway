@@ -4,10 +4,11 @@ import { SwitchControl } from "./controls";
 import type { AppState } from "../../shared/contracts";
 import { cn } from "../lib/utils";
 
-/** The protection title with the session's elapsed time: large in the overview card, small in the page header. */
+/** The protection title with the session's elapsed time, or a retry under way: large in the overview card, small in the page header. */
 export function ProtectionStatus({ state, variant }: { state: AppState; variant: "card" | "header" }): React.JSX.Element {
   const { phase, title } = state.protection;
   const active = phase === "protected";
+  const retrying = phase === "verificationFailed" && state.reconnecting;
   const since = active ? state.protectedSince : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -36,12 +37,13 @@ export function ProtectionStatus({ state, variant }: { state: AppState; variant:
       : "grid-cols-[14px_auto] justify-center justify-items-end gap-x-1.25")}>
       {active ? <ShieldCheck size={iconSize} aria-hidden="true" /> : phase === "reconnecting" ? <RefreshCw size={iconSize} aria-hidden="true" /> : <ShieldX size={iconSize} aria-hidden="true" />}
       <span aria-live="polite">{title}</span>
+      {retrying && card && <span className="col-start-2 text-xs leading-4.5 font-normal text-muted-foreground">Retrying…</span>}
       {elapsed !== undefined && <time className={cn("w-[8ch] font-mono text-xs leading-4.5 whitespace-nowrap text-muted-foreground tabular-nums", card ? "col-start-2 font-normal" : "col-span-full font-medium")} dateTime={`PT${seconds}S`} aria-label={`Session elapsed ${elapsed}`}>{elapsed}</time>}
     </span>
   );
 }
 
-/** The protection switch; its action is the tray's protection item. The overview card also labels development mode. */
+/** The protection switch; its action is the tray's protection item. */
 export function ProtectedControl({
   state,
   pending,
@@ -57,11 +59,9 @@ export function ProtectedControl({
   onToggle(): void;
 }): React.JSX.Element {
   const { action } = state.protection;
-  const developmentMode = !state.config.requireProductionOs;
   const card = variant === "card";
   return (
     <div className={cn("flex items-center gap-2.5 text-xs font-semibold", !card && "max-[440px]:gap-1.5 max-[440px]:pl-1.75", className)}>
-      {developmentMode && card && <span className="text-xs font-semibold text-warning">Dev mode</span>}
       <SwitchControl
         size="default"
         className={card ? "transition-colors duration-200 ease-out" : undefined}
@@ -69,7 +69,6 @@ export function ProtectedControl({
         label={action.label}
         disabled={!action.enabled || pending}
         aria-busy={pending}
-        developmentMode={developmentMode}
         onToggle={onToggle}
       />
     </div>

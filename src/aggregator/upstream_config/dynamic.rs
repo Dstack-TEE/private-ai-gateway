@@ -7,17 +7,26 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::ConfiguredUpstreams;
-use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationResult};
+use crate::aci::receipt::{UpstreamVerifiedEvent, VerificationFailure, VerificationResult};
 use crate::aci::upstream::{
-    PreparedUpstreamRequest, UpstreamBackend, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStreamResponse,
+    PreparedUpstreamRequest, SseProtocol, UpstreamBackend, UpstreamError, UpstreamRequest,
+    UpstreamResponse, UpstreamStreamResponse,
 };
 use crate::aggregator::service::{UpstreamVerificationRequest, UpstreamVerifier};
+use crate::endpoint::Endpoint;
 
 pub(super) struct EmptyUpstreamBackend;
 
 #[async_trait]
 impl UpstreamBackend for EmptyUpstreamBackend {
+    fn response_protocol(
+        &self,
+        _req: &PreparedUpstreamRequest,
+        _operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        None
+    }
+
     fn name(&self) -> &str {
         "unconfigured"
     }
@@ -75,6 +84,14 @@ impl DynamicUpstreamBackend {
 
 #[async_trait]
 impl UpstreamBackend for DynamicUpstreamBackend {
+    fn response_protocol(
+        &self,
+        req: &PreparedUpstreamRequest,
+        operation: Endpoint,
+    ) -> Option<SseProtocol> {
+        self.backend().response_protocol(req, operation)
+    }
+
     fn name(&self) -> &str {
         "dynamic-upstream-config"
     }
@@ -85,6 +102,10 @@ impl UpstreamBackend for DynamicUpstreamBackend {
 
     fn prepare(&self, req: UpstreamRequest) -> Result<PreparedUpstreamRequest, UpstreamError> {
         self.backend().prepare(req)
+    }
+
+    fn requires_verified_binding(&self, req: &PreparedUpstreamRequest) -> bool {
+        self.backend().requires_verified_binding(req)
     }
 
     async fn forward(&self, req: UpstreamRequest) -> Result<UpstreamResponse, UpstreamError> {
@@ -164,10 +185,31 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }
+    }
+
+    fn cached(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
+        self.state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .as_ref()?
+            .cached(request)
+    }
+
+    fn cache_remaining(
+        &self,
+        request: &UpstreamVerificationRequest,
+    ) -> Option<std::time::Duration> {
+        self.state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .as_ref()?
+            .cache_remaining(request)
     }
 
     async fn refresh(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
@@ -186,10 +228,27 @@ impl UpstreamVerifier for DynamicUpstreamVerifier {
                 verifier_id: "none".to_string(),
                 result: VerificationResult::Failed,
                 required: request.required,
-                reason: Some("no upstream verifier configured".to_string()),
+                failure: VerificationFailure::NoVerifier,
                 ..Default::default()
             },
         }
+    }
+
+    async fn reverify_instance(
+        &self,
+        request: UpstreamVerificationRequest,
+        previous: &UpstreamVerifiedEvent,
+        instance_id: &str,
+    ) -> Option<UpstreamVerifiedEvent> {
+        let verifier = self
+            .state
+            .read()
+            .expect("upstream config manager state poisoned")
+            .verifier
+            .clone()?;
+        verifier
+            .reverify_instance(request, previous, instance_id)
+            .await
     }
 
     fn invalidate(&self, request: &UpstreamVerificationRequest) {

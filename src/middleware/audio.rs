@@ -1,0 +1,600 @@
+//! Bounded OpenAI multipart transcription input and sanitized JSON output.
+
+use super::media::{self, MediaError, MediaForm, TRANSCRIPTION};
+
+use axum::body::Bytes;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
+use std::{collections::HashSet, sync::Arc};
+
+pub const MAX_FILE_BYTES: usize = 25 * 1024 * 1024;
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+pub const MAX_BODY_BYTES: usize = MAX_FILE_BYTES + MAX_TEXT_BYTES + 64 * 1024;
+const UPSTREAM_FIELDS: &[&str] = &[
+    "model",
+    "language",
+    "prompt",
+    "temperature",
+    "response_format",
+    "timestamp_granularities[]",
+];
+
+pub async fn parse(body: Bytes, content_type: &str) -> Result<(Value, Arc<MediaForm>), MediaError> {
+    let mut multipart = media::multipart(body, content_type, &TRANSCRIPTION)?;
+    let mut params = Map::new();
+    let mut seen = HashSet::new();
+    let mut timestamps = Vec::new();
+    let mut timestamp_name = None;
+    let mut file = None;
+    let mut text_bytes = 0;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| TRANSCRIPTION.invalid("multipart"))?
+    {
+        // Only parsed values are used; reqwest re-encodes caller part headers.
+        let name = media::field_name(&field, &TRANSCRIPTION)?;
+        let timestamp = matches!(
+            name.as_str(),
+            "timestamp_granularities" | "timestamp_granularities[]"
+        );
+        if !timestamp && !seen.insert(name.clone()) {
+            return Err(TRANSCRIPTION.invalid(&name));
+        }
+        if name == "file" {
+            let filename = field
+                .file_name()
+                .filter(|v| v.len() <= 255)
+                .ok_or_else(|| TRANSCRIPTION.invalid("file"))?;
+            let ext = filename
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_ascii_lowercase())
+                .filter(|e| {
+                    [
+                        "flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm",
+                    ]
+                    .contains(&e.as_str())
+                })
+                .ok_or_else(|| TRANSCRIPTION.invalid("file"))?;
+            let data = field.bytes().await.map_err(|_| TRANSCRIPTION.large())?;
+            if data.is_empty() {
+                return Err(TRANSCRIPTION.invalid("file"));
+            }
+            file = Some(Arc::new(MediaForm::Transcription {
+                file: data,
+                extension: ext,
+            }));
+            continue;
+        }
+        if !UPSTREAM_FIELDS.contains(&name.as_str())
+            && !matches!(name.as_str(), "user" | "stream")
+            && !timestamp
+        {
+            return Err(MediaError {
+                code: "unknown_parameter",
+                ..TRANSCRIPTION.invalid(&name)
+            });
+        }
+        if field.file_name().is_some() {
+            return Err(TRANSCRIPTION.invalid(&name));
+        }
+        let data = field
+            .bytes()
+            .await
+            .map_err(|_| TRANSCRIPTION.invalid(&name))?;
+        text_bytes += data.len();
+        if text_bytes > MAX_TEXT_BYTES {
+            return Err(TRANSCRIPTION.invalid("fields"));
+        }
+        let value = std::str::from_utf8(&data).map_err(|_| TRANSCRIPTION.invalid(&name))?;
+        if name == "stream" {
+            if value != "false" {
+                return Err(TRANSCRIPTION.invalid(&name));
+            }
+        } else if timestamp {
+            if timestamp_name.as_ref().is_some_and(|n| n != &name)
+                || timestamps.iter().any(|v| v == value)
+                || !["word", "segment"].contains(&value)
+                || timestamps.len() >= 2
+            {
+                return Err(TRANSCRIPTION.invalid(&name));
+            }
+            timestamp_name = Some(name);
+            timestamps.push(value.to_string());
+        } else if name == "temperature" {
+            let temperature = value
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .ok_or_else(|| TRANSCRIPTION.invalid(&name))?;
+            params.insert(name, json!(temperature));
+        } else {
+            params.insert(name, Value::String(value.into()));
+        }
+    }
+    if !params
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return Err(TRANSCRIPTION.invalid("model"));
+    }
+    if params.get("language").is_some_and(|v| {
+        !v.as_str().is_some_and(|s| {
+            (2..=3).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_lowercase())
+        })
+    }) {
+        return Err(TRANSCRIPTION.invalid("language"));
+    }
+    if params
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_some_and(|s| s.chars().count() > 4096)
+    {
+        return Err(TRANSCRIPTION.invalid("prompt"));
+    }
+    let format = params.entry("response_format").or_insert(json!("json"));
+    if !matches!(format.as_str(), Some("json" | "verbose_json")) {
+        return Err(TRANSCRIPTION.invalid("response_format"));
+    }
+    if !timestamps.is_empty() {
+        if format != "verbose_json" {
+            return Err(TRANSCRIPTION.invalid("timestamp_granularities"));
+        }
+        params.insert("timestamp_granularities[]".into(), json!(timestamps));
+    }
+    Ok((
+        Value::Object(params),
+        file.ok_or_else(|| TRANSCRIPTION.invalid("file"))?,
+    ))
+}
+
+pub fn upstream_fields(params: &Value) -> Value {
+    let mut fields = params.as_object().cloned().unwrap_or_default();
+    fields.retain(|k, _| UPSTREAM_FIELDS.contains(&k.as_str()));
+    Value::Object(fields)
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AudioUsage {
+    pub seconds: u64,
+    pub raw_duration: f64,
+}
+
+pub fn sanitize_response(
+    mut body: Value,
+    params: &Value,
+) -> Result<(Value, AudioUsage), &'static str> {
+    let audio = usage(&body)?;
+    canonicalize(&mut body);
+    // Expose the validated integer duration used for billing.
+    body["usage"] = json!({"type":"duration","seconds":audio.seconds});
+    if params.get("response_format").and_then(Value::as_str) == Some("verbose_json") {
+        body["duration"] = json!(audio.raw_duration);
+        if !body.get("language").is_some_and(Value::is_string) {
+            body["language"] = params
+                .get("language")
+                .filter(|v| v.is_string())
+                .cloned()
+                .unwrap_or(json!(""));
+        }
+    }
+    reduce_format(&mut body, params);
+    Ok((body, audio))
+}
+
+/// Preferred duration is authoritative, even when invalid. Never estimate from
+/// segments, file size, or latency, and never fall back from an invalid value.
+fn usage(body: &Value) -> Result<AudioUsage, &'static str> {
+    if !body.get("text").is_some_and(Value::is_string) {
+        return Err("missing transcription text");
+    }
+    let duration = if let Some(usage) = body.get("usage").filter(|v| {
+        v.get("seconds").is_some() || v.get("type").and_then(Value::as_str) == Some("duration")
+    }) {
+        if usage.get("type").and_then(Value::as_str) != Some("duration") {
+            return Err("invalid duration usage type");
+        }
+        usage.get("seconds").and_then(Value::as_f64)
+    } else {
+        // vLLM returns verbose_json duration as a numeric string.
+        body.get("duration").and_then(|duration| {
+            duration
+                .as_f64()
+                .or_else(|| duration.as_str()?.parse::<f64>().ok())
+        })
+    };
+    let raw = duration
+        .filter(|v| v.is_finite() && *v > 0.0 && *v <= u32::MAX as f64)
+        .ok_or("missing or invalid transcription duration")?;
+    Ok(AudioUsage {
+        seconds: raw.ceil() as u64,
+        raw_duration: raw,
+    })
+}
+
+fn reduce_format(body: &mut Value, params: &Value) {
+    if params.get("response_format").and_then(Value::as_str) != Some("verbose_json") {
+        if let Some(object) = body.as_object_mut() {
+            object.retain(|k, _| matches!(k.as_str(), "text" | "usage" | "languages"));
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct Segment {
+    id: u64,
+    seek: u64,
+    start: f64,
+    end: f64,
+    text: String,
+    tokens: Vec<u64>,
+    temperature: f64,
+    avg_logprob: f64,
+    compression_ratio: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_speech_prob: Option<f64>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Word {
+    word: String,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct Language {
+    code: String,
+}
+
+fn canonicalize(body: &mut Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.retain(|k, v| match k.as_str() {
+        "text" | "language" | "task" => v.is_string(),
+        "segments" | "words" | "languages" => v.is_array(),
+        _ => false,
+    });
+    for array in ["segments", "words", "languages"] {
+        if let Some(items) = object.get_mut(array).and_then(Value::as_array_mut) {
+            *items = std::mem::take(items)
+                .into_iter()
+                .filter_map(|item| match array {
+                    "segments" => serde_json::from_value::<Segment>(item)
+                        .ok()
+                        .filter(|s| s.start >= 0.0 && s.end >= 0.0)
+                        .map(|s| json!(s)),
+                    "words" => serde_json::from_value::<Word>(item)
+                        .ok()
+                        .filter(|w| w.start >= 0.0 && w.end >= 0.0)
+                        .map(|w| json!(w)),
+                    _ => serde_json::from_value::<Language>(item)
+                        .ok()
+                        .map(|l| json!(l)),
+                })
+                .collect();
+            if array != "languages" && items.is_empty() {
+                object.remove(array);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    async fn request(fields: &[(&str, &str)], data: Bytes, filename: &str) -> (Bytes, String) {
+        media::test_multipart(fields, &[("file", data, filename)]).await
+    }
+
+    #[tokio::test]
+    async fn multipart_roundtrip_validates_fields_and_generates_safe_upstream_filename() {
+        let (raw, ct) = request(
+            &[
+                ("model", "alias"),
+                ("user", "alice"),
+                ("stream", "false"),
+                ("prompt", "hello"),
+                ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "word"),
+                ("timestamp_granularities[]", "segment"),
+            ],
+            Bytes::from_static(b"audio"),
+            "private.wav",
+        )
+        .await;
+        let (params, form) = parse(raw, &ct).await.unwrap();
+        assert!(params.get("stream").is_none());
+        assert_eq!(
+            params["timestamp_granularities[]"],
+            json!(["word", "segment"])
+        );
+        let mut rewritten = params.clone();
+        rewritten["model"] = json!("upstream-model");
+        let (encoded, ct) = form.encode(&rewritten).await.unwrap();
+        let text = std::str::from_utf8(&encoded).unwrap();
+        assert!(text.contains("audio.wav"));
+        assert!(!text.contains("private.wav"));
+        assert!(!text.contains("alice"));
+        let (forwarded, _) = parse(encoded, &ct).await.unwrap();
+        assert_eq!(forwarded["model"], "upstream-model");
+        assert_eq!(forwarded["response_format"], "verbose_json");
+        assert_eq!(
+            forwarded["timestamp_granularities[]"],
+            json!(["word", "segment"])
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_ambiguous_unsupported_and_invalid_fields() {
+        for fields in [
+            vec![("model", "a"), ("model", "b")],
+            vec![("model", "a"), ("provider", "{}")],
+            vec![("model", "a"), ("include[]", "true")],
+            vec![("model", "a"), ("stream", "true")],
+            vec![("model", "a"), ("stream", "0")],
+            vec![("model", "a"), ("temperature", "NaN")],
+            vec![("model", "a"), ("temperature", "1.1")],
+            vec![("model", "a"), ("language", "EN")],
+            vec![("model", "a"), ("response_format", "srt")],
+            vec![("model", "a"), ("timestamp_granularities[]", "word")],
+            vec![
+                ("model", "a"),
+                ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "word"),
+                ("timestamp_granularities", "segment"),
+            ],
+            vec![
+                ("model", "a"),
+                ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "word"),
+                ("timestamp_granularities[]", "word"),
+            ],
+        ] {
+            let (raw, ct) = request(&fields, Bytes::from_static(b"audio"), "audio.wav").await;
+            assert!(parse(raw, &ct).await.is_err(), "{fields:?}");
+        }
+        for filename in ["audio.exe", "audio", "audio."] {
+            let (raw, ct) = request(&[("model", "a")], Bytes::from_static(b"a"), filename).await;
+            assert!(parse(raw, &ct).await.is_err());
+        }
+        let (raw, ct) = request(&[("model", "a")], Bytes::new(), "audio.wav").await;
+        assert!(parse(raw, &ct).await.is_err());
+        let (raw, ct) = request(
+            &[("model", "a"), ("prompt", &"a".repeat(4097))],
+            Bytes::from_static(b"a"),
+            "audio.wav",
+        )
+        .await;
+        assert!(parse(raw, &ct).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_limit_and_utf8_and_text_aggregate_are_enforced() {
+        let (raw, ct) = request(
+            &[("model", "a")],
+            Bytes::from(vec![0; MAX_FILE_BYTES]),
+            "a.wav",
+        )
+        .await;
+        assert!(parse(raw, &ct).await.is_ok());
+        let (raw, ct) = request(
+            &[("model", "a")],
+            Bytes::from(vec![0; MAX_FILE_BYTES + 1]),
+            "a.wav",
+        )
+        .await;
+        assert_eq!(
+            parse(raw, &ct).await.unwrap_err().status,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let (raw, ct) = request(
+            &[("model", "a"), ("user", &"a".repeat(MAX_TEXT_BYTES))],
+            Bytes::from_static(b"a"),
+            "a.wav",
+        )
+        .await;
+        assert!(parse(raw, &ct).await.is_err());
+        let raw = Bytes::from_static(
+            b"--x\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n\xff\r\n--x--\r\n",
+        );
+        assert!(parse(raw, "multipart/form-data; boundary=x").await.is_err());
+    }
+
+    #[test]
+    fn duration_is_authoritative_positive_bounded_and_rounded_up() {
+        let body =
+            json!({"text":"hello","duration":10.1,"usage":{"type":"duration","seconds":1.01}});
+        assert_eq!(
+            usage(&body).unwrap(),
+            AudioUsage {
+                seconds: 2,
+                raw_duration: 1.01
+            }
+        );
+        for seconds in [
+            Value::Null,
+            json!("1"),
+            json!(-1),
+            json!(0),
+            json!(4294967296u64),
+        ] {
+            assert!(usage(
+                &json!({"text":"secret","duration":1,"usage":{"type":"duration","seconds":seconds}})
+            )
+            .is_err());
+        }
+        assert!(usage(&json!({"text":"hello","usage":{"type":"duration"},"duration":1})).is_err());
+        assert!(
+            usage(&json!({"text":"hello","usage":{"type":"tokens","seconds":1},"duration":1}))
+                .is_err()
+        );
+        assert!(usage(&json!({"text":"hello"})).is_err());
+        assert!(usage(&json!({"duration":1})).is_err());
+        assert_eq!(
+            usage(&json!({"text":"hello","duration":1.2}))
+                .unwrap()
+                .seconds,
+            2
+        );
+    }
+
+    #[test]
+    fn sanitizer_normalizes_usage_metadata_and_requested_format() {
+        for (provider_usage, language, requested, expected_language) in [
+            (Value::Null, Value::Null, Value::Null, ""),
+            (json!({}), json!("English"), json!("en"), "English"),
+            (
+                json!({"type":"tokens","input_tokens":2}),
+                Value::Null,
+                json!("en"),
+                "en",
+            ),
+            (
+                json!({"type":"duration","seconds":2.965,"cost":99}),
+                json!({"private":1}),
+                Value::Null,
+                "",
+            ),
+        ] {
+            let upstream =
+                json!({"text":"hello","duration":2.965,"language":language,"usage":provider_usage});
+            let params = json!({"response_format":"verbose_json","language":requested});
+            let (verbose, audio) = sanitize_response(upstream.clone(), &params).unwrap();
+            assert_eq!(
+                audio,
+                AudioUsage {
+                    seconds: 3,
+                    raw_duration: 2.965
+                }
+            );
+            assert_eq!(verbose["duration"], 2.965);
+            assert_eq!(verbose["language"], expected_language);
+            assert_eq!(verbose["usage"], json!({"type":"duration","seconds":3}));
+            let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
+            assert_eq!(reduced, json!({"text":"hello","usage":verbose["usage"]}));
+        }
+    }
+
+    #[test]
+    fn numeric_string_duration_is_normalized_and_rounded_up() {
+        for (duration, raw_duration, seconds) in [
+            ("2.965", 2.965, 3),
+            ("2", 2.0, 2),
+            ("4294967295", u32::MAX as f64, u32::MAX as u64),
+        ] {
+            let (body, audio) = sanitize_response(
+                json!({"text":"hello","duration":duration,"language":"en"}),
+                &json!({"response_format":"verbose_json"}),
+            )
+            .unwrap();
+            assert_eq!(
+                audio,
+                AudioUsage {
+                    seconds,
+                    raw_duration
+                }
+            );
+            assert_eq!(
+                body,
+                json!({"text":"hello","duration":raw_duration,"language":"en","usage":{"type":"duration","seconds":seconds}})
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_string_durations_are_rejected() {
+        for duration in [
+            "",
+            "garbage",
+            "-1",
+            "0",
+            "NaN",
+            "inf",
+            "-inf",
+            "1e999",
+            "4294967296",
+        ] {
+            assert_eq!(
+                sanitize_response(
+                    json!({"text":"hello","duration":duration}),
+                    &json!({"response_format":"verbose_json"})
+                ),
+                Err("missing or invalid transcription duration"),
+                "duration: {duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn near_segments_without_no_speech_probability_are_preserved() {
+        let upstream = json!({
+            "text": " The quick brown fox jumps over the lazy dog.",
+            "duration": 2.965,
+            "language": "en",
+            "segments": [{
+                "id": 0,
+                "seek": 0,
+                "start": 0.0,
+                "end": 2.96,
+                "text": " The quick brown fox jumps over the lazy dog.",
+                "tokens": [440, 1702, 6292, 21026, 16704, 670, 264, 14847, 3000, 13],
+                "temperature": 0.0,
+                "avg_logprob": -0.11467078472681654,
+                "compression_ratio": 0.8653846153846154
+            }]
+        });
+        let mut expected = upstream.clone();
+        expected["usage"] = json!({"type":"duration","seconds":3});
+        let (body, _) =
+            sanitize_response(upstream, &json!({"response_format":"verbose_json"})).unwrap();
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn timestamp_items_require_schema_fields_and_keep_no_private_fields() {
+        let segment = json!({"id":0,"seek":0,"start":0.0,"end":1.0,"text":"hello","tokens":[1],"temperature":0.0,"avg_logprob":-0.1,"compression_ratio":1.0,"no_speech_prob":0.0});
+        let mut invalid = segment.clone();
+        invalid["tokens"] = json!([1, "private"]);
+        let mut private = segment.clone();
+        private["url"] = json!("private");
+        let mut negative = segment.clone();
+        negative["start"] = json!(-1);
+        let mut segments = vec![private, invalid, negative, json!({"text":"hello"})];
+        for field in [
+            "id",
+            "seek",
+            "start",
+            "end",
+            "text",
+            "tokens",
+            "temperature",
+            "avg_logprob",
+            "compression_ratio",
+        ] {
+            let mut incomplete = segment.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            segments.push(incomplete);
+        }
+        let upstream = json!({"text":"hello","duration":1,"private":{},"segments":segments,"words":[{"word":"hello","start":0,"end":1,"url":"private"},{"word":"incomplete"},{"word":"negative","start":0,"end":-1}],"languages":[{"code":"en","private":1},{"code":7},"private"]});
+        let (body, _) =
+            sanitize_response(upstream.clone(), &json!({"response_format":"verbose_json"}))
+                .unwrap();
+        assert_eq!(body["segments"], json!([segment]));
+        assert_eq!(
+            body["words"],
+            json!([{"word":"hello","start":0.0,"end":1.0}])
+        );
+        assert_eq!(body["languages"], json!([{"code":"en"}]));
+        assert!(!body.to_string().contains("private"));
+        let (reduced, _) = sanitize_response(upstream, &Value::Null).unwrap();
+        assert_eq!(
+            reduced,
+            json!({"text":"hello","usage":{"type":"duration","seconds":1},"languages":[{"code":"en"}]})
+        );
+    }
+}

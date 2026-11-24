@@ -94,6 +94,10 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
         item(&files.patch, "web-search-deepseek").get_value(&["disabled"]),
         Some(ConfigValue::Bool(true))
     );
+    assert_eq!(
+        item(&files.patch, "credentials").get_value(&["disabled"]),
+        Some(ConfigValue::Bool(false))
+    );
     let acp = item(&files.patch, "acp");
     assert_eq!(
         acp.get_value(&["config"]),

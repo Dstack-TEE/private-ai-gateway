@@ -31,14 +31,18 @@ pub(super) async fn is_running() -> bool {
     hello().await.is_ok()
 }
 
-/// Asks the legacy backend to shut down and returns its process ID to wait for.
-pub(super) async fn shutdown(expected: Option<&Path>, mode: ShutdownMode) -> Result<u32, String> {
+/// Observes the legacy process before asking it to shut down.
+pub(super) async fn shutdown(
+    expected: Option<&Path>,
+    mode: ShutdownMode,
+) -> Result<crate::launch::ProcessExit, String> {
     let (mut reader, hello) = hello().await.map_err(connection_error)?;
     if let Some(expected) = expected {
         if !executable_matches(&hello.executable, expected)? {
             return Err(OTHER_INSTALLATION.into());
         }
     }
+    let process = crate::launch::observe_exit(hello.process_id)?;
     let request = json!({
         "version": PROTOCOL_VERSION,
         "id": 1,
@@ -66,7 +70,7 @@ pub(super) async fn shutdown(expected: Option<&Path>, mode: ShutdownMode) -> Res
             if outcome.get("result").is_some()
                 || outcome.pointer("/error/code").and_then(Value::as_str) == Some("busy") =>
         {
-            Ok(hello.process_id)
+            Ok(process)
         }
         Some(outcome) => Err(
             match outcome.pointer("/error/message").and_then(Value::as_str) {

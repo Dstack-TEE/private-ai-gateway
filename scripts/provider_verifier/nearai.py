@@ -1,171 +1,212 @@
-"""NEAR AI provider verification.
-
-Two layers, both from one nonce-bound report
-(`/v1/attestation/report?model=…&provider=near&include_tls_fingerprint=true`):
-
-1. The NEAR gateway (router) TEE and its TLS key. This is the channel binding,
-   verified exactly as before; if it fails, the upstream fails closed.
-2. Every model enclave NEAR reports for the requested model: TDX quote and event
-   log (dstack verifier), compose hash, `report_data` binding of the enclave's
-   signing key and TLS fingerprint to the nonce, and NVIDIA GPU evidence (NRAS,
-   nonce-matched).
-
-When at least one model enclave verifies, the result is model-scoped and lists
-the verified enclave signers (`near_session`). NEAR signs non-streaming
-responses from the serving enclave (`provider_tee` signatures over
-`<model>:<sha256(request)>:<sha256(response)>`), so the backend can bind each
-response to one verified enclave and cite that enclave's own session. With no
-verified model enclave, the result falls back to the router scope.
-"""
+"""NEAR AI provider verification."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
-import secrets
+import re
 import sys
 import time
+from collections import Counter
+from concurrent.futures import Future
+from threading import Thread
 from typing import Any
+
+from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 from .common import (
     emit,
+    evidence_bundle,
     failed,
+    json_bytes,
     json_evidence_bundle,
     verifier_id_for,
+    tdx_session_material,
 )
 
+
 ATTESTATION_URL = "https://cloud-api.near.ai/v1/attestation/report"
-SIGNATURE_PATH = "/v1/signature/{chat_id}"
-FETCH_ATTEMPTS = 5
-# (connect, read) seconds. NEAR's report endpoint intermittently stalls on connect
-# or mid-body; without timeouts the verifier would hang until the backend's outer
-# deadline. Retries back off 2, 4, 6, 8 seconds.
-FETCH_TIMEOUT = (15, 60)
+MODEL_VERIFICATION_BUDGET = 8.0
+MAX_MODEL_CANDIDATES = 8
+MAX_MODEL_EVIDENCE_BYTES = 2 * 1024 * 1024
 
 
-def fetch_report(model_id: str, api_key: str | None, nonce: str) -> dict[str, Any]:
-    import requests
-
-    params = {
-        "model": model_id,
-        "signing_algo": "ecdsa",
-        "nonce": nonce,
-        "include_tls_fingerprint": "true",
-        "provider": "near",
-    }
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    last_error: Exception | None = None
-    for attempt in range(FETCH_ATTEMPTS):
-        try:
-            response = requests.get(ATTESTATION_URL, params=params, headers=headers, timeout=FETCH_TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except Exception as exc:  # noqa: BLE001 - every failure is retried, then reported
-            last_error = exc
-            time.sleep(2 * (attempt + 1))
-    raise RuntimeError(f"NEAR attestation report fetch failed after {FETCH_ATTEMPTS} attempts: {last_error}")
+def reported_model_name(entry: dict[str, Any]) -> str | None:
+    if (
+        "model_name" not in entry
+        and not entry.get("intel_quote")
+        and entry.get("provider") == "chutes"
+    ):
+        # The public Chutes report uses the canonical ID in "model".
+        # This permits only gateway evidence, never a model TDX candidate.
+        return entry.get("model")
+    return entry.get("model_name")
 
 
-def dstack_details(component: dict[str, Any]) -> dict[str, Any]:
-    dstack = (component.get("details") or {}).get("dstack") or {}
-    return dstack.get("details") or {}
-
-
-def tcb_status_of(component: dict[str, Any]) -> str | None:
-    return dstack_details(component).get("tcb_status")
-
-
-def production_os_image(component: dict[str, Any]) -> bool | None:
-    """True when the dstack verifier reproduced the OS image hash and the image
-    is a production build; False for a dev image; None when unresolved."""
-    details = dstack_details(component)
-    if not details.get("os_image_hash_verified"):
-        return None
+def production_os_image(details: dict[str, Any]) -> bool | None:
     is_dev = details.get("os_image_is_dev")
-    return None if is_dev is None else not is_dev
+    return not is_dev if details.get("os_image_hash_verified") and isinstance(is_dev, bool) else None
 
 
-def worst_tcb_status(statuses: list[str | None]) -> str | None:
-    """UpToDate only when every present status is UpToDate; otherwise the first
-    stale status, so the tri-state tcb_up_to_date claim refutes."""
-    present = [s for s in statuses if s]
-    if not present:
-        return None
-    return next((s for s in present if s != "UpToDate"), "UpToDate")
+async def verify_model_candidates(
+    verifier: Any,
+    entries: list[dict[str, Any]],
+    nonce: str,
+) -> dict[str, Any]:
+    # A shared key is ambiguous even if one quote fails. If no unique key
+    # exists, checking the quotes cannot enable response attribution.
+    addresses = []
+    for entry in entries:
+        address = entry.get("signing_address")
+        quote = entry.get("intel_quote")
+        fingerprint = entry.get("tls_cert_fingerprint")
+        if (
+            not isinstance(address, str)
+            or not re.fullmatch(r"0x[0-9a-fA-F]{40}", address)
+            or entry.get("signing_algo") != "ecdsa"
+            or not isinstance(quote, str)
+            or not quote
+            or not isinstance(fingerprint, str)
+            or not re.fullmatch(r"(?:0x)?[0-9a-fA-F]{64}", fingerprint)
+        ):
+            return {}
+        addresses.append(address.lower())
+
+    counts = Counter(addresses)
+    if 1 not in counts.values():
+        return {}
+
+    verified = {}
+    for address, entry in zip(addresses, entries):
+        payload = entry.get("nvidia_payload")
+        if payload:
+            try:
+                payload = json.loads(payload) if isinstance(payload, str) else payload
+            except ValueError:
+                return {}
+            if not isinstance(payload, dict) or payload.get("nonce") != nonce:
+                return {}
+        result = await verifier._verify_component("model", entry, nonce)
+        details = result.get("details") or {}
+        dstack = (details.get("dstack") or {}).get("details") or {}
+        # Use the compose identity authenticated by event-log replay, and
+        # require that it is also the hash of the supplied compose.
+        compose_hash = (dstack.get("app_info") or {}).get("compose_hash")
+        if (
+            not result.get("is_valid")
+            or not details.get("compose_verified")
+            or not compose_hash
+            or compose_hash != (entry.get("info") or {}).get("compose_hash")
+        ):
+            return {}
+        if counts[address] != 1:
+            continue
+        verified[address] = {
+            "compose_hash": compose_hash,
+            "compose_hash_verified": True,
+            "tcb_status": dstack.get("tcb_status"),
+            "production_os_image": production_os_image(dstack),
+            "gpu_evidence_present": bool(payload),
+            "gpu_verified": (details.get("gpu") or {}).get("model_verified") is True,
+        }
+    return verified
 
 
-def enclave_facts(entry: dict[str, Any], component: dict[str, Any]) -> dict[str, Any]:
-    info = entry.get("info") or {}
-    gpu = (component.get("details") or {}).get("gpu") or {}
-    errors = component.get("errors") or []
-    return {
-        "signing_address": str(entry.get("signing_address", "")).lower(),
-        "signing_algo": entry.get("signing_algo"),
-        "tcb_status": tcb_status_of(component),
-        "gpu_verified": bool(gpu.get("model_verified")),
-        "gpu_evidence_present": bool(entry.get("nvidia_payload")),
-        "gpu_nonce_matched": not any("GPU nonce mismatch" in e for e in errors),
-        "compose_hash_verified": bool((component.get("details") or {}).get("compose_verified")),
-        "production_os_image": production_os_image(component),
-        "app_id": info.get("app_id"),
-        "instance_id": info.get("instance_id"),
-        "compose_hash": info.get("compose_hash"),
-        "os_image_hash": info.get("os_image_hash"),
-    }
+async def bounded_model_verification(
+    verifier: Any,
+    entries: list[dict[str, Any]],
+    nonce: str,
+    budget: float,
+) -> dict[str, Any]:
+    if budget <= 0:
+        return {}
+    # dstack and NRAS use blocking HTTP. The worker lives only as long as this
+    # single verifier subprocess, so optional checks cannot hold up gateway
+    # evidence or outlive the process deadline.
+    outcome: Future[dict[str, Any]] = Future()
+
+    def verify() -> None:
+        if outcome.set_running_or_notify_cancel():
+            try:
+                outcome.set_result(asyncio.run(verify_model_candidates(verifier, entries, nonce)))
+            except Exception as exc:
+                outcome.set_exception(exc)
+
+    Thread(target=verify, daemon=True).start()
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(outcome), timeout=budget)
+    except Exception as exc:
+        print(f"NEAR AI model attestation skipped: {type(exc).__name__}", file=sys.stderr)
+        return {}
 
 
 async def verify_nearai(request: dict[str, Any]) -> None:
+    from confidential_verifier.providers.nearai import NearaiProvider
     from confidential_verifier.verifiers.nearai import NearAICloudVerifier
 
     provider = "near-ai"
     verifier_id = verifier_id_for(provider)
     # Fail loudly on bridge/verifier contract drift instead of letting a missing
     # method surface as a cryptic AttributeError mid-verification.
-    for method in ("verify_gateway_component", "_verify_component"):
-        if not hasattr(NearAICloudVerifier, method):
-            failed(
-                provider,
-                f"verifier contract drift: NearAICloudVerifier is missing {method}; the "
-                "confidential_verifier package is out of sync with this bridge "
-                "(see scripts/confidential_verifier/VENDOR.md)",
-                verifier_id=verifier_id,
-            )
-            return
-
-    model_id = request["model_id"]
-    api_key = (request.get("provider_options") or {}).get("near_ai_api_key")
-    nonce = secrets.token_hex(32)
+    if not (
+        hasattr(NearAICloudVerifier, "verify_gateway_component")
+        and hasattr(NearaiProvider, "fetch_raw_report")
+    ):
+        failed(
+            provider,
+            "verifier contract drift: NEAR AI verifier lacks "
+            "raw report fetch or gateway verification; the confidential_verifier package is out of sync "
+            "with this bridge (see scripts/confidential_verifier/VENDOR.md)",
+            failure="verifier_misconfigured",
+            verifier_id=verifier_id,
+        )
+        return
+    provider_options = request.get("provider_options") or {}
+    near_provider = NearaiProvider(
+        include_tls_fingerprint=True,
+        api_key=provider_options.get("near_ai_api_key"),
+    )
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
-    # The verifier library prints progress to stdout, which carries this bridge's
-    # JSON result, so its output is redirected; results are emitted after the block.
+    model_id = request["model_id"]
+    started = time.monotonic()
     try:
-        raw = await asyncio.to_thread(fetch_report, model_id, api_key, nonce)
-    except RuntimeError as exc:
-        failed(provider, str(exc), verifier_id=verifier_id)
+        with contextlib.redirect_stdout(sys.stderr):
+            raw, nonce = await asyncio.to_thread(near_provider.fetch_raw_report, model_id)
+    except (ConnectionError, HTTPError, Timeout) as exc:
+        failed(
+            provider,
+            f"NEAR AI attestation report fetch failed: {exc}",
+            failure="evidence_unavailable",
+        )
+        return
+    except ValueError:
+        failed(provider, "NEAR AI attestation report is malformed", failure="evidence_invalid")
+        return
+    attestations = raw.get("model_attestations")
+    if not isinstance(attestations, list) or not attestations:
+        failed(provider, "NEAR AI report missing model_attestations", failure="evidence_invalid")
+        return
+    if any(
+        not isinstance(entry, dict) or reported_model_name(entry) != model_id
+        for entry in attestations
+    ):
+        failed(
+            provider,
+            "NEAR AI model attestation model_name does not match the requested model ID",
+            failure="binding_mismatch",
+        )
         return
     with contextlib.redirect_stdout(sys.stderr):
         verifier = NearAICloudVerifier(dstack_verifier_url)
-        gateway_result = await verifier.verify_gateway_component(raw, nonce)
-        entries = [
-            entry
-            for entry in raw.get("model_attestations") or []
-            if entry.get("model_name") in (None, model_id)
-        ]
-        model_results = [
-            await verifier._verify_component(f"model-{i}", entry, nonce)
-            for i, entry in enumerate(entries)
-        ]
-
-    report_evidence = {"provider": "nearai", "request_nonce": nonce, "report": raw}
-    gateway = raw.get("gateway_attestation") or {}
-    if not gateway:
+        gateway = raw.get("gateway_attestation")
+    if not isinstance(gateway, dict) or not gateway:
         failed(
             provider,
             "NEAR AI report did not include gateway_attestation",
-            evidence=json_evidence_bundle(report_evidence, ATTESTATION_URL),
+            failure="evidence_invalid",
+            evidence=json_evidence_bundle(raw, ATTESTATION_URL),
             verifier_id=verifier_id,
         )
         return
@@ -174,107 +215,115 @@ async def verify_nearai(request: dict[str, Any]) -> None:
         failed(
             provider,
             "NEAR AI report did not include TLS SPKI binding",
-            evidence=json_evidence_bundle(report_evidence, ATTESTATION_URL),
+            failure="evidence_invalid",
+            evidence=json_evidence_bundle(raw, ATTESTATION_URL),
             verifier_id=verifier_id,
         )
         return
+    with contextlib.redirect_stdout(sys.stderr):
+        gateway_result = await verifier.verify_gateway_component(raw, nonce)
     if not gateway_result.get("is_valid"):
         failed(
             provider,
-            "; ".join(gateway_result.get("errors") or []) or "NEAR AI gateway verification failed",
-            evidence=json_evidence_bundle(report_evidence, ATTESTATION_URL),
+            "; ".join(gateway_result.get("errors") or [])
+            or "NEAR AI gateway verification failed",
+            evidence=json_evidence_bundle(raw, ATTESTATION_URL),
             verifier_id=verifier_id,
         )
         return
 
-    gateway_tcb_status = tcb_status_of(gateway_result)
-    gateway_production_os = production_os_image(gateway_result)
-    channel_bindings = [{"type": "tls_spki_sha256", "origin": request.get("url_origin"), "spki_sha256": spki}]
-    verified = [
-        enclave_facts(entry, result)
-        for entry, result in zip(entries, model_results)
-        if result.get("is_valid") and entry.get("signing_address")
-    ]
-    failed_enclaves = {
-        str(entry.get("signing_address", f"model-{i}")).lower(): result.get("errors") or ["not valid"]
-        for i, (entry, result) in enumerate(zip(entries, model_results))
-        if not result.get("is_valid")
+    # The model_name check guards model selection. The resulting evidence and
+    # binding cover the shared gateway TEE channel.
+    #
+    # Surface the granular gateway TDX TCB status (e.g. "UpToDate", "OutOfDate")
+    # so the session layer can populate a tri-state `tcb_up_to_date` claim. The
+    # dstack verifier reports TCB freshness separately from its overall is_valid
+    # (is_valid covers quote signature / measurement / event-log replay, not TCB
+    # freshness), so a stale TCB surfaces here without failing the gateway.
+    gateway_dstack = (gateway_result.get("details") or {}).get("dstack") or {}
+    gateway_tcb_status = (gateway_dstack.get("details") or {}).get("tcb_status")
+
+    # Channel-scoped, model-independent evidence: the gateway TD attestation and
+    # the TLS binding the dstack verifier checked, nonce-bound for freshness.
+    channel_evidence = {
+        "provider": "nearai",
+        "trust_boundary": "near-ai-gateway",
+        "request_nonce": nonce,
+        "tls_cert_fingerprint": spki,
+        "gateway_attestation": gateway,
     }
-
-    if not verified:
-        # Router scope only: the gateway TEE and its TLS key, as before. Model
-        # enclaves are unverified, so no model-level claim is made.
-        provider_claims = {
-            "trust_boundary": "near-ai-gateway",
-            "gateway_verified": True,
-            "gateway_tls_spki_sha256": spki,
-            "tcb_status": gateway_tcb_status,
-            "production_os_image": gateway_production_os,
-            "model_enclaves_verified": 0,
-        }
-        if failed_enclaves:
-            provider_claims["failed_enclaves"] = failed_enclaves
-        emit(
-            {
-                "result": "verified",
-                "verifier_id": verifier_id,
-                "attested_scope": "model",
-                "evidence": json_evidence_bundle(report_evidence, ATTESTATION_URL),
-                "channel_bindings": channel_bindings,
-                "provider_claims": provider_claims,
-            }
-        )
-        return
-
-    # The router sees traffic, so its TCB counts: the session's status is the
-    # worst of the router and every verified enclave.
     provider_claims = {
-        "trust_boundary": "near-ai-model-enclave",
-        "evidence_scope": "model_instance",
-        "canonical_model_id": model_id,
+        "trust_boundary": "near-ai-gateway",
         "gateway_verified": True,
         "gateway_tls_spki_sha256": spki,
-        "gateway_tcb_status": gateway_tcb_status,
-        "gateway_production_os_image": gateway_production_os,
-        "tcb_status": worst_tcb_status([gateway_tcb_status] + [v["tcb_status"] for v in verified]),
-        "model_enclaves_verified": len(verified),
-        "verified_signers": [v["signing_address"] for v in verified],
-        "instance_tcb_statuses": {v["signing_address"]: v["tcb_status"] for v in verified},
-        "instance_gpu": {
-            v["signing_address"]: {
-                "gpu_verified": v["gpu_verified"],
-                "gpu_evidence_present": v["gpu_evidence_present"],
-                "gpu_nonce_matched": v["gpu_nonce_matched"],
-            }
-            for v in verified
-        },
-        "instance_workloads": {
-            v["signing_address"]: {
-                key: v[key]
-                for key in ("app_id", "instance_id", "compose_hash", "os_image_hash", "compose_hash_verified", "production_os_image")
-            }
-            for v in verified
-        },
-        "gpu_verified": all(v["gpu_verified"] for v in verified),
-        "gpu_evidence_present": any(v["gpu_evidence_present"] for v in verified),
-        "response_signature": {"path": SIGNATURE_PATH, "signing_algo": "ecdsa", "kind": "provider_tee"},
+        "tcb_status": gateway_tcb_status,
     }
-    if failed_enclaves:
-        provider_claims["failed_enclaves"] = failed_enclaves
+
+    # Only the replayed, authenticated event-log identity is eligible. Supplied
+    # info.compose_hash is metadata, not the measured compose identity.
+    compose_hash = (
+        (gateway_dstack.get("details") or {}).get("app_info") or {}
+    ).get("compose_hash")
+    gpu = (gateway_result.get("details") or {}).get("gpu")
+    provider_claims.update(
+        {
+            "signing_address": gateway.get("signing_address"),
+            "compose_hash": compose_hash,
+            "gateway_gpu_check": {
+                "present": bool(gateway.get("nvidia_payload")),
+                "accepted": isinstance(gpu, dict) and gpu.get("model_verified") is True,
+            },
+        }
+    )
+    material = tdx_session_material(gateway.get("intel_quote"))
+    if material and compose_hash:
+        provider_claims.update(material)
+        provider_claims["session_material_version"] = "near-ai/1"
+
+    evidence = json_evidence_bundle(channel_evidence, ATTESTATION_URL)
+    budget = min(
+        MODEL_VERIFICATION_BUDGET,
+        request.get("timeout_seconds", 60) - (time.monotonic() - started) - 2,
+    )
+    if (
+        budget > 0
+        and len(attestations) <= MAX_MODEL_CANDIDATES
+        and all(entry.get("intel_quote") for entry in attestations)
+        and hasattr(verifier, "_verify_component")
+    ):
+        model_evidence = json_bytes({**channel_evidence, "model_attestations": attestations})
+        if len(model_evidence) > MAX_MODEL_EVIDENCE_BYTES:
+            model_evidence = None
+        with contextlib.redirect_stdout(sys.stderr):
+            candidates = (
+                await bounded_model_verification(verifier, attestations, nonce, budget)
+                if model_evidence is not None
+                else {}
+            )
+        if candidates:
+            for candidate in candidates.values():
+                candidate["gateway_production_os_image"] = production_os_image(
+                    gateway_dstack.get("details") or {}
+                )
+            provider_claims["model_enclave_candidates"] = candidates
+            evidence["near_model"] = evidence_bundle(
+                model_evidence, ATTESTATION_URL, "application/json"
+            )
+
     emit(
         {
             "result": "verified",
             "verifier_id": verifier_id,
-            "attested_scope": "model",
-            "evidence": json_evidence_bundle(report_evidence, ATTESTATION_URL),
-            "channel_bindings": channel_bindings,
+            "attested_scope": "router",
+            "evidence": evidence,
+            "channel_bindings": [
+                {
+                    "type": "tls_spki_sha256",
+                    "origin": request.get("url_origin"),
+                    "spki_sha256": spki,
+                }
+            ],
             "provider_claims": provider_claims,
-            "near_session": {
-                "model_id": model_id,
-                "signers": [
-                    {"signing_address": v["signing_address"], "signing_algo": v["signing_algo"]}
-                    for v in verified
-                ],
-            },
         }
     )
+    return

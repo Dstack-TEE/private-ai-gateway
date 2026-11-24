@@ -170,13 +170,57 @@ fn capture_stderr(mut stderr: impl Read, diagnostics: Arc<Mutex<Vec<u8>>>) {
     }
 }
 
-/// Wait until the operating system reports that `pid` has exited. This never
-/// sends a signal or otherwise changes the target process.
-pub fn wait_for_exit(pid: u32, timeout: Duration) -> Result<(), String> {
+/// A process observed before asking it to exit, so PID reuse cannot redirect
+/// the wait after the shutdown request.
+pub struct ProcessExit {
+    pid: u32,
+    observer: ExitObserver,
+}
+
+enum ExitObserver {
+    Exited,
+    #[cfg(target_os = "linux")]
+    PidFd(std::os::fd::OwnedFd),
+    #[cfg(target_os = "macos")]
+    Kqueue(std::os::fd::OwnedFd),
+    #[cfg(windows)]
+    Process(std::os::windows::io::OwnedHandle),
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Polling,
+}
+
+impl ProcessExit {
+    pub fn wait(self, timeout: Duration) -> Result<(), String> {
+        match self.observer {
+            ExitObserver::Exited => Ok(()),
+            #[cfg(target_os = "linux")]
+            ExitObserver::PidFd(fd) => wait_for_pidfd(self.pid, fd, timeout),
+            #[cfg(target_os = "macos")]
+            ExitObserver::Kqueue(queue) => wait_for_kqueue(self.pid, queue, timeout),
+            #[cfg(windows)]
+            ExitObserver::Process(handle) => wait_for_process(self.pid, handle, timeout),
+            #[cfg(all(unix, not(target_os = "macos")))]
+            ExitObserver::Polling => wait_for_exit_polling(self.pid, timeout),
+        }
+    }
+}
+
+/// Register for process exit before sending Shutdown. Kernels without pidfds
+/// retain the existing signal-zero polling fallback.
+pub fn observe_exit(pid: u32) -> Result<ProcessExit, String> {
     if pid == 0 {
         return Err("Cannot wait for process ID 0".to_string());
     }
-    wait_for_exit_native(pid, timeout)
+    Ok(ProcessExit {
+        pid,
+        observer: observe_exit_native(pid)?,
+    })
+}
+
+/// Wait until the operating system reports that `pid` has exited. This never
+/// sends a signal or otherwise changes the target process.
+pub fn wait_for_exit(pid: u32, timeout: Duration) -> Result<(), String> {
+    observe_exit(pid)?.wait(timeout)
 }
 
 /// Starts the service in its own session, so it outlives the terminal or app
@@ -224,8 +268,8 @@ fn spawn_detached(command: &mut Command) -> io::Result<Child> {
 }
 
 #[cfg(target_os = "linux")]
-fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+fn observe_exit_native(pid: u32) -> Result<ExitObserver, String> {
+    use std::os::fd::{FromRawFd, OwnedFd};
 
     if pid > libc::pid_t::MAX as u32 {
         return Err(format!("Process ID is outside the native range: {pid}"));
@@ -237,15 +281,23 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
     if raw_fd == -1 {
         let error = io::Error::last_os_error();
         return match error.raw_os_error() {
-            Some(libc::ESRCH) => Ok(()),
+            Some(libc::ESRCH) => Ok(ExitObserver::Exited),
             // Kernels before 5.3, and seccomp filters that deny the call, as
             // std's `Command` falls back on them.
-            Some(libc::ENOSYS | libc::EPERM) => wait_for_exit_polling(pid, timeout),
+            Some(libc::ENOSYS | libc::EPERM) => Ok(ExitObserver::Polling),
             _ => Err(format!("Cannot observe PAP service process {pid}: {error}")),
         };
     }
     // SAFETY: the successful syscall returned a new descriptor owned here.
-    let pid_fd = unsafe { OwnedFd::from_raw_fd(raw_fd as libc::c_int) };
+    Ok(ExitObserver::PidFd(unsafe {
+        OwnedFd::from_raw_fd(raw_fd as libc::c_int)
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_pidfd(pid: u32, pid_fd: std::os::fd::OwnedFd, timeout: Duration) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
     let started = Instant::now();
 
     loop {
@@ -283,8 +335,8 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
-    use std::{mem::MaybeUninit, os::fd::FromRawFd, os::fd::OwnedFd, ptr};
+fn observe_exit_native(pid: u32) -> Result<ExitObserver, String> {
+    use std::{os::fd::FromRawFd, os::fd::OwnedFd, ptr};
 
     if pid > libc::pid_t::MAX as u32 {
         return Err(format!("Process ID is outside the native range: {pid}"));
@@ -314,11 +366,18 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
     if registered == -1 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(libc::ESRCH) {
-            return Ok(());
+            return Ok(ExitObserver::Exited);
         }
         return Err(format!("Cannot observe PAP service process {pid}: {error}"));
     }
+    Ok(ExitObserver::Kqueue(queue))
+}
 
+#[cfg(target_os = "macos")]
+fn wait_for_kqueue(pid: u32, queue: std::os::fd::OwnedFd, timeout: Duration) -> Result<(), String> {
+    use std::{mem::MaybeUninit, os::fd::AsRawFd, ptr};
+
+    let raw_queue = queue.as_raw_fd();
     let started = Instant::now();
     loop {
         let wait = remaining_timespec(started, timeout);
@@ -347,41 +406,46 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
+fn observe_exit_native(pid: u32) -> Result<ExitObserver, String> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, ERROR_INVALID_PARAMETER, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-        },
-        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        Foundation::ERROR_INVALID_PARAMETER,
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE},
     };
-
-    struct ProcessHandle(HANDLE);
-    impl Drop for ProcessHandle {
-        fn drop(&mut self) {
-            // SAFETY: the handle was returned by `OpenProcess` and is closed
-            // exactly once by this owner.
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
 
     // SAFETY: the call receives scalar values and returns an owned handle.
     let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
     if handle.is_null() {
         let error = io::Error::last_os_error();
         if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
-            return Ok(());
+            return Ok(ExitObserver::Exited);
         }
         return Err(format!("Cannot observe PAP service process {pid}: {error}"));
     }
-    let handle = ProcessHandle(handle);
+    // SAFETY: OpenProcess returned a unique owned kernel handle.
+    Ok(ExitObserver::Process(unsafe {
+        OwnedHandle::from_raw_handle(handle.cast())
+    }))
+}
+
+#[cfg(windows)]
+fn wait_for_process(
+    pid: u32,
+    handle: std::os::windows::io::OwnedHandle,
+    timeout: Duration,
+) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
+    };
+
     let started = Instant::now();
 
     loop {
         let wait_ms = remaining_windows_millis(started, timeout);
         // SAFETY: `handle` stays valid for the duration of the wait.
-        match unsafe { WaitForSingleObject(handle.0, wait_ms) } {
+        match unsafe { WaitForSingleObject(handle.as_raw_handle().cast(), wait_ms) } {
             WAIT_OBJECT_0 => return Ok(()),
             WAIT_TIMEOUT => {
                 if started.elapsed() >= timeout {
@@ -404,11 +468,11 @@ fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
 }
 
 #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn wait_for_exit_native(pid: u32, timeout: Duration) -> Result<(), String> {
+fn observe_exit_native(pid: u32) -> Result<ExitObserver, String> {
     if pid > libc::pid_t::MAX as u32 {
         return Err(format!("Process ID is outside the native range: {pid}"));
     }
-    wait_for_exit_polling(pid, timeout)
+    Ok(ExitObserver::Polling)
 }
 
 /// Polls for the process with signal zero where no exit notification exists.
@@ -437,7 +501,7 @@ fn wait_for_exit_polling(pid: u32, timeout: Duration) -> Result<(), String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn wait_for_exit_native(_: u32, _: Duration) -> Result<(), String> {
+fn observe_exit_native(_: u32) -> Result<ExitObserver, String> {
     Err("Waiting for process exit is unsupported on this platform".to_string())
 }
 
@@ -484,6 +548,23 @@ fn exit_timeout(pid: u32, timeout: Duration) -> String {
 #[cfg(all(test, unix))]
 mod exit_tests {
     use super::*;
+
+    #[test]
+    fn a_registered_observer_survives_the_child_being_reaped() {
+        let mut child = Command::new("sleep").arg("0.1").spawn().unwrap();
+        let process = observe_exit(child.id()).unwrap();
+        child.wait().unwrap();
+        process.wait(Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn an_observed_live_process_still_has_a_bounded_wait() {
+        let error = observe_exit(std::process::id())
+            .unwrap()
+            .wait(Duration::from_millis(20))
+            .unwrap_err();
+        assert!(error.contains("Timed out after 20 ms"));
+    }
 
     // Regression: an unbounded wait once gave kevent a timeout XNU rejects,
     // so the Mac App Store service never observed its owner exit.

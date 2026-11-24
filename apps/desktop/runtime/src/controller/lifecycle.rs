@@ -26,7 +26,7 @@ impl DesktopRuntime {
     }
 
     pub(super) fn recover_network(self: &Arc<Self>) -> Result<(), Error> {
-        let Ok(_operation) = self.lifecycle.try_lock() else {
+        let Ok(operation) = self.lifecycle.try_lock() else {
             return Ok(());
         };
         if self.closing() {
@@ -65,6 +65,33 @@ impl DesktopRuntime {
         if retry && ((!local_service && !self.recovery.online()) || !self.recovery.retry_due()) {
             return Ok(());
         }
+        // Addresses also change when containers, VPNs and temporary IPv6
+        // addresses come and go. Restarting ends every request in flight, so
+        // a verified session is rebuilt only if its service stopped answering.
+        let _operation =
+            if !retry && state.status == VerificationStatus::Verified && self.recovery.online() {
+                // The probe waits on the network, so other operations go first;
+                // one that changed the session settles the question itself.
+                let generation = self.proxy.session().generation;
+                drop(operation);
+                if self.manager.service_answers() {
+                    return Ok(());
+                }
+                let Ok(operation) = self.lifecycle.try_lock() else {
+                    // Whatever holds the lock leaves the dead session; look again.
+                    self.recovery.request();
+                    return Ok(());
+                };
+                if self.proxy.session().generation != generation {
+                    return Ok(());
+                }
+                tracing::info!(
+                    "The network changed and the service no longer answers; restarting protection"
+                );
+                operation
+            } else {
+                operation
+            };
         self.recovery.clear_wait();
         if let Err(error) = self.stop_with_reconnect(true) {
             self.manager.cancel_reconnection();
@@ -105,6 +132,15 @@ impl DesktopRuntime {
     pub fn start(self: &Arc<Self>, config: StartConfig) -> Result<AppState, Error> {
         let _operation = self.configuration_change()?;
         self.recovery.cancel();
+        // A port that was busy at launch may be free by now.
+        let state = self.state();
+        if state.endpoint_error.is_some() {
+            let resolved = settings_config::resolve_local_api(state.local_api)?;
+            if self.restore_endpoint(&resolved).is_ok() {
+                self.manager
+                    .set_endpoint(resolved.config, Ok(resolved.endpoint));
+            }
+        }
         self.start_inner(config)
     }
 
@@ -132,18 +168,6 @@ impl DesktopRuntime {
                 Err(error)
             }
         }
-    }
-
-    pub fn set_require_production_os(&self, required: bool) -> Result<AppState, Error> {
-        let _operation = self.configuration_change()?;
-        self.recovery.cancel();
-        self.stop_with_reconnect(false)?;
-        self.update_config(|saved| {
-            saved.require_production_os = required;
-            Ok(())
-        })?;
-        self.publish_profiles()?;
-        Ok(self.state())
     }
 
     pub fn stop(&self) -> Result<AppState, Error> {

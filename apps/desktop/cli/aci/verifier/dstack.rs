@@ -2,8 +2,8 @@
 //! from `aci-verify`; this module feeds them the DCAP quote and applies the
 //! custody policy's accepted KMS roots.
 
+use aci_verify::dstack::KeyCustodyError;
 pub use aci_verify::dstack::{dstack_rtmr3_event, DstackEventLog, VerifiedEventLog};
-use aci_verify::dstack::{verify_dstack_kms_receipt_chain, KeyCustodyError};
 use serde_json::Value;
 
 use super::policy::CustodyPolicy;
@@ -34,7 +34,8 @@ pub(super) fn verify_dstack_kms_receipt_custody(
     app_id: &[u8],
     policy: &CustodyPolicy,
 ) -> Result<(), CustodyError> {
-    let root = verify_dstack_kms_receipt_chain(evidence, keyset, app_id)?;
+    let root = aci_verify::dstack::verify_dstack_kms_receipt_custody(evidence, keyset, app_id)?
+        .root_public_key;
     if !policy.accepts_kms_root(&root) {
         return Err(CustodyError::KmsRootRejected);
     }
@@ -43,9 +44,10 @@ pub(super) fn verify_dstack_kms_receipt_custody(
 
 fn dcap_rtmr3(report: &dcap_qvl::quote::Report) -> Option<&[u8; 48]> {
     match report {
+        dcap_qvl::quote::Report::SgxEnclave(_) => None,
         dcap_qvl::quote::Report::TD10(report) => Some(&report.rt_mr3),
         dcap_qvl::quote::Report::TD15(report) => Some(&report.base.rt_mr3),
-        dcap_qvl::quote::Report::SgxEnclave(_) => None,
+        dcap_qvl::quote::Report::TD15Ex(report) => Some(&report.base.base.rt_mr3),
     }
 }
 
@@ -63,9 +65,7 @@ pub(super) mod tests {
     }
 
     fn sign_recoverable(key: &SigningKey, message: &[u8]) -> String {
-        let (signature, recid) = key
-            .sign_digest_recoverable(Keccak256::new_with_prefix(message))
-            .unwrap();
+        let (signature, recid) = key.sign_digest_recoverable(Keccak256::new_with_prefix(message));
         let mut out = signature.to_vec();
         out.push(recid.to_byte());
         hex::encode(out)
@@ -130,8 +130,7 @@ pub(super) mod tests {
     }
 
     pub(in crate::aci::verifier) fn policy_with_root(root: &SigningKey) -> CustodyPolicy {
-        let root_uncompressed =
-            hex::encode(root.verifying_key().to_encoded_point(false).as_bytes());
+        let root_uncompressed = hex::encode(root.verifying_key().to_sec1_point(false).as_bytes());
         CustodyPolicy::new(
             [format!("app-id:0x{}", hex::encode(APP_ID))],
             [root_uncompressed],

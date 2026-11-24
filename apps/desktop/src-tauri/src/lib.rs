@@ -6,11 +6,12 @@ mod commands;
 mod app_data;
 mod autostart;
 mod cli_registration;
+mod clipboard;
 mod distribution;
 mod menu;
 mod notifications;
 mod tray;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 mod tray_theme;
 mod ui_api;
 mod updates;
@@ -25,7 +26,7 @@ use std::sync::{
 
 use desktop_core::{
     client::Client,
-    config::NotificationPreferences,
+    config::{Appearance, NotificationPreferences},
     contracts::AppState,
     ui_api::{Host, StateEventProjection},
 };
@@ -74,8 +75,6 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_filter(|label| label == window::MAIN)
@@ -86,7 +85,6 @@ pub fn run() {
         .manage(updates::PreparedUpdate::default())
         .manage(cli_registration::CliStartup::default())
         .manage(Mutex::new(window::WindowState::default()))
-        .manage(Mutex::new(NotificationPreferences::default()))
         .invoke_handler(desktop_core::renderer_methods!(invoke_handler))
         .on_menu_event(menu::handle_event)
         .setup(setup);
@@ -101,22 +99,46 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building Tauri application")
         .run(|_app, event| match event {
-            #[cfg(feature = "mac-app-store")]
             tauri::RunEvent::Exit => {
-                if let Some(client) = _app.try_state::<Arc<Client>>() {
-                    if client.is_running().unwrap_or(false) {
-                        if let Err(error) = client.shutdown() {
-                            tracing::warn!(
-                                "Cannot stop the App Store backend during exit: {error}"
-                            );
-                        }
-                    }
-                }
+                clipboard::release();
+                #[cfg(feature = "mac-app-store")]
+                stop_app_store_backend(_app);
             }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => window::show(_app),
             _ => {}
         });
+}
+
+/// How long quitting the App Store build waits for its backend to stop, so
+/// the client's much longer request and exit timeouts never hold the main
+/// thread. A backend that has the request stops on its own.
+#[cfg(feature = "mac-app-store")]
+const APP_STORE_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Stops the App Store build's backend as the app quits, off the main thread,
+/// waiting for it at most `APP_STORE_EXIT_WAIT`.
+#[cfg(feature = "mac-app-store")]
+fn stop_app_store_backend(app: &AppHandle) {
+    let Some(client) = app.try_state::<Arc<Client>>() else {
+        return;
+    };
+    let client = client.inner().clone();
+    let (stopped, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if client.is_running().unwrap_or(false) {
+            let _ = stopped.send(client.shutdown());
+        } else {
+            let _ = stopped.send(Ok(()));
+        }
+    });
+    match result.recv_timeout(APP_STORE_EXIT_WAIT) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!("Cannot stop the App Store backend during exit: {error}");
+        }
+        Err(_) => tracing::warn!("The App Store backend did not stop before exit"),
+    }
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -132,8 +154,24 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("Cannot prepare Agent Home access for the backend: {error}");
         }
     }
+    // The window and notifications follow the saved settings until the
+    // backend answers with its own; settings that cannot be read keep
+    // notifications off until then.
+    let (appearance, notifications) = match desktop_core::config::load() {
+        Ok(saved) => (saved.appearance, saved.notifications),
+        Err(_) => (
+            Appearance::default(),
+            NotificationPreferences {
+                enabled: false,
+                ..NotificationPreferences::default()
+            },
+        ),
+    };
+    app.manage(Mutex::new(notifications));
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    autostart::setup(app.handle())?;
+    if let Err(error) = autostart::setup(app.handle()) {
+        tracing::warn!("Open at Login is unavailable: {error}");
+    }
     if updates::configured(app.handle()) {
         app.handle()
             .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -147,11 +185,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // The renderer invokes backend commands on mount. Create it only
     // after Client and native services are registered in managed state.
-    window::create(app)?;
+    window::create(app, appearance)?;
     if let Err(error) = tray::setup(app.handle()) {
         tracing::warn!("The system tray is unavailable: {error}");
     } else {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        #[cfg(target_os = "windows")]
         if let Err(error) = tray_theme::setup(app.handle()) {
             tracing::warn!("Cannot observe system tray appearance: {error}");
         }
@@ -159,12 +197,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     follow_backend(app.handle(), client);
     if show_on_launch {
         window::show(app.handle());
+    } else {
+        window::launch_hidden(app.handle());
     }
     Ok(())
 }
 
 fn configure_account_return(app: &tauri::App) {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    // Installers register the scheme; a development build registers itself.
+    #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "windows")))]
     if let Err(error) = app.deep_link().register_all() {
         tracing::warn!("Cannot register app return link: {error}");
     }
@@ -188,7 +229,7 @@ fn follow_backend(app: &AppHandle, client: Arc<Client>) {
     let initial = states.borrow().clone();
     let mut projection = StateEventProjection::new(&initial);
     tray::sync(&app, &initial);
-    let mut alerts = notifications::Observer::new(&initial);
+    let mut alerts = notifications::Observer::default();
     let mut backend = BackendInstance::default();
     // The notification permission is asked for once per launch, once a
     // backend answers with its preferences.

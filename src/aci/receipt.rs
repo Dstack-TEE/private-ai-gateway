@@ -22,10 +22,11 @@ pub const EVENT_UPSTREAM_VERIFIED: &str = "upstream.verified";
 pub const EVENT_RESPONSE_RETURNED: &str = "response.returned";
 
 // Reference-implementation extension events (§7.4: verifiers ignore unknown
-// types). They record routing decisions and the upstream's response bytes.
+// types). They record routing, upstream response bytes and gateway usage.
 pub const EVENT_MIDDLEWARE_FORWARDED: &str = "middleware.forwarded";
 pub const EVENT_ROUTE_SELECTED: &str = "route.selected";
 pub const EVENT_RESPONSE_RECEIVED: &str = "response.received";
+pub const EVENT_USAGE_REPORTED: &str = "usage.reported";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
@@ -49,6 +50,17 @@ pub enum ReceiptError {
     Key(#[from] KeyError),
 }
 
+/// Gateway-local round token for evidence that does not bind platform state.
+/// Verifiers create it on a fresh run; caches clone it. Never served on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VerificationRound([u8; 32]);
+
+impl VerificationRound {
+    pub fn fresh() -> Self {
+        Self(rand::random())
+    }
+}
+
 /// The verification outcome an upstream verifier hands the aggregator.
 ///
 /// The receipt records only the slim §7.5 event; everything else here —
@@ -57,8 +69,10 @@ pub enum ReceiptError {
 /// ([`VerificationResult::Failed`]).
 #[derive(Debug, Clone, Default)]
 pub struct UpstreamVerifiedEvent {
+    /// Present only when equal evidence cannot establish equal platform state.
+    pub verification_round: Option<VerificationRound>,
     /// The operator's per-endpoint upstream config `name` (e.g.
-    /// "tinfoil-glm51").
+    /// "tinfoil-glm53-live").
     pub upstream_name: String,
     /// The verifier adapter *type* the verification logic keys on (e.g.
     /// "tinfoil", "chutes"); maps provider evidence onto typed session claims.
@@ -69,10 +83,134 @@ pub struct UpstreamVerifiedEvent {
     pub verifier_id: String,
     pub result: VerificationResult,
     pub required: bool,
-    pub reason: Option<String>,
+    /// Why verification failed, as the receipt and the client are told.
+    /// Meaningful only when `result` is [`VerificationResult::Failed`].
+    pub failure: VerificationFailure,
+    /// The verifier's own account of the failure, for the gateway's log and
+    /// the operator's status view. It may quote whatever failed underneath —
+    /// a URL, a response, an exception — so it never enters a receipt or a
+    /// response; those carry `failure`.
+    pub diagnostic: Option<String>,
     pub evidence: Option<Value>,
     pub channel_bindings: Vec<ChannelBinding>,
     pub provider_claims: Option<Value>,
+    /// The native ACI verifier's accepted binding, retaining the digest of the
+    /// original keyset JSON. Provider claims cannot supply this identity.
+    pub aci_identity: Option<aci_verify::report::ReportBinding>,
+}
+
+/// Why an upstream verification failed: what the receipt records (§7.5) and
+/// the refusal says (§10).
+///
+/// A receipt is this workload's signed statement, so its reason is one of
+/// these sentences and never text a verifier assembled from what an
+/// unverified upstream or a failed call returned. The causes follow the §9.1
+/// checks; a verifier's own account goes to
+/// [`UpstreamVerifiedEvent::diagnostic`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationFailure {
+    /// The evidence could not be fetched or the verifier could not run:
+    /// nothing was judged, and a later attempt may succeed.
+    EvidenceUnavailable,
+    /// The evidence arrived but is malformed or incomplete.
+    EvidenceInvalid,
+    /// The hardware quote, or the GPU attestation with it, did not verify.
+    QuoteInvalid,
+    /// The evidence is not bound to this verification's nonce, keys or model.
+    BindingMismatch,
+    /// The attested keyset is past its `not_after` (§9.1(3)).
+    KeysetExpired,
+    /// The measured workload is not one the operator's policy accepts.
+    ProvenanceNotAccepted,
+    /// The key custody evidence did not verify.
+    CustodyNotVerified,
+    /// The platform state is not acceptable: an out-of-date TCB, a debug TD.
+    PolicyRejected,
+    /// Verification passed but pinned nothing the gateway can enforce (§1.2).
+    NoChannelBinding,
+    NoVerifier,
+    /// The route's verifier lacks configuration it needs to judge anything.
+    VerifierMisconfigured,
+    /// The upstream withheld an unverified response and named no serving
+    /// instance to attribute it to.
+    UnattributedResponse,
+    /// The verifier did not accept the upstream and named no cause this
+    /// gateway knows.
+    #[default]
+    #[serde(other)]
+    NotVerified,
+}
+
+impl VerificationFailure {
+    #[cfg(test)]
+    const ALL: [Self; 13] = [
+        Self::EvidenceUnavailable,
+        Self::EvidenceInvalid,
+        Self::QuoteInvalid,
+        Self::BindingMismatch,
+        Self::KeysetExpired,
+        Self::ProvenanceNotAccepted,
+        Self::CustodyNotVerified,
+        Self::PolicyRejected,
+        Self::NoChannelBinding,
+        Self::NoVerifier,
+        Self::VerifierMisconfigured,
+        Self::UnattributedResponse,
+        Self::NotVerified,
+    ];
+
+    /// The cause as a token: `error.code` on a refusal, and the `failure`
+    /// value a provider verifier writes.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::EvidenceUnavailable => "evidence_unavailable",
+            Self::EvidenceInvalid => "evidence_invalid",
+            Self::QuoteInvalid => "quote_invalid",
+            Self::BindingMismatch => "binding_mismatch",
+            Self::KeysetExpired => "keyset_expired",
+            Self::ProvenanceNotAccepted => "provenance_not_accepted",
+            Self::CustodyNotVerified => "custody_not_verified",
+            Self::PolicyRejected => "policy_rejected",
+            Self::NoChannelBinding => "no_channel_binding",
+            Self::NoVerifier => "no_verifier",
+            Self::VerifierMisconfigured => "verifier_misconfigured",
+            Self::UnattributedResponse => "unattributed_response",
+            Self::NotVerified => "not_verified",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EvidenceUnavailable => "the upstream's attestation evidence could not be obtained",
+            Self::EvidenceInvalid => "the upstream's attestation evidence is malformed or incomplete",
+            Self::QuoteInvalid => "the upstream's hardware attestation did not verify",
+            Self::BindingMismatch => {
+                "the upstream's attestation is not bound to this verification's nonce, keys or model"
+            }
+            Self::KeysetExpired => "the upstream's attested keyset has expired",
+            Self::ProvenanceNotAccepted => {
+                "the upstream's measured workload is not accepted by this gateway's policy"
+            }
+            Self::CustodyNotVerified => "the upstream's key custody did not verify",
+            Self::PolicyRejected => {
+                "the upstream's platform state is not accepted by this gateway's policy"
+            }
+            Self::NoChannelBinding => "no enforceable channel binding",
+            Self::NoVerifier => "no upstream verifier configured",
+            Self::VerifierMisconfigured => "the upstream verifier is not fully configured",
+            Self::UnattributedResponse => {
+                "upstream withheld an unverified response without a serving instance"
+            }
+            Self::NotVerified => "the upstream's attestation was not verified",
+        }
+    }
+}
+
+impl std::fmt::Display for VerificationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,6 +251,15 @@ pub enum ChannelBinding {
         key_id: Option<String>,
         algorithm: String,
         public_key_sha256: String,
+    },
+    /// Digests binding a provider proxy co-deployed in the gateway's measured
+    /// dstack Compose. The proxy verifies the provider's attestation chain.
+    ProxyImageSha256 {
+        provider: String,
+        proxy_image_digest: String,
+        /// Digest of the exact Compose secret mounted into both the measured
+        /// gateway and proxy.
+        credential_sha256: String,
     },
 }
 
@@ -159,6 +306,7 @@ pub struct SignedReceipt {
     /// Lookup ids, duplicated out of the document so stores never parse it.
     pub receipt_id: String,
     pub chat_id: Option<String>,
+    pub workload_keyset_digest: String,
     /// The §7.2 receipt document bytes as served.
     pub document: Vec<u8>,
     pub key_id: String,
@@ -454,6 +602,7 @@ impl ReceiptBuilder {
         Ok(SignedReceipt {
             receipt_id: self.receipt_id,
             chat_id: self.chat_id,
+            workload_keyset_digest: self.workload_keyset_digest,
             document: digest::jcs_bytes(&document)?,
             key_id: receipt_key.key_id,
             signature_hex,
@@ -611,6 +760,22 @@ mod tests {
         // The stored bytes are the JCS form: sorted members, compact.
         let text = String::from_utf8(receipt.document.clone()).unwrap();
         assert!(text.starts_with(r#"{"api_version":"aci/1","chat_id":"#));
+    }
+
+    #[test]
+    fn a_verifier_can_only_name_a_failure_from_the_closed_set() {
+        let parse = |code: &str| {
+            serde_json::from_value::<VerificationFailure>(Value::String(code.into())).unwrap()
+        };
+        // The token a verifier writes is the token a refusal carries.
+        for failure in VerificationFailure::ALL {
+            assert_eq!(parse(failure.code()), failure);
+        }
+        // Anything else a verifier writes there is not text the gateway repeats.
+        assert_eq!(
+            parse("see https://node.example.com/report"),
+            VerificationFailure::NotVerified
+        );
     }
 
     #[test]

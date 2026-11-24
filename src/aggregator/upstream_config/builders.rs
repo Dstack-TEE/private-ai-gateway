@@ -1,22 +1,25 @@
 //! Backend/verifier construction from upstream config.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::dynamic::EmptyUpstreamBackend;
-use super::validation::validate_config;
+use super::validation::{validate_config, verification_refresh_seconds};
 use super::{
     ConfiguredUpstreams, ProviderSessionRegistry, UpstreamConfig, UpstreamConfigError,
     UpstreamProvider, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use crate::aci::digest;
 use crate::aci::upstream::{
-    ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend, NearAiBackend,
-    OpenAICompatibleBackend, UpstreamBackend,
+    CacheSaltField, ChutesProviderBackend, ChutesSessionStore, ModelRoute, ModelRouterBackend,
+    NearAiBackend, OpenAICompatibleBackend, PrivatemodeProviderBackend, PrivatemodeProxyDeployment,
+    UpstreamBackend, ZeroGProviderBackend,
 };
 use crate::aci::verifier::{
-    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ChutesProviderVerifier,
-    NearAiProviderVerifier, PhalaDirectProviderVerifier, PreverifiedUpstreamVerifier,
-    RoutingUpstreamVerifier, SecretAiProviderVerifier, TinfoilProviderVerifier,
+    AciServiceUpstreamVerifier, AciServiceVerifierPolicy, ArmetAiProviderVerifier,
+    ChutesProviderVerifier, NearAiProviderVerifier, PhalaDirectProviderVerifier,
+    PreverifiedUpstreamVerifier, PrivatemodeProviderVerifier, RoutingUpstreamVerifier,
+    SecretAiProviderVerifier, TinfoilProviderVerifier, ZeroGProviderVerifier,
 };
 use crate::aggregator::service::UpstreamVerifier;
 
@@ -60,6 +63,10 @@ fn build_model_router(
                     )
                     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
                     .with_path(cfg.path.clone())
+                    .with_streaming_usage(cfg.streaming_usage)
+                    .with_cache_salt_field(provider_cache_salt_field(cfg.provider))
+                    // NEAR's native JSON contains only text, without duration.
+                    .with_force_verbose_json(cfg.provider == UpstreamProvider::NearAi)
                     .with_is_tee(Some(provider_is_tee(cfg.provider))),
                 )
                 .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;
@@ -68,10 +75,30 @@ fn build_model_router(
     Ok(router)
 }
 
+/// Cache controls are an explicit provider capability, not inferred from an
+/// OpenAI-compatible wire format. Tags match `UpstreamProvider`'s serde names.
+pub(super) fn provider_cache_salt_field(provider: UpstreamProvider) -> Option<CacheSaltField> {
+    match provider {
+        UpstreamProvider::Chutes => Some(CacheSaltField::CacheSalt("chutes")),
+        UpstreamProvider::Privatemode => Some(CacheSaltField::CacheSalt("privatemode")),
+        UpstreamProvider::Tinfoil => Some(CacheSaltField::UserCacheSecret("tinfoil")),
+        UpstreamProvider::PhalaDirect => Some(CacheSaltField::CacheSalt("phala-direct")),
+        UpstreamProvider::NearAi => Some(CacheSaltField::CacheSalt("near-ai")),
+        UpstreamProvider::ArmetAi => Some(CacheSaltField::CacheSalt("armet-ai")),
+        UpstreamProvider::ZeroGPrivateComputer => {
+            Some(CacheSaltField::CacheSalt("0g-private-computer"))
+        }
+        UpstreamProvider::OpenAiCompatible
+        | UpstreamProvider::Anthropic
+        | UpstreamProvider::AciService
+        | UpstreamProvider::SecretAi => None,
+    }
+}
+
 /// Whether a provider route may serve `provider.aci_verified` requests. Plain
 /// OpenAI-compatible cloud APIs have no provider attestation and are therefore
 /// ineligible for that constraint.
-fn provider_is_tee(provider: UpstreamProvider) -> bool {
+pub(super) fn provider_is_tee(provider: UpstreamProvider) -> bool {
     match provider {
         UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => false,
         UpstreamProvider::AciService
@@ -79,8 +106,34 @@ fn provider_is_tee(provider: UpstreamProvider) -> bool {
         | UpstreamProvider::Tinfoil
         | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => true,
+        | UpstreamProvider::Privatemode
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::ArmetAi
+        | UpstreamProvider::ZeroGPrivateComputer => true,
     }
+}
+
+pub(super) fn has_verifier_route(
+    cfg: &UpstreamConfig,
+    config: &[UpstreamConfig],
+    options: &UpstreamRuntimeOptions,
+) -> bool {
+    provider_is_tee(cfg.provider)
+        || match options.verifier_mode {
+            UpstreamVerifierMode::None => false,
+            UpstreamVerifierMode::Preverified => true,
+            UpstreamVerifierMode::AciService => {
+                !config.iter().any(|cfg| provider_is_tee(cfg.provider))
+                    || cfg
+                        .accepted_subjects
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+                    || cfg
+                        .accepted_image_digests
+                        .as_ref()
+                        .is_some_and(|ids| !ids.is_empty())
+            }
+        }
 }
 
 fn build_provider_backend(
@@ -108,42 +161,61 @@ fn build_provider_backend(
                 session_store,
             )?))
         }
-        UpstreamProvider::NearAi => {
-            let mut inner = OpenAICompatibleBackend::new_with_timeouts(
-                cfg.base_url.clone(),
+        UpstreamProvider::Privatemode => {
+            let backend = PrivatemodeProviderBackend::new_with_timeouts(
+                privatemode_deployment(cfg, options)?,
                 connect_timeout_seconds,
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
-            if let Some(token) = &cfg.bearer_token {
-                inner = inner.with_bearer_token(token.clone());
-            }
-            let backend = NearAiBackend::new(inner, cfg.base_url.clone(), cfg.bearer_token.clone())
-                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?;
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
             Ok(Arc::new(backend))
         }
+        UpstreamProvider::ZeroGPrivateComputer => Ok(Arc::new(
+            ZeroGProviderBackend::new_with_timeouts(
+                cfg.base_url.clone(),
+                cfg.bearer_token.clone().unwrap_or_default(),
+                connect_timeout_seconds,
+                read_timeout_seconds,
+            )
+            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes),
+        )),
         UpstreamProvider::OpenAiCompatible
         | UpstreamProvider::Anthropic
         | UpstreamProvider::AciService
         | UpstreamProvider::Tinfoil
+        | UpstreamProvider::NearAi
         | UpstreamProvider::SecretAi
-        | UpstreamProvider::PhalaDirect => {
+        | UpstreamProvider::PhalaDirect
+        | UpstreamProvider::ArmetAi => {
             let mut backend = OpenAICompatibleBackend::new_with_timeouts(
                 cfg.base_url.clone(),
                 connect_timeout_seconds,
                 read_timeout_seconds,
             )
             .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
-            .with_name(cfg.name.clone());
-            if let Some(token) = &cfg.bearer_token {
-                backend = if cfg.provider == UpstreamProvider::Anthropic {
-                    backend.with_anthropic_api_key(token.clone())
-                } else {
-                    backend.with_bearer_token(token.clone())
-                };
+            .with_name(cfg.name.clone())
+            .with_max_buffered_response_bytes(options.max_buffered_response_bytes);
+            if cfg.provider == UpstreamProvider::Anthropic {
+                backend = backend.with_anthropic_protocol();
+                if let Some(token) = &cfg.bearer_token {
+                    backend = backend.with_anthropic_api_key(token.clone());
+                }
+            } else if let Some(token) = &cfg.bearer_token {
+                backend = backend.with_bearer_token(token.clone());
             }
             backend = backend.with_basic_auth(cfg.basic_auth);
+            if cfg.provider == UpstreamProvider::NearAi && !cfg.basic_auth {
+                if let Some(token) = cfg.bearer_token.as_ref().filter(|token| !token.is_empty()) {
+                    return Ok(Arc::new(
+                        NearAiBackend::new(backend, cfg.base_url.clone(), token.clone())
+                            .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?,
+                    ));
+                }
+            }
             Ok(Arc::new(backend))
         }
     }
@@ -167,6 +239,7 @@ pub(super) fn build_chutes_provider_backend(
     )
     .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
     .with_name(cfg.name.clone())
+    .with_max_buffered_response_bytes(options.max_buffered_response_bytes)
     .with_session_store(session_store);
     if let Some(token) = &cfg.bearer_token {
         backend = backend.with_bearer_token(token.clone());
@@ -186,50 +259,29 @@ pub(super) fn build_verifier(
     options: &UpstreamRuntimeOptions,
     sessions: &ProviderSessionRegistry,
 ) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    if let Some(provider_verifier) = build_provider_verifier(config, options, sessions)? {
-        return Ok(Some(provider_verifier));
-    }
-    match options.verifier_mode {
-        UpstreamVerifierMode::None => Ok(None),
-        UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
-            "preverified/out-of-band/v1",
-        )))),
-        UpstreamVerifierMode::AciService => {
-            let mut router = RoutingUpstreamVerifier::new();
-            for cfg in config {
-                let verifier = build_aci_service_verifier(cfg, options)?;
-                router = router.add_route(
-                    cfg.name.clone(),
-                    cfg.base_url.trim_end_matches('/').to_string(),
-                    verifier,
-                );
-            }
-            Ok(Some(Arc::new(router)))
-        }
-    }
-}
-
-fn build_provider_verifier(
-    config: &[UpstreamConfig],
-    options: &UpstreamRuntimeOptions,
-    sessions: &ProviderSessionRegistry,
-) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    if !config.iter().any(|cfg| provider_is_tee(cfg.provider)) {
-        return Ok(None);
-    }
     let mut router = RoutingUpstreamVerifier::new();
+    let mut has_routes = false;
     for cfg in config {
+        if !has_verifier_route(cfg, config, options) {
+            continue;
+        }
         let cache_seconds = cfg
             .verifier_cache_seconds
             .unwrap_or(options.verifier_cache_seconds);
         let request_timeout_seconds = cfg
             .verifier_request_timeout_seconds
             .unwrap_or(options.verifier_request_timeout_seconds);
-        let verifier: Option<Arc<dyn UpstreamVerifier>> = match cfg.provider {
+        let verifier: Arc<dyn UpstreamVerifier> = match cfg.provider {
             UpstreamProvider::OpenAiCompatible | UpstreamProvider::Anthropic => {
-                build_global_verifier_for_config(cfg, options)?
+                match options.verifier_mode {
+                    UpstreamVerifierMode::None => continue,
+                    UpstreamVerifierMode::Preverified => Arc::new(
+                        PreverifiedUpstreamVerifier::new("preverified/out-of-band/v1"),
+                    ),
+                    UpstreamVerifierMode::AciService => build_aci_service_verifier(cfg, options)?,
+                }
             }
-            UpstreamProvider::AciService => Some(build_aci_service_verifier(cfg, options)?),
+            UpstreamProvider::AciService => build_aci_service_verifier(cfg, options)?,
             UpstreamProvider::Chutes => {
                 let session_store = sessions.chutes(&cfg.name).ok_or_else(|| {
                     UpstreamConfigError::InvalidConfig(format!(
@@ -258,75 +310,113 @@ fn build_provider_verifier(
                 if let Some(interval) = cfg.chutes_e2ee_discovery_interval_seconds {
                     verifier = verifier.with_discovery_interval_seconds(interval);
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
-            UpstreamProvider::Tinfoil => Some(Arc::new(TinfoilProviderVerifier::new_with_cache(
-                request_timeout_seconds,
-                cache_seconds,
-            ))),
+            UpstreamProvider::Tinfoil => Arc::new(
+                TinfoilProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                    .with_accepted_subjects(cfg.accepted_subjects.as_deref().unwrap_or_default()),
+            ),
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
+                if let Some(period) = verification_refresh_seconds(cfg, options) {
+                    verifier = verifier.with_refresh_lead(Duration::from_secs(
+                        cache_seconds.saturating_sub(period),
+                    ));
+                }
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_api_key(token.clone());
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
             }
             UpstreamProvider::SecretAi => {
+                let accepted_subjects = cfg.accepted_subjects.as_deref().unwrap_or_default();
+                if accepted_subjects.is_empty() {
+                    tracing::warn!(upstream = %cfg.name, "SecretAI has no accepted_subjects workload pin configured");
+                }
                 let verifier = SecretAiProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
                 )
-                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
-                Some(Arc::new(verifier))
+                .with_accepted_subjects(accepted_subjects.iter().cloned());
+                Arc::new(verifier)
             }
+            UpstreamProvider::Privatemode => Arc::new(
+                PrivatemodeProviderVerifier::new(
+                    privatemode_deployment(cfg, options)?,
+                    cfg.connect_timeout_seconds
+                        .unwrap_or(options.connect_timeout_seconds),
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .map_err(|err| UpstreamConfigError::InvalidConfig(err.to_string()))?,
+            ),
             UpstreamProvider::PhalaDirect => {
                 let mut verifier = PhalaDirectProviderVerifier::new_with_cache(
                     request_timeout_seconds,
                     cache_seconds,
-                );
+                )
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_bearer_token(token.clone());
                 }
-                Some(Arc::new(verifier))
+                Arc::new(verifier)
+            }
+            // Validation guarantees the token, RPC, contract and subjects are present.
+            UpstreamProvider::ZeroGPrivateComputer => Arc::new(
+                ZeroGProviderVerifier::new(
+                    cfg.base_url.clone(),
+                    cfg.bearer_token.clone().unwrap_or_default(),
+                    cfg.zg_chain_rpc_url.clone().unwrap_or_default(),
+                    cfg.zg_serving_contract.clone().unwrap_or_default(),
+                    cfg.pccs_url.clone().or_else(|| options.pccs_url.clone()),
+                    request_timeout_seconds,
+                    cache_seconds,
+                )
+                .map_err(|e| UpstreamConfigError::InvalidConfig(e.to_string()))?
+                .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default()),
+            ),
+            UpstreamProvider::ArmetAi => {
+                let mut verifier =
+                    ArmetAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                        .with_accepted_subjects(cfg.accepted_subjects.clone().unwrap_or_default());
+                if let Some(token) = &cfg.bearer_token {
+                    verifier = verifier.with_bearer_token(token.clone());
+                }
+                Arc::new(verifier)
             }
         };
-        if let Some(verifier) = verifier {
-            router = router.add_route(
-                cfg.name.clone(),
-                cfg.base_url.trim_end_matches('/').to_string(),
-                verifier,
-            );
-        }
+        router = router.add_route(
+            cfg.name.clone(),
+            cfg.base_url.trim_end_matches('/').to_string(),
+            verifier,
+        );
+        has_routes = true;
     }
-    Ok(Some(Arc::new(router)))
+    Ok(has_routes.then(|| Arc::new(router) as Arc<dyn UpstreamVerifier>))
 }
 
-fn build_global_verifier_for_config(
+/// The static, measured sidecar a Privatemode route may select. Mutable route
+/// config names it by origin but cannot replace it.
+fn privatemode_deployment(
     cfg: &UpstreamConfig,
     options: &UpstreamRuntimeOptions,
-) -> Result<Option<Arc<dyn UpstreamVerifier>>, UpstreamConfigError> {
-    match options.verifier_mode {
-        UpstreamVerifierMode::None => Ok(None),
-        UpstreamVerifierMode::Preverified => Ok(Some(Arc::new(PreverifiedUpstreamVerifier::new(
-            "preverified/out-of-band/v1",
-        )))),
-        UpstreamVerifierMode::AciService => {
-            let has_explicit_aci_policy = cfg
-                .accepted_subjects
-                .as_ref()
-                .is_some_and(|ids| !ids.is_empty())
-                || cfg
-                    .accepted_image_digests
-                    .as_ref()
-                    .is_some_and(|digests| !digests.is_empty());
-            if has_explicit_aci_policy {
-                build_aci_service_verifier(cfg, options).map(Some)
-            } else {
-                Ok(None)
-            }
-        }
+) -> Result<Arc<PrivatemodeProxyDeployment>, UpstreamConfigError> {
+    let deployment = options.privatemode_proxy.clone().ok_or_else(|| {
+        UpstreamConfigError::InvalidConfig(format!(
+            "Privatemode upstream {:?} requires static privatemode_proxy gateway config",
+            cfg.name
+        ))
+    })?;
+    if cfg.base_url.trim_end_matches('/') != deployment.base_url() {
+        return Err(UpstreamConfigError::InvalidConfig(format!(
+            "Privatemode upstream {:?} base_url {:?} does not match static proxy endpoint {:?}",
+            cfg.name,
+            cfg.base_url,
+            deployment.base_url()
+        )));
     }
+    Ok(deployment)
 }
 
 fn build_aci_service_verifier(

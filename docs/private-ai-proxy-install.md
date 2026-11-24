@@ -12,55 +12,12 @@ The steps below install the stable release. `pap curl` and the key-custody
 flags (`--accept-subject` with `--accept-dstack-kms-root-public-key`) need
 0.2.0 or later.
 
-## npm
+## Native install (recommended)
 
-```sh
-npm install --global private-ai-proxy
-pap --help
-```
+The official install scripts download the standalone CLI from GitHub Releases
+and need no Node.js or package manager.
 
-npm installs the native executables for the current operating system and CPU
-architecture as an optional dependency. Do not install with `--omit=optional`
-or `--no-optional`: without that dependency, `pap` only prints the reinstall
-command.
-
-Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
-exact version such as `private-ai-proxy@0.2.0`. Do not use a prerelease range
-such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
-version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
-package.
-
-npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
-executables even on glibc systems. Upgrade npm if `pap` reports that they are
-missing.
-
-## Homebrew
-
-Install the CLI Formula, or the Cask with the desktop app for macOS, directly
-from the official tap:
-
-```sh
-brew install dstack-tee/private-ai/private-ai-proxy
-brew install --cask dstack-tee/private-ai/private-ai-proxy
-```
-
-To use the shorter commands after tapping once:
-
-```sh
-brew tap dstack-tee/private-ai
-brew install private-ai-proxy
-brew install --cask private-ai-proxy
-```
-
-The Formula exposes `pap`, `private-ai-proxy`, and `aci`. Homebrew owns upgrades
-and removal for both the Formula and Cask installations.
-
-The tap carries stable releases only. It is updated by pull requests that the
-tap's own workflow opens after a stable release and a maintainer merges, so it
-can trail the latest GitHub release. Use npm or the install script for beta
-versions or when you need a release the tap does not have yet.
-
-## macOS and Linux install script
+### macOS and Linux
 
 Run the official installer from the stable RedPill URL:
 
@@ -78,7 +35,8 @@ sh install.sh
 The script supports macOS and Linux on arm64 and x86_64. It installs without
 root, verifies the release archive against `SHA256SUMS`, validates its contents,
 stops the previous user backend during an upgrade, and atomically switches the
-three commands. It never edits shell startup files.
+three commands. It never edits shell startup files; if `$HOME/.local/bin` is
+not on `PATH`, the installer says so, and you add it yourself.
 
 Options:
 
@@ -92,7 +50,7 @@ Options:
 The defaults are `${XDG_DATA_HOME:-$HOME/.local/share}/private-ai-proxy` for
 versioned files and `$HOME/.local/bin` for commands.
 
-## Windows install script
+### Windows
 
 Run the official installer from PowerShell:
 
@@ -122,6 +80,61 @@ PowerShell parameters:
 
 The default installation directory is
 `%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
+
+## Homebrew
+
+Install the CLI Formula, or the Cask with the desktop app for macOS, directly
+from the official tap. On Homebrew 6+, each fully qualified command
+automatically taps the repository and trusts only the item being installed:
+
+```sh
+brew install dstack-tee/private-ai/private-ai-proxy
+brew install --cask dstack-tee/private-ai/private-ai-proxy
+```
+
+To use short names such as `brew install private-ai-proxy` or `brew upgrade
+private-ai-proxy`, trust the whole tap first:
+
+```sh
+brew tap dstack-tee/private-ai
+brew trust dstack-tee/private-ai
+brew install private-ai-proxy
+brew install --cask private-ai-proxy
+```
+
+Trust for an item installed by its fully qualified name persists, so later
+upgrades continue to work. Older Homebrew versions do not have tap trust; the
+fully qualified one-line commands still work there.
+
+The Formula exposes `pap`, `private-ai-proxy`, and `aci`. Homebrew owns upgrades
+and removal for both the Formula and Cask installations.
+
+The tap carries stable releases only. It is updated by pull requests that the
+tap's own workflow opens after a stable release and a maintainer merges, so it
+can trail the latest GitHub release. Use the native install script or npm for beta
+versions or when you need a release the tap does not have yet.
+
+## npm
+
+```sh
+npm install --global private-ai-proxy
+pap --help
+```
+
+npm installs the native executables for the current operating system and CPU
+architecture as an optional dependency. Do not install with `--omit=optional`
+or `--no-optional`: without that dependency, `pap` only prints the reinstall
+command.
+
+Install `private-ai-proxy` (the stable release), `private-ai-proxy@beta`, or an
+exact version such as `private-ai-proxy@0.2.0`. Do not use a prerelease range
+such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
+version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
+package.
+
+npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
+executables even on glibc systems. Upgrade npm if `pap` reports that they are
+missing.
 
 ## Desktop app and native packages
 

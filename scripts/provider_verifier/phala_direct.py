@@ -18,7 +18,11 @@ from .common import (
     provider_options,
     tdx_debug_enabled,
     verifier_id_for,
+    tdx_session_material,
 )
+
+ACCEPTED_SUBJECT_OPTION = "phala_direct_accepted_subject:"
+COMPOSE_SUBJECT_PREFIX = "dstack-compose:"
 
 
 def _phala_direct_compose_hash_ok(
@@ -47,13 +51,12 @@ def _phala_direct_compose_hash_ok(
 
 
 async def verify_phala_direct(request: dict[str, Any]) -> None:
-    """Verify a Phala dstack-vllm-proxy attestation endpoint reached directly.
+    """Verify a Phala Inference Guard or dstack-vllm-proxy endpoint directly.
 
-    Mirrors the NEAR AI path: fetch the per-model attestation report (version 2),
-    verify the dstack TDX quote, the report_data binding (signing address +
-    request nonce + custom-domain TLS SPKI), the compose hash, and the GPU
-    evidence; then return the attested TLS SPKI as the enforceable channel
-    binding so the forwarding backend pins the connection.
+    Verify the version 2 report's TDX quote, report_data binding (signing
+    address, request nonce and custom-domain TLS SPKI), and measured compose.
+    Return the attested TLS SPKI for the forwarding backend to pin. Record
+    GPU evidence, TCB status and OS classification as supplemental claims.
     """
     import requests
 
@@ -68,7 +71,12 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
 
     raw_origin = request.get("url_origin")
     if not raw_origin:
-        failed(provider, "PhalaDirect upstream is missing url_origin", verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect upstream is missing url_origin",
+            failure="verifier_misconfigured",
+            verifier_id=verifier_id,
+        )
         return
     url_origin = raw_origin.rstrip("/")
     bearer = (options.get("phala_direct_bearer_token") or "").strip()
@@ -82,30 +90,41 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     params = {"signing_algo": "ecdsa", "nonce": nonce, "version": "2"}
     headers = {"Authorization": f"Bearer {bearer}"} if bearer else {}
 
-    def _fetch_report() -> dict[str, Any]:
+    def _fetch_report() -> requests.Response:
         response = requests.get(
             attestation_url, params=params, headers=headers, timeout=timeout
         )
         response.raise_for_status()
-        return response.json()
+        return response
 
     try:
         # requests is blocking; run it off the event loop (as with the dstack call,
         # and consistent with the rest of the bridge's HTTP).
-        report = await asyncio.to_thread(_fetch_report)
+        response = await asyncio.to_thread(_fetch_report)
     except Exception as exc:  # noqa: BLE001
         failed(
             provider,
             f"failed to fetch PhalaDirect attestation report: {exc}",
+            failure="evidence_unavailable",
+            verifier_id=verifier_id,
+        )
+        return
+    # A report that arrived but is not JSON was fetched: it did not verify.
+    try:
+        report = response.json()
+    except ValueError as exc:
+        failed(
+            provider,
+            f"PhalaDirect attestation report is not JSON: {exc}",
+            failure="evidence_invalid",
             verifier_id=verifier_id,
         )
         return
 
     evidence = json_evidence_bundle(report, attestation_url)
 
-    # A per-model PhalaDirect endpoint returns a single attestation at the top level
-    # of the report — use it directly. (all_attestations is a multi-instance gateway
-    # shape and is not expected here.)
+    # Both producers expose the per-model attestation at the top level, and may
+    # repeat it in all_attestations. Use the top-level fields.
     attestation = report
 
     intel_quote = attestation.get("intel_quote") or attestation.get("quote")
@@ -118,32 +137,63 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     nvidia_payload = attestation.get("nvidia_payload")
 
     if not intel_quote:
-        failed(provider, "PhalaDirect report missing intel_quote", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report missing intel_quote",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
     if not signing_address:
-        failed(provider, "PhalaDirect report missing signing_address", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report missing signing_address",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
     if not tls_cert_fingerprint:
         failed(
             provider,
-            "PhalaDirect report did not include tls_cert_fingerprint; the proxy "
+            "PhalaDirect report did not include tls_cert_fingerprint; the producer "
             "must serve attestation version 2 (custom-domain TLS SPKI binding)",
+            failure="evidence_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
         return
     if report_nonce is not None and str(report_nonce).lower() != nonce.lower():
-        failed(provider, "PhalaDirect report nonce did not match request nonce", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            "PhalaDirect report nonce did not match request nonce",
+            failure="binding_mismatch",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     # Reject a TD running in debug/untrusted mode: its CPU state and private
     # memory are accessible to the host, so the TEE guarantee does not hold.
     try:
         if tdx_debug_enabled(bytes.fromhex(intel_quote)):
-            failed(provider, "PhalaDirect TDX quote is in debug mode (TD_ATTRIBUTES TUD set)", evidence=evidence, verifier_id=verifier_id)
+            failed(
+                provider,
+                "PhalaDirect TDX quote is in debug mode (TD_ATTRIBUTES TUD set)",
+                failure="policy_rejected",
+                evidence=evidence,
+                verifier_id=verifier_id,
+            )
             return
     except ValueError as exc:
-        failed(provider, f"PhalaDirect intel_quote is not valid TDX quote bytes: {exc}", evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            f"PhalaDirect intel_quote is not valid TDX quote bytes: {exc}",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     if isinstance(vm_config, (dict, list)):
@@ -162,6 +212,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             f"dstack quote verification failed: {dstack_result.get('reason', 'unknown')}",
+            failure="quote_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -170,7 +221,32 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
     # 2. Compose hash: SHA256(app_compose) == the RTMR3-measured compose hash.
     compose_ok, compose_reason = _phala_direct_compose_hash_ok(info, dstack_result)
     if not compose_ok:
-        failed(provider, compose_reason, evidence=evidence, verifier_id=verifier_id)
+        failed(
+            provider,
+            compose_reason,
+            failure="provenance_not_accepted",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
+        return
+
+    dstack_details = dstack_result["details"]
+    app_info = dstack_details["app_info"]
+    compose_hash = app_info["compose_hash"]
+    compose_pins = {
+        key[len(ACCEPTED_SUBJECT_OPTION):]
+        for key, value in options.items()
+        if key.startswith(ACCEPTED_SUBJECT_OPTION + COMPOSE_SUBJECT_PREFIX) and value == "true"
+    }
+    subject = f"{COMPOSE_SUBJECT_PREFIX}sha256:{str(compose_hash).lower()}"
+    if compose_pins and subject not in compose_pins:
+        failed(
+            provider,
+            "PhalaDirect measured compose hash is not in accepted_subjects",
+            failure="provenance_not_accepted",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
         return
 
     # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
@@ -181,6 +257,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             "could not obtain report_data from PhalaDirect quote; cannot verify nonce/address/TLS binding",
+            failure="evidence_invalid",
             evidence=evidence,
             verifier_id=verifier_id,
         )
@@ -195,17 +272,18 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         failed(
             provider,
             f"PhalaDirect report_data binding failed: {binding.get('error') or 'mismatch'}",
+            failure="binding_mismatch",
             evidence=evidence,
             verifier_id=verifier_id,
         )
         return
 
     # 4. GPU (NVIDIA confidential computing) evidence — SUPPLEMENTAL, never a gate.
+    # The NVIDIA path decodes JWTs without signature verification. Its outcome
+    # does not authenticate GPU identity or prove continued use of any device.
     # The CPU TEE quote + report_data binding + compose integrity above are the
-    # trust gate. A standalone gateway-side NRAS check only proves a CC-capable
-    # GPU exists for a nonce; it does not prove that GPU is bound to this CPU TEE
-    # or serving this request (that is the measured serving software's job, inside
-    # the quote). So we record the GPU outcome as metadata and do not fail on it.
+    # trust gate. Record the supplemental GPU outcome and nonce matching as
+    # metadata; neither establishes binding to the serving CPU or request.
     gpu_evidence_present = False
     gpu_evidence_nonce_matched: bool | None = None
     gpu_attested = False
@@ -228,30 +306,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         except Exception:  # noqa: BLE001 - supplemental; a GPU error is never fatal
             gpu_attested = False
 
-    # Surface the granular TDX TCB status (e.g. "UpToDate", "OutOfDate") so the
-    # session layer can populate a tri-state `tcb_up_to_date` claim instead of
-    # only seeing the dstack verifier's overall is_valid.
-    dstack_details = dstack_result.get("details") if isinstance(dstack_result, dict) else None
-    tcb_status = dstack_details.get("tcb_status") if isinstance(dstack_details, dict) else None
-
-    # OS-image provenance (production-vs-dev decision).
-    #
-    # The attested os_image_hash (proved by the dstack verifier — is_valid implies
-    # os_image_hash_verified) is SHA256(sha256sum.txt) of dstack's published OS
-    # image, and that manifest pins SHA256(metadata.json) — so the image's `is_dev`
-    # flag is cryptographically bound to the attested hash. resolve_os_image()
-    # re-downloads the published image, re-verifies that binding, and reads is_dev
-    # (known fleet images are seeded, so the common case is offline). A dev image
-    # (dstack-nvidia-dev-*, SSH/serial-console enabled) is NOT a production OS.
-    #
-    # This is recorded metadata, not a gate (mirrors how GPU evidence is handled):
-    # the deployed fleet currently runs dev images, and gating here would reject
-    # them. The session layer decides policy. None means "could not resolve"
-    # (unknown hash + offline/unreachable) — never silently treated as production.
-    app_info = dstack_details.get("app_info") if isinstance(dstack_details, dict) else None
-    os_image_hash = app_info.get("os_image_hash") if isinstance(app_info, dict) else None
-    if not os_image_hash and isinstance(dstack_details, dict):
-        os_image_hash = dstack_details.get("os_image_hash")
+    # The verified OS image hash binds the published metadata, including is_dev.
+    # Known hashes resolve offline. Unresolved hashes leave the OS claim unknown.
+    tcb_status = dstack_details.get("tcb_status")
+    os_image_hash = app_info.get("os_image_hash") or dstack_details.get("os_image_hash")
 
     os_image = resolve_os_image(os_image_hash) if os_image_hash else None
     if os_image is not None:
@@ -262,6 +320,10 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         os_image_is_dev = None
         os_image_version = None
         production_os_image = None
+
+    material = tdx_session_material(intel_quote)
+    if material:
+        material["session_material_version"] = "phala-direct/1"
 
     emit(
         {
@@ -276,6 +338,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 }
             ],
             "provider_claims": {
+                **material,
                 "trust_boundary": "phala-dstack-cvm",
                 "evidence_scope": "model_instance",
                 "canonical_model_id": request["model_id"],
@@ -283,6 +346,7 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "tls_spki_from_report_data": True,
                 "signing_address": signing_address,
                 "report_data_nonce_matched": True,
+                "compose_hash": compose_hash,
                 "compose_hash_verified": True,
                 "tdx_debug_mode": False,
                 # OS-image provenance, resolved from dstack's published image and

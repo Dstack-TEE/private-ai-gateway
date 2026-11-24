@@ -87,6 +87,20 @@ test('prepared requests retain authorization for receipt lookup', async () => {
   assert.equal(prepared.authorization, 'Bearer request-token');
 });
 
+test('native FormData carries policy in the header without changing its parts', async () => {
+  const form = new FormData();
+  form.set('model', 'whisper-large-v3');
+  form.set('file', new Blob([new Uint8Array([0, 255])], { type: 'audio/wav' }), 'audio.wav');
+  const prepared = await prepareRequest('https://gateway.example/v1/audio/transcriptions', {
+    method: 'POST', body: form,
+  }, { baseURL: 'https://gateway.example/v1' }, {
+    supported_multipart_constraint_endpoints: ['/v1/audio/transcriptions'],
+  });
+  assert.deepEqual(JSON.parse(prepared.request.headers.get('x-aci-provider') ?? ''), { aci_verified: true });
+  const outgoing = await prepared.request.formData();
+  assert.equal(outgoing.get('provider'), null);
+});
+
 test('connectAci rejects a self-consistent report without a hardware quote', async () => {
   const nonceReport = async (url: string): Promise<AttestationReport> => {
     const nonce = new URL(url).searchParams.get('nonce');

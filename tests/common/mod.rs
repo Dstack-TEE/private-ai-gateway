@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+pub mod admission;
+
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
@@ -32,8 +36,19 @@ pub fn verified_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEv
         result: VerificationResult::Verified,
         required: true,
         channel_bindings: vec![test_channel_binding()],
+        evidence: Some(test_evidence()),
         ..Default::default()
     }
+}
+
+/// The evidence bundle [`verified_event`] carries: every stored session needs
+/// a complete bundle, its digest plus the data that hashes to it (§8.2).
+pub fn test_evidence() -> serde_json::Value {
+    let evidence = private_ai_gateway::aggregator::session::EvidenceRef::from_bytes(
+        "application/json",
+        br#"{"fixture":"verifier-input"}"#,
+    );
+    serde_json::json!({ "digest": evidence.digest, "data": evidence.data_uri })
 }
 
 /// The enforceable channel binding [`verified_event`] pins: the fail-closed
@@ -60,15 +75,15 @@ pub fn failed_event(upstream_name: &str, model_id: &str) -> UpstreamVerifiedEven
 /// Builds an event the way a mock `UpstreamVerifier` does: copying
 /// `upstream_name` / `model_id` / `url_origin` / `required` straight off the
 /// request, with the given `result` (verified events get an enforceable
-/// binding). The caller fills `verifier_id` and any `reason` / `evidence` via
+/// binding and evidence). The caller fills `verifier_id` and any `reason` via
 /// struct-update syntax.
 pub fn event_from_request(
     request: &UpstreamVerificationRequest,
     result: VerificationResult,
 ) -> UpstreamVerifiedEvent {
-    let channel_bindings = match result {
-        VerificationResult::Verified => vec![test_channel_binding()],
-        VerificationResult::Failed => Vec::new(),
+    let (channel_bindings, evidence) = match result {
+        VerificationResult::Verified => (vec![test_channel_binding()], Some(test_evidence())),
+        VerificationResult::Failed => (Vec::new(), None),
     };
     UpstreamVerifiedEvent {
         upstream_name: request.upstream_name.clone(),
@@ -77,6 +92,7 @@ pub fn event_from_request(
         required: request.required,
         result,
         channel_bindings,
+        evidence,
         ..Default::default()
     }
 }
@@ -287,4 +303,60 @@ impl Quoter for StubQuoter {
     async fn get_quote_raw(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
         Ok(self.quote_for(report_data.to_vec()))
     }
+}
+
+/// Load a task-local upstream configuration for session HTTP tests, then remove
+/// its file: these tests only read the manager's in-memory snapshot.
+pub fn session_config(
+    config: serde_json::Value,
+) -> Arc<private_ai_gateway::aggregator::upstream_config::UpstreamConfigManager> {
+    use private_ai_gateway::aggregator::upstream_config::{
+        UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let manager = UpstreamConfigManager::load(
+        &path,
+        UpstreamRuntimeOptions {
+            max_buffered_response_bytes:
+                private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
+            verifier_mode: UpstreamVerifierMode::None,
+            accepted_subjects: Vec::new(),
+            accepted_image_digests: Vec::new(),
+            accepted_dstack_kms_root_public_keys: Vec::new(),
+            pccs_url: None,
+            verifier_cache_seconds: 300,
+            connect_timeout_seconds: 10,
+            read_timeout_seconds: 600,
+            verifier_request_timeout_seconds: 60,
+            privatemode_proxy: None,
+        },
+    );
+    Arc::new(manager.unwrap())
+}
+
+/// A real 4096-dimensional float batch exceeding the default response budget.
+pub fn large_embeddings_response() -> Vec<u8> {
+    let vector = std::iter::repeat_n("-0.006929283495992422", 4096)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut body = String::from(r#"{"object":"list","model":"provider-model","data":["#);
+    for index in 0..1000 {
+        if index != 0 {
+            body.push(',');
+        }
+        body.push_str(&format!(
+            r#"{{"object":"embedding","index":{index},"embedding":[{vector}]}}"#
+        ));
+    }
+    body.push_str(r#"],"usage":{"prompt_tokens":290000,"total_tokens":290000}}"#);
+    body.into_bytes()
+}
+
+/// A single-image multipart edit with caller-controlled filename and MIME headers.
+pub fn image_edit_request(model: &str, n: usize) -> Vec<u8> {
+    let mut raw = format!("--upload\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--upload\r\nContent-Disposition: form-data; name=\"prompt\"\r\n\r\nmake it blue\r\n--upload\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\n{n}\r\n--upload\r\nContent-Disposition: form-data; name=\"image\"; filename=\"private.exe\"\r\nContent-Type: text/private\r\n\r\n").into_bytes();
+    raw.extend_from_slice(b"\x89PNG\r\n\x1a\nimage\r\n--upload--\r\n");
+    raw
 }

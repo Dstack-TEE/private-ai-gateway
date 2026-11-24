@@ -11,7 +11,7 @@ mod common;
 use axum::{
     body::{to_bytes, Body},
     extract::RawQuery,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     routing::get,
     Json, Router,
 };
@@ -22,7 +22,7 @@ use private_ai_gateway::aggregator::upstream_config::{
     UpstreamConfigManager, UpstreamRuntimeOptions, UpstreamVerifierMode,
 };
 use private_ai_gateway::http::{build_router_with_admin, build_router_with_admin_and_middleware};
-use private_ai_gateway::middleware::{Middleware, MiddlewareConfig, PrefixHashKey};
+use private_ai_gateway::middleware::{hash_api_key, Middleware, MiddlewareConfig, PrefixHashKey};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -32,22 +32,17 @@ use common::{StaticKeyProvider, StubQuoter};
 /// A middleware with a fixed prefix-hash key; the gateway derives the real
 /// key from dstack KMS.
 fn new_middleware(config: &MiddlewareConfig) -> Result<Middleware, String> {
-    Middleware::new(PrefixHashKey::new([7; 32]), config)
-}
-
-fn temp_config_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "private-ai-gateway-middleware-catalog-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    Middleware::new(
+        PrefixHashKey::new([7; 32]),
+        private_ai_gateway::middleware::CacheSaltKey::new([8; 32]),
+        config,
+    )
 }
 
 fn runtime_options() -> UpstreamRuntimeOptions {
     UpstreamRuntimeOptions {
+        max_buffered_response_bytes:
+            private_ai_gateway::aci::upstream::MAX_BUFFERED_UPSTREAM_RESPONSE_BYTES,
         verifier_mode: UpstreamVerifierMode::Preverified,
         accepted_subjects: vec![],
         accepted_image_digests: vec![],
@@ -57,11 +52,17 @@ fn runtime_options() -> UpstreamRuntimeOptions {
         connect_timeout_seconds: 10,
         read_timeout_seconds: 600,
         verifier_request_timeout_seconds: 60,
+        privatemode_proxy: None,
     }
 }
 
-fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
-    let path = temp_config_path();
+fn build_service() -> (
+    tempfile::TempDir,
+    Arc<AciService>,
+    Arc<UpstreamConfigManager>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upstreams.json");
     let manager = Arc::new(UpstreamConfigManager::load(&path, runtime_options()).unwrap());
     let service = Arc::new(
         AciService::new_with_upstream_verifier(
@@ -75,7 +76,7 @@ fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
         )
         .unwrap(),
     );
-    (service, manager)
+    (directory, service, manager)
 }
 
 // Spawn a stub control plane that labels each catalog so the test can prove the
@@ -83,23 +84,29 @@ fn build_service() -> (Arc<AciService>, Arc<UpstreamConfigManager>) {
 // test can prove catalog filters (e.g. `?zdr=true`) survive the relay. The
 // control plane serves catalogs without the `/v1` prefix.
 async fn spawn_stub_control() -> String {
+    fn key_hash(headers: &HeaderMap) -> Value {
+        headers
+            .get("x-api-key-hash")
+            .and_then(|value| value.to_str().ok())
+            .map_or(Value::Null, |hash| json!(hash))
+    }
     let app = Router::new()
         .route(
             "/models",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["m1"], "source": "control-models", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["m1"], "source": "control-models", "query": q, "keyHash": key_hash(&headers) }))
             }),
         )
         .route(
             "/models/*rest",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["ns"], "source": "control-sub", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["ns"], "source": "control-sub", "query": q, "keyHash": key_hash(&headers) }))
             }),
         )
         .route(
             "/embeddings/models",
-            get(|RawQuery(q): RawQuery| async move {
-                Json(json!({ "data": ["e1"], "source": "control-embeddings", "query": q }))
+            get(|headers: HeaderMap, RawQuery(q): RawQuery| async move {
+                Json(json!({ "data": ["e1"], "source": "control-embeddings", "query": q, "keyHash": key_hash(&headers) }))
             }),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -136,7 +143,7 @@ async fn relays_catalogs_from_control() {
         })
         .unwrap(),
     );
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
 
     let (status, body) = get_json(app.clone(), "/v1/models").await;
@@ -171,7 +178,7 @@ async fn relays_catalog_query_string_to_control() {
         })
         .unwrap(),
     );
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
 
     let (status, body) = get_json(app.clone(), "/v1/models?zdr=true").await;
@@ -198,9 +205,50 @@ async fn relays_catalog_query_string_to_control() {
     assert_eq!(body["query"], Value::Null);
 }
 
+// The control plane answers a catalog for the caller, so every catalog route
+// relays the hash of the key the request carried, and only the hash. A request
+// with no key relays none.
+#[tokio::test]
+async fn relays_caller_key_hash_to_control() {
+    let control_url = spawn_stub_control().await;
+    let middleware = Arc::new(
+        new_middleware(&MiddlewareConfig {
+            control_url,
+            control_token: None,
+            control_timeout_ms: Some(2_000),
+            control_post_timeout_ms: Some(2_000),
+            sse_keepalive_ms: None,
+            send_request_features: None,
+            tee_only_domains: Vec::new(),
+        })
+        .unwrap(),
+    );
+    let (_directory, service, manager) = build_service();
+    let app = build_router_with_admin_and_middleware(service, manager, None, middleware);
+
+    for uri in [
+        "/v1/models",
+        "/v1/models/my-namespace",
+        "/v1/embeddings/models",
+    ] {
+        let request = Request::builder()
+            .uri(uri)
+            .header("authorization", "Bearer sk-caller")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["keyHash"], hash_api_key("sk-caller"), "{uri}");
+
+        let (_, body) = get_json(app.clone(), uri).await;
+        assert_eq!(body["keyHash"], Value::Null, "{uri}");
+    }
+}
+
 #[tokio::test]
 async fn direct_mode_sub_catalogs_remain_not_found() {
-    let (service, manager) = build_service();
+    let (_directory, service, manager) = build_service();
     let app = build_router_with_admin(service, manager, None);
 
     let (status, _) = get_json(app.clone(), "/v1/models/my-namespace").await;

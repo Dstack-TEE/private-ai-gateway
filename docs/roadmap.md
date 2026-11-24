@@ -1,24 +1,42 @@
-# Project Status and Roadmap
+# Project status and roadmap
 
 This page records implementation status and the next engineering priorities. It is non-normative and carries no release-date commitment.
 
-Last reviewed: 2026-09-28.
+Last reviewed: 2026-11-16.
 
 ## Implemented
 
-- OpenAI chat, completions, embeddings, and Responses endpoints, and Anthropic Messages.
+- OpenAI chat, completions, embeddings, Responses, buffered reranking, image generation and edits, audio transcription and speech synthesis, and native System One endpoints, and Anthropic Messages.
 - Direct-upstream routing, and an in-process middleware path driven by an HTTP control plane, with SSE keepalives and failure accounting.
-- Runtime upstream replacement: validated, redacted, atomically persisted, prewarmed, and refreshed in the background.
+- Runtime upstream replacement: validated, redacted, atomically persisted, and refreshed in the background.
 - Provider adapters for OpenAI-compatible, Anthropic, ACI service, Chutes, Tinfoil, NEAR AI, SecretAI, and Phala direct, with enforced TLS SPKI and Chutes E2EE key bindings.
 - Fail-closed request constraints and session allowlists.
 - Signed receipts, attestation reports, and immutable attested sessions.
 - Multi-domain downstream TLS identities and TEE-only hostnames.
 - E2EE v2 for chat, completions, and embeddings.
 - Private AI Proxy: the desktop app, per-user backend, and `pap` CLI (`verify`, `audit`, `sessions`, `curl`, `send`, `serve`), with coding-agent setup.
-- TypeScript packages: `@phala/aci-verifier` (browser verification, and pinned Node and Bun transports that audit receipts and sessions), `@phala/aci-provider`, and Pi and OpenCode adapters for generic ACI, RedPill, and Phala Cloud. The Pi and OpenCode adapters verify each receipt and its cited session before a response completes.
+- TypeScript package: `@phala/aci-verifier` (browser verification, and pinned Node and Bun transports that audit receipts and sessions). Use `pap` for coding agents and provider access; see [Retired packages](../clients/README.md#retired-packages).
 - Unit and integration tests, ACI test vectors, and a live provider suite.
 
 Providers prove different claims; see [Provider verification](providers/README.md).
+
+Buffered image generation, OpenAI SDK multipart edits, reranking (including
+SDK aliases), and speech synthesis are available in direct and middleware modes,
+with receipts and explicit per-endpoint middleware opt-in. See the
+[API reference](api-reference.md#reranking) for contracts and limits.
+Streaming media, media E2EE, JSON/URL/file-ID edit inputs, GIF/SVG preview parameters,
+and public-launch compliance controls remain out of scope.
+
+Audio transcription (`/v1/audio/transcriptions`) supports buffered multipart,
+JSON/verbose JSON, strict duration accounting, receipts, and per-second pricing
+in direct and middleware modes. Clients must ship multipart fail-closed policy
+and capability negotiation before this gateway endpoint is enabled. Launch
+requires NEAR `openai/whisper-large-v3` live verification and control-plane
+idempotent audio ingestion, matching rounding, and validated pricing.
+Privatemode `whisper-large-v3` remains blocked pending pinned-proxy multipart
+verification. Qwen3-ASR self-hosting on the planned shared Phala H200 is a
+separate task; translations, streaming, text/subtitle responses, and audio E2EE
+are outside v1.
 
 ## Known limitations
 
@@ -30,9 +48,9 @@ These are gaps in the implementation. What ACI does not cover by design is in
 - Receipts live in memory for one hour and are lost on restart. They do not name the downstream domain or session a request used.
 - Sessions are stored as content-addressed JSONL, not in a witnessed log.
 - Router providers (NEAR AI, Tinfoil, SecretAI) are trusted for per-model TEE coverage, and the instance that served a request is not identified.
-- Chutes instance sessions carry no evidence, so a client cannot re-check a Chutes receipt's provider evidence; see item 4 of the [conformance gap review](reviews/aci-spec-conformance-gaps.md).
+- Clients check that a session's evidence matches its digest, but not what the evidence proves. See item 12 of the [conformance gap review](reviews/aci-spec-conformance-gaps.md).
 - A non-`UpToDate` TCB is recorded as a refuted claim, not a failure. Relying parties enforce their own TCB policy.
-- E2EE covers selected fields, not metadata. It is not available on `/v1/responses` or as an Anthropic Messages profile.
+- E2EE covers selected fields, not metadata. It is not available on `/v1/responses`, `/v1/images/generations`, or as an Anthropic Messages profile.
 - The Private AI Proxy Local API and `pap serve` are plain local HTTP endpoints, not TEE-backed services.
 - The example control plane covers only the request-decision contract. The deployment example leaves authentication, rate limiting, observability, secret delivery, and availability to the operator.
 
@@ -62,13 +80,12 @@ These are gaps in the implementation. What ACI does not cover by design is in
 - A durable receipt store that survives restarts and serves multiple replicas.
 - Production guidance for state backup, recovery, permissions, growth, replica ownership, health checks, and alerting.
 - Metrics for verification cache health, refresh results, binding mismatches, and the Chutes nonce pool.
-- Per-upstream refresh scheduling, a real nonce count on the Chutes `refreshed_via_verifier` path, and a low-watermark nonce refill.
+- A real nonce count on the Chutes `refreshed_via_verifier` path and a low-watermark nonce refill.
 - A pinned runner image or reviewed prebuilt binary instead of the runtime apt and rustup bootstrap.
 - Multi-region identity and state: KMS application identity, receipt locality, failover, and session availability.
 
 ### API, clients, and control plane
 
-- Native structured decisions through `POST /v1/systemone`; see the [System One design proposal](systemone-design.md). The endpoint is not implemented.
 - Optional receipt and session-policy checks in `pap curl`.
 - Define or reject an Anthropic Messages E2EE profile.
 - Responses API conformance tests, and live coverage for streaming, tools, structured output, multimodal input, context limits, and caching.

@@ -12,12 +12,38 @@ run the same executable with the same commands. On an interactive terminal
 outside `--json` and `--json-events`, `aci` prints a one-line note pointing to
 `pap`. Use `pap` or `private-ai-proxy` in new scripts and documentation.
 
+## First Run
+
+```sh
+pap profiles login work        # sign in to RedPill or Phala in the browser
+pap start                      # verify the service and start protection
+pap agents list                # the coding agents found on this machine
+pap agents connect codex       # route one through the Local API
+```
+
+Connect an agent after `pap start`: with protection off the connection is only
+saved, and the command exits `1` saying the agent still uses its own provider.
+
+With an API key instead of an account, replace the first step with
+`pap profiles add --id work --name Work --url <service URL>`, which asks for
+the key at a hidden prompt. `pap status` shows what protection is doing and why
+at any time.
+
+After a restart of the machine, `pap service start` starts the backend and
+resumes protection that was on; until then connected agents cannot reach the
+Local API. The Linux packages ship a systemd user unit that does this at login
+([Standalone CLI](cli-distribution.md#standalone-cli)).
+
 ## Discover Commands
 
 Start with `pap --help` and `<command> --help`.
 
 `pap completions bash` prints shell completion code without installing it or
-changing shell configuration. Other supported shells are listed in its help.
+changing shell configuration. It registers the name you run. Use
+`pap completions bash` for `pap`, `private-ai-proxy completions bash` for the
+canonical name, or
+`aci completions bash` for the legacy alias. Other supported shells are listed
+in its help.
 
 ## ACI Commands
 
@@ -36,6 +62,32 @@ These commands are the relying party of the
 `verify`, `audit`, `sessions`, `send` and `curl` do not start the backend
 service or read the settings files.
 
+Attestation, receipt, and session responses are size-bounded: 4 MiB for
+attestation documents, 16 MiB for session listings, 32 MiB for session records,
+and 64 KiB for receipts. Each attestation, session, and receipt response must
+arrive within 30 seconds, including headers and body. Session audits may take
+longer in total when there are many sessions; `send`'s session fetch uses the
+same per-response bound. Service verification also has a 30-second overall
+deadline; a timeout fails closed.
+
+Human-readable fields replace terminal controls, including line breaks and
+tabs, with spaces. Transcript explanations render each sanitized line behind a
+`|` gutter. Echoed streamed replies in `send` preserve line breaks and tabs.
+JSON output and captured body bytes are unchanged.
+
+When stdout's reader closes, output ends quietly. Other output failures make
+`send` fail; `serve` reports them on stderr and continues serving.
+
+Online verification fetches the quote's DCAP collateral only from the Phala
+PCCS (`https://pccs.phala.network`). The collateral is Intel-signed and checked
+to Intel's root; the id-1 detail names the PCCS, and a failure reports why the
+fetch failed, including the underlying transport or HTTP error.
+
+Online commands (`verify`, `send`, `serve`, `sessions`, and `curl`) reject URLs
+containing a username or password, and a service base URL with a query or
+fragment, so no secret in a URL reaches their output. Supply credentials
+through their documented API key inputs or curl's header-file option instead.
+
 The pinned channel uses the TLS keys the verified report declares for the
 host: every attested TLS key when none is domain-scoped, otherwise only the
 entry its `downstream_tls_binding` names (spec 4.2). A failed verification or a
@@ -47,6 +99,10 @@ from an argument that other local processes can see. The old `--api-key KEY`
 option is hidden, still works with a warning, and will be removed in 0.3
 (see [Removal in 0.3](configuration.md#removal-in-03)).
 
+Use `pap send <url> --max-tokens <N>` to limit the generated response to a
+positive number of tokens. This sends `max_tokens: N` in the chat completion
+body; when omitted, no token limit is sent.
+
 ### Verification Policy
 
 `verify`, `audit`, `sessions`, `send`, `curl` and `serve` accept the same
@@ -57,7 +113,9 @@ policy flags:
 | `--accept-compose <hex>` | Compose hash to accept; repeatable. Without it the compose measurement is verified and reported, and you appraise its provenance yourself. |
 | `--accept-subject app-id:0x<hex>` | Measured dstack app-id to accept for key custody; repeatable. |
 | `--accept-dstack-kms-root-public-key <hex>` | dstack KMS root public key the key-custody chain must end at; repeatable. |
-| `--require-production-os` | Require the attested OS image to be a reviewed production image. |
+
+A nonempty `--require-claim` policy always fails closed when no session can be
+audited, including direct services and unverified or missing-session receipts.
 
 Key custody (check id-5) is checked when both custody flags are given; one
 without the other is an error. The receipt key's dstack KMS signature chain
@@ -67,28 +125,30 @@ anchor: nothing measured corroborates it (spec 4.1), so any app under the same
 KMS root could claim it. Without the custody flags id-5 is an honest skip; no
 trust anchors are built in.
 
-Under `--require-production-os`, the client reads the RTMR3-bound
-`os-image-hash` and requires it to be in the verifier's reviewed
-production-image allowlist. Development and unknown hashes fail closed.
-Updating the allowlist requires a verifier release.
+Clients do not check whether the gateway runs a production or development dstack
+OS image. A development image permits operator access to the gateway. Users who
+need assurance about the OS image should verify the quote, event log, and VM
+configuration with an independent dstack verifier.
 
-This option is an appraisal step, not a dstack boot verifier. The client
-verifies the DCAP quote and replays RTMR3, but it does not reconstruct MRTD or
-RTMR0-2 from the dstack OS image. Before relying on `policy-os: pass`, run a
-dstack verifier over the same quote, event log, and VM configuration, and
-require `is_valid: true`; that result establishes `os_image_hash` from those
-boot measurements. See
-[How the OS image is classified](../../../docs/providers/phala-direct/verification.md#how-the-os-image-is-classified).
+### Offline audit
+
+`pap audit` receipt-only options (`--request-body`, `--response-body`,
+`--session`, `--require-claim`, `--pin`, and `--require-verified`) require
+`--receipt`; using one without it is a usage error (exit 2).
 
 ### One pinned curl request
 
 ```sh
 pap curl https://tee.redpill.ai/v1/chat/completions -- \
   --fail-with-body --no-buffer \
-  --header "Authorization: Bearer $ACI_API_KEY" \
+  --header @auth-headers.txt \
   --header 'content-type: application/json' \
   --data-binary '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hi"}],"provider":{"aci_verified":true}}'
 ```
+
+Create `auth-headers.txt` with an `Authorization: Bearer …` line and restrict
+its permissions to your user. Passing the file path keeps the key out of the
+process argument list; do not pass a literal authorization header in argv.
 
 `pap curl` verifies a fresh service report under the
 [verification policy](#verification-policy) flags, then starts system curl with
@@ -116,8 +176,13 @@ URL is never globbed, so `[1-3]` or `{a,b}` in it is sent as written.
 | Exit code | Meaning |
 | --- | --- |
 | 125 | pap refused the request or could not start curl: invalid options, failed verification, or curl missing. curl did not run. |
-| 128 + N | curl was killed by signal N (Unix). |
+| Signal N (Unix) | curl received signal N; shells normally report this as 128 + N. |
 | Any other | curl's own exit code; 0 is success. |
+
+On Unix, pap replaces itself with curl after verification, so curl keeps the
+same PID, receives signals directly, and determines the exact exit status or
+signal. Windows starts curl and waits for its exit code. Child processes do
+not inherit the CLI alias variable (`PRIVATE_AI_PROXY_ALIAS`).
 
 Command-line usage errors, such as a missing URL, exit 2 before verification.
 
@@ -130,6 +195,34 @@ Anthropic-compatible client can use it as a local base URL.
 [Quickstart step 4](../../../docs/quickstart.md#4-use-it-as-a-local-endpoint)
 walks through it against a live service.
 
+Both the proxy and its control listener (`127.0.0.1:4183`, changed by
+`--control`) bind only loopback addresses by default. Non-loopback addresses,
+including wildcard binds, require `--allow-network-access`. These listeners
+use plain HTTP, so allow network access only on a trusted network.
+
+Both listeners reject a request with HTTP 403 unless `Host` is an IP literal
+(IPv4 or bracketed IPv6, optionally with a port), `localhost` on a loopback
+listener, or a name supplied with repeatable `--client-host NAME`. A supplied
+name is accepted with or without the listener's port, case-insensitively, on
+both listeners. The value must be a hostname without a port, path, scheme or
+userinfo. Other names, missing or duplicate Host headers, and malformed hosts
+are refused before handling the request. IP literals and `localhost` cannot be
+rebound by DNS; adding a `--client-host` name is an explicit DNS-rebinding
+trade-off, so add only names you control.
+
+For example, a Docker container can reach a host-running proxy by its Docker
+host name:
+
+```sh
+pap serve https://gateway.example \
+  --listen 0.0.0.0:4180 --control 0.0.0.0:4183 \
+  --allow-network-access --client-host host.docker.internal
+curl http://host.docker.internal:4180/v1/models
+```
+
+A re-verification timeout keeps the previously trusted identity and releases
+queued requests to retry the normal failure path.
+
 Requests:
 
 - Every method and path is forwarded to the same path on the service over the
@@ -140,6 +233,12 @@ Requests:
 - Every JSON POST body gets `provider.aci_verified: true` (spec 5.3), so an
   aggregator refuses rather than serve the request through an unverified
   upstream. `--allow-unverified` drops this demand.
+- When verified serving or session pins are active, JSON request bodies must
+  have an object top level, and `provider` must be an object or `null`.
+  `provider: null` is treated like an absent provider and receives the local
+  constraints. If present, `provider.aci_session_ids` must be an array of
+  strings. Malformed JSON shapes are rejected locally with HTTP 400 before an
+  upstream call; non-JSON POST bodies pass through unchanged.
 - Session pinning is opt-in, in one of two ways that cannot be combined.
   - `--session <id>` (repeatable) defines a fixed accepted set. Each POST uses
     the intersection with its own pins, or this set when it has none, and a
@@ -187,7 +286,8 @@ its receipt audits.
 after verification and once the listeners are bound, with `proxy_url`,
 `control_url` and the active `policy`; `request_complete` for each request and
 its optional `receipt_id`; `blocked` when forwarding fails closed;
-`identity_updated` after a successful re-verification; and `fatal` before an
+`identity_updated` after a successful re-verification; `identity_renewed` for
+same-family refreshes, with the same identity payload; and `fatal` before an
 unsuccessful exit. Human diagnostics stay on stderr.
 
 ## Lifecycle
@@ -206,6 +306,9 @@ pap service stop --yes
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
+`service restart` restarts the backend without ending the protection session:
+agents stay pointed at the Local API, which answers again once the new backend
+has verified the service.
 When no backend is running, `service stop` restores nothing, and agents may
 still point at the Local API: after an update that was not relaunched, a crash,
 or a Windows sign-out. `stop --offline` does what `stop` does, without a
@@ -254,8 +357,8 @@ restored from disk.
 ## Status
 
 Human `status` summarizes the backend PID/version, active profile and service,
-saved credential presence, a settings file error, Local API exposure, production OS
-policy, TEE identity/checks, catalog size and current-session usage. Retained
+saved credential presence, a settings file error, Local API exposure, TEE
+identity/checks, catalog size and current-session usage. Retained
 catalogs are labeled cached when protection is inactive. Reported costs are
 session totals, not a billing reconciliation. Request contents and tokens are
 never included in this summary. `--json` retains the full existing state shape.
@@ -267,6 +370,37 @@ presentation derived from them (`phase`, such as `protected` or
 `profileRequired`; `title`; `tone`; and `action`, the operation the
 protection switch offers). `protection` is additive and always describes the
 state it accompanies.
+
+When the service answers but fails a verification check, such as a TLS key
+that is not in its attested keyset (id-6), protection stays off (fail closed).
+`start` exits `1` with code `service_verification_failed` and a message naming
+each failed check, its spec section and detail, and what to do. The protection
+session stays on, so the backend keeps retrying with backoff until `stop`.
+`status` keeps the reason visible, also while a retry runs:
+
+```text
+Not protected (verification failed; retrying)
+…
+Checks: 5 passed, 1 failed, 0 skipped
+  Failed: id-6 the channel actually used is bound to the attested keyset (TLS SPKI or E2EE key) [9.1(6)]
+…
+Retry: verifying again (attempt in progress)
+Error: Service verification failed: id-6 … [9.1(6)] — observed SPKI sha256:… is NOT an attested entry clients pin. The service's TLS certificate is not in its attested keyset. The operator must restart or fix the gateway; protection stays off.
+```
+
+While a retry is in progress, human output replaces transient verifier progress
+with `Retry: verifying again (attempt in progress)`.
+
+In JSON, `gateway.verificationFailed` is `true`, `gateway.protection.phase` is
+`verificationFailed`, `gateway.checks` holds the transcript with the failed
+check's `status` `fail`, and `gateway.error` holds the message. While a retry
+runs they stay until its result replaces them. A verdict without a failed
+check, such as PARTIAL or an incomplete report, is reported the same way and
+names the verdict. The desktop app shows **Verification failed**, with
+**Retrying…** while it retries, the failed check and the start of its reason;
+the privacy dialog shows the full message.
+The service log records it at warn level. `pap verify URL` prints the full
+transcript without the backend.
 
 Read-only commands do not start a missing backend. A successful `status` means
 the query succeeded, not that protection is active: inspect `gateway.status`
@@ -305,9 +439,9 @@ invalid edits and unknown keys; see [Editing](configuration.md#editing).
 
 `pap settings reset --yes` stops protection, disconnects managed agents, and
 returns every setting in `config.toml` except the profiles and the active
-profile to its default (including the Local API listener and the production OS
-policy), and replaces the web UI password with a new generated one. Profiles,
-their API keys, the local client key and usage history are kept.
+profile to its default (including the Local API listener), and replaces the
+web UI password with a new generated one. Profiles, their API keys, the local
+client key and usage history are kept.
 The same operation is available under Settings > Advanced in the desktop app, which
 also disables Open at Login. CLI installation and system notification permission
 are unchanged. Failures are reported; retry after resolving the reported conflict.
@@ -387,11 +521,11 @@ it asks `Web UI is off. Enable it on <address>:<port>? [y/N]`; `--yes` enables i
 `--yes` fails with a hint to run `pap settings set web-ui.enabled true`.
 
 Signing in sets a session cookie, so reloading and other tabs of the same
-browser share the session until it ends. Sessions end
-after an hour without requests or an open page, 12 hours after sign-in even
-while a page stays open, when the page signs out (Settings > Connections > Sign
+browser share the session until it ends. As in code-server, sessions do not
+time out. They end when the page signs out (Settings > Connections > Sign
 Out), when the password changes, when the web UI is turned off or its listener
-moves, when settings are reset, and when the service restarts. The page then
+moves, when settings are reset, when the service restarts, and, for the least
+recently used of 16 open sessions, when another browser signs in. The page then
 returns to the sign-in page. Browsers cannot read or change the password; as
 with code-server and Jupyter, it is managed outside the browser.
 
@@ -405,7 +539,7 @@ Security model:
   version is verified with Argon2id until replaced.
 - Sessions are server-side. The browser holds only a 256-bit random token in a
   `pap_session_<port>` cookie with `HttpOnly; SameSite=Strict; Path=/` and a
-  12-hour `Max-Age`; the service stores only its SHA-256 digest, so page
+  400-day `Max-Age`, the longest browsers keep; the service stores only its SHA-256 digest, so page
   scripts never see it. The cookie cannot be `Secure` because the listener
   speaks plain HTTP, even on loopback. Cookies are not scoped to a port, so the
   name carries the port: a local web UI and a tunneled one on another port keep
@@ -458,7 +592,7 @@ The browser UI degrades desktop-only integration:
 | OS notifications | Hidden. |
 | Software updates | Settings > About announces a newer release in the saved channel with the exact upgrade steps for the backend's installation; it never installs anything. |
 | CLI registration | Hidden. |
-| RedPill loopback OAuth | Use **Paste callback link** when the browser cannot reach the sign-in's loopback callback on the service machine. Phala device flow is unchanged. |
+| Account sign-in | RedPill and Phala both use a device code, so the sign-in can be approved from any browser; no callback reaches the service machine. |
 
 ### Remote Access
 
@@ -522,7 +656,6 @@ instead.
 ```sh
 pap profiles show work
 pap profiles edit work --name "Work gateway"
-pap profiles edit work --require-production-os
 pap profiles verify work
 pap profiles export --output profiles.json
 pap profiles import profiles.json --yes
@@ -530,7 +663,17 @@ pap profiles import profiles.json --yes
 
 Adding, editing and verifying a profile use the backend's verification and
 credential-storage policy. Verification can change the active profile and
-restart protection; it is not a read-only probe. Credentials use a hidden prompt
+restart protection; it is not a read-only probe. `profiles verify` on the
+profile that is protecting, without a new key, attests the service again where
+it runs and, for an unchanged service, keeps its requests and streams; with a new key or another profile it says that
+protection restarts before it asks, and reports the session once it has
+resumed. The service is verified before anything is saved: when verification
+fails, nothing is saved and the command exits `1` with the reason, as `start`
+reports it. Verification attests the service and reads its model list; a
+service that lists models without authentication does not reject a wrong key
+there, so a bad key first shows as `service_key_rejected` on a request.
+Replace a saved key with `pap profiles verify <id> --replace-key` (hidden
+prompt) or `--key-stdin`. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
@@ -541,9 +684,7 @@ that status may still be reconnecting or show why protection could not start
 or verify. A profile without a credential is refused while protection is on,
 and neither the active profile nor protection changes.
 
-`--key-stdin` is for a pipe or redirected file, not a terminal. The production
-OS requirement is a shared current policy, not a separate preference per profile;
-`edit --require-production-os` restores the strict policy.
+`--key-stdin` is for a pipe or redirected file, not a terminal.
 
 ## Automation
 
@@ -561,8 +702,8 @@ field `protocolVersion`). A command that fails prints
 `{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is
 the backend's stable error code, such as `invalid_state`, `busy` or
 `revision_conflict`, or `command_failed` for a failure the CLI reports itself;
-`error.message` is text for people. 0.1 always reported `command_failed` and
-prefixed the message with the backend's code (`CODE: MESSAGE`). The desktop app
+`error.message` is text for people. Human-readable errors start with `error:`.
+0.1 always reported `command_failed` and prefixed the message with the backend's code (`CODE: MESSAGE`). The desktop app
 and the web UI receive the same `code` and `message`.
 
 For reviewed agent changes, obtain a preview first:
@@ -588,7 +729,11 @@ and `1` for operation failures. With `--json`, failures have an `error` object
 with `code` and `message`. Argument errors use `invalid_arguments`; operation
 errors use the backend's code, or `command_failed`. Classify failures by
 `code`, never by parsing message text, and do not assume all failures are
-retryable.
+retryable. `sessions --json` prints the service verification transcript on
+stdout when verification fails, while still exiting nonzero and reporting the
+failure on stderr. Every rejected session includes a human-readable `error`
+describing fetch or audit failures, failed integrity checks, or unmet claims.
+Human output shows the same reason with terminal control characters neutralized.
 
 `doctor` reports every independent check, even when some fail. In that case it
 prints the partial report on stdout and exits nonzero; the `errors` object
@@ -646,6 +791,13 @@ reports that no receipt is saved, as it does before the audit finishes.
 OS login startup, notification permissions and installer-based app updates stay
 in the desktop app or the OS installer. `doctor` also reports whether the saved update
 channel (`settings set update-channel beta|stable`) has a newer release and the
-exact upgrade steps for this installation; see
+exact upgrade steps for this installation. `pap update` runs those steps, printing each
+one, for the installations a package manager owns
+(CLI-only DEB, RPM and Arch packages, the Arch desktop package, and npm, except
+on Windows). The backend stops as for a restart: connected agents stay pointed
+at the Local API, which does not listen during the installation, and the
+installed release resumes protection that was on. If the installation fails,
+the previous release does. For a desktop app or a portable archive it says where to update
+instead; see
 [Updates by installation](distribution.md#updates-by-installation). Shared notification preferences are available
 through `settings`; they do not grant OS notification permission.

@@ -83,6 +83,11 @@ App Store build is sandboxed and cannot write the real home directory, so its
 settings stay in the `Config` subdirectory of its container's app directory.
 `pap settings show` prints the paths in use.
 
+Home lookup prefers `USERPROFILE` on Windows and `HOME` elsewhere, then the
+other variable. When neither is set, it uses the operating system's user
+profile or account database. Service logs stay in the app data directory's
+`logs` subdirectory.
+
 On Windows the settings directory is in the user profile, not in the roaming
 `%APPDATA%`: roaming profiles and folder redirection of AppData no longer carry
 the settings to other machines (sync the directory instead; see
@@ -164,6 +169,9 @@ ignored and reported as a warning with its position
 applies. This is Cargo's "unused config key" warning, collected the same way
 (with `serde_ignored`), and matches Alacritty and VS Code, which also warn about
 unknown settings instead of rejecting the file.
+
+The removed `require-production-os` key, at the top level or in a profile,
+is silently ignored and dropped on the next settings write.
 
 An edit that does not parse or validate is not applied: the previous settings
 stay in effect, and the error, with file, line and column
@@ -249,18 +257,25 @@ unlocked OS keychain for a process running as you.
   agent as they arrive. Each signed receipt is fetched and audited after the
   response was delivered, and a failed audit is reported in Usage; it cannot
   retract bytes the agent already received.
-- **The production OS check relies on the service's own report.** It
-  compares the OS image hash that the service records in its RTMR3 event log
-  with a reviewed allowlist. It does not rebuild the MRTD and RTMR0-2 boot
-  measurements from the OS image, so it does not prove on its own which
-  image booted. For that assurance, run a dstack verifier over the same quote
-  (see the [CLI README](../cli/README.md)).
+- Clients do not check whether the gateway runs a production or development dstack
+  OS image. A development image permits operator access to the gateway. Users who
+  need assurance about the OS image should verify the quote, event log, and VM
+  configuration with an independent dstack verifier.
 - **Verification failures fail closed.** When verification fails or is
   blocked, connected agents stay pointed at the Local API, which refuses
   their requests until protection is verified again; they never fall back to
-  their original provider. A Local API address change rewrites them to the
-  new address, unless the backend has not verified a catalog since it
-  started; then they are restored until verification projects them again.
+  their original provider. The backend keeps retrying the verification, backing
+  off to at most a minute, until it passes or protection is stopped. For the
+  first 30 seconds after verification is lost, new requests wait for it instead
+  of failing, so a routine re-verification only delays them; after that they
+  are refused at once with `503` and a `Retry-After` header. A request that was
+  already being sent when verification was lost is ended: it may have reached
+  the service, so its error says that delivery is unknown and carries no
+  `Retry-After`. While the backend itself restarts, nothing listens, and a
+  client's own connection retry applies. A Local API address change rewrites
+  them to the new address, unless the backend has not verified a catalog since
+  it started; then they keep the previous address, where the Local API no
+  longer listens, until verification projects them again.
   Stopping protection, Stop All and Quit, `pap service stop`, Reset settings,
   or disconnecting an agent restores its own configuration. Quitting the app
   from the tray or menu leaves the backend running and the agents pointed at

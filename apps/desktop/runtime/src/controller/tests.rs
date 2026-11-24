@@ -87,7 +87,7 @@ fn test_runtime_with(
     launcher: Arc<dyn VerifierLauncher>,
 ) -> Arc<DesktopRuntime> {
     let (events, _) = tokio::sync::mpsc::channel(8);
-    let proxy = ProxyState::new(events).unwrap();
+    let proxy = ProxyState::new(events, std::time::Duration::ZERO).unwrap();
     let usage = Arc::new(UsageStore::memory().unwrap());
     let manager = Arc::new(SessionManager::new(
         proxy.clone(),
@@ -197,7 +197,7 @@ fn completed_authorization_is_staged_until_explicit_save_and_bound_to_its_provid
         };
         assert_eq!(
             runtime
-                .save_account_login("login-test".into(), different_provider, true, None)
+                .save_account_login("login-test".into(), different_provider, None)
                 .await
                 .unwrap_err()
                 .to_string(),
@@ -355,7 +355,7 @@ fn saving_an_offline_profile_does_not_launch_verification() {
         remote_url: "https://offline.invalid".into(),
     };
     let saved = executor
-        .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+        .block_on(runtime.save_configuration(profile, Some("test-key".into())))
         .unwrap();
     assert_eq!(saved.active_profile_id, "offline");
     assert_eq!(saved.status, VerificationStatus::Stopped);
@@ -385,7 +385,7 @@ fn a_switch_is_refused_only_before_anything_changes() {
             remote_url: format!("https://{id}.invalid"),
         };
         executor
-            .block_on(runtime.save_configuration(profile, true, Some("test-key".into())))
+            .block_on(runtime.save_configuration(profile, Some("test-key".into())))
             .unwrap();
     }
     runtime
@@ -457,7 +457,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
     };
     for (id, name) in [("other", "Other"), ("ready", "Ready")] {
         executor
-            .block_on(runtime.save_configuration(profile(id, name), true, Some("test-key".into())))
+            .block_on(runtime.save_configuration(profile(id, name), Some("test-key".into())))
             .unwrap();
     }
     let starting = AppState {
@@ -475,7 +475,7 @@ fn a_change_during_a_start_says_which_profile_is_starting() {
         "Protection is starting on Ready; try again when it finishes."
     );
     let refused = executor
-        .block_on(runtime.save_configuration(profile("new", "New"), true, Some("key".into())))
+        .block_on(runtime.save_configuration(profile("new", "New"), Some("key".into())))
         .unwrap_err();
     assert_eq!(refused.code(), ErrorCode::Busy);
     assert_eq!(runtime.state().active_profile_id, "ready");
@@ -513,36 +513,11 @@ fn busy_save_is_a_definite_rejection_not_an_unknown_operation() {
             uuid::Uuid::new_v4().to_string(),
             "login-test".into(),
             profile,
-            true,
             None,
         )
         .unwrap();
     assert!(
         matches!(result, desktop_core::contracts::AccountSaveResult::Failed { error } if error.contains("Another save"))
-    );
-}
-
-#[test]
-fn the_production_os_policy_is_saved_for_the_next_start() {
-    let executor = tokio::runtime::Runtime::new().unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let runtime = test_runtime(&executor, directory.path());
-    let state = runtime.set_require_production_os(false).unwrap();
-    assert!(!state.config.require_production_os);
-    assert!(
-        !runtime
-            .settings
-            .snapshot()
-            .unwrap()
-            .config
-            .require_production_os
-    );
-    assert!(
-        runtime
-            .set_require_production_os(true)
-            .unwrap()
-            .config
-            .require_production_os
     );
 }
 
@@ -564,7 +539,6 @@ fn returned_and_published_states_present_their_own_protection() {
     let admission = runtime.admission();
     for command in [
         desktop_core::protocol::Command::Stop {},
-        desktop_core::protocol::Command::SetRequireProductionOs { required: false },
         desktop_core::protocol::Command::GetState {},
     ] {
         presents_itself(
@@ -816,7 +790,6 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
         session_active: true,
         config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         },
         ..Default::default()
     };
@@ -886,11 +859,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     // A verification failure or block keeps the agents pointed at the Local
     // API, which refuses them; the original provider never gets their requests.
-    for status in [
-        VerificationStatus::Error,
-        VerificationStatus::Stopped,
-        VerificationStatus::Blocked,
-    ] {
+    for status in [VerificationStatus::Error, VerificationStatus::Stopped] {
         runtime.manager.restore_snapshot(AppState {
             status,
             ..verified.clone()
@@ -971,6 +940,21 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_ne!(moved, reprojected);
     assert!(String::from_utf8_lossy(&moved).contains(&format!("127.0.0.1:{port}")));
     assert_eq!(refusal(&token), "gateway_not_verified");
+    // Before this backend has verified a catalog there is nothing to rewrite
+    // them from: they keep the address they have, never their own provider.
+    *runtime.verified_catalog.lock().unwrap() = None;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    executor
+        .block_on(runtime.apply_local_api(ListenConfig {
+            port,
+            ..ListenConfig::default()
+        }))
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), moved);
     executor
         .block_on(runtime.shutdown(desktop_core::protocol::ShutdownMode::UpdateRestart, true))
         .unwrap();
@@ -1068,7 +1052,7 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
     let resumes = || {
         let (events, _) = tokio::sync::mpsc::channel(8);
         SessionManager::new(
-            ProxyState::new(events).unwrap(),
+            ProxyState::new(events, std::time::Duration::ZERO).unwrap(),
             Arc::new(UsageStore::open(usage.clone()).unwrap()),
             Arc::new(NoVerifier),
             executor.handle().clone(),
@@ -1145,7 +1129,6 @@ fn network_loss_revokes_session_and_manual_stop_cancels_recovery() {
         },
         config: StartConfig {
             remote_url: "https://inference.phala.com".into(),
-            require_production_os: true,
         },
         ..Default::default()
     });
@@ -1360,7 +1343,6 @@ fn only_live_protection_allows_agent_projection() {
     for status in [
         VerificationStatus::Stopped,
         VerificationStatus::Verifying,
-        VerificationStatus::Blocked,
         VerificationStatus::Error,
     ] {
         state.status = status;
@@ -1514,7 +1496,6 @@ fn an_address_change_reconnects_only_a_remote_service() {
         session_active: true,
         config: StartConfig {
             remote_url: remote_url.into(),
-            require_production_os: false,
         },
         ..Default::default()
     };
@@ -1722,6 +1703,7 @@ impl VerifierLauncher for UnreachableVerifier {
                 "Cannot reach tee.invalid.",
             )
             .into(),
+            verification: None,
         });
         Ok(Box::new(IdleTask))
     }
@@ -1733,6 +1715,195 @@ impl crate::verifier_session::VerifierTask for IdleTask {
     fn stop(&mut self) -> Result<(), String> {
         Ok(())
     }
+}
+
+const ANSWERS: u8 = 0;
+const UNREACHABLE: u8 = 1;
+const HANGS: u8 = 2;
+
+/// A verifier whose service lists one model while it `ANSWERS`.
+struct AnsweringVerifier {
+    answers: Arc<std::sync::atomic::AtomicU8>,
+}
+
+struct AnsweringService {
+    answers: Arc<std::sync::atomic::AtomicU8>,
+}
+
+/// Fresh attestations asked of a running `AnsweringService`.
+static VERIFIED_AGAIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl proxy::VerifiedService for AnsweringService {
+    fn verify_again(
+        self: Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        Box::pin(async move {
+            VERIFIED_AGAIN.fetch_add(1, Ordering::SeqCst);
+            if self.answers.load(Ordering::SeqCst) == ANSWERS {
+                Ok(())
+            } else {
+                Err("the report did not verify".to_string())
+            }
+        })
+    }
+
+    fn call(
+        self: Arc<Self>,
+        _: axum::http::Request<axum::body::Body>,
+        _: Option<proxy::ForwardContext>,
+    ) -> proxy::VerifiedResponse {
+        use axum::response::IntoResponse;
+        Box::pin(async move {
+            let answers = self.answers.load(Ordering::SeqCst);
+            if answers == HANGS {
+                std::future::pending::<()>().await;
+            }
+            if answers == ANSWERS {
+                axum::Json(serde_json::json!({"data": [{"id": "model"}]})).into_response()
+            } else {
+                let mut refused = axum::http::StatusCode::BAD_GATEWAY.into_response();
+                refused
+                    .extensions_mut()
+                    .insert(proxy::VerifierRefusal::Unreachable);
+                refused
+            }
+        })
+    }
+}
+
+impl VerifierLauncher for AnsweringVerifier {
+    fn spawn(
+        &self,
+        config: crate::verifier_session::VerifierConfig,
+        events: crate::verifier_session::VerifierEventSink,
+        _: tokio::sync::mpsc::Sender<ProxyEvent>,
+    ) -> Result<Box<dyn crate::verifier_session::VerifierTask>, String> {
+        let identity = serde_json::from_value(serde_json::json!({
+            "tee_type": "tdx",
+            "trust_level": "hardware_verified",
+            "keyset_digest": "sha256:keyset",
+            "keyset_not_after": 2_000_000_000_u64,
+            "tls_spki": null,
+            "source_provenance": {},
+            "service_capabilities": {"serving": "aggregator", "supported_e2ee_versions": []},
+            "verification": {"checks": []},
+        }))
+        .unwrap();
+        let service = Arc::new(AnsweringService {
+            answers: self.answers.clone(),
+        });
+        // The manager accepts events once `spawn` has returned its task.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            events(crate::verifier_session::VerifierEvent::Ready {
+                identity,
+                remote_url: config.remote_url,
+                service,
+            });
+        });
+        Ok(Box::new(IdleTask))
+    }
+}
+
+/// Containers, VPNs and temporary addresses change the address list all the
+/// time. A verified session whose service still answers is left alone: a
+/// restart would end every request in flight.
+#[test]
+fn an_address_change_restarts_only_a_session_whose_service_stopped_answering() {
+    // A connection the change left dead gives no answer at all.
+    for gone in [UNREACHABLE, HANGS] {
+        let executor = tokio::runtime::Runtime::new().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let answers = Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS));
+        let launcher = Arc::new(AnsweringVerifier {
+            answers: answers.clone(),
+        });
+        let runtime = test_runtime_with(&executor, directory.path(), launcher);
+        let started = runtime
+            .manager
+            .start(StartConfig {
+                remote_url: "https://inference.phala.com".into(),
+            })
+            .unwrap();
+        executor
+            .block_on(runtime.manager.wait_for_verification(
+                started.session_id.as_deref().unwrap(),
+                std::time::Duration::from_secs(5),
+            ))
+            .unwrap();
+        let generation = runtime.proxy.session().generation;
+
+        runtime.recovery.request();
+        runtime.recover_network().unwrap();
+        assert!(!runtime.recovery.needs_check());
+        assert_eq!(runtime.proxy.session().generation, generation);
+        assert!(runtime.proxy.session().verified);
+
+        answers.store(gone, Ordering::SeqCst);
+        runtime.recovery.request();
+        // The restart itself fails here: this runtime has no profile to start.
+        let _ = runtime.recover_network();
+        assert_ne!(runtime.proxy.session().generation, generation, "{gone}");
+        assert!(!runtime.proxy.session().verified);
+    }
+}
+
+/// Verifying the profile that is protecting attests its service where it
+/// runs. Stopping the session to verify it cut every request in flight.
+#[test]
+fn verifying_the_protecting_profile_does_not_interrupt_it() {
+    use desktop_core::contracts::ServiceProvider;
+    let executor = tokio::runtime::Runtime::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let answers = Arc::new(std::sync::atomic::AtomicU8::new(ANSWERS));
+    let launcher = Arc::new(AnsweringVerifier {
+        answers: answers.clone(),
+    });
+    let runtime = test_runtime_with(&executor, directory.path(), launcher);
+    let input = || ConfidentialProfileInput {
+        id: "work".into(),
+        name: "Work".into(),
+        provider: ServiceProvider::Custom,
+        remote_url: "https://inference.phala.com".into(),
+    };
+    executor
+        .block_on(runtime.save_configuration(input(), Some("sk-test-key-0123456789".into())))
+        .unwrap();
+    let started = runtime.start(runtime.state().config).unwrap();
+    executor
+        .block_on(runtime.manager.wait_for_verification(
+            started.session_id.as_deref().unwrap(),
+            std::time::Duration::from_secs(5),
+        ))
+        .unwrap();
+    let session = runtime.proxy.session();
+    let asked = VERIFIED_AGAIN.load(Ordering::SeqCst);
+
+    let state = executor
+        .block_on(runtime.verify_configuration(input(), None))
+        .unwrap();
+    assert!(state.is_protected());
+    // The session's evidence is the verifier's; saving the profile leaves it.
+    assert!(state.identity.is_some() && state.catalog.is_some());
+    assert!(state.profiles[0].verified_at.is_some());
+    assert_eq!(VERIFIED_AGAIN.load(Ordering::SeqCst), asked + 1);
+    let after = runtime.proxy.session();
+    assert_eq!(
+        (after.generation, after.epoch, after.verified),
+        (session.generation, session.epoch, true)
+    );
+
+    // A service that does not verify again is reported, not verified a
+    // second time behind a stopped session, and its time is not recorded.
+    let verified_at = state.profiles[0].verified_at;
+    answers.store(UNREACHABLE, Ordering::SeqCst);
+    let error = executor
+        .block_on(runtime.verify_configuration(input(), None))
+        .unwrap_err();
+    assert!(error.to_string().contains("did not verify again"));
+    assert_eq!(runtime.state().profiles[0].verified_at, verified_at);
+    assert_eq!(runtime.proxy.session().generation, session.generation);
+    runtime.stop().unwrap();
 }
 
 /// A profile save that fails leaves the state, the settings and the saved
@@ -1760,7 +1931,7 @@ fn a_failed_profile_save_changes_nothing() {
     // Verification fails: its own error answers, and nothing is saved.
     let before = state();
     let error = executor
-        .block_on(runtime.verify_configuration(input("new"), true, Some("new-key".into())))
+        .block_on(runtime.verify_configuration(input("new"), Some("new-key".into())))
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::ServiceConnectionFailed);
     assert_eq!(error.to_string(), "Cannot reach tee.invalid.");
@@ -1770,7 +1941,7 @@ fn a_failed_profile_save_changes_nothing() {
 
     // A saved profile whose key is replaced.
     executor
-        .block_on(runtime.save_configuration(input("saved"), true, Some("old-key".into())))
+        .block_on(runtime.save_configuration(input("saved"), Some("old-key".into())))
         .unwrap();
     let before = state();
 
@@ -1780,8 +1951,10 @@ fn a_failed_profile_save_changes_nothing() {
         "active-profile = [",
     )
     .unwrap();
+    let mut edited = input("saved");
+    edited.name = "Renamed service".into();
     let error = executor
-        .block_on(runtime.save_configuration(input("saved"), false, Some("new-key".into())))
+        .block_on(runtime.save_configuration(edited, Some("new-key".into())))
         .unwrap_err();
     assert_eq!(error.code(), ErrorCode::InvalidState);
     assert!(error

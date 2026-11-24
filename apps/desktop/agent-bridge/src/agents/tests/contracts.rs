@@ -567,7 +567,7 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
     let service: Arc<dyn VerifiedService> = Arc::new(DirectService(hits.clone()));
 
     let (sender, _events) = tokio::sync::mpsc::channel(8);
-    let state = ProxyState::new(sender).unwrap();
+    let state = ProxyState::new(sender, std::time::Duration::ZERO).unwrap();
     state.set_api_key(Some("sk-live".into()));
     state.publish(Session {
         generation: 1,

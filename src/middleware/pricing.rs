@@ -10,18 +10,36 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 
 struct ResolvedUsage {
-    prompt: i64,
-    completion: i64,
-    cache_read: i64,
-    cache_creation: i64,
+    prompt: i128,
+    completion: i128,
+    cache_read: i128,
+    cache_creation: i128,
 }
 
-// Read a token count, accepting integer- or float-encoded numbers (a provider
-// may send `10.0`). Returns None only for missing/null/non-numeric values, so the
-// `??`-style chain: a numeric `0` stops the chain (not treated as missing).
+/// A finite, non-negative integral counter, at most JavaScript's MAX_SAFE_INTEGER.
+/// Strings contain one or more ASCII digits, including leading zeros.
+/// Shared with usage projection so pricing and bridge cache buckets agree.
+pub(super) fn usage_counter(value: &Value) -> Option<i64> {
+    const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+    let count = match value {
+        Value::Number(number) => number.as_u64().or_else(|| {
+            let count = number.as_f64()?;
+            (count >= 0.0 && count.fract() == 0.0 && count <= MAX_SAFE_INTEGER as f64)
+                .then_some(count as u64)
+        })?,
+        Value::String(text)
+            if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u64>().ok()?
+        }
+        _ => return None,
+    };
+    (count <= MAX_SAFE_INTEGER).then_some(count as i64)
+}
+
+// An absent/invalid counter consults the fallback; an explicit zero wins.
 fn token_value(value: &Value, key: &str) -> Option<i64> {
-    let field = value.get(key)?;
-    field.as_i64().or_else(|| field.as_f64().map(|f| f as i64))
+    value.get(key).and_then(usage_counter)
 }
 
 fn token_field(usage: &Value, keys: &[&str]) -> i64 {
@@ -71,7 +89,15 @@ fn resolve_usage(usage: &Value) -> ResolvedUsage {
         })
         .or(responses_cached)
         .unwrap_or(0);
-    let cache_creation = token_value(usage, "cache_creation_input_tokens").unwrap_or(0);
+    let cache_creation = token_value(usage, "cache_creation_input_tokens")
+        .or_else(|| {
+            let prompt = token_value(usage, "prompt_tokens")?;
+            let write = usage
+                .get("prompt_tokens_details")
+                .and_then(|details| token_value(details, "cache_write_tokens"))?;
+            (i128::from(write) <= i128::from(prompt) - i128::from(cache_read)).then_some(write)
+        })
+        .unwrap_or(0);
     // OpenAI's `prompt_tokens` already includes cached tokens; Anthropic's
     // `input_tokens` excludes them (cache_read/cache_creation are separate,
     // additive buckets). Normalize to the OpenAI convention (prompt includes
@@ -79,17 +105,18 @@ fn resolve_usage(usage: &Value) -> ResolvedUsage {
     // either family — otherwise native Anthropic usage under-counts input. A
     // Responses `input_tokens` is already that total: adding its cached portion
     // again would count those tokens twice.
-    let input = token_value(usage, "input_tokens").unwrap_or(0);
+    // Widen before adding or subtracting provider-controlled i64 counters.
+    let input = i128::from(token_value(usage, "input_tokens").unwrap_or(0));
     let prompt = match token_value(usage, "prompt_tokens") {
-        Some(prompt_tokens) => prompt_tokens,
+        Some(prompt_tokens) => i128::from(prompt_tokens),
         None if responses_cached.is_some() => input,
-        None => input + cache_read + cache_creation,
+        None => input + i128::from(cache_read) + i128::from(cache_creation),
     };
     ResolvedUsage {
         prompt,
-        completion,
-        cache_read,
-        cache_creation,
+        completion: i128::from(completion),
+        cache_read: i128::from(cache_read),
+        cache_creation: i128::from(cache_creation),
     }
 }
 
@@ -105,6 +132,12 @@ fn rate(pricing: &Value, key: &str) -> Option<Decimal> {
 
 /// Compute the request cost from usage and pricing, as an `f64`.
 pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
+    token_cost(usage, pricing)
+        .and_then(|cost| cost.to_f64())
+        .unwrap_or(0.0)
+}
+
+fn token_cost(usage: &Value, pricing: &Value) -> Option<Decimal> {
     let resolved = resolve_usage(usage);
     let input_rate = rate(pricing, "inputCostPerToken").unwrap_or(Decimal::ZERO);
     let cache_read_rate = rate(pricing, "cacheReadCostPerToken").unwrap_or(input_rate);
@@ -113,11 +146,67 @@ pub fn compute_cost(usage: &Value, pricing: &Value) -> f64 {
 
     let uncached_input = (resolved.prompt - resolved.cache_read - resolved.cache_creation).max(0);
 
-    let cost = Decimal::from(uncached_input) * input_rate
-        + Decimal::from(resolved.cache_read) * cache_read_rate
-        + Decimal::from(resolved.cache_creation) * cache_creation_rate
-        + Decimal::from(resolved.completion) * output_rate;
-    cost.to_f64().unwrap_or(0.0)
+    [
+        (uncached_input, input_rate),
+        (resolved.cache_read, cache_read_rate),
+        (resolved.cache_creation, cache_creation_rate),
+        (resolved.completion, output_rate),
+    ]
+    .into_iter()
+    .try_fold(Decimal::ZERO, |total, (count, rate)| {
+        total.checked_add(Decimal::from_i128(count)?.checked_mul(rate)?)
+    })
+}
+
+// Control-plane media unit prices are bounded, unsigned plain decimals. Validate
+// the spelling before parsing so signs, exponents, and rounded scales fail.
+fn unit_price(value: &Value) -> Option<Decimal> {
+    let value = value.as_str()?;
+    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if integer.is_empty()
+        || !integer.bytes().all(|c| c.is_ascii_digit())
+        || (value.contains('.') && fraction.is_empty())
+        || fraction.len() > 18
+        || !fraction.bytes().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let rate = Decimal::from_str_exact(value).ok()?;
+    (rate <= Decimal::from(1_000_000)).then_some(rate)
+}
+
+/// Image unit price uses exact dimensions, then size, then the default.
+/// Invalid image rates contribute zero; unrepresentable costs are omitted.
+pub fn compute_image_cost(
+    usage: Option<&Value>,
+    pricing: &Value,
+    images: &super::images::ImageUsage,
+) -> Option<f64> {
+    let configured = pricing.get("imageCostPerImage");
+    let unit = match configured {
+        Some(Value::Object(rates)) => rates
+            .get(&format!("{}|{}", images.size, images.quality))
+            .or_else(|| rates.get(&images.size))
+            .or_else(|| rates.get("default")),
+        value => value,
+    }
+    .and_then(unit_price)
+    .unwrap_or(Decimal::ZERO);
+    let tokens = match usage {
+        Some(usage) => token_cost(usage, pricing)?,
+        None => Decimal::ZERO,
+    };
+    let images = Decimal::from_usize(images.count).and_then(|count| count.checked_mul(unit))?;
+    images.checked_add(tokens)?.to_f64()
+}
+
+/// Audio prices use the same bounded, unsigned decimal grammar as image prices.
+pub fn compute_audio_cost(pricing: &Value, audio: &super::audio::AudioUsage) -> Option<f64> {
+    let unit = pricing
+        .get("audioCostPerSecond")
+        .map(unit_price)
+        .unwrap_or(Some(Decimal::ZERO))?;
+    Decimal::from(audio.seconds).checked_mul(unit)?.to_f64()
 }
 
 /// Serialize an `f64` cost the way JavaScript's `JSON.stringify` would: an
@@ -137,6 +226,75 @@ pub fn cost_to_json(cost: f64) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn usage_counters_share_integer_and_digit_string_validation() {
+        for (value, expected) in [
+            (json!(0), 0),
+            (json!(-0.0), 0),
+            (json!(10), 10),
+            (json!(10.0), 10),
+            (json!(1e2), 100),
+            (json!("0"), 0),
+            (json!("10"), 10),
+            (json!("01"), 1),
+            (json!("000"), 0),
+            (json!(9_007_199_254_740_991_i64), 9_007_199_254_740_991),
+            (json!("9007199254740991"), 9_007_199_254_740_991),
+        ] {
+            assert_eq!(usage_counter(&value), Some(expected), "{value}");
+        }
+        for value in [
+            json!(10.5),
+            json!(-1),
+            json!("10.0"),
+            json!("10.5"),
+            json!("-1"),
+            json!("-0"),
+            json!("1e2"),
+            json!("1E+2"),
+            json!("100e-2"),
+            json!(" 10"),
+            json!("10 "),
+            json!("\t10"),
+            json!("10\n"),
+            json!("10\r"),
+            json!("0x10"),
+            json!(""),
+            json!("  "),
+            json!("Infinity"),
+            json!("NaN"),
+            json!("+10"),
+            json!(".5"),
+            json!("1."),
+            json!("not a count"),
+            json!("1e400"),
+            json!(9_007_199_254_740_992_i64),
+            json!("9007199254740992"),
+            json!(i64::MAX),
+            json!(i64::MAX.to_string()),
+            json!("9223372036854775808"),
+            json!(u64::MAX),
+            json!("18446744073709551616"),
+            json!("１０"),
+            json!("\u{feff}10"),
+            json!("10\u{feff}"),
+            json!("\u{0085}10"),
+            json!("10\u{0085}"),
+            json!("\u{000b}10"),
+            json!("10\u{000c}"),
+            Value::Null,
+            json!(true),
+            json!([]),
+            json!({}),
+        ] {
+            assert_eq!(usage_counter(&value), None, "{value}");
+        }
+        let usage = json!({"prompt_tokens":"invalid","input_tokens":"10"});
+        assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 10);
+        let usage = json!({"prompt_tokens":0,"input_tokens":10});
+        assert_eq!(token_field(&usage, &["prompt_tokens", "input_tokens"]), 0);
+    }
 
     #[test]
     fn resolve_handles_openai_and_anthropic_shapes() {
@@ -220,6 +378,48 @@ mod tests {
                 74.0,
             ),
             (
+                "OpenAI chat with read and write cache buckets",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                81.5,
+            ),
+            (
+                "numeric strings use the same cache buckets",
+                json!({"prompt_tokens":"100","completion_tokens":"5",
+                    "prompt_tokens_details":{"cached_tokens":"40","cache_write_tokens":"30"}}),
+                81.5,
+            ),
+            (
+                "an inconsistent nested write bucket is ignored",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":61}}),
+                74.0,
+            ),
+            (
+                "top-level zero creation takes precedence",
+                json!({"prompt_tokens":100,"completion_tokens":5,"cache_creation_input_tokens":0,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                74.0,
+            ),
+            (
+                "top-level creation takes precedence",
+                json!({"prompt_tokens":100,"completion_tokens":5,"cache_creation_input_tokens":10,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                76.5,
+            ),
+            (
+                "nested write requires Chat prompt_tokens",
+                json!({"input_tokens":100,"output_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":30}}),
+                114.0,
+            ),
+            (
+                "existing Chat read bucket is not clamped",
+                json!({"prompt_tokens":100,"completion_tokens":5,
+                    "prompt_tokens_details":{"cached_tokens":140,"cache_write_tokens":30}}),
+                24.0,
+            ),
+            (
                 "Anthropic native, cache buckets added to the total",
                 json!({ "input_tokens": 60, "output_tokens": 5,
                         "cache_read_input_tokens": 30, "cache_creation_input_tokens": 10 }),
@@ -290,5 +490,115 @@ mod tests {
     fn cost_to_json_matches_js_integer_formatting() {
         assert_eq!(cost_to_json(0.0), json!(0));
         assert_eq!(cost_to_json(0.000135), json!(0.000135));
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use crate::middleware::images::ImageUsage;
+    use serde_json::json;
+
+    #[test]
+    fn unit_prices_reject_invalid_spelling_scale_and_range() {
+        let images = ImageUsage {
+            count: 2,
+            size: "512x512".into(),
+            quality: "high".into(),
+        };
+        for invalid in [
+            json!("-0.1"),
+            json!("+0.1"),
+            json!("1e-2"),
+            json!("1E2"),
+            json!("1_000"),
+            json!(".1"),
+            json!("1."),
+            json!(" 1"),
+            json!("1 "),
+            json!(""),
+            json!("0.0000000000000000001"),
+            json!("1000000.000000000000000001"),
+            json!("79228162514264337593543950335"),
+            json!("9999999999999999999999999999999999999999"),
+            json!(0.1),
+            Value::Null,
+        ] {
+            // A malformed exact match is missing pricing, not permission to
+            // charge a broader fallback. Token pricing still contributes.
+            let pricing = json!({"imageCostPerImage":{"512x512|high":invalid,"default":"1"},"inputCostPerToken":"0.01"});
+            assert_eq!(
+                compute_image_cost(Some(&json!({"input_tokens":2})), &pricing, &images),
+                Some(0.02),
+                "{pricing}"
+            );
+        }
+        for valid in [
+            "0",
+            "0.000000000000000001",
+            "1000000",
+            "1000000.000000000000000000",
+        ] {
+            assert!(unit_price(&json!(valid)).is_some(), "{valid}");
+        }
+        assert_eq!(
+            compute_image_cost(None, &json!({"imageCostPerImage":"1000000"}), &images),
+            Some(2_000_000.0)
+        );
+    }
+
+    #[test]
+    fn image_cost_checked_arithmetic_does_not_panic_on_extreme_token_rates() {
+        let images = ImageUsage {
+            count: 2,
+            size: "auto".into(),
+            quality: "auto".into(),
+        };
+        let max_rate = Decimal::MAX.to_string();
+        // Each component fits but their sum does not.
+        let pricing = json!({"imageCostPerImage":"1","inputCostPerToken":max_rate});
+        assert_eq!(
+            compute_image_cost(Some(&json!({"input_tokens":1})), &pricing, &images),
+            None
+        );
+        assert_eq!(
+            compute_image_cost(
+                Some(
+                    &json!({"prompt_tokens":i64::MIN,"cache_read_input_tokens":9_007_199_254_740_991_i64})
+                ),
+                &pricing,
+                &images,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn image_lookup_precedence_and_combined_token_cost() {
+        let images = ImageUsage {
+            count: 2,
+            size: "512x512".into(),
+            quality: "high".into(),
+        };
+        for (rates, expected) in [
+            (json!("0.1"), 0.2),
+            (
+                json!({"512x512|high":"0.1","512x512":"0.2","default":"0.3"}),
+                0.2,
+            ),
+            (json!({"512x512":"0.2","default":"0.3"}), 0.4),
+            (json!({"default":"0.3"}), 0.6),
+            (json!({"other":"0.4"}), 0.0),
+        ] {
+            let pricing = json!({"imageCostPerImage":rates,"inputCostPerToken":"0.01","outputCostPerToken":"0.02"});
+            assert_eq!(compute_image_cost(None, &pricing, &images), Some(expected));
+            let cost = compute_image_cost(
+                Some(&json!({"input_tokens":2,"output_tokens":3})),
+                &pricing,
+                &images,
+            )
+            .unwrap();
+            assert!((cost - expected - 0.08).abs() < 1e-12);
+        }
     }
 }

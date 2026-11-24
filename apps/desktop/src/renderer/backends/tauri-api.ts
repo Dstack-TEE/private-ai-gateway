@@ -3,7 +3,7 @@ import { invoke as tauriInvoke, type InvokeArgs } from "@tauri-apps/api/core";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
-import { NAVIGATE_EVENT, type DesktopApi, type DistributionCapabilities, type NavigationTarget, type UiEvent, type UiEventPayloads } from "../../shared/contracts";
+import { CHECK_FOR_UPDATES_EVENT, NAVIGATE_EVENT, type DesktopApi, type DistributionCapabilities, type NavigationTarget, type UiEvent, type UiEventPayloads } from "../../shared/contracts";
 import { createDesktopApi, type Backend, type UiPlatform, type UiTransport } from "./create-api";
 import { AuthoredError } from "../lib/error-message";
 
@@ -44,10 +44,11 @@ const platform: UiPlatform = {
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
   onNavigate,
+  onCheckForUpdates: (listener) => subscribe(CHECK_FOR_UPDATES_EVENT, listener),
   // Goes through the window's close request, which hides it to the tray.
   closeWindow: () => getCurrentWebviewWindow().close(),
   quit: () => invoke("quit_app"),
-  copyText: (text) => invoke("copy_text", { text }),
+  copyText: (text, secret) => invoke("copy_text", { text, secret }),
   // The shell shows the system file panels and reads or writes the chosen file.
   selectProfileBackup: () => invoke("select_profile_backup"),
   saveProfileExport: () => invoke("export_profiles"),

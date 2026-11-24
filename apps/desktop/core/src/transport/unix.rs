@@ -28,6 +28,7 @@ pub(super) const LEGACY_SOCKET_FILE: &str = "backend.sock";
 #[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
 const MAS_RUNTIME_DIR: &str = "pap-ipc";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const ENDPOINT_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 pub type Stream = UnixStream;
 pub type ClientStream = UnixStream;
@@ -37,6 +38,8 @@ pub struct Listener {
     inner: UnixListener,
     endpoint: PathBuf,
     socket_identity: FileIdentity,
+    check: tokio::time::Interval,
+    _owner: InstanceLock,
 }
 
 impl Listener {
@@ -49,39 +52,67 @@ impl Listener {
     }
 
     /// The next connection; one from another user fails with `PermissionDenied`.
-    pub async fn accept(&self) -> io::Result<Stream> {
-        let (stream, _) = self.inner.accept().await?;
-        authenticate_peer(&stream)?;
-        Ok(stream)
+    pub async fn accept(&mut self) -> io::Result<Stream> {
+        loop {
+            tokio::select! {
+                result = self.inner.accept() => {
+                    let (stream, _) = result?;
+                    authenticate_peer(&stream)?;
+                    return Ok(stream);
+                }
+                _ = self.check.tick() => {
+                    match FileIdentity::read(&self.endpoint) {
+                        Ok(identity) if identity == self.socket_identity => continue,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
+                    let (inner, identity) = bind_endpoint(&self.endpoint)?;
+                    self.inner = inner;
+                    self.socket_identity = identity;
+                    tracing::info!("Restored management endpoint {}", self.endpoint.display());
+                }
+            }
+        }
     }
 
     pub fn endpoint_path(&self) -> &Path {
         &self.endpoint
     }
 
-    fn bind_at(_owner: &InstanceLock, endpoint: PathBuf) -> io::Result<Self> {
-        let dir = endpoint.parent().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent")
-        })?;
-        ensure_private_dir(dir)
-            .map_err(|error| failed(error, "prepare IPC runtime directory", dir))?;
-        remove_stale_socket(&endpoint)
-            .map_err(|error| failed(error, "clean IPC endpoint", &endpoint))?;
-
-        let inner = UnixListener::bind(&endpoint)
-            .map_err(|error| failed(error, "bind IPC endpoint", &endpoint))?;
-        if let Err(error) = fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)) {
-            let _ = fs::remove_file(&endpoint);
-            return Err(failed(error, "secure IPC endpoint", &endpoint));
-        }
-        let socket_identity = FileIdentity::read(&endpoint)
-            .map_err(|error| failed(error, "inspect IPC endpoint", &endpoint))?;
+    fn bind_at(owner: &InstanceLock, endpoint: PathBuf) -> io::Result<Self> {
+        let (inner, socket_identity) = bind_endpoint(&endpoint)?;
+        let mut check = tokio::time::interval_at(
+            tokio::time::Instant::now() + ENDPOINT_CHECK_INTERVAL,
+            ENDPOINT_CHECK_INTERVAL,
+        );
+        check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Ok(Self {
             inner,
             endpoint,
             socket_identity,
+            check,
+            _owner: owner.retain(),
         })
     }
+}
+
+fn bind_endpoint(endpoint: &Path) -> io::Result<(UnixListener, FileIdentity)> {
+    let dir = endpoint
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IPC endpoint has no parent"))?;
+    ensure_private_dir(dir).map_err(|error| failed(error, "prepare IPC runtime directory", dir))?;
+    remove_stale_socket(endpoint).map_err(|error| failed(error, "clean IPC endpoint", endpoint))?;
+
+    let inner = UnixListener::bind(endpoint)
+        .map_err(|error| failed(error, "bind IPC endpoint", endpoint))?;
+    if let Err(error) = fs::set_permissions(endpoint, fs::Permissions::from_mode(0o600)) {
+        let _ = fs::remove_file(endpoint);
+        return Err(failed(error, "secure IPC endpoint", endpoint));
+    }
+    let socket_identity = FileIdentity::read(endpoint)
+        .map_err(|error| failed(error, "inspect IPC endpoint", endpoint))?;
+    Ok((inner, socket_identity))
 }
 
 impl Drop for Listener {
@@ -235,7 +266,12 @@ fn socket_path_fits(path: &Path) -> bool {
 }
 
 fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    private_fs::create_private_dir(dir)?;
+    // Before the repair, whose open of another user's 0700 directory fails
+    // with a bare permission error.
+    if fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.uid() != effective_uid()) {
+        return Err(runtime_directory_owner_error(dir));
+    }
+    private_fs::create_or_repair_private_dir(dir)?;
     validate_private_dir(dir)
 }
 
@@ -247,13 +283,27 @@ fn validate_private_dir(dir: &Path) -> io::Result<()> {
             "IPC runtime path is not a directory",
         ));
     }
-    if metadata.uid() != effective_uid() || metadata.mode() & 0o077 != 0 {
+    if metadata.uid() != effective_uid() {
+        return Err(runtime_directory_owner_error(dir));
+    }
+    if metadata.mode() & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "IPC runtime directory is not private to the current user",
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("runtime directory {} is owned by another user", .0.display())]
+pub(crate) struct RuntimeDirectoryOwnerError(PathBuf);
+
+fn runtime_directory_owner_error(dir: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        RuntimeDirectoryOwnerError(dir.to_path_buf()),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -365,7 +415,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let owner = crate::lock::instance(temp.path()).unwrap().unwrap();
         let endpoint = temp.path().join("ipc").join(SOCKET_FILE);
-        let listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
+        let mut listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
         let client = tokio::spawn(async move {
             let mut stream = connect(&endpoint).await.unwrap();
             let mut byte = [0];
@@ -391,7 +441,10 @@ mod tests {
             fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        let stale = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+        // A bound socket that never listened is stale even if another test
+        // briefly inherits its descriptor between fork and exec.
+        let stale = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        stale.bind(&SockAddr::unix(&endpoint).unwrap()).unwrap();
         drop(stale);
 
         let listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
@@ -431,20 +484,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_refuses_an_insecure_runtime_directory() {
+    async fn only_the_listener_repairs_an_insecure_runtime_directory() {
         let temp = tempfile::tempdir().unwrap();
         let owner = crate::lock::instance(temp.path()).unwrap().unwrap();
         let runtime = temp.path().join("ipc");
         fs::create_dir(&runtime).unwrap();
         fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
         let endpoint = runtime.join(SOCKET_FILE);
-        let raw_listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
-
-        let error = Listener::bind_at(&owner, endpoint.clone()).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         let error = connect(&endpoint).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        drop(raw_listener);
+        assert_eq!(fs::metadata(&runtime).unwrap().mode() & 0o777, 0o755);
+        let _listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
+        assert_eq!(fs::metadata(&runtime).unwrap().mode() & 0o777, 0o700);
+        connect(&endpoint).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_removed_endpoint_is_restored_within_the_check_interval() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = crate::lock::instance(temp.path()).unwrap().unwrap();
+        let runtime = temp.path().join("runtime");
+        let endpoint = runtime.join(SOCKET_FILE);
+        let mut listener = Listener::bind_at(&owner, endpoint.clone()).unwrap();
+        drop(owner);
+        assert!(crate::lock::instance(temp.path()).unwrap().is_none());
+        let server = tokio::spawn(async move {
+            let mut stream = listener.accept().await.unwrap();
+            stream.write_all(b"restored").await.unwrap();
+        });
+        tokio::task::yield_now().await;
+        fs::remove_file(&endpoint).unwrap();
+        fs::remove_dir(&runtime).unwrap();
+        tokio::time::advance(ENDPOINT_CHECK_INTERVAL).await;
+        tokio::task::yield_now().await;
+        let mut client = connect(&endpoint).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, b"restored");
+        server.await.unwrap();
     }
 
     #[test]

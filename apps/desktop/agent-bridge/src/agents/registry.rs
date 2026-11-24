@@ -75,13 +75,12 @@ impl AgentIntegration for Agent {
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
-            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to its web, headless and acp profiles and the dsh desktop app, and reads the token from dsh's own credential store. This app reads DSH_HOME only from its own environment, never in the Mac App Store build, so a DSH_HOME exported in your shell points dsh at a folder this connection does not cover. Also not protected: runs started with --patch, a PRIVATE_AI_PROXY_DSH_TOKEN exported in your shell, and the sdk and sdk-minimal profiles for embedding dsh, which choose their provider in code. Only new sessions go through the proxy: existing sessions, resumed acp sessions included, keep the provider and model they were recorded with. dsh web and the dsh desktop app apply the change at once; restart running dsh headless or acp processes. DeepSeek web search is turned off while connected; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
+            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to its web, headless and acp profiles and the dsh desktop app, and reads the token from dsh's own credential store. This app reads DSH_HOME only from its own environment, never in the Mac App Store build, so a DSH_HOME exported in your shell points dsh at a folder this connection does not cover. Also not protected: runs started with --patch, a PRIVATE_AI_PROXY_DSH_TOKEN exported in your shell on older dsh releases, and the sdk and sdk-minimal profiles for embedding dsh, which choose their provider in code. Only new sessions go through the proxy: existing sessions, resumed acp sessions included, keep the provider and model they were recorded with. dsh web and the dsh desktop app apply the change at once; restart running dsh headless or acp processes. DeepSeek web search is turned off while connected; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
             Agent::Codex if super::codex_service::AVAILABLE => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
-                 the app-owned model catalog. Only the Codex baseline pinned by this app is \
-                 supported; other versions are not checked or supported. Codex keeps a background \
+                 the app-owned model catalog. The app does not check the Codex version. Codex keeps a background \
                  service with the previous settings. The app offers to stop it; otherwise run \
                  \"codex app-server daemon restart\" in your terminal. Either stops running \
                  Codex sessions. Then quit and reopen the Codex app."
@@ -89,8 +88,7 @@ impl AgentIntegration for Agent {
             Agent::Codex => {
                 "Codex will use its official custom model provider with the Responses API, the \
                  selected model from the verified catalog, command-backed authentication, and \
-                 the app-owned model catalog. Only the Codex baseline pinned by this app is \
-                 supported; other versions are not checked or supported. Codex keeps a background \
+                 the app-owned model catalog. The app does not check the Codex version. Codex keeps a background \
                  server, so after applying run \"codex app-server daemon restart\" (this stops \
                  running Codex sessions), then quit and reopen the Codex app."
             }
@@ -100,10 +98,10 @@ impl AgentIntegration for Agent {
             }
             Agent::ClaudeCode => {
                 if cfg!(windows) {
-                    return "Claude Code 2.1.242+ uses a verified model picker and apiKeyHelper with a local token. Responses stream immediately; receipt audits run after delivery. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
+                    return "Claude Code uses a verified model picker and apiKeyHelper with a local token. Use 2.1.299+ for upstream fixes that keep gateway tokens out of Anthropic background requests. Nonessential traffic and auto-updates are disabled while connected. Responses stream immediately; receipt audits run after delivery. Windows shell compatibility has not been verified with the real Claude CLI. Shell credentials and managed settings may override this projection. Anthropic does not officially support non-Claude models.";
                 }
                 "Claude Code will authenticate through apiKeyHelper with a machine-local token \
-                 and use a Messages-compatible model picker generated from the verified service (Claude Code 2.1.242+). Restart Claude Code after applying. Responses stream immediately; receipt audits run after delivery. Credentials set in this settings file are taken over and restored on \
+                 and use a Messages-compatible model picker generated from the verified service. Use Claude Code 2.1.299+ for upstream fixes that keep gateway tokens out of Anthropic background requests. Nonessential traffic and auto-updates are disabled while connected. Restart Claude Code after applying. Responses stream immediately; receipt audits run after delivery. Credentials set in this settings file are taken over and restored on \
                  disconnect; a token exported in your shell would still take priority, so unset \
                  ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY there. A claude.ai login is not \
                  used through the gateway. Anthropic does not officially support non-Claude models."

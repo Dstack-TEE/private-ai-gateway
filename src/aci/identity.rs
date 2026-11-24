@@ -11,9 +11,9 @@ use super::digest;
 use super::types::WorkloadKeyset;
 pub use aci_protocol::identity::*;
 
-/// A keyset frozen with its JCS form and digest. Sealed once at startup;
-/// the report serves the keyset as a plain object (§4.1) and this digest
-/// for the workload's lifetime.
+/// A keyset frozen with its JCS form and digest. The report serves the
+/// keyset as a plain object (§4.1) and this digest until the keyset is
+/// renewed with a new `not_after` (§3.4).
 #[derive(Debug, Clone)]
 pub struct SealedWorkloadKeyset {
     keyset: WorkloadKeyset,

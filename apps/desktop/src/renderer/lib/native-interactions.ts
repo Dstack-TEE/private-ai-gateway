@@ -1,6 +1,17 @@
 import type { DesktopApi } from "../../shared/contracts";
 import type { Platform } from "./environment";
 
+/** Whether a point in the window, such as a right-click's, is on the selected text. */
+export function pointInSelection(selection: Pick<Selection, "isCollapsed" | "rangeCount" | "getRangeAt"> | null, x: number, y: number): boolean {
+  if (!selection || selection.isCollapsed) return false;
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    for (const rect of selection.getRangeAt(index).getClientRects()) {
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return true;
+    }
+  }
+  return false;
+}
+
 /** Replace browser navigation surfaces, without intercepting text editing. */
 export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu" | "closeWindow" | "quit">, platform: Platform | undefined): () => void {
   const contextMenu = (event: MouseEvent) => {
@@ -8,8 +19,8 @@ export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu" |
     const field = event.target instanceof Element ? event.target.closest("input, textarea, [contenteditable=true]") : null;
     const input = field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement ? field : undefined;
     const editable = input ? !input.disabled && !input.readOnly : field instanceof HTMLElement && field.isContentEditable;
-    const selectedText = Boolean(window.getSelection()?.toString());
-    if (!field && !selectedText) return;
+    // Like a native app, the menu belongs to a text field or the selected text under the pointer.
+    if (!field && !pointInSelection(window.getSelection(), event.clientX, event.clientY)) return;
     if (field instanceof HTMLElement && document.activeElement !== field) field.focus({ preventScroll: true });
     void api.showEditMenu(editable).catch((error) => console.error("Could not open the text editing menu", error));
   };
@@ -33,6 +44,12 @@ export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu" |
     event.preventDefault();
     void action().catch((error) => console.error("Could not run the window shortcut", error));
   };
+  // A modified or middle click on an in-app link would open it in a new
+  // webview window; the window has no tabs or second windows to open.
+  const linkClick = (event: MouseEvent) => {
+    if ((event.button === 1 || event.ctrlKey || event.shiftKey || event.metaKey || event.altKey)
+      && event.target instanceof Element && event.target.closest("a[href]")) event.preventDefault();
+  };
   const fileDrop = (event: DragEvent) => {
     if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
   };
@@ -42,12 +59,16 @@ export function installNativeInteractions(api: Pick<DesktopApi, "showEditMenu" |
   };
   window.addEventListener("contextmenu", contextMenu);
   window.addEventListener("keydown", keyDown);
+  window.addEventListener("click", linkClick, true);
+  window.addEventListener("auxclick", linkClick, true);
   window.addEventListener("dragover", fileDrop);
   window.addEventListener("drop", fileDrop);
   window.addEventListener("dragstart", contentDrag);
   return () => {
     window.removeEventListener("contextmenu", contextMenu);
     window.removeEventListener("keydown", keyDown);
+    window.removeEventListener("click", linkClick, true);
+    window.removeEventListener("auxclick", linkClick, true);
     window.removeEventListener("dragover", fileDrop);
     window.removeEventListener("drop", fileDrop);
     window.removeEventListener("dragstart", contentDrag);
