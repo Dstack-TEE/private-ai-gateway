@@ -1,9 +1,10 @@
 //! Backend/verifier construction from upstream config.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::dynamic::EmptyUpstreamBackend;
-use super::validation::validate_config;
+use super::validation::{validate_config, verification_refresh_seconds};
 use super::{
     ConfiguredUpstreams, ProviderSessionRegistry, UpstreamConfig, UpstreamConfigError,
     UpstreamProvider, UpstreamRuntimeOptions, UpstreamVerifierMode,
@@ -310,6 +311,11 @@ pub(super) fn build_verifier(
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);
+                if let Some(period) = verification_refresh_seconds(cfg, options) {
+                    verifier = verifier.with_refresh_lead(Duration::from_secs(
+                        cache_seconds.saturating_sub(period),
+                    ));
+                }
                 if let Some(token) = &cfg.bearer_token {
                     verifier = verifier.with_api_key(token.clone());
                 }

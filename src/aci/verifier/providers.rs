@@ -253,6 +253,11 @@ impl NearAiProviderVerifier {
         self
     }
 
+    pub(crate) fn with_refresh_lead(mut self, lead: Duration) -> Self {
+        self.verifier = self.verifier.with_near_ai_refresh_lead(lead);
+        self
+    }
+
     #[cfg(test)]
     pub(super) fn with_command(
         command: Vec<String>,

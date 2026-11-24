@@ -221,11 +221,15 @@ impl UpstreamProvider {
             | UpstreamProvider::AciService => AttestationScope::PerModel,
         }
     }
+
+    pub(super) fn shares_verification_across_models(self) -> bool {
+        self.attestation_scope().is_per_router() && self != Self::NearAi
+    }
 }
 
 /// The channel boundary a provider's attestation proves, and thus what identifies
-/// its attested session: one shared channel for a router (model dropped from the
-/// verifier cache key) or a distinct channel per model / per serving instance.
+/// its attested session: one shared channel for a router or a distinct channel
+/// per model or serving instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttestationScope {
     PerRouter,
@@ -529,7 +533,7 @@ impl UpstreamConfigManager {
                     .into_iter()
                     .filter(move |target| {
                         model.is_none_or(|model| {
-                            if cfg.provider.attestation_scope().is_per_router() {
+                            if cfg.provider.shares_verification_across_models() {
                                 cfg.models.contains_key(model)
                             } else {
                                 cfg.models.get(model) == Some(&target.model_id)

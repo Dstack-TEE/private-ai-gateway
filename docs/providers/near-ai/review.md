@@ -10,6 +10,12 @@ lease contract updated 2026-06-15 for router-scoped sessions.
 > reviewed release. See [verification.md](verification.md) for current adapter
 > behavior.
 
+**Adapter status (2026-11-23 PST).** Lease verification requires every model
+attestation entry to name the requested upstream model and reports a missing
+`intel_quote` on the first entry explicitly. This addresses alias selection in
+finding 2 for newly verified leases. The evidence still attests the gateway
+channel and the backend workload admission finding remains open.
+
 ## Round 2 (2026-11-23 PST)
 
 Reviewed the deployed NEAR AI gateway release

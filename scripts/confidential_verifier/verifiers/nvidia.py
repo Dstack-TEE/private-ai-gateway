@@ -3,7 +3,7 @@ import requests
 import json
 import time
 import jwt
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from ..types import VerificationResult, HARDWARE_NVIDIA_CC
 from .base import Verifier
 
@@ -11,14 +11,16 @@ logger = logging.getLogger(__name__)
 
 
 class NvidiaGpuVerifier(Verifier):
-    def __init__(self):
+    def __init__(self, *, timeout: Optional[tuple[float, float]] = None):
         self.nras_url = "https://nras.attestation.nvidia.com/v3/attest/gpu"
+        self.timeout = timeout
 
     async def verify(self, payload: Dict[str, Any]) -> VerificationResult:
         try:
             response = requests.post(
                 self.nras_url,
                 json=payload,
+                timeout=self.timeout,
                 headers={
                     "accept": "application/json",
                     "content-type": "application/json",

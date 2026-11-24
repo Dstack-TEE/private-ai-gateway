@@ -39,20 +39,24 @@ For a required request, the gateway does not forward the prompt unless a verifie
 
 The verifier input contains the upstream config name, origin, upstream model identifier, hash of the body that will be forwarded, and whether verification is required.
 
-Caching follows the provider's attestation scope:
+Most router-scoped providers use one verification key for the origin.
+NEAR AI includes the upstream model ID because it checks model selection as
+part of verifying the router channel. Per-model and per-instance providers
+also include the model in the verification key.
 
-- Router-scoped providers use one verification key for the origin. The model is omitted because all routed models share the same attested channel.
-- Per-model or per-instance providers include the model in the verification key.
-
-Only successful verification events are cached. Failed verification is returned to the caller and is not stored as a reusable success.
+The verifier caches successful events for reuse. NEAR AI also caches failures
+per upstream model. A model name mismatch is cached for 60 seconds.
+Unavailable evidence is cached for up to 10 seconds, capped by the refresh lead
+when background refresh is enabled.
 
 ## Cache and background refresh
 
 The manager runs one sequential task per upstream with a verifier route and
 refresh enabled. Startup verification uses this task; hot reload cancels old
 tasks and starts fresh verifiers. Startup and admin responses do not wait for it.
-Router-scoped and ACI-service upstreams refresh one representative model;
-other providers refresh each distinct upstream model.
+Most router-scoped upstreams and ACI-service upstreams refresh one
+representative model. NEAR AI and other providers refresh each distinct
+upstream model.
 
 Never-attempted targets run first in stable order, then due warm entries by
 earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
@@ -60,15 +64,19 @@ after waiting for a background permit, since caches and deadlines can change.
 The period p is a positive `verification_refresh_seconds`, or
 `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` by default
 (240 seconds); zero disables refresh. The lead is `max(TTL - p, 0)`,
-and warm entries become due at expiry minus lead. External and ACI-service cache
-TTLs begin at verification start. ACI-service caps expiry at keyset `not_after`,
+and warm entries become due at expiry minus lead. Successful external and
+ACI-service cache TTLs begin at verification start. The NEAR AI failure TTL
+begins when verification reports the failure. ACI-service caps expiry at keyset `not_after`,
 rechecked when verification completes; appraisal uses the wall clock after the
 response. Cold requests and background refresh share its single-flight lock.
 
 All tasks share `upstream_verification_concurrency` permits (default 4);
 request-time verification is independent. After success, a target cannot start
-again before its previous start plus p, including cacheless verifiers. Failure
-keeps a valid entry and retries at expiry, otherwise no earlier than start plus p.
+again before its previous start plus p, including cacheless verifiers. A failed
+refresh normally keeps a valid entry and retries at expiry, or at start plus p
+if there is no valid entry. NEAR AI preserves a current verification when
+evidence is unavailable. An explicit model name mismatch replaces it
+immediately because the upstream returned a different model identity.
 On Unix, cancellation or timeout kills an external verifier's process group,
 including bridge subprocesses, and reaps the child.
 

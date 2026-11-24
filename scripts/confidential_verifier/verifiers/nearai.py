@@ -31,8 +31,9 @@ def _tdx_report_data_hex(quote: Any) -> Optional[str]:
 
 class NearAICloudVerifier(Verifier):
     def __init__(self, dstack_verifier_url: str = "http://localhost:8080"):
+        # The bridge subprocess deadline allows time for cold OS-image fetches.
         self.dstack_verifier = DstackVerifier(service_url=dstack_verifier_url)
-        self.nvidia_verifier = NvidiaGpuVerifier()
+        self.nvidia_verifier = NvidiaGpuVerifier(timeout=(3, 10))
 
     def _verify_compose_hash(self, app_compose: str, expected_hash: str) -> bool:
         if not app_compose:

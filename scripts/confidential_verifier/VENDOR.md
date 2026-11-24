@@ -28,7 +28,10 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
   Upstream read `report_data` from the dstack verifier result, which never contains it, so the
   binding check never ran.
 - `providers/nearai.py`: `NearaiProvider` takes an optional `api_key` and sends it as a bearer token
-  when fetching the attestation report.
+  when fetching the attestation report. It raises an explicit error when the
+  first model attestation lacks a non-empty `intel_quote` string.
+  NEAR AI report, catalog, and NVIDIA requests use connect and read timeouts.
+  The shared NVIDIA client accepts an optional timeout.
 - `RedpillProvider` is renamed `RedPillProvider`.
 
 ## Re-syncing with upstream

@@ -28,6 +28,9 @@ use crate::aggregator::service::UpstreamVerificationRequest;
 use crate::aggregator::session::EvidenceRef;
 use crate::aggregator::upstream_config::AttestationScope;
 
+const NEAR_AI_MODEL_MISMATCH_TTL: Duration = Duration::from_secs(60);
+const NEAR_AI_EVIDENCE_UNAVAILABLE_TTL: Duration = Duration::from_secs(10);
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderVerifierConfigError {
     #[error("provider verifier command must not be empty")]
@@ -98,6 +101,7 @@ pub(super) struct ExternalProviderVerifier {
     options: HashMap<String, String>,
     timeout_seconds: u64,
     cache_ttl_seconds: u64,
+    near_ai_unavailable_ttl: Duration,
     cache: Arc<RwLock<HashMap<ExternalProviderVerifierCacheKey, CachedProviderEvent>>>,
     verify_lock: Arc<tokio::sync::Mutex<()>>,
     chutes_session_store: Option<Arc<ChutesSessionStore>>,
@@ -137,6 +141,7 @@ impl ExternalProviderVerifier {
             options: HashMap::new(),
             timeout_seconds,
             cache_ttl_seconds,
+            near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
@@ -164,6 +169,7 @@ impl ExternalProviderVerifier {
             options: HashMap::new(),
             timeout_seconds,
             cache_ttl_seconds: 0,
+            near_ai_unavailable_ttl: NEAR_AI_EVIDENCE_UNAVAILABLE_TTL,
             cache: Arc::new(RwLock::new(HashMap::new())),
             verify_lock: Arc::new(tokio::sync::Mutex::new(())),
             chutes_session_store: None,
@@ -198,12 +204,16 @@ impl ExternalProviderVerifier {
         self
     }
 
-    /// Cache / channel-identity key. A per-router provider shares one verified
-    /// channel across all its models, so the model is dropped from the key.
+    pub(super) fn with_near_ai_refresh_lead(mut self, lead: Duration) -> Self {
+        self.near_ai_unavailable_ttl = NEAR_AI_EVIDENCE_UNAVAILABLE_TTL.min(lead);
+        self
+    }
+
+    /// NEAR AI checks model selection before accepting its router evidence.
     fn cache_key(&self, request: &UpstreamVerificationRequest) -> ExternalProviderVerifierCacheKey {
         let mut key = ExternalProviderVerifierCacheKey::from_request(request);
-        if self.scope.is_per_router() {
-            key.model_id = String::new();
+        if self.scope.is_per_router() && self.provider != "near-ai" {
+            key.model_id.clear();
         }
         key
     }
@@ -212,11 +222,11 @@ impl ExternalProviderVerifier {
         &self,
         request: UpstreamVerificationRequest,
     ) -> UpstreamVerifiedEvent {
-        if let Some(event) = self.cached(&request) {
+        if let Some(event) = self.cached_event(&request) {
             return event;
         }
         let _verify_guard = self.verify_lock.lock().await;
-        if let Some(event) = self.cached(&request) {
+        if let Some(event) = self.cached_event(&request) {
             return event;
         }
         self.verify_uncached(request).await
@@ -226,10 +236,12 @@ impl ExternalProviderVerifier {
         &self,
         request: &UpstreamVerificationRequest,
     ) -> Option<UpstreamVerifiedEvent> {
+        self.cached_event(request)
+            .filter(|event| event.result == VerificationResult::Verified)
+    }
+
+    fn cached_event(&self, request: &UpstreamVerificationRequest) -> Option<UpstreamVerifiedEvent> {
         let cache_key = self.cache_key(request);
-        if self.cache_ttl_seconds == 0 {
-            return None;
-        }
         let now = Instant::now();
         let cached = self
             .cache
@@ -240,10 +252,16 @@ impl ExternalProviderVerifier {
         match cached {
             Some(cached) if now < cached.expires_at => Some(cached.event_for(request)),
             Some(_) => {
-                self.cache
+                let mut cache = self
+                    .cache
                     .write()
-                    .expect("external provider verifier cache poisoned")
-                    .remove(&cache_key);
+                    .expect("external provider verifier cache poisoned");
+                if cache
+                    .get(&cache_key)
+                    .is_some_and(|entry| entry.expires_at <= now)
+                {
+                    cache.remove(&cache_key);
+                }
                 None
             }
             None => None,
@@ -258,8 +276,11 @@ impl ExternalProviderVerifier {
             .cache
             .read()
             .expect("external provider verifier cache poisoned");
-        cache
-            .get(&self.cache_key(request))?
+        let entry = cache.get(&self.cache_key(request))?;
+        if entry.event.result != VerificationResult::Verified {
+            return None;
+        }
+        entry
             .expires_at
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -276,6 +297,12 @@ impl ExternalProviderVerifier {
     async fn verify_uncached(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let cache_key = self.cache_key(&request);
         let started = Instant::now();
+        let event = self.verifier_event(request).await;
+        self.maybe_cache_event(cache_key, &event, started);
+        event
+    }
+
+    async fn verifier_event(&self, request: UpstreamVerificationRequest) -> UpstreamVerifiedEvent {
         let input = ExternalProviderVerifierInput {
             api_version: "aci.provider-verifier.request.v1",
             provider: self.provider,
@@ -314,7 +341,6 @@ impl ExternalProviderVerifier {
                         return self.failed_event(request, err);
                     }
                 }
-                self.maybe_cache_event(cache_key, &event, started);
                 event
             }
             Err(err) => self.failed_event(request, err),
@@ -327,23 +353,46 @@ impl ExternalProviderVerifier {
         event: &UpstreamVerifiedEvent,
         started: Instant,
     ) {
-        if self.cache_ttl_seconds == 0 || event.result != VerificationResult::Verified {
+        let now = Instant::now();
+        let expires_at = match (event.result, event.failure) {
+            (VerificationResult::Verified, _) if self.cache_ttl_seconds > 0 => {
+                started + Duration::from_secs(self.cache_ttl_seconds)
+            }
+            // The NEAR AI bridge uses binding_mismatch for the model-name check.
+            (VerificationResult::Failed, VerificationFailure::BindingMismatch)
+                if self.provider == "near-ai" =>
+            {
+                now + NEAR_AI_MODEL_MISMATCH_TTL
+            }
+            (VerificationResult::Failed, VerificationFailure::EvidenceUnavailable)
+                if self.provider == "near-ai" && !self.near_ai_unavailable_ttl.is_zero() =>
+            {
+                now + self.near_ai_unavailable_ttl
+            }
+            _ => return,
+        };
+        let mut cache = self
+            .cache
+            .write()
+            .expect("external provider verifier cache poisoned");
+        if event.result == VerificationResult::Failed
+            && event.failure == VerificationFailure::EvidenceUnavailable
+            && cache.get(&cache_key).is_some_and(|entry| {
+                entry.event.result == VerificationResult::Verified && now < entry.expires_at
+            })
+        {
             return;
         }
-        let cached = CachedProviderEvent {
-            expires_at: started + Duration::from_secs(self.cache_ttl_seconds),
-            event: event.clone(),
-        };
-        self.cache
-            .write()
-            .expect("external provider verifier cache poisoned")
-            .insert(cache_key, cached);
+        cache.insert(
+            cache_key,
+            CachedProviderEvent {
+                expires_at,
+                event: event.clone(),
+            },
+        );
     }
 
     pub(super) fn invalidate(&self, request: &UpstreamVerificationRequest) {
-        // Must use the same key as `verify`/`refresh` (channel-keyed for routers),
-        // otherwise invalidation would target a different entry than the one
-        // cached and a router's verification could never be flushed.
         self.cache
             .write()
             .expect("external provider verifier cache poisoned")
