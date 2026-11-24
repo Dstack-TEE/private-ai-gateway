@@ -41,8 +41,8 @@ inclusion. RYTN was unreachable during this review.
   the new workload after the mandatory checks passed.
 - `/cpu`, `/gpu`, and `/docker-compose` returned `200` and `text/plain` on
   `:21434`. Repeated `/cpu` and `/gpu` fetches returned identical bytes and
-  `POST /cpu` returned `405`. Port `:29343` was closed. This deployment uses
-  SPKI binding and static lease evidence on the inference origin.
+  `POST /cpu` returned `405`. JEDI served no evidence on `:29343`. The deployment
+  uses SPKI binding and static lease evidence on the inference origin.
 - `family_id`, `image_id`, and `host_data` were zero in the signed SEV-SNP
   report. The verifier derived workload identity from the launch measurement.
 - RYTN (`secretai-rytn.scrtlabs.com`) could be resolved, but connections failed
@@ -98,7 +98,9 @@ scope of the live check.
 The historical record below covers SecretVM artifacts `v0.0.26-beta.2` and
 includes later notes with their own dates. Source paths reflect the layout at
 the time. On 2026-07-20, the gateway verifier passed JEDI (SEV-SNP) and RYTN
-(TDX) using evidence bound to the inference SPKI. See
+(TDX) using evidence bound to the inference SPKI. The current state described
+above supersedes the original review's passages on deferring the adapter,
+pinning the full certificate, and using `:29343` for attestation. See
 [verification.md](verification.md) for the adapter's current behavior.
 
 Source repos reviewed:
