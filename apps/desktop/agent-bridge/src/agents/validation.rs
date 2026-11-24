@@ -40,6 +40,13 @@ impl Projector {
         if current.to_str().is_none() {
             return Err("The agent config path must be valid Unicode".to_string());
         }
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return Err(format!(
+                "Refusing to use symlinked {} config at {}; replace the symlink with a regular file before connecting or disconnecting",
+                agent.name(),
+                current.display()
+            ));
+        }
         if let Some(record) =
             record.filter(|record| !record.disconnected() && !record.fields.is_empty())
         {
@@ -69,7 +76,11 @@ impl Projector {
         if self.file_credentials {
             return Ok(());
         }
-        openclaw::validate_helper(&self.helper_exe, &self.tokens.path(Agent::OpenClaw.id()))
+        openclaw::validate_staged_helper(
+            &self.bundled_helper,
+            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
+            &self.tokens.path(Agent::OpenClaw.id()),
+        )
     }
 
     pub(super) fn edit(
@@ -119,7 +130,7 @@ impl Projector {
         let inputs = Inputs {
             file_credentials: self.file_credentials,
             endpoint: &self.endpoint,
-            helper_exe: &self.helper_exe,
+            helper_exe: self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
             token_path: &self.tokens.path(agent.id()),
             codex_catalog_path: &codex_catalog_path,
             catalog,
@@ -224,7 +235,7 @@ impl Projector {
                                     && !is_model_selection_field(agent, field)
                             })
                             .collect();
-                        !fields.is_empty() && fields.iter().all(|field| doc.get_value(&refs(&field.path)) == field.value)
+                        !fields.is_empty()
                     });
                     if !owned {
                         return Err(AgentError::ConfigurationConflict("The Hermes private-ai-proxy provider already exists outside this connection; it will not be overwritten".to_string()));
@@ -311,10 +322,6 @@ impl Projector {
                 paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
             }
         }
-        paths.extend([
-            PathBuf::from("/etc/opencode/opencode.json"),
-            PathBuf::from("/etc/opencode/opencode.jsonc"),
-        ]);
         let mut merged = serde_json::json!({});
         let mut sources = Vec::new();
         for path in paths {
@@ -355,6 +362,40 @@ impl Projector {
                 merge_opencode_config(&mut merged, layer);
             }
         }
+        let system_dir = if cfg!(target_os = "macos") {
+            Some(PathBuf::from("/Library/Application Support/opencode"))
+        } else if cfg!(windows) {
+            env::var_os("ProgramData")
+                .map(PathBuf::from)
+                .map(|path| path.join("opencode"))
+        } else {
+            Some(PathBuf::from("/etc/opencode"))
+        };
+        if let Some(system_dir) = system_dir {
+            for path in [
+                system_dir.join("opencode.json"),
+                system_dir.join("opencode.jsonc"),
+            ] {
+                let text = match fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => {
+                        return Err(format!(
+                            "Cannot verify OpenCode config merge: {} is unreadable. Access is disabled; fix that file or Disconnect to restore the original config.",
+                            path.display()
+                        ));
+                    }
+                };
+                let layer = parse_jsonc(&text).map_err(|reason| {
+                    format!(
+                        "Cannot verify OpenCode config merge: {} is {reason}. Access is disabled; fix that file or Disconnect to restore the original config.",
+                        path.display()
+                    )
+                })?;
+                sources.push(path.display().to_string());
+                merge_opencode_config(&mut merged, layer);
+            }
+        }
         if let Some(policies) = merged.get("policies") {
             let policies = policies.as_array().ok_or_else(|| {
                 "OpenCode's merged policies are invalid. Resolve them in OpenCode; they will not be overwritten".to_string()
@@ -369,7 +410,7 @@ impl Projector {
                     && object
                         .get("resource")
                         .and_then(serde_json::Value::as_str)
-                        .is_some_and(|resource| resource == "private-ai-proxy" || resource == "*");
+                        .is_some_and(|resource| Self::glob_matches(resource, "private-ai-proxy"));
                 if matches {
                     denied =
                         object.get("effect").and_then(serde_json::Value::as_str) == Some("deny");
@@ -422,6 +463,26 @@ impl Projector {
         Ok(())
     }
 
+    fn glob_matches(pattern: &str, value: &str) -> bool {
+        fn matches(pattern: &[u8], value: &[u8]) -> bool {
+            match pattern.split_first() {
+                None => value.is_empty(),
+                Some((b'*', rest)) => {
+                    matches(rest, value)
+                        || value
+                            .split_first()
+                            .is_some_and(|(_, rest)| matches(pattern, rest))
+                }
+                Some((expected, rest)) => {
+                    value.split_first().is_some_and(|(actual, rest_value)| {
+                        expected == actual && matches(rest, rest_value)
+                    })
+                }
+            }
+        }
+        matches(pattern.as_bytes(), value.as_bytes())
+    }
+
     fn opencode_v2_config(&self, doc: &ConfigDoc) -> bool {
         doc.contains(&["providers"])
             || doc.contains(&["policies"])
@@ -443,6 +504,7 @@ impl Projector {
             id: agent.id().to_string(),
             name: agent.name().to_string(),
             config_path: path.display().to_string(),
+            config_path_source: agent.config_path_source(self.tool_env).map(str::to_string),
             installed,
             connected: false,
             recorded: record.is_some_and(|record| !record.disconnected()),
@@ -563,7 +625,7 @@ impl Projector {
         } else if stale_helper(
             agent,
             record,
-            &self.helper_exe,
+            self.staged_helper.as_deref().unwrap_or(&self.helper_exe),
             self.file_credentials
                 .then_some(self.tokens.path(agent.id()).as_path()),
         ) {
@@ -576,7 +638,19 @@ impl Projector {
                     .to_string(),
             );
         } else if status.connected {
-            if let (Some(catalog), Some(model)) = (catalog, selected_model(agent, doc.as_ref())) {
+            if agent == Agent::OpenCode
+                && opencode_selected_provider(doc.as_ref().unwrap())
+                    .is_some_and(|provider| provider != "private-ai-proxy")
+            {
+                status.connected = false;
+                status.authorized = false;
+                status.attention = Some(
+                    "OpenCode's selected model uses another provider, so this agent is not routed through Private AI Proxy. Choose a private-ai-proxy model to use the connection."
+                        .to_string(),
+                );
+            } else if let (Some(catalog), Some(model)) =
+                (catalog, selected_model(agent, doc.as_ref()))
+            {
                 if catalog
                     .get(&model)
                     .is_none_or(|model| !model.supports(agent.surface()))
@@ -596,7 +670,7 @@ impl Projector {
             }
             if refusal.is_none() {
                 refusal = self
-                    .validate_native_config(agent, doc, Some(record), &record.options, catalog)
+                    .validate_native_config(agent, doc, Some(record), &record.options, None)
                     .err()
                     .map(|error| error.to_string());
             }
@@ -613,7 +687,8 @@ impl Projector {
                 let token = self.tokens.path(agent.id());
                 let (helper, file) = (&self.helper_exe, self.file_credentials);
                 refusal = openclaw::validate_config(doc, Some(record)).err();
-                if refusal.is_none() && openclaw::stale_credentials(record, helper, &token, file) {
+                let staged = self.staged_helper.as_deref().unwrap_or(helper);
+                if refusal.is_none() && openclaw::stale_credentials(record, staged, &token, file) {
                     refusal =
                         Some("The OpenClaw helper changed; Disconnect then Connect again".into());
                 }
@@ -664,16 +739,26 @@ impl Projector {
         agent: Agent,
         text: Option<&str>,
     ) -> Result<ConfigDoc, AgentError> {
-        let format = if agent == Agent::OpenCode
-            && agent
-                .config_path(&self.home, self.tool_env)
+        let path = agent.config_path(&self.home, self.tool_env);
+        self.parse_config_at(agent, &path, text)
+    }
+
+    pub(super) fn parse_config_at(
+        &self,
+        agent: Agent,
+        path: &Path,
+        text: Option<&str>,
+    ) -> Result<ConfigDoc, AgentError> {
+        let jsonc = agent == Agent::OpenCode
+            && path
                 .extension()
-                .is_some_and(|extension| extension == "jsonc")
-        {
-            Format::Json5
-        } else {
-            agent.format()
-        };
+                .is_some_and(|extension| extension == "jsonc");
+        if jsonc {
+            parse_jsonc(text.unwrap_or_default()).map_err(|reason| {
+                AgentError::InvalidConfiguration(self.parse_error(agent, &reason))
+            })?;
+        }
+        let format = if jsonc { Format::Json5 } else { agent.format() };
         ConfigDoc::parse(format, text.unwrap_or_default())
             .map_err(|reason| AgentError::InvalidConfiguration(self.parse_error(agent, &reason)))
     }

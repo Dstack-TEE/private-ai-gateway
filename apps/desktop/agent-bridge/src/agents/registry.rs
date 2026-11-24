@@ -7,6 +7,7 @@ pub(crate) trait AgentIntegration {
     /// The live user-level config file. With `tool_env` each tool's own
     /// location override is honored.
     fn config_path(self, home: &Path, tool_env: bool) -> PathBuf;
+    fn config_path_source(self, tool_env: bool) -> Option<&'static str>;
     fn note(self, connect: bool) -> &'static str;
 }
 
@@ -65,6 +66,26 @@ impl AgentIntegration for Agent {
                 .unwrap_or_else(|| hermes_native_dir(home, tool_env))
                 .join("config.yaml"),
         }
+    }
+
+    fn config_path_source(self, tool_env: bool) -> Option<&'static str> {
+        if !tool_env {
+            return None;
+        }
+        let vars = match self {
+            Agent::Codex => &["CODEX_HOME"][..],
+            Agent::ClaudeCode => &["CLAUDE_CONFIG_DIR"][..],
+            Agent::OpenCode => &["OPENCODE_CONFIG", "XDG_CONFIG_HOME"][..],
+            Agent::Pi | Agent::OhMyPi => &["PI_CODING_AGENT_DIR", "PI_CONFIG_DIR"][..],
+            Agent::Hermes => &["HERMES_HOME"][..],
+            Agent::OpenClaw => &[
+                "OPENCLAW_CONFIG_PATH",
+                "OPENCLAW_STATE_DIR",
+                "OPENCLAW_HOME",
+            ][..],
+            Agent::Dsh => &["DSH_HOME"][..],
+        };
+        vars.iter().find(|name| env_path(name).is_some()).copied()
     }
 
     fn note(self, connect: bool) -> &'static str {

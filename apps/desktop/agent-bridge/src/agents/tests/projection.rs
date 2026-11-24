@@ -85,6 +85,13 @@ fn opencode_v2_model_and_preferred_default_are_supported() {
         selected_model(Agent::OpenCode, Some(&model)).as_deref(),
         Some("phala/qwen")
     );
+    let model = ConfigDoc::Json(
+        serde_json::json!({"model": "private-ai-proxy/phala/qwen#fast"}).to_string(),
+    );
+    assert_eq!(
+        selected_model(Agent::OpenCode, Some(&model)).as_deref(),
+        Some("phala/qwen")
+    );
 
     let catalog = Catalog::from_remote(
         &serde_json::json!({

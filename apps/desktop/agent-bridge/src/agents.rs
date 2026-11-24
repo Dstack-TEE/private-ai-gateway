@@ -261,6 +261,8 @@ pub struct Projector {
     home: PathBuf,
     data_dir: PathBuf,
     helper_exe: PathBuf,
+    bundled_helper: PathBuf,
+    staged_helper: Option<PathBuf>,
     endpoint: String,
     tool_env: bool,
     file_credentials: bool,
@@ -314,22 +316,28 @@ impl Projector {
         tool_env: bool,
         secrets: Arc<dyn SecretStore>,
     ) -> Self {
-        let staged_helper = data_dir.join("helpers").join(helper_binary_name());
-        let helper_exe = if staged_helper.is_file() {
-            staged_helper
-        } else {
-            helper_exe
-        };
         Self {
             home,
             tokens: TokenFiles::new(&data_dir),
             data_dir,
+            bundled_helper: helper_exe.clone(),
             helper_exe,
+            staged_helper: None,
             endpoint: endpoint.to_string(),
             tool_env,
             file_credentials: false,
             secrets,
         }
+    }
+
+    pub fn with_staged_helper(mut self, staged_helper: PathBuf) -> Self {
+        self.staged_helper = Some(staged_helper);
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_staged_helper(&mut self, staged_helper: PathBuf) {
+        self.staged_helper = Some(staged_helper);
     }
 
     /// Expose only revocable local-proxy tokens and public model metadata in
@@ -444,8 +452,13 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
+        let configured = agent.config_path(&self.home, self.tool_env);
         let mut restore_problem = path.as_ref().err().cloned();
-        let edit = match ConfigDoc::parse(agent.format(), text.as_deref().unwrap_or_default()) {
+        let edit = match self.parse_config_at(
+            agent,
+            path.as_deref().unwrap_or(&configured),
+            text.as_deref(),
+        ) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
             Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
@@ -462,11 +475,7 @@ impl Projector {
                 store.get(agent.id()).ok_or(AgentError::InvalidState)?;
                 Edit::default()
             }
-            Err(reason) => {
-                return Err(AgentError::InvalidConfiguration(
-                    self.parse_error(agent, &reason),
-                ))
-            }
+            Err(error) => return Err(error),
         };
         Ok(AgentPreview {
             agent: self.status(agent, &store, catalog),

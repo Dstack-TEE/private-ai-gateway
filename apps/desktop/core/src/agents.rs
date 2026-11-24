@@ -10,6 +10,8 @@ pub struct AgentStatus {
     pub id: String,
     pub name: String,
     pub config_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path_source: Option<String>,
     /// The agent's configuration folder exists; each agent creates it on
     /// first run, so detection does not depend on how the CLI was installed.
     pub installed: bool,

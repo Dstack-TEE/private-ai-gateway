@@ -72,7 +72,7 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(!sandbox.projector.load_store().unwrap()[agent.id()]
         .fields
         .is_empty());
-    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_some());
     write(&config, &managed);
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
@@ -112,6 +112,48 @@ fn disconnect_restores_original_opencode_model_after_private_model_edit() {
     assert_eq!(
         doc(&sandbox, agent).get_str(&["model"]).as_deref(),
         Some("other/original")
+    );
+}
+
+#[test]
+fn reconnect_after_endpoint_drift_preserves_original_value() {
+    let sandbox = sandbox("reconnect-endpoint-drift");
+    let agent = Agent::ClaudeCode;
+    let path = agent.config_path(&sandbox.home, false);
+    write(
+        &path,
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid"}}"#,
+    );
+    let catalog = catalog();
+    connect(&sandbox);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(&["env", "ANTHROPIC_BASE_URL"], "https://drift.invalid")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let preview = sandbox
+        .projector
+        .preview(agent, true, Some(&catalog), &claude_options())
+        .unwrap();
+    assert!(
+        sandbox
+            .projector
+            .apply(
+                agent,
+                true,
+                &preview.revision,
+                Some(&catalog),
+                &claude_options(),
+            )
+            .unwrap()
+            .authorized
+    );
+    disconnect(&sandbox, agent);
+    assert_eq!(
+        doc(&sandbox, agent)
+            .get_str(&["env", "ANTHROPIC_BASE_URL"])
+            .as_deref(),
+        Some("https://original.invalid")
     );
 }
 
@@ -305,13 +347,11 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
         .unwrap();
     assert!(!sandbox.projector.scan(None).unwrap().1.is_empty());
 
-    // Make the config unwritable (a symlink target is refused) so the
-    // restore step fails after the record was tombstoned.
-    let dir = path.parent().unwrap().to_path_buf();
+    // Make the config invalid so the restore step fails after the record was
+    // tombstoned.
     let original = fs::read_to_string(&path).unwrap();
     fs::remove_file(&path).unwrap();
-    fs::write(dir.join("elsewhere.json"), &original).unwrap();
-    std::os::unix::fs::symlink(dir.join("elsewhere.json"), &path).unwrap();
+    fs::write(&path, "invalid json").unwrap();
     let options = ConnectOptions::default();
     let preview = sandbox
         .projector
@@ -341,8 +381,7 @@ fn a_failed_disconnect_leaves_a_retryable_tombstone_and_never_reuses_the_token()
         .is_err());
 
     // Repair the config and retry: idempotent cleanup completes.
-    fs::remove_file(&path).unwrap();
-    fs::rename(dir.join("elsewhere.json"), &path).unwrap();
+    fs::write(&path, &original).unwrap();
     let preview = sandbox
         .projector
         .preview(Agent::ClaudeCode, false, None, &options)

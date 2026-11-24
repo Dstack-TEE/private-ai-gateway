@@ -51,6 +51,7 @@ const CATALOG_REFRESH: std::time::Duration = std::time::Duration::from_secs(10 *
 pub struct RuntimeOptions {
     pub launcher: Arc<dyn VerifierLauncher>,
     pub helper_path: PathBuf,
+    pub staged_helper: Option<PathBuf>,
     pub task_runtime: Handle,
     pub agent_configuration: bool,
     pub agent_access_error: Option<String>,
@@ -86,6 +87,7 @@ pub struct DesktopRuntime {
     exiting: AtomicBool,
     recovery: crate::recovery::Recovery,
     helper_path: PathBuf,
+    staged_helper: Option<PathBuf>,
     agent_configuration: bool,
     agent_access_error: Option<String>,
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -234,6 +236,7 @@ impl DesktopRuntime {
         let RuntimeOptions {
             launcher,
             helper_path,
+            mut staged_helper,
             task_runtime,
             agent_configuration,
             agent_access_error,
@@ -250,9 +253,12 @@ impl DesktopRuntime {
             .ok_or(LaunchError::AlreadyRunning)?;
         #[cfg(all(unix, not(all(target_os = "macos", feature = "mac-app-store"))))]
         if agent_configuration {
-            if let Err(error) = crate::helper_staging::stage(&helper_path, &data_dir) {
-                // OpenClaw independently rejects an unavailable or mismatched staged copy.
-                tracing::warn!("Cannot stage the credential helper: {error}");
+            match crate::helper_staging::stage(&helper_path, &data_dir) {
+                Ok(path) => staged_helper = Some(path),
+                Err(error) => {
+                    // OpenClaw independently rejects an unavailable or mismatched staged copy.
+                    tracing::warn!("Cannot stage the credential helper: {error}");
+                }
             }
         }
         let (settings_dir, relocation_notices) = match legacy_config_dir() {
@@ -334,6 +340,7 @@ impl DesktopRuntime {
             exiting: AtomicBool::new(false),
             recovery: crate::recovery::Recovery::default(),
             helper_path,
+            staged_helper,
             agent_configuration,
             agent_access_error,
             #[cfg(all(target_os = "macos", feature = "mac-app-store"))]

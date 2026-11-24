@@ -21,6 +21,7 @@ fn launch_requires_instance_ownership_before_initialization() {
         let result = DesktopRuntime::launch(RuntimeOptions {
             launcher: Arc::new(NoVerifier),
             helper_path: app_data_dir().unwrap().join("helper"),
+            staged_helper: None,
             task_runtime: executor.handle().clone(),
             agent_configuration: true,
             agent_access_error: None,
@@ -115,6 +116,7 @@ fn test_runtime_with(
         lifecycle: tokio::sync::Mutex::new(()),
         exiting: AtomicBool::new(false),
         helper_path: directory.join("helper"),
+        staged_helper: None,
         agent_configuration: true,
         agent_access_error: None,
         #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -823,6 +825,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
             None => std::fs::remove_file(&catalog_path).unwrap(),
             Some(bytes) => std::fs::write(&catalog_path, bytes).unwrap(),
         }
+        runtime.reconcile_agents().unwrap();
         let statuses = runtime.list_agents().unwrap();
         let codex = statuses.iter().find(|status| status.id == "codex").unwrap();
         assert!(codex.authorized && codex.attention.is_none());
@@ -898,10 +901,9 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     assert_eq!(refusal(&token), "gateway_not_verified");
     assert_eq!(std::fs::read(&path).unwrap(), projected);
     reverify();
-    // Only the user ending the session restores the original configuration,
-    // which revokes the token.
+    // Only the user ending the session restores the original configuration.
     runtime.stop().unwrap();
-    assert!(files.read(agent.id()).unwrap().is_none());
+    assert!(files.read(agent.id()).unwrap().is_some());
     assert_eq!(refusal(&token), "unauthorized");
     let restored =
         || serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap();
@@ -1080,7 +1082,7 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
         restored,
         serde_json::from_str::<serde_json::Value>(original).unwrap()
     );
-    assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_none());
+    assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_some());
     assert!(files.read(Agent::Codex.id()).unwrap().is_none());
     let codex = std::fs::read_to_string(&codex_config).unwrap();
     let doc =

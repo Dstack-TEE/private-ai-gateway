@@ -29,6 +29,12 @@ impl DesktopRuntime {
         #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
         let projector =
             Projector::new(self.helper_path.clone(), endpoint, self.local_state.clone())?;
+        #[cfg(not(all(target_os = "macos", feature = "mac-app-store")))]
+        let projector = if let Some(path) = self.staged_helper.clone() {
+            projector.with_staged_helper(path)
+        } else {
+            projector
+        };
         Ok(projector)
     }
 
@@ -116,7 +122,7 @@ impl DesktopRuntime {
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
-        let (mut statuses, tokens) = projector.scan(catalog.as_ref())?;
+        let (mut statuses, _tokens) = projector.scan(catalog.as_ref())?;
         if !self.state().is_protected() || !session.verified {
             for status in &mut statuses {
                 status.authorized = false;
@@ -126,23 +132,6 @@ impl DesktopRuntime {
             self.report_agents(&statuses);
             return Ok(statuses);
         }
-        if let Some(catalog) = catalog.as_ref() {
-            if let Some(codex) = statuses
-                .iter_mut()
-                .find(|status| status.id == Agent::Codex.id() && status.authorized)
-            {
-                if let Err(error) = projector.sync_codex_catalog(catalog) {
-                    let refresh = format!(
-                        "Codex model metadata could not be refreshed: {error}. Disconnect remains available"
-                    );
-                    codex.attention = Some(match codex.attention.take() {
-                        Some(attention) => format!("{attention} {refresh}"),
-                        None => refresh,
-                    });
-                }
-            }
-        }
-        self.publish_agent_tokens(tokens)?;
         self.report_agents(&statuses);
         Ok(statuses)
     }
@@ -293,6 +282,11 @@ impl DesktopRuntime {
             return Ok(());
         }
         let projector = self.current_projector()?;
+        if let Some(catalog) = catalog.as_ref() {
+            projector
+                .sync_codex_catalog(catalog)
+                .map_err(|error| format!("Codex model metadata could not be refreshed: {error}"))?;
+        }
         let outcome = projector.reconcile(catalog.as_ref());
         self.recovery.agents_finished(
             outcome

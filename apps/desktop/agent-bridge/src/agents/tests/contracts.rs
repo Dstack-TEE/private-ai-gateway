@@ -363,6 +363,14 @@ fn opencode_policies_use_the_last_matching_provider_rule() {
         ])))
         .unwrap_err();
     assert!(refusal.contains("policies deny provider.use"));
+    let refusal = sandbox
+        .projector
+        .check_opencode_merge(&config(serde_json::json!([
+            {"action": "provider.use", "resource": "private-ai-proxy", "effect": "allow"},
+            {"action": "provider.use", "resource": "private-*", "effect": "deny"}
+        ])))
+        .unwrap_err();
+    assert!(refusal.contains("policies deny provider.use"));
 }
 
 #[test]
@@ -393,6 +401,21 @@ fn audit_opencode_v2_projection_uses_native_provider_keys() {
     let config = doc(&sandbox, Agent::OpenCode);
     assert!(config.contains(&["providers", "private-ai-proxy"]));
     assert!(!config.contains(&["provider", "private-ai-proxy"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_agent_config_is_refused_at_preview() {
+    let sandbox = sandbox("symlink-preview");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let target = path.with_file_name("target.json");
+    write(&target, "{}");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let error = sandbox
+        .projector
+        .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
+        .unwrap_err();
+    assert!(error.to_string().contains("symlinked"));
 }
 
 #[test]

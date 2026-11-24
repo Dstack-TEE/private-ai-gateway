@@ -358,8 +358,18 @@ fn validate_command_text(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), String> {
-    let command = helper_path(source, token_path)?;
+    let staged = helper_path(source, token_path)?;
+    validate_staged_helper(source, &staged, token_path)
+}
+
+pub(super) fn validate_staged_helper(
+    source: &Path,
+    staged: &Path,
+    token_path: &Path,
+) -> Result<(), String> {
+    let command = helper_path(staged, token_path)?;
     validate_command_text(path_text(&command)?)?;
     #[cfg(unix)]
     {
@@ -378,7 +388,7 @@ pub(super) fn validate_helper(source: &Path, token_path: &Path) -> Result<(), St
     }
     #[cfg(windows)]
     windows::validate_helper(&command)?;
-    if source != command
+    if source != staged
         && !same_content(source, &command)
             .map_err(|_| "Cannot verify the staged OpenClaw helper against this installation")?
     {

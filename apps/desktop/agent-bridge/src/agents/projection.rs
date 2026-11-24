@@ -163,8 +163,7 @@ pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedFi
         let Some(mut current) = owned_value(doc, field) else {
             return false;
         };
-        normalize_regenerable_value(agent, &mut expected);
-        normalize_regenerable_value(agent, &mut current);
+        normalize_regenerable_values(agent, &mut expected, &mut current);
         return expected == current;
     }
     if agent == Agent::Dsh
@@ -194,7 +193,10 @@ fn is_regenerable_field(agent: Agent, field: &OwnedField) -> bool {
     match agent {
         Agent::Codex => field.path == owned(&["model_catalog_json"]),
         Agent::ClaudeCode => field.path == owned(&["modelPicker"]),
-        Agent::OpenCode => field.path == owned(&["provider", "private-ai-proxy"]),
+        Agent::OpenCode => {
+            field.path == owned(&["provider", "private-ai-proxy"])
+                || field.path == owned(&["providers", "private-ai-proxy"])
+        }
         Agent::Pi | Agent::OhMyPi => field.path == owned(&["providers", "private-ai-proxy"]),
         Agent::OpenClaw => field.path == owned(&["models", "providers", "private-ai-proxy"]),
         Agent::Dsh => {
@@ -208,20 +210,110 @@ fn is_regenerable_field(agent: Agent, field: &OwnedField) -> bool {
     }
 }
 
-fn normalize_regenerable_value(agent: Agent, value: &mut ConfigValue) {
-    let ConfigValue::Json(value) = value else {
+fn normalize_regenerable_values(
+    agent: Agent,
+    expected: &mut ConfigValue,
+    current: &mut ConfigValue,
+) {
+    let (ConfigValue::Json(expected), ConfigValue::Json(current)) = (expected, current) else {
         return;
     };
     match agent {
         Agent::Codex | Agent::ClaudeCode => {}
         Agent::OpenCode | Agent::Pi | Agent::OhMyPi | Agent::OpenClaw => {
-            if let Some(object) = value.as_object_mut() {
-                object.remove("models");
+            normalize_model_map(expected, current)
+        }
+        Agent::Dsh => {
+            let expected = json_path_mut(expected, &["providers", "private-ai-proxy", "models"]);
+            let current = json_path_mut(current, &["providers", "private-ai-proxy", "models"]);
+            if let (Some(expected), Some(current)) = (expected, current) {
+                normalize_model_map(expected, current);
             }
         }
-        Agent::Dsh => remove_json_path(value, &["providers", "private-ai-proxy", "models"]),
         Agent::Hermes => {}
     }
+}
+
+fn normalize_model_map(expected: &mut serde_json::Value, current: &mut serde_json::Value) {
+    let (Some(expected), Some(current)) = (expected.as_object_mut(), current.as_object_mut())
+    else {
+        return;
+    };
+    let expected_models = expected
+        .remove("models")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let current_models = current
+        .remove("models")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    let mut expected_routing = serde_json::Map::new();
+    let mut routing = serde_json::Map::new();
+    for id in current_models.keys() {
+        let Some(current_model) = current_models.get(id) else {
+            continue;
+        };
+        let Some(expected_model) = expected_models.get(id) else {
+            routing.insert(id.clone(), routing_value(current_model));
+            continue;
+        };
+        if current_model != expected_model {
+            expected_routing.insert(id.clone(), routing_value(expected_model));
+            routing.insert(id.clone(), routing_value(current_model));
+        }
+    }
+    for id in expected_models.keys() {
+        if !current_models.contains_key(id) {
+            continue;
+        }
+        if current_models.get(id) != expected_models.get(id) {
+            expected_routing
+                .entry(id.clone())
+                .or_insert_with(|| routing_value(expected_models.get(id).unwrap()));
+        }
+    }
+    expected.insert("models".into(), serde_json::Value::Object(expected_routing));
+    current.insert("models".into(), serde_json::Value::Object(routing));
+}
+
+fn routing_value(value: &serde_json::Value) -> serde_json::Value {
+    let Some(object) = value.as_object() else {
+        return serde_json::Value::Null;
+    };
+    let mut routing = serde_json::Map::new();
+    if let Some(provider) = object.get("provider") {
+        if let Some(provider) = provider.as_object() {
+            let mut selected = serde_json::Map::new();
+            for key in ["npm", "api"] {
+                if let Some(value) = provider.get(key) {
+                    selected.insert(key.into(), value.clone());
+                }
+            }
+            routing.insert("provider".into(), serde_json::Value::Object(selected));
+        } else {
+            routing.insert("provider".into(), provider.clone());
+        }
+    }
+    if let Some(options) = object.get("options").and_then(serde_json::Value::as_object) {
+        if let Some(base_url) = options.get("baseURL") {
+            routing.insert("options".into(), serde_json::json!({"baseURL": base_url}));
+        }
+    }
+    if let Some(headers) = object.get("headers") {
+        routing.insert("headers".into(), headers.clone());
+    }
+    serde_json::Value::Object(routing)
+}
+
+fn json_path_mut<'a>(
+    value: &'a mut serde_json::Value,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Value> {
+    let mut value = value;
+    for key in path {
+        value = value.get_mut(*key)?;
+    }
+    Some(value)
 }
 
 fn remove_json_path(value: &mut serde_json::Value, path: &[&str]) {
@@ -422,6 +514,12 @@ pub(super) fn inactive_provider_value(field: &OwnedField) -> Option<ConfigValue>
             let mut value = value.clone();
             if let Some(object) = value.as_object_mut() {
                 object.remove("apiKey");
+                if let Some(settings) = object
+                    .get_mut("settings")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    settings.remove("apiKey");
+                }
                 if let Some(options) = object
                     .get_mut("options")
                     .and_then(serde_json::Value::as_object_mut)
@@ -519,6 +617,10 @@ pub(super) fn project(
         }
         let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
+            None if prior.iter().any(|owned| owned.path == field.path) => prior
+                .iter()
+                .find(|owned| owned.path == field.path)
+                .and_then(|owned| owned.previous.clone()),
             None => match current.clone() {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
@@ -796,8 +898,13 @@ fn project_exact(
     let still_ours = prior
         .iter()
         .find(|owned| owned.path == field.path && owned.holds(current.as_ref()));
+    let recorded = prior.iter().find(|owned| owned.path == field.path);
     let (previous, source) = match (still_ours, &current) {
         (Some(owned), _) => (owned.previous.clone(), owned.source.clone()),
+        (None, Some(_)) if recorded.is_some() => {
+            let recorded = recorded.unwrap();
+            (recorded.previous.clone(), recorded.source.clone())
+        }
         (None, None) => (None, None),
         (None, Some(ConfigValue::List(_) | ConfigValue::Json(_))) => {
             return Err(format!(
@@ -1068,7 +1175,9 @@ fn restore_exact(
 ) -> Result<Option<ConfigChange>, AgentError> {
     let path = refs(&field.path);
     let current = target.get_value(&path);
-    if !field.holds(current.as_ref()) {
+    if !field.holds(current.as_ref())
+        && !(is_any_model_selection_field(field) && private_model_selection(current.as_ref()))
+    {
         return Ok(None);
     }
     let restored = match &field.previous {
@@ -1187,7 +1296,12 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::Codex => doc.get_str(model_selection_paths(agent)[0].path),
         Agent::ClaudeCode => doc.get_str(model_selection_paths(agent)[0].path),
         Agent::OpenCode => match doc.get_value(model_selection_paths(agent)[0].path)? {
-            ConfigValue::Str(value) => value.strip_prefix("private-ai-proxy/").map(str::to_string),
+            ConfigValue::Str(value) => value.strip_prefix("private-ai-proxy/").map(|value| {
+                value
+                    .split_once('#')
+                    .map_or(value, |(model, _)| model)
+                    .to_string()
+            }),
             ConfigValue::Json(value) => {
                 let object = value.as_object()?;
                 (object.get("providerID")?.as_str() == Some("private-ai-proxy"))
@@ -1202,5 +1316,16 @@ pub(super) fn selected_model(agent: Agent, doc: Option<&ConfigDoc>) -> Option<St
         Agent::OpenClaw => openclaw::selected_model(doc),
         Agent::Pi | Agent::OhMyPi => None,
         Agent::Dsh => dsh::selected_model(doc),
+    }
+}
+
+pub(super) fn opencode_selected_provider(doc: &ConfigDoc) -> Option<String> {
+    match doc.get_value(model_selection_paths(Agent::OpenCode)[0].path)? {
+        ConfigValue::Str(value) => value.split('/').next().map(str::to_string),
+        ConfigValue::Json(value) => value
+            .get("providerID")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        _ => None,
     }
 }

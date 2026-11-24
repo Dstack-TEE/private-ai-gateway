@@ -52,19 +52,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if matches!(agent, Agent::OpenCode | Agent::Dsh) {
-            assert_scan(&sandbox, true, None);
-        } else if agent == Agent::OpenClaw {
-            assert_scan(
-                &sandbox,
-                false,
-                Some(if cfg!(unix) {
-                    "differs"
-                } else {
-                    "helper changed"
-                }),
-            );
-            sandbox.projector.helper_exe = current;
+        if matches!(agent, Agent::OpenCode | Agent::Dsh | Agent::OpenClaw) {
             assert_scan(&sandbox, true, None);
         } else {
             assert_scan(&sandbox, false, Some("Disconnect, then Connect"));
@@ -155,6 +143,29 @@ fn changing_a_connected_agents_model_keeps_access() {
 }
 
 #[test]
+fn opencode_external_model_is_reported_as_unrouted() {
+    let sandbox = sandbox("external-opencode-model");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_str(&["model"], "other/provider-model#fast")
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(!status.authorized, "{status:?}");
+    assert!(status.attention.unwrap().contains("not routed"));
+}
+
+#[test]
 fn audit_generated_catalog_edits_do_not_deauthorize() {
     let sandbox = sandbox("audit-generated-catalog");
     let catalog = catalog();
@@ -181,6 +192,38 @@ fn audit_generated_catalog_edits_do_not_deauthorize() {
 }
 
 #[test]
+fn audit_model_routing_override_deauthorizes() {
+    let sandbox = sandbox("audit-model-routing");
+    let catalog = catalog();
+    apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
+    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let mut config = doc(&sandbox, Agent::OpenCode);
+    config
+        .set_str(
+            &[
+                "provider",
+                "private-ai-proxy",
+                "models",
+                "openai/gpt-oss-20b",
+                "options",
+                "baseURL",
+            ],
+            "https://example.invalid/v1",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    let status = sandbox
+        .projector
+        .scan(Some(&catalog))
+        .unwrap()
+        .0
+        .into_iter()
+        .find(|status| status.id == Agent::OpenCode.id())
+        .unwrap();
+    assert!(!status.authorized, "{status:?}");
+}
+
+#[test]
 fn audit_drift_does_not_restore_or_revoke_until_disconnect() {
     let sandbox = sandbox("audit-drift-no-suspend");
     let catalog = catalog();
@@ -202,7 +245,13 @@ fn audit_drift_does_not_restore_or_revoke_until_disconnect() {
 
 #[test]
 fn audit_agent_helpers_use_the_staged_helper_location() {
-    let sandbox = sandbox("audit-staged-helper");
+    let mut sandbox = sandbox("audit-staged-helper");
+    let staged = sandbox
+        .projector
+        .data_dir
+        .join("helpers")
+        .join(helper_binary_name());
+    sandbox.projector.set_staged_helper(staged);
     let catalog = catalog();
     apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
     let config = doc(&sandbox, Agent::ClaudeCode);
