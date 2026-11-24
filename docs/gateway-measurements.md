@@ -52,7 +52,8 @@ key's identity; key custody remains part of deployment review.
 ## Asset schema
 
 `schema` is `gateway-measurements/v1`; `release` identifies the release tag;
-`domains` lists every monitored hostname. Hashes and public keys use hex.
+`domains` lists the public serving hostnames monitored by the workflow. Hashes
+and public keys use hex.
 
 | Object | Fields |
 | --- | --- |
@@ -98,13 +99,19 @@ snapshot on one domain and a prerelease snapshot on another. Individual fields
 from different releases cannot be combined to pass. Publishing the new release
 automatically ends the acceptance window for older prereleases.
 
-A mismatch prints a unified JSON diff and exits 1. Missing assets, malformed
-evidence, and network failures also fail the check. `GITHUB_TOKEN` is optional
-locally and supplies authenticated GitHub API quota in CI.
+A mismatch prints a unified JSON diff and exits 1. Missing assets and malformed
+evidence also fail the check. For each domain, the check retries connection
+failures, timeouts, interrupted responses, and HTTP 408, 429, or 5xx responses
+after 5 seconds and then 15 seconds. Each attempt uses a fresh nonce. A domain
+is unavailable only after all three attempts fail. TLS errors and measurement
+mismatches fail immediately. `GITHUB_TOKEN` is optional locally and supplies
+authenticated GitHub API quota in CI.
 
 The [Gateway measurements workflow](../.github/workflows/gateway-measurements.yml)
-runs hourly and on manual dispatch. It opens or updates one
-`measurement-drift` issue on failure and closes it on recovery. It uses only
-`contents: read` and `issues: write` permissions. Scheduled checks start once
-the workflow is on the default branch; neither the workflow nor the script
-deploys the gateway or changes release assets.
+runs hourly and on manual dispatch. A serving domain that recovers within the
+three attempts does not trigger an issue. A failed check opens or updates one
+`measurement-drift` issue, and a passing check closes it. The workflow runs
+with `--summary` to publish domain-level outcomes, and the issue links to the
+workflow run. It uses only `contents: read` and `issues: write` permissions.
+Scheduled checks start once the workflow is on the default branch; neither
+the workflow nor the script deploys the gateway or changes release assets.

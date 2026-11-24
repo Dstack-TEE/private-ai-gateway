@@ -1,9 +1,8 @@
-"""Public captured evidence and offline release/HTTP regression tests.
+"""Sanitized public evidence and offline release/HTTP regression tests.
 
-The attestation fixture was captured from tee.redpill.ai on 2026-11-05.
-It retains every replay digest and the payloads needed by this tool, with
-unrelated event payloads and workload keys omitted. No inference credentials
-or private evidence are used.
+The fixture is based on a report captured from tee.redpill.ai on 2026-11-05.
+It contains an example Compose, a recomputed compose event, and an unsigned
+quote header and body with the corresponding replay results.
 """
 
 import copy
@@ -56,7 +55,7 @@ def update_quote_replay(report):
 
 
 class MeasurementsTests(unittest.TestCase):
-    def test_captured_public_evidence_and_output_files(self):
+    def test_sanitized_public_evidence_and_output_files(self):
         actual, app, compose = gm.extract(REPORT, RELEASE)
         self.assertEqual(actual, EXPECTED)
         self.assertEqual(hashlib.sha256(app.encode()).hexdigest(), EXPECTED["app"]["compose_hash"])
@@ -227,11 +226,13 @@ class MeasurementsTests(unittest.TestCase):
 
 
 class CheckTests(unittest.TestCase):
-    def run_check(self, releases=None, assets=None, reports=None, *, paginated=False, served_spkis=None):
+    def run_check(self, releases=None, assets=None, reports=None, *, paginated=False, served_spkis=None,
+                  attestation_failures=None, summary=False):
         releases = releases if releases is not None else [release()]
         assets = assets if assets is not None else {RELEASE: EXPECTED}
         reports = reports if reports is not None else {}
         calls = []
+        nonces = set()
         def peer_spki(response):
             hostname = response.url.split("/")[2]
             if served_spkis and hostname in served_spkis:
@@ -256,13 +257,23 @@ class CheckTests(unittest.TestCase):
             else:
                 hostname = url.split("/")[2]
                 payload = reports.get(hostname, REPORT)
-                self.assertRegex(kwargs["params"]["nonce"], r"^[0-9a-f]{64}$")
+                nonce = kwargs["params"]["nonce"]
+                self.assertRegex(nonce, r"^[0-9a-f]{64}$")
+                self.assertNotIn(nonce, nonces)
+                nonces.add(nonce)
+                failures = (attestation_failures or {}).get(hostname, [])
+                if failures:
+                    failure = failures.pop(0)
+                    if isinstance(failure, Exception):
+                        raise failure
+                    response.status_code = failure
             response._content = json.dumps(payload).encode()
             response._content_consumed = True
             return response
         output, error = io.StringIO(), io.StringIO()
         with patch.object(requests.Session, "get", get), patch.object(gm, "peer_spki", peer_spki), redirect_stdout(output), redirect_stderr(error):
-            result = gm.main(["check", "--repo", "fixture/repo"])
+            args = ["check", "--repo", "fixture/repo"]
+            result = gm.main(args + (["--summary"] if summary else []))
         return result, output.getvalue(), error.getvalue(), calls
 
     def test_match_checks_every_domain_and_paginates(self):
@@ -404,6 +415,41 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("api.redpill.ai:", error)
         self.assertIn("tee.redpill.ai: matches", output)
+
+    def test_brief_domain_outage_recovers_within_three_attempts(self):
+        with patch.object(gm.time, "sleep") as sleep:
+            result, output, error, calls = self.run_check(
+                attestation_failures={"api.redpill.ai": [requests.Timeout(), 503]}, summary=True,
+            )
+        self.assertEqual((result, error), (0, ""))
+        self.assertIn(f"api.redpill.ai: matches {RELEASE}", output)
+        self.assertEqual(calls.count("https://api.redpill.ai/v1/aci/attestation"), 3)
+        self.assertEqual([call.args for call in sleep.call_args_list], [(5,), (15,)])
+
+    def test_persistent_domain_outage_fails_at_threshold_with_safe_summary(self):
+        with patch.object(gm.time, "sleep") as sleep:
+            result, output, error, calls = self.run_check(
+                attestation_failures={"api.redpill.ai": [requests.ConnectionError("private detail")] * 3},
+                summary=True,
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(error, "api.redpill.ai: attestation unavailable after 3 attempts\n")
+        self.assertIn(f"tee.redpill.ai: matches {RELEASE}", output)
+        self.assertEqual(calls.count("https://api.redpill.ai/v1/aci/attestation"), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_tls_errors_and_measurement_mismatches_fail_without_retry_or_raw_summary(self):
+        with patch.object(gm.time, "sleep") as sleep:
+            result, _, error, calls = self.run_check(
+                attestation_failures={"api.redpill.ai": [requests.exceptions.SSLError("private detail")]},
+                served_spkis={"tee.redpill.ai": "ff" * 32},
+                summary=True,
+            )
+        self.assertEqual(result, 1)
+        self.assertEqual(error, "api.redpill.ai: cannot validate attestation\n"
+                                "tee.redpill.ai: no accepted release matches\n")
+        self.assertEqual(sum("/v1/aci/attestation" in url for url in calls), 3)
+        sleep.assert_not_called()
 
 
 if __name__ == "__main__":

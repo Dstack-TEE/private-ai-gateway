@@ -34,10 +34,7 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -o pipefail
-          uv run --locked python scripts/gateway_measurements.py check 2>&1 | tee "$RUNNER_TEMP/measurements.log"
+        run: uv run --locked python scripts/gateway_measurements.py check --summary
 
       - name: Reconcile drift issue
         if: ${{ !cancelled() }}
@@ -46,8 +43,6 @@ jobs:
           CHECK_OUTCOME: ${{ steps.check.outcome }}
         with:
           script: |
-            const fs = require('node:fs');
-            const path = require('node:path');
             const repo = context.repo;
             const label = 'measurement-drift';
             const title = 'Gateway measurement drift';
@@ -67,13 +62,10 @@ jobs:
               if (error.status !== 404) throw error;
               await github.rest.issues.createLabel({...repo, name: label, color: 'B60205'});
             }
-            const logPath = path.join(process.env.RUNNER_TEMP, 'measurements.log');
-            const log = fs.existsSync(logPath)
-              ? fs.readFileSync(logPath, 'utf8').slice(-50000)
-              : 'The measurement check did not run. Inspect the workflow setup steps.';
             const run = `${context.serverUrl}/${repo.owner}/${repo.repo}/actions/runs/${context.runId}`;
-            const body = `Release/live measurement check failed. [Workflow run](${run})\n\n` +
-              '```text\n' + log.replace(/```/g, "''' ") + '\n```';
+            const body = process.env.CHECK_OUTCOME === 'failure'
+              ? `Release/live measurement check failed. [Check summary](${run})`
+              : `The measurement check did not run. [Workflow setup](${run})`;
             if (issue) {
               await github.rest.issues.update({...repo, issue_number: issue.number, body});
             } else {

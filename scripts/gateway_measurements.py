@@ -18,6 +18,7 @@ import re
 import secrets
 import struct
 import sys
+import time
 from urllib.parse import urlsplit
 
 import requests
@@ -28,6 +29,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 SCHEMA = "gateway-measurements/v1"
 DEFAULT_REPO = "Dstack-TEE/private-ai-gateway"
 RELEASE_PATTERN = r"gateway-prod-[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-[1-9][0-9]*)?"
+CHECK_RETRY_DELAYS = (5, 15)
 FIELDS = {
     "app": ("compose_hash", "app_id", "repo_url", "repo_commit", "launcher_image"),
     "kms": ("root_key",),
@@ -89,6 +91,10 @@ class ResolveAdapter(requests.adapters.HTTPAdapter):
         request.headers["Host"] = urlsplit(request.url).netloc
 
 
+class AttestationUnavailable(ValueError):
+    """An attestation request failed with a retryable HTTP status."""
+
+
 def peer_spki(response):
     # Read before consuming the streamed response, which releases its connection.
     connection = getattr(response.raw, "connection", None)
@@ -117,9 +123,24 @@ def fetch_attestation(url, resolve=None):
             params={"nonce": secrets.token_hex(32)}, timeout=(10, 60), allow_redirects=False,
             stream=True,
         ) as response:
+            if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+                raise AttestationUnavailable(f"{parsed.hostname}: attestation HTTP {response.status_code}")
             require(response.status_code == 200, f"{parsed.hostname}: attestation HTTP {response.status_code}")
             served_spki = peer_spki(response)
             return response.json(), served_spki
+
+
+def fetch_attestation_for_check(url):
+    for delay in (*CHECK_RETRY_DELAYS, None):
+        try:
+            return fetch_attestation(url)
+        except requests.exceptions.SSLError:
+            raise
+        except (AttestationUnavailable, requests.ConnectionError, requests.Timeout,
+                requests.exceptions.ChunkedEncodingError) as exc:
+            if delay is None:
+                raise AttestationUnavailable(str(exc)) from exc
+            time.sleep(delay)
 
 
 def measured_evidence(report):
@@ -328,19 +349,22 @@ def stable(measurements):
             for key, value in measurements.items() if key != "release"}
 
 
-def check(repo):
+def check(repo, *, summary=False):
     snapshots = release_measurements(repo)
     failures = []
     domains = sorted({hostname for snapshot in snapshots for hostname in snapshot["domains"]})
     for hostname in domains:
         candidates = [snapshot for snapshot in snapshots if hostname in snapshot["domains"]]
         try:
-            report, served_spki = fetch_attestation(f"https://{hostname}")
+            report, served_spki = fetch_attestation_for_check(f"https://{hostname}")
             live, _, _ = extract(report, candidates[0]["release"])
             match = next((snapshot for snapshot in candidates
                           if stable(live) == stable(snapshot) and served_spki == snapshot["tls"][hostname]), None)
             if match:
                 print(f"{hostname}: matches {match['release']}")
+                continue
+            if summary:
+                failures.append(f"{hostname}: no accepted release matches")
                 continue
             expected_spkis = ", ".join(f"{snapshot['release']}={snapshot['tls'][hostname]}" for snapshot in candidates)
             failures.append(f"{hostname}: no accepted release matches\n"
@@ -351,8 +375,13 @@ def check(repo):
                     fromfile=snapshot["release"], tofile=f"live/{hostname}",
                 )) for snapshot in candidates
             ))
+        except AttestationUnavailable as exc:
+            attempts = len(CHECK_RETRY_DELAYS) + 1
+            detail = f": {exc}" if not summary else ""
+            failures.append(f"{hostname}: attestation unavailable after {attempts} attempts{detail}")
         except (OSError, ValueError, KeyError, TypeError, struct.error, requests.RequestException, yaml.YAMLError) as exc:
-            failures.append(f"{hostname}: {exc}")
+            detail = "cannot validate attestation" if summary else str(exc)
+            failures.append(f"{hostname}: {detail}")
     if failures:
         print("\n".join(failures), file=sys.stderr)
         return 1
@@ -374,6 +403,7 @@ def main(argv=None):
     rendering.add_argument("measurements", type=Path)
     checking = commands.add_parser("check", help="compare every release domain to live measurements")
     checking.add_argument("--repo", default=DEFAULT_REPO)
+    checking.add_argument("--summary", action="store_true", help="omit raw evidence and errors from check output")
     args = parser.parse_args(argv)
     try:
         if args.command == "extract":
@@ -393,9 +423,10 @@ def main(argv=None):
         if args.command == "render":
             print(render(read_json(args.measurements)), end="")
             return 0
-        return check(args.repo)
+        return check(args.repo, summary=args.summary)
     except (OSError, ValueError, KeyError, TypeError, struct.error, requests.RequestException, yaml.YAMLError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        detail = "cannot load release measurements" if args.command == "check" and args.summary else str(exc)
+        print(f"error: {detail}", file=sys.stderr)
         return 1
 
 

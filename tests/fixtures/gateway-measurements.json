@@ -7,10 +7,10 @@
     "tee.redpill.ai"
   ],
   "app": {
-    "compose_hash": "3dcf9d462955a01d6f188a3dd495573d63a7dee20a0396daa25bbbf31f046a32",
+    "compose_hash": "a8475d40f523b41efa03fe5a752c3b926e5ce2070e27b28db0bdad1bc618532f",
     "app_id": "fdb7a14e5a6675f752e2cb69c9067a98ca402918",
     "repo_url": "https://github.com/Dstack-TEE/private-ai-gateway.git",
-    "repo_commit": "77fac1267000b27f09e2058923f7492e5330bb49",
+    "repo_commit": "1212121212121212121212121212121212121212",
     "launcher_image": "ghcr.io/redpill-ai/private-ai-launcher@sha256:c083ff9e6a5ddf10f6c9e9bb1f74cc618deebecfea5208b563c574399db4637c"
   },
   "kms": {
