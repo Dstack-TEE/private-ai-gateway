@@ -261,7 +261,11 @@ fn openclaw_external_entry_object_is_attention_only() {
 #[test]
 fn hermes_rejects_invalid_active_profile_names() {
     let sandbox = sandbox("hermes-invalid-profile");
-    let root = sandbox.home.join(".hermes");
+    let root = if cfg!(windows) {
+        sandbox.home.join("AppData").join("Local").join("hermes")
+    } else {
+        sandbox.home.join(".hermes")
+    };
     write(&root.join("active_profile"), "../escape\n");
     let error = sandbox
         .projector
