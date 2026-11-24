@@ -1,17 +1,101 @@
 # Confidential AI review
 
-Date: 2026-10-27 PDT (round 3).
+Date: 2026-11-23 PST (round 4).
 
 > [!NOTE]
 > This is a dated admission record; see [Documentation conventions](../../README.md#documentation-conventions).
-> Currency check, 2026-10-27 PDT: [round 3](#round-3-2026-10-27-pdt) reviews
-> deployed Confidential Inference `v0.15.15`, which pins c8s `v0.59.1`
-> (`4c916ece`). c8s `v0.74.1` was also read but is not deployed. This corrects
-> the 2026-10-26 currency note: the deployed c8s version is `v0.59.1`, not
-> `v0.74.1`. The [round-2 record](#round-2-2026-10-15-pdt) is retained below.
+> The 2026-11-23 PST currency check in [round 4](#round-4-2026-11-23-pst)
+> identified Confidential Inference `v0.16.9` with c8s `v0.80.10` in production.
+> The earlier records are in [round 3](#round-3-2026-10-27-pdt) and
+> [round 2](#round-2-2026-10-15-pdt).
 
 Operator: Inexorable, Inc. d/b/a Confidential AI. Product: Confidential Inference.
 Endpoint: `https://api.confidential.ai`.
+
+## Round 4 (2026-11-23 PST)
+
+Production matched Confidential Inference `v0.16.9`
+(`28f4e591cd2a6bb473eb607e74fb2a0bf5191f71`), which pins c8s `v0.80.10`
+(`cd68ff62`). See the [Confidential Inference release](https://github.com/confidential-dot-ai/confidential-inference/releases/tag/v0.16.9)
+and [c8s source](https://github.com/confidential-dot-ai/confidential-kubernetes/tree/cd68ff62791ffc792ecf45583151a278e7291512).
+The newest framework release at the time of the check, `v0.19.2`, pins c8s
+`v0.101.9` and publishes a v2 manifest without a signed deployment allowlist.
+Its RTMR1 and RTMR2 differ from production. See the [v0.19.2 release](https://github.com/confidential-dot-ai/confidential-inference/releases/tag/v0.19.2).
+
+### Admission verdict
+
+Still **not acceptable**. Host server enrollment remains a hard reject. The
+live allowlist closes the round-3 fake-worker path as documented. The operator
+still controls internal routing Services, and the gateway and router lack
+workload identity checks on those connections.
+
+### Live evidence (2026-11-23 20:07–20:10 PST)
+
+- `/attestation` returned HTTP 401. The raw `/allowlist` bytes matched the
+  published `v0.16.9` `allowlist.json` with SHA-256
+  `251eaf57d70dda5b2f6e292bf898cb339993a81a99381d195d45f580708da113`.
+  MRTD, RTMR1, and RTMR2 matched the release bundle.
+- A fresh-nonce `attest-lb` proof echoed the nonce and bound the TLS leaf observed
+  on the same connection. Its route digest `7ab8ecae…303d96` matched the SHA-256
+  of the decoded route manifest for `api.confidential.ai`.
+- TEErminator `v0.0.4` returned `Verified` with the bundle measurements, exact
+  allowlist, workload `c8s-router-7210bdeb078b`, and route digest pinned. The check
+  required Intel TCB status `UpToDate` and used no RTMR3 pin.
+- Live RTMR3 (`ef50dded…b28710`) matched neither previously published
+  operator-key seed. The provider removed its published operator-key files on
+  2026-11-11. See the [upstream change](https://github.com/confidential-dot-ai/confidential-inference/pull/294).
+- The Sigstore bundle digest and certificate identity matched the release
+  metadata.
+
+### Runtime policy improvements
+
+- The `busybox` entry is gone. The application workloads admit no `any` args,
+  env, or mounts, and `nginx-unprivileged` mounts no ConfigMap.
+- `sglang-router` pins its worker URLs and no longer admits workers by label.
+  Model routes and the gateway runtime configuration are pinned in the exact
+  environment, and live runtime configuration reload is gone.
+- The host-privilege sandbox is `enforce` in c8s `v0.80.10`. See the [image policy](https://github.com/confidential-dot-ai/confidential-kubernetes/blob/cd68ff62791ffc792ecf45583151a278e7291512/node-guest-image/c8s/image-policy.yaml.in#L1476-L1482).
+
+### Remaining findings
+
+1. **Operator data-plane authority.** The c8s operator role can still manage
+   pods, Services, Endpoints, ConfigMaps, and Secrets and read pod logs in the
+   inference namespace. Production gateway and router traffic resolves through
+   operator-writable Services without workload identity checks. The allowlist
+   review found no workload that would disclose a redirected request. See the
+   [operator RBAC](https://github.com/confidential-dot-ai/confidential-kubernetes/blob/cd68ff62791ffc792ecf45583151a278e7291512/node-guest-image/c8s/mkosi.extra/var/lib/rancher/rke2/server/manifests/cred-release-rbac.yaml#L22-L42).
+2. **Host server enrollment.** The c8s `v0.80.10` source review found that server
+   enrollment requires no c8s attestation and the launch configuration exposes
+   enrollment credentials to the host. See the [operator guide](https://github.com/confidential-dot-ai/confidential-kubernetes/blob/cd68ff62791ffc792ecf45583151a278e7291512/docs/operator.md#L165-L168).
+3. **RTMR3 pin.** The published release omits the expected production RTMR3.
+   Neither published seed passed when test runs added it as an RTMR3 pin.
+4. **Telemetry egress.** The allowlisted telemetry configuration exports log
+   bodies outside the TEE with bearer-token redaction. Whether those logs can
+   contain request content remains unverified.
+5. **Stale client instructions.** The provider's current-production guide names
+   `v0.16.2`, allowlist `65306c56…`, and RTMR3 `256e9368…`. All three differ from
+   the live evidence. See the [provider guide](https://github.com/confidential-dot-ai/confidential-inference/blob/f127c4747dda30c60e0ebe26fd6b7d0fdd5936c3/docs/verification.md).
+
+### Provider requests
+
+1. Publish the expected production RTMR3 or launch public key in the signed
+   release and update the current-production guide.
+2. Remove the operator role's Service and Endpoints writes in the inference
+   namespace, or require workload identity checks on gateway and router
+   connections.
+3. Identify which workloads send logs to the telemetry collector and show that
+   their logs exclude request content.
+
+### Verification limits
+
+- The operator routing and host enrollment findings came from source and
+  allowlist review. Neither path was exercised against production.
+- The Sigstore signature and Rekor inclusion were not verified. The production
+  RTMR3 seed remains unknown.
+- Per-pod mesh and egress enforcement in c8s `v0.80.10` were reviewed through
+  documentation only. Gateway, router, and worker log contents were not traced.
+- Model selection, request fidelity, and receipts were not re-examined beyond
+  round 2. The candidate endpoint was not probed separately.
 
 ## Round 3 (2026-10-27 PDT)
 
