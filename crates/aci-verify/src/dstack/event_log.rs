@@ -127,6 +127,12 @@ pub(super) fn replay_rtmr3(events: &[DstackEventLog]) -> Result<[u8; 48], String
         if !event.is_runtime_event() {
             return Err(format!("dstack RTMR3 event {index} is not a runtime event"));
         }
+        // dstack 0.6.6 reserves ':' as the V1 name/payload delimiter.
+        if event.version == 1 && event.event.contains(':') {
+            return Err(format!(
+                "V1 runtime event {index} name must not contain ':'"
+            ));
+        }
         let digest: [u8; 48] = Sha384::digest(event.runtime_preimage()?).into();
         // Legacy GetQuote responses can omit V1 digests. The final RTMR3
         // comparison still authenticates the replay of the recomputed digests.
@@ -183,8 +189,8 @@ mod tests {
         }
         let edges = [
             "",
-            ":",
-            "a:b",
+            "：",
+            "a-b",
             "\0\u{1}\u{8}\u{c}\n\r\t\"\\",
             "测试-🦀",
             "\u{2028}\u{2029}",

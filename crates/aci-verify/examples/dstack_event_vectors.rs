@@ -4,14 +4,13 @@ use cc_eventlog::{EventLogVersion, RuntimeEvent, TdxEvent};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-fn vector(name: &str, versions: &[EventLogVersion]) -> Value {
+fn vector(name: &str, versions: &[EventLogVersion], custom_event: &str) -> Value {
     let compose = "services:\n  gateway:\n    image: demo\n";
     let compose_hash = Sha256::digest(compose.as_bytes()).to_vec();
     let fields = [
         ("app-id", vec![0x11; 20]),
         ("compose-hash", compose_hash.clone()),
-        // Upstream accepts arbitrary names; cover UTF-8, delimiters and JCS escapes.
-        ("custom:event-测试-🦀\"\\\n\u{1}", vec![0xab, 0xcd, 0xff]),
+        (custom_event, vec![0xab, 0xcd, 0xff]),
         // Upstream find_event returns the first boot-time match.
         ("compose-hash", vec![0x22; 32]),
         ("system-ready", vec![]),
@@ -32,10 +31,23 @@ fn vector(name: &str, versions: &[EventLogVersion]) -> Value {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let v1 = vector("v1", &[EventLogVersion::V1]);
-    let v2 = vector("v2", &[EventLogVersion::V2]);
-    let mixed = vector("mixed-v1-v2", &[EventLogVersion::V1, EventLogVersion::V2]);
-    let mut vectors = vec![v1.clone(), v2.clone(), mixed];
+    const CUSTOM_EVENT: &str = "custom-event-测试-🦀\"\\\n\u{1}";
+    const COLON_EVENT: &str = "custom:event-测试-🦀\"\\\n\u{1}";
+    let v1 = vector("v1", &[EventLogVersion::V1], CUSTOM_EVENT);
+    let v2 = vector("v2", &[EventLogVersion::V2], COLON_EVENT);
+    let mixed = vector(
+        "mixed-v1-v2",
+        &[EventLogVersion::V1, EventLogVersion::V2],
+        CUSTOM_EVENT,
+    );
+    // The old oracle can replay this log. dstack 0.6.6 rejects the V1 name.
+    let mut colon_v1 = vector(
+        "v1-colon-in-event-name",
+        &[EventLogVersion::V1],
+        COLON_EVENT,
+    );
+    colon_v1["valid"] = json!(false);
+    let mut vectors = vec![v1.clone(), v2.clone(), mixed, colon_v1];
     let mut legacy = v1.clone();
     legacy["name"] = json!("v1-omitted-digests");
     for event in legacy["events"].as_array_mut().unwrap() {

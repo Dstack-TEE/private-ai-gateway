@@ -21,8 +21,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -47,7 +47,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": true
@@ -137,8 +137,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -167,10 +167,61 @@
           "preimage": "7b226e616d65223a22636f6d706f73652d68617368222c227061796c6f6164223a2233333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333222c2274797065223a3133343231373732397d"
         }
       ],
-      "rtmr3": "36846d0f3028f95d5296af5543b89b79ebb146ffe929e0149747473984890ea29c1000a401d52c7ff33331c6eb7ea6d1",
+      "rtmr3": "f77c4b33b3b840161122891a6efb3580af0bcf517e261db992ba0e09547f6acbe37e5e203cdfa25150ed0c8ceb560157",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": true
+    },
+    {
+      "name": "v1-colon-in-event-name",
+      "events": [
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "3f1fbb6cfe25e7f19bd48cfa9dc590cabaa946da04f9215402e7083550177292c1478402b258a90c649ccfcb5f408175",
+          "event": "app-id",
+          "event_payload": "1111111111111111111111111111111111111111"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "1f0cf96156ad94f3114f159bb659288cba1722a928c23b574175e1b0be6fb65daf909b0375e4796bcf0b052410ffbe75",
+          "event": "compose-hash",
+          "event_payload": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
+          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "event_payload": "abcdff"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "d3e12cee7ef1e612c2771edfecb63faf403dec2100b40c57b14f77707f6d49b8e3b0c968c2bc293bfe207fce37df6360",
+          "event": "compose-hash",
+          "event_payload": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "1a76b2a80a0be71eae59f80945d876351a7a3fb8e9fd1ff1cede5734aa84ea11fd72b4edfbb6f04e5a85edd114c751bd",
+          "event": "system-ready",
+          "event_payload": ""
+        },
+        {
+          "imr": 3,
+          "event_type": 134217729,
+          "digest": "0384d68c5a51b6d5f30f66456a9cec870a5c8a0bb4065b9de2d9bfc5fde0bb0fd8b7d9a2a6eb069993ecd84b6032caf4",
+          "event": "compose-hash",
+          "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "app_compose": "services:\n  gateway:\n    image: demo\n",
+      "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
+      "valid": false
     },
     {
       "name": "v1-omitted-digests",
@@ -193,7 +244,7 @@
           "imr": 3,
           "event_type": 134217729,
           "digest": "",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -218,7 +269,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": true
@@ -243,8 +294,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -269,7 +320,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": false
@@ -294,8 +345,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -320,7 +371,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": false
@@ -345,8 +396,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -371,7 +422,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": false
@@ -396,8 +447,8 @@
         {
           "imr": 3,
           "event_type": 134217729,
-          "digest": "b3db2e79915ec83dbd14b7d02522eb3782854c597187df051ce51130c979a3a6f2a3a74eb4ac1169d83da9f85f912143",
-          "event": "custom:event-测试-🦀\"\\\n\u0001",
+          "digest": "8f395dc7f355d8bc0d3d8f03992112f84527afc036ec44f90956ef8181e1808fb259f533bf2dfd3e80e9153f1da9016d",
+          "event": "custom-event-测试-🦀\"\\\n\u0001",
           "event_payload": "abcdff"
         },
         {
@@ -422,7 +473,7 @@
           "event_payload": "3333333333333333333333333333333333333333333333333333333333333333"
         }
       ],
-      "rtmr3": "db96dc80274fb388c02a2045ff649e6e2f9fdee641fcb5a9818dac1e9a6260aa9dd010e95fd5146d2e08baf18bbbe5fe",
+      "rtmr3": "3b5a8efcd419ae99dda11490e9b65e635ca16dd367ac20b133f055ffa6ef797a6a73796cb5f0b6f922d26fd5b233c307",
       "app_compose": "services:\n  gateway:\n    image: demo\n",
       "compose_hash": "cce6311e622dfa22cfaba821cea005908cd8859b997c819ff45fe184e30bf1c4",
       "valid": false

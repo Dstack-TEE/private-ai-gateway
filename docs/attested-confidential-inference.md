@@ -320,6 +320,9 @@ require replay to the quoted RTMR3, and select the first runtime `compose-hash` 
 supplied preimage to match both the advertised digest and the canonical JCS
 event bytes. Legacy V1 logs with omitted or empty digests still have to
 reproduce the quoted RTMR3 from their event fields.
+V1 runtime names containing an ASCII colon fail replay because V1 uses the
+colon to separate the name from the payload. This follows
+[dstack 0.6.6's runtime event validation](https://github.com/Dstack-TEE/dstack/blob/verifier-v0.6.6/dstack/cc-eventlog/src/runtime_events.rs#L143-L154).
 RTMR3 entries of other types are rejected because their payload binding cannot
 be reconstructed. Shared fixtures generated with upstream check both ports. Regenerate them from
 the repository root with `cargo run -q -p aci-verify --example dstack_event_vectors > clients/verifier-ts/test/fixtures/dstack_event_vectors.json`.

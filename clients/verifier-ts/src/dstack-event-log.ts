@@ -126,6 +126,10 @@ export async function replayDstackRtmr3(events: DstackEvent[]): Promise<Uint8Arr
     if (!preimage) {
       throw new AciFormatError(`dstack RTMR3 event ${index} is not a runtime event`);
     }
+    // dstack 0.6.6 reserves ':' as the V1 name/payload delimiter.
+    if (event.version === 1 && event.event.includes(':')) {
+      throw new AciFormatError(`V1 runtime event ${index} name must not contain ':'`);
+    }
     const digest = await sha384(preimage);
     // Legacy GetQuote can omit V1 digests. RTMR3 still binds the replay.
     if (event.digest.length !== 0 && !equal(digest, event.digest)) {
