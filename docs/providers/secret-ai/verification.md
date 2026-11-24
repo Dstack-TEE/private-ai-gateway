@@ -50,10 +50,12 @@ secretvm:tdx:prod:4xlarge_256gb_gpu:v0.0.33:sha256:3a013b14abfacd03515ca3c6ae2d9
 ```
 
 A SecretAI rollout that changes the VM artifacts or compose bytes produces a
-different workload ID. An unpinned configuration reports the new ID and
-continues after all mandatory checks pass. A pinned configuration rejects it
-until an operator updates the allowlist. JEDI's reported AMD TCB matched the
-embedded minimum on both 2026-07-21 and 2026-11-23 PST.
+different workload ID. If `accepted_subjects` is omitted or empty, the gateway
+logs a warning when it configures the upstream. A direct bridge invocation
+logs the warning to stderr. Unpinned verification reports the measured ID and
+continues after all mandatory checks pass. A pinned configuration rejects a
+different ID until an operator updates the allowlist. JEDI's reported AMD TCB
+matched the gateway's policy floor on both 2026-07-21 and 2026-11-23 PST.
 
 ## Verification algorithm
 
