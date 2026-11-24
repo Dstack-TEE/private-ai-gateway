@@ -183,7 +183,7 @@ impl Client {
             Err(error) => return Err(connection_error(error)),
         }
         // Under the service manager a crashed backend is started again.
-        let mut child = if crate::supervisor::start() {
+        let mut child = if crate::supervisor::start()? {
             None
         } else {
             Some(crate::launch::spawn_background()?)

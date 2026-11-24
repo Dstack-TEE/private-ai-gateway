@@ -645,8 +645,17 @@ fn agent_change(
     let options = ConnectOptions {
         default_model: model,
     };
-    // Connecting means routing the agent, which needs protection on.
-    if connect && !dry_run && !client.state()?.is_protected() {
+    if dry_run {
+        return value(client.call(rpc::PreviewAgent {
+            agent_id: id.into(),
+            connect,
+            options,
+        })?);
+    }
+    // The preview needs the verified catalog. Get consent to start it before
+    // presenting or applying any agent configuration changes.
+    if connect && (!client.is_running()? || !client.state()?.is_protected()) {
+        confirm(global, "Start protection before connecting this agent?")?;
         start(client, None, 90)?;
     }
     let revision = match revision {
@@ -663,9 +672,6 @@ fn agent_change(
                 connect,
                 options: options.clone(),
             })?;
-            if dry_run {
-                return value(preview);
-            }
             if !global.yes && global.interactive() {
                 eprintln!("{}", output::details(&value(&preview)?));
             }

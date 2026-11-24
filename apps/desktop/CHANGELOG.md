@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+* **Protection resumes after login and crashes.** `pap start` enables the login service for supported Linux and macOS CLI installations. `pap service disable` turns off supervision and preserves any running protection session.
+* **`pap agents connect` starts protection.** If protection cannot start, the command exits 1 with the reason before saving the connection. `--dry-run` leaves the backend and protection state alone.
+
 ### Bug Fixes
 
 * Keep Oh My Pi model filters and path-scoped provider filters advisory, and honor global provider disables in `config.yml` and `config.yaml`.

@@ -102,29 +102,38 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
-The first `pap start` registers the backend with the user's service manager,
-so it starts at login and after a crash and resumes the protection it left;
-`pap service disable` removes the registration and `pap service enable` adds
-it again.
+The first successful `pap start` registers the backend with the user's service
+manager on supported CLI installations. The backend starts at login and after
+a crash and resumes the protection it left. `pap service disable` turns off
+supervision and keeps a running backend and its protection going. `pap service
+enable` turns supervision back on.
 
 | Installation | Registration | Runs |
 | --- | --- | --- |
 | Linux DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages ship one | the packaged backend |
-| Linux npm, install script, archive | `~/.config/systemd/user/private-ai-proxy.service`, written with the same settings | `<command> service run` |
+| Linux npm, install script, archive | `$XDG_CONFIG_HOME/systemd/user/private-ai-proxy.service` (defaults to `~/.config/systemd/user/`), written with the same settings | `<command> service run` |
 | macOS npm, install script, Homebrew, archive | `~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist`, with `RunAtLoad` and `KeepAlive` on a failed exit | `<command> service run` |
 
 `<command>` is the entry on `PATH` that links to the installed command, which
 install scripts and Homebrew keep across upgrades, or else the command's own
-path, which npm keeps. `pap start` registers by itself when one of those holds;
-an archive run from its own directory needs `pap service enable`, again after
-it moves. A registration of that name which this command did not write is
-never used or changed. Where no user service manager runs (containers, WSL
-without systemd) nothing is registered and the first command starts the
-backend.
+path, which npm keeps within the same global prefix. `pap start` registers by
+itself when one of those holds. For an archive used directly, run `pap service
+enable`. Before moving an archive or changing the npm global prefix, run
+`pap service disable` from the old installation, then `pap service enable`
+from the new one. If the old installation is already gone, remove its
+registration after checking which command it runs. PAP leaves a user unit,
+mask, drop-in, or registration for another installation alone. On Linux
+without a reachable user manager (including containers and some WSL setups),
+commands launch the backend directly. Without systemd lingering, the manager
+starts at login. PAP leaves the system's lingering setting alone.
 
-`Restart=on-failure` restarts a crashed backend but not one stopped with `pap
-service stop`. While the unit is enabled, commands start the backend through
-it, also after a package upgrade.
+`pap stop` ends protection and leaves the backend running. `pap service stop`
+stops the backend and ends protection. The service manager treats the latter
+as a clean exit. The backend starts again the next time the user manager
+starts or when you run `pap service start`. If port 4180 is busy, the backend remains available for status and
+configuration so you can free the port or choose another. The install script
+keeps the service's command path across upgrades and stops the old backend
+during installation. Run `pap start` to turn protection back on.
 
 A plain `systemctl --user restart` would find that backend holding the instance
 lock: the unit's backend exits with status 75 (already running), and

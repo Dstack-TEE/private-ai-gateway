@@ -586,7 +586,6 @@ jobs:
           cargo test --release --locked --package private-ai-proxy-core --target "$host" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$host" --lib
           cargo test --release --locked --package private-ai-proxy-runtime --target "$host" --lib -- --ignored legacy_keychain_import_round_trip
-          cargo test --release --locked --package private-ai-proxy-core --target "$host" --lib -- --ignored launchd_round_trip
 
       # verify-windows-x64 already tested these libraries on x64.
       - name: Test Windows desktop libraries

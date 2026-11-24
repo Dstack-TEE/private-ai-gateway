@@ -23,7 +23,8 @@ pap agents connect codex       # route one through the Local API
 
 `pap agents connect` starts protection first when it is off, so the agent is
 routed when the command succeeds; if protection cannot start, it exits `1` with
-the reason and the agent keeps its own provider.
+the reason before saving the connection. `--dry-run` previews against the
+running backend without starting the backend or protection.
 
 With an API key instead of an account, replace the first step with
 `pap profiles add --id work --name Work --url <service URL>`, which asks for
@@ -731,6 +732,8 @@ until protection resumes.
 
 Use the returned revision with the same agent, direction and options. A changed
 configuration is rejected rather than silently re-previewed and approved.
+When reviewing a connection while protection is off, run `pap start` before
+previewing so the revision includes the verified model catalog.
 Do not automatically retry mutations after a timeout or lost connection: they
 may have completed. Query state before deciding what to do next.
 

@@ -9,14 +9,17 @@
 //! (containers, WSL without systemd) enabling fails and commands start the
 //! backend as before.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", not(feature = "mac-app-store"))
+))]
+mod registration;
 
 use crate::updates::{installation, Installation};
 
 const UNSUPPORTED: &str = "Starting the backend at login is not available for this installation";
-const FOREIGN: &str = "was not written by this command; it is left as it is";
-/// The command that runs the backend in the foreground.
-const RUN: [&str; 2] = ["service", "run"];
 
 /// Records that the user turned this off, so `pap start` does not turn it on
 /// again.
@@ -29,6 +32,7 @@ fn relocated() -> bool {
     [
         crate::paths::HOME_OVERRIDE_ENV,
         crate::paths::APP_DATA_OVERRIDE_ENV,
+        crate::paths::CONFIG_OVERRIDE_ENV,
     ]
     .iter()
     .any(|name| std::env::var_os(name).is_some())
@@ -100,7 +104,7 @@ pub fn disable() -> Result<(), String> {
     }
     platform::disable()?;
     if let Some(marker) = declined() {
-        std::fs::write(&marker, "")
+        crate::private_fs::write_private_atomic(&marker, "", None)
             .map_err(|error| format!("Cannot write {}: {error}", marker.display()))?;
     }
     Ok(())
@@ -113,34 +117,14 @@ pub fn enabled() -> bool {
 
 /// Starts the backend under the service manager, if it is enabled there.
 /// False leaves the caller to start it itself.
-pub fn start() -> bool {
-    enabled() && platform::start()
-}
-
-/// Replaces a registration file only if it is absent or was written here.
-fn write_registration(path: &Path, marker: &str, text: &str) -> Result<bool, String> {
-    match std::fs::read_to_string(path) {
-        Ok(current) if current == text => return Ok(false),
-        Ok(current) if !current.contains(marker) => {
-            return Err(format!("{} {FOREIGN}", path.display()))
-        }
-        _ => {}
+pub fn start() -> Result<bool, String> {
+    if !enabled() {
+        return Ok(false);
     }
-    let directory = path.parent().ok_or("The registration has no directory")?;
-    std::fs::create_dir_all(directory)
-        .and_then(|()| std::fs::write(path, text))
-        .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
+    if !platform::start() {
+        return Err("Cannot start the backend through its login service. Run pap doctor.".into());
+    }
     Ok(true)
-}
-
-fn run(program: &str, arguments: &[&str]) -> bool {
-    std::process::Command::new(program)
-        .args(arguments)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
 }
 
 #[cfg(target_os = "linux")]
@@ -148,17 +132,35 @@ mod platform {
     use std::{
         fs,
         path::{Path, PathBuf},
+        process::{Command, Output, Stdio},
     };
 
-    use super::{command, run, write_registration, FOREIGN, RUN, UNSUPPORTED};
+    use super::{command, registration};
 
     const UNIT: &str = "private-ai-proxy.service";
     const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/private-ai-proxy.service";
     const PACKAGED_BACKEND: &str = "/usr/libexec/private-ai-proxy/private-ai-proxy-service";
+    const PACKAGED_CONTENTS: &str =
+        include_str!("../../src-tauri/installer/private-ai-proxy.service");
     const MARKER: &str = "# Written by `pap service enable`; `pap service disable` removes it.";
 
-    fn systemctl(arguments: &[&str]) -> bool {
-        run("systemctl", &[&["--user"], arguments].concat())
+    fn systemctl(arguments: &[&str]) -> Result<Output, String> {
+        let output = Command::new("systemctl")
+            .arg("--user")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| format!("Cannot run systemctl --user: {error}"))?;
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "systemctl --user {} failed ({}): {}",
+                arguments[0],
+                output.status,
+                error.trim()
+            ));
+        }
+        Ok(output)
     }
 
     /// The package's unit, when it starts this installation's backend.
@@ -179,16 +181,16 @@ mod platform {
     }
 
     /// The packaged unit's settings, running `command`.
-    pub(super) fn unit(command: &Path) -> String {
-        // Quoted, with systemd's specifier and escape characters doubled.
+    fn unit(command: &Path) -> Result<String, String> {
+        // Quote the path, escape specifiers, and disable variable expansion.
         let path = command
-            .display()
-            .to_string()
+            .to_str()
+            .filter(|path| !path.chars().any(char::is_control))
+            .ok_or("The command path cannot be represented in a systemd unit")?
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('%', "%%")
-            .replace('$', "$$");
-        format!(
+            .replace('%', "%%");
+        Ok(format!(
             "{MARKER}\n\
              [Unit]\n\
              Description=Private AI Proxy backend\n\
@@ -196,76 +198,184 @@ mod platform {
              StartLimitBurst=4\n\
              \n\
              [Service]\n\
-             ExecStart=\"{path}\" {}\n\
+             ExecStart=:\"{path}\" service run\n\
              Restart=on-failure\n\
              RestartSec=1\n\
              RestartPreventExitStatus=75\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
-            RUN.join(" ")
-        )
+        ))
     }
 
-    fn written() -> Result<(PathBuf, String), String> {
-        Ok((user_unit()?, unit(&command()?.0)))
+    struct Registration {
+        path: PathBuf,
+        contents: String,
+        packaged: bool,
     }
 
-    fn registered() -> bool {
-        packaged()
-            || written().is_ok_and(|(path, unit)| {
-                fs::read_to_string(path).is_ok_and(|current| current == unit)
+    impl Registration {
+        fn for_installation() -> Result<Self, String> {
+            let packaged = packaged();
+            let (path, contents) = if packaged {
+                (PathBuf::from(PACKAGED_UNIT), PACKAGED_CONTENTS.into())
+            } else {
+                (user_unit()?, unit(&command()?.0)?)
+            };
+            Ok(Self {
+                path,
+                contents,
+                packaged,
             })
+        }
+
+        fn exists(&self) -> Result<bool, String> {
+            if !self.packaged {
+                return registration::exists(&self.path, &self.contents);
+            }
+            let user = user_unit()?;
+            match fs::symlink_metadata(&user) {
+                Ok(_) => return Err(registration::foreign(&user)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("Cannot inspect {}: {error}", user.display())),
+            }
+            // Package versions may differ in comments. Check the directives.
+            let current = fs::read_to_string(&self.path)
+                .map_err(|error| format!("Cannot read {}: {error}", self.path.display()))?;
+            let directives = |line: &&str| !line.is_empty() && !line.starts_with('#');
+            if current
+                .lines()
+                .filter(directives)
+                .eq(self.contents.lines().filter(directives))
+            {
+                Ok(true)
+            } else {
+                Err(registration::foreign(&self.path))
+            }
+        }
+
+        /// Inspect the effective unit. A user mask, an overlay in another
+        /// search directory or any drop-in takes precedence over our file.
+        fn state(&self) -> Result<Option<String>, String> {
+            let mut state = self.loaded_state()?;
+            if matches!(state, State::Reload) {
+                systemctl(&["daemon-reload"])?;
+                state = self.loaded_state()?;
+            }
+            match state {
+                State::Missing => Ok(None),
+                State::Loaded(state) => Ok(Some(state)),
+                State::Reload => Err(format!(
+                    "The systemd user unit {UNIT} still has pending changes"
+                )),
+            }
+        }
+
+        fn loaded_state(&self) -> Result<State, String> {
+            let output = systemctl(&[
+                "show",
+                "--all",
+                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState",
+                UNIT,
+            ])?;
+            let text = String::from_utf8_lossy(&output.stdout);
+            let property = |key: &str| {
+                text.lines()
+                    .filter_map(|line| line.split_once('='))
+                    .find_map(|(name, value)| (name == key).then_some(value))
+            };
+            if property("LoadState") == Some("masked") {
+                return Err(format!("The systemd user unit {UNIT} is masked"));
+            }
+            if property("DropInPaths") != Some("") {
+                return Err(format!("The systemd user unit {UNIT} has overrides"));
+            }
+            match property("LoadState") {
+                Some("not-found") => {
+                    self.exists()?;
+                    Ok(State::Missing)
+                }
+                Some("loaded") if property("FragmentPath").is_some_and(|path| Path::new(path) == self.path) && self.exists()? => {
+                    if property("NeedDaemonReload") != Some("no") {
+                        return Ok(State::Reload);
+                    }
+                    Ok(State::Loaded(property("UnitFileState").ok_or("systemd did not report the unit file state")?.to_owned()))
+                }
+                _ => Err(format!("The effective systemd user unit {UNIT} belongs to another installation or was customized")),
+            }
+        }
+    }
+
+    enum State {
+        Missing,
+        Loaded(String),
+        Reload,
     }
 
     pub(super) fn enabled() -> bool {
-        registered() && systemctl(&["is-enabled", "--quiet", UNIT])
+        Registration::for_installation()
+            .and_then(|registration| registration.state())
+            .is_ok_and(|state| matches!(state.as_deref(), Some("enabled" | "enabled-runtime")))
     }
 
     pub(super) fn enable() -> Result<bool, String> {
-        if !packaged() {
-            let (path, unit) = written()?;
-            if write_registration(&path, MARKER, &unit)? && !systemctl(&["daemon-reload"]) {
-                let _ = fs::remove_file(&path);
-                return Err(UNSUPPORTED.into());
-            }
-        }
-        if systemctl(&["is-enabled", "--quiet", UNIT]) {
+        let registration = Registration::for_installation()?;
+        let state = registration.state()?;
+        if state.as_deref() == Some("enabled") {
             return Ok(false);
         }
-        if systemctl(&["enable", UNIT]) {
-            Ok(true)
-        } else {
-            Err(UNSUPPORTED.into())
+        let created = state.is_none() && !registration.packaged && !registration.exists()?;
+        if created {
+            super::registration::create(&registration.path, &registration.contents)?;
         }
+        let result = (|| {
+            if state.is_none() {
+                systemctl(&["daemon-reload"])?;
+                if registration.state()?.is_none() {
+                    return Err(format!(
+                        "systemd could not load {}",
+                        registration.path.display()
+                    ));
+                }
+            }
+            systemctl(&["enable", UNIT])?;
+            Ok(true)
+        })();
+        if result.is_err() && created {
+            super::registration::remove(&registration.path, &registration.contents)?;
+            let _ = systemctl(&["daemon-reload"]);
+        }
+        result
     }
 
     pub(super) fn disable() -> Result<(), String> {
-        if !registered() {
-            return match user_unit() {
-                Ok(path) if path.exists() => Err(format!("{} {FOREIGN}", path.display())),
-                _ => Ok(()),
-            };
+        let registration = Registration::for_installation()?;
+        match registration.state()?.as_deref() {
+            Some("enabled") => {
+                systemctl(&["disable", UNIT])?;
+            }
+            Some("enabled-runtime") => {
+                systemctl(&["disable", "--runtime", UNIT])?;
+            }
+            _ => {}
         }
-        if enabled() && !systemctl(&["disable", UNIT]) {
-            return Err("Cannot disable the backend's user service".into());
-        }
-        if !packaged() && fs::remove_file(user_unit()?).is_ok() {
-            systemctl(&["daemon-reload"]);
+        if !registration.packaged && registration.exists()? {
+            super::registration::remove(&registration.path, &registration.contents)?;
+            systemctl(&["daemon-reload"])?;
         }
         Ok(())
     }
 
     pub(super) fn start() -> bool {
-        systemctl(&["start", UNIT])
+        systemctl(&["start", UNIT]).is_ok()
     }
 
     #[cfg(test)]
     mod tests {
         #[test]
         fn a_written_unit_quotes_the_command_path() {
-            let unit = super::unit(std::path::Path::new("/opt/my apps/100%/pap"));
-            assert!(unit.contains("ExecStart=\"/opt/my apps/100%%/pap\" service run\n"));
+            let unit = super::unit(std::path::Path::new("/opt/my apps/$100%/pap")).unwrap();
+            assert!(unit.contains("ExecStart=:\"/opt/my apps/$100%%/pap\" service run\n"));
             assert!(unit.contains("Restart=on-failure\n"));
         }
     }
@@ -274,14 +384,24 @@ mod platform {
 #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
 mod platform {
     use std::{
-        fs,
-        path::{Path, PathBuf},
+        path::PathBuf,
+        process::{Command, Stdio},
     };
 
-    use super::{command, run, write_registration, FOREIGN, RUN};
+    use super::{command, registration};
 
     const MARKER: &str =
         "<!-- Written by `pap service enable`; `pap service disable` removes it. -->";
+
+    fn launchctl(arguments: &[&str]) -> bool {
+        Command::new("launchctl")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 
     /// A launchd user agent: its label, and the property list that defines it.
     pub(super) struct Agent {
@@ -311,21 +431,21 @@ mod platform {
         }
 
         pub fn loaded(&self) -> bool {
-            run("launchctl", &["print", &self.target()])
+            launchctl(&["print", &self.target()])
         }
 
         pub fn load(&self) -> bool {
             self.plist
                 .to_str()
-                .is_some_and(|plist| run("launchctl", &["bootstrap", &Self::domain(), plist]))
+                .is_some_and(|plist| launchctl(&["bootstrap", &Self::domain(), plist]))
         }
 
         pub fn unload(&self) -> bool {
-            run("launchctl", &["bootout", &self.target()])
+            launchctl(&["bootout", &self.target()])
         }
 
         pub fn start(&self) -> bool {
-            run("launchctl", &["kickstart", &self.target()])
+            launchctl(&["kickstart", &self.target()])
         }
     }
 
@@ -372,49 +492,51 @@ mod platform {
         let agent = Agent::backend()?;
         let command = command()?.0;
         let command = command.to_str().ok_or("This command's path is not UTF-8")?;
-        let text = plist(&agent.label, &[command, RUN[0], RUN[1]]);
+        let text = plist(&agent.label, &[command, "service", "run"]);
         Ok((agent, text))
     }
 
-    fn registered(agent: &Agent, text: &str) -> bool {
-        fs::read_to_string(&agent.plist).is_ok_and(|current| current == text)
-    }
-
     pub(super) fn enabled() -> bool {
-        written().is_ok_and(|(agent, text)| registered(&agent, &text) && agent.loaded())
+        written().is_ok_and(|(agent, text)| {
+            registration::exists(&agent.plist, &text) == Ok(true) && agent.loaded()
+        })
     }
 
     pub(super) fn enable() -> Result<bool, String> {
         let (agent, text) = written()?;
-        // launchd keeps the definition it loaded; a changed one is loaded anew.
-        if write_registration(&agent.plist, MARKER, &text)? && agent.loaded() {
-            agent.unload();
-        }
+        let exists = registration::exists(&agent.plist, &text)?;
         if agent.loaded() {
-            return Ok(false);
+            return if exists {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "The launchd agent {} belongs to another installation",
+                    agent.label
+                ))
+            };
+        }
+        if !exists {
+            registration::create(&agent.plist, &text)?;
         }
         if agent.load() {
             Ok(true)
         } else {
-            let _ = fs::remove_file(&agent.plist);
+            if !exists {
+                registration::remove(&agent.plist, &text)?;
+            }
             Err("launchd did not accept the backend's login item".into())
         }
     }
 
     pub(super) fn disable() -> Result<(), String> {
         let (agent, text) = written()?;
-        if !registered(&agent, &text) {
-            return if Path::new(&agent.plist).exists() {
-                Err(format!("{} {FOREIGN}", agent.plist.display()))
-            } else {
-                Ok(())
-            };
+        if !registration::exists(&agent.plist, &text)? {
+            return Ok(());
         }
         if agent.loaded() && !agent.unload() {
             return Err("Cannot remove the backend's login item".into());
         }
-        fs::remove_file(&agent.plist)
-            .map_err(|error| format!("Cannot remove {}: {error}", agent.plist.display()))
+        registration::remove(&agent.plist, &text)
     }
 
     pub(super) fn start() -> bool {
@@ -424,6 +546,7 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::fs;
 
         #[test]
         fn a_plist_escapes_its_arguments() {
@@ -436,8 +559,7 @@ mod platform {
         }
 
         /// Loads, starts and removes a throwaway agent in the real launchd.
-        /// It changes the user's login items while it runs, so only the macOS
-        /// packaging job runs it.
+        /// It loads a unique temporary job, so only macOS CI runs it.
         #[test]
         #[ignore]
         fn launchd_round_trip() {
@@ -450,6 +572,15 @@ mod platform {
             fs::write(&agent.plist, plist(&agent.label, &["/bin/sleep", "600"])).unwrap();
             assert!(!agent.loaded());
             assert!(agent.load());
+            struct UnloadOnDrop<'a>(&'a Agent);
+            impl Drop for UnloadOnDrop<'_> {
+                fn drop(&mut self) {
+                    if self.0.loaded() {
+                        self.0.unload();
+                    }
+                }
+            }
+            let _unload = UnloadOnDrop(&agent);
             assert!(agent.loaded());
             assert!(agent.start());
             assert!(agent.unload());

@@ -17,6 +17,44 @@ fn sandbox_teardown_watchdog() {
     support::watchdog();
 }
 
+#[test]
+fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
+    let backend = Backend::start();
+    let backup = backend.directory.path().join("profiles-connect.json");
+    fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
+    backend.run(&["profiles", "import", backup.to_str().unwrap(), "--yes"]);
+    backend.run(&["agents", "connect", "codex", "--dry-run"]);
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
+    backend.run(&["service", "stop", "--yes"]);
+
+    for args in [&["--dry-run", "--yes"][..], &["--non-interactive"][..]] {
+        let refused = backend
+            .command(&["agents", "connect", "codex", "--json"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(refused.status.code(), Some(1));
+        assert_eq!(backend.run(&["status"])["status"], "not_running");
+    }
+
+    let failed = backend
+        .command(&["agents", "connect", "codex", "--yes", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&failed.stderr).unwrap();
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("has no API key"));
+    assert!(backend
+        .run(&["agents", "list"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|agent| agent["recorded"] == false));
+}
+
 /// Scripts such as `scripts/live_e2e` run `aci audit --json` and read its
 /// streams; the legacy alias must stay byte-for-byte the canonical command.
 #[cfg(unix)]
@@ -625,16 +663,6 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     backend.run(&["settings", "set", "appearance", "dark", "--yes"]);
     backend.run(&["settings", "set", "connect-on-launch", "true", "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    // Connecting starts protection first; without a key it says what is
-    // missing instead of reporting a route that does not exist.
-    let saved = backend
-        .command(&["agents", "connect", "codex", "--yes", "--json"])
-        .output()
-        .unwrap();
-    assert!(!saved.status.success());
-    assert!(
-        String::from_utf8_lossy(&[saved.stdout, saved.stderr].concat()).contains("has no API key")
-    );
     let key = backend.run(&["token", "show", "--yes"]);
     let profiles = backend.run(&["profiles", "list"]);
     let before = backend.run(&["settings", "show"]);
