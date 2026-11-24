@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0...desktop-v0.9.1-beta.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **verifiers:** bound remaining attestation and artifact reads ([#530](https://github.com/Dstack-TEE/private-ai-gateway/issues/530)) ([6c6076e](https://github.com/Dstack-TEE/private-ai-gateway/commit/6c6076edc86104df7824f818cad7dbc8c04fd6a7))
+
 ## [0.9.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.8.5...desktop-v0.9.0) (2026-11-18)
 
 Private AI Proxy 0.9.0 keeps protection running through gateway key rotations, network changes and routine commands that used to interrupt it, and adds `pap update` and `pap service restart`.
