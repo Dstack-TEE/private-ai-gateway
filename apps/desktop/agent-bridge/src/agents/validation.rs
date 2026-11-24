@@ -724,7 +724,7 @@ impl Projector {
                 let staged = self.staged_helper.as_deref().unwrap_or(helper);
                 if refusal.is_none() && openclaw::stale_credentials(record, staged, &token, file) {
                     refusal =
-                        Some("The OpenClaw helper changed; Disconnect then Connect again".into());
+                        Some("The OpenClaw helper changed; Disconnect, then Connect again".into());
                 }
             }
             if let Some(attention) = refusal {
