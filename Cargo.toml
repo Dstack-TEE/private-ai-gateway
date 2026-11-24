@@ -28,6 +28,8 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Private Computer AAD, which binds arbitrary cleartext JSON.
 serde_json_canonicalizer = "0.4"
 dstack-sdk = "0.6.0"
+rmp-serde = "1.3"
+serde-human-bytes = "0.1.2"
 bytes = "1"
 rust_decimal = "1"
 

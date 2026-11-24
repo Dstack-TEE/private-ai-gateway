@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dstack_sdk::dstack_client_v0::GetKeyConfig;
+use dstack_sdk::DstackClientV1;
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::{RecoveryId, Signature as K256Signature, SigningKey as K256SigningKey};
 use serde_json::json;
@@ -28,8 +29,9 @@ use crate::aci::keys::{
 };
 use crate::aci::types::{KeyedPublicKey, TlsSpki};
 
-// The frozen guest API preserves the deployed KMS key derivation and serves
-// GetQuote on both dstack 0.5 and 0.6.
+mod attestation;
+
+// The frozen guest API preserves the deployed KMS key derivation.
 #[expect(deprecated, reason = "the gateway uses the frozen dstack guest API")]
 type DstackClientV0 = dstack_sdk::dstack_client_v0::DstackClientV0;
 
@@ -92,6 +94,7 @@ struct KmsKeyEvidence {
 /// Provider backed by dstack KMS keys plus dstack TDX quotes.
 pub struct DstackAciProvider {
     client: Arc<DstackClientV0>,
+    attest_client: Option<DstackClientV1>,
     receipt: Ed25519SigningKey,
     x25519_e2ee: X25519SecretKey,
     legacy_e2ee: k256::SecretKey,
@@ -113,11 +116,27 @@ impl DstackAciProvider {
     ) -> Result<Self, KeyError> {
         let endpoint = normalize_dstack_endpoint(endpoint)?;
         let client = Arc::new(DstackClientV0::new(endpoint.as_deref()));
-        Self::from_client(client, config).await
+        let attest_client = DstackClientV1::new(endpoint.as_deref());
+        let attest_client = match attest_client.version().await {
+            Ok(_) => Some(attest_client),
+            // SDK 0.6 includes the HTTP status and the pRPC error text in
+            // Display. Only an unmounted surface indicates a pre-v1 guest.
+            Err(error)
+                if error
+                    .to_string()
+                    .strip_prefix("HTTP 404: ")
+                    .is_some_and(|body| !body.starts_with("Service not found:")) =>
+            {
+                None
+            }
+            Err(error) => return Err(KeyError::Quote(format!("dstack v1 Version: {error}"))),
+        };
+        Self::from_client(client, attest_client, config).await
     }
 
     async fn from_client(
         client: Arc<DstackClientV0>,
+        attest_client: Option<DstackClientV1>,
         config: DstackAciProviderConfig,
     ) -> Result<Self, KeyError> {
         let (receipt_bytes, receipt_chain) =
@@ -183,6 +202,7 @@ impl DstackAciProvider {
 
         Ok(Self {
             client,
+            attest_client,
             receipt,
             x25519_e2ee,
             legacy_e2ee,
@@ -282,9 +302,22 @@ impl DstackAciProvider {
     }
 
     /// Request a dstack TDX quote binding exactly the supplied 64-byte
-    /// report-data, returning the verified quote plus its event log and VM
-    /// config evidence.
+    /// report-data, returning the quote plus its event log and VM config.
     async fn quote_with_report_data(&self, report_data: [u8; 64]) -> Result<Quote, KeyError> {
+        if let Some(client) = &self.attest_client {
+            let response = client
+                .attest(report_data.to_vec(), false)
+                .await
+                .map_err(|e| KeyError::Quote(format!("dstack v1 Attest: {e}")))?;
+            let mut quote = attestation::decode_tdx_quote(&response.attestation, report_data)?;
+            let info = client
+                .info()
+                .await
+                .map_err(|e| KeyError::Quote(format!("dstack v1 Info: {e}")))?;
+            quote.app_compose = Some(info.app_compose);
+            return Ok(quote);
+        }
+
         let response = self
             .client
             .get_quote(report_data.to_vec())
@@ -306,20 +339,8 @@ impl DstackAciProvider {
             .info()
             .await
             .map_err(|e| KeyError::Quote(format!("dstack info: {e}")))?;
-        // GetQuote includes V2 preimages from the same snapshot as the quote.
-        // For V1 keep the full Info log: GetQuote strips boot event payloads.
-        let has_versioned_events = !response.event_log.is_empty()
-            && response
-                .decode_event_log()
-                .map_err(|e| KeyError::Quote(format!("invalid dstack quote event log: {e}")))?
-                .iter()
-                .any(|event| event.version.is_some_and(|version| version > 1));
-        let event_log = if has_versioned_events {
-            response.event_log
-        } else {
-            serde_json::to_string(&info.tcb_info.event_log)
-                .map_err(|e| KeyError::Quote(format!("serialize dstack event log: {e}")))?
-        };
+        let event_log = serde_json::to_string(&info.tcb_info.event_log)
+            .map_err(|e| KeyError::Quote(format!("serialize dstack event log: {e}")))?;
 
         Ok(Quote {
             raw_quote,
@@ -533,63 +554,38 @@ mod tests {
         use http_body_util::{BodyExt, Full};
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
-        use hyper::{Method, Response};
+        use hyper::{Method, Response, StatusCode};
         use hyper_util::rt::TokioIo;
         use serde_json::{json, Value};
         use tokio::net::UnixListener;
 
         use super::super::{DstackAciProvider, DstackAciProviderConfig, Quoter};
+        use crate::aci::keys::{KeyError, Quote};
 
-        // The app-id vectors generated by cc-eventlog at dad8326f in PR #531.
+        // The V1 app-id vector generated by cc-eventlog at dad8326f in PR #531.
         const V1_LOG: &str = concat!(
             r#"[{"imr":0,"event_type":4,"digest":"010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101","event":"","event_payload":"0102"},"#,
             r#"{"imr":3,"event_type":134217729,"digest":"#,
             r#""3f1fbb6cfe25e7f19bd48cfa9dc590cabaa946da04f9215402e7083550177292c1478402b258a90c649ccfcb5f408175","#,
             r#""event":"app-id","event_payload":"1111111111111111111111111111111111111111"}]"#,
         );
-        const V2_LOG: &str = concat!(
-            r#"[{ "imr":3,"event_type":134217729,"digest":"#,
-            r#""f3fdf5a4af4b5554d2fd20456bd667fce7df585c5d94a4f36b5c16ae22eab4123bf6f4e97a30efb6ec980a950e28d1a8","#,
-            r#""event":"app-id","event_payload":"1111111111111111111111111111111111111111","version":2,"#,
-            r#""preimage":"7b226e616d65223a226170702d6964222c227061796c6f6164223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131222c2274797065223a3133343231373732397d"}]"#,
-        );
+        const APP_COMPOSE: &str = r#"{"name":"gateway"}"#;
+        const RECORDED_ATTEST: &str =
+            include_str!("../tests/fixtures/dstack/tdx-lite-v1-attest.json");
+
+        type Exchange = (&'static str, Value, StatusCode, String);
+
+        fn rpc(path: &'static str, request: Value, response: Value) -> Exchange {
+            (path, request, StatusCode::OK, response.to_string())
+        }
 
         #[tokio::test]
         async fn dstack_05_preserves_legacy_evidence() {
             let quote_log = V1_LOG.replace(r#""event_payload":"0102""#, r#""event_payload":"""#);
-            round_trip_quote(
-                &quote_log,
-                serde_json::from_str(V1_LOG).unwrap(),
-                V1_LOG,
-                false,
-            )
-            .await;
-        }
-
-        #[tokio::test]
-        async fn dstack_06_preserves_v2_runtime_events() {
-            let mut info_log: Value = serde_json::from_str(V2_LOG).unwrap();
-            info_log[0]
-                .as_object_mut()
-                .unwrap()
-                .shift_remove("preimage")
-                .unwrap();
-            round_trip_quote(V2_LOG, info_log, V2_LOG, true).await;
-        }
-
-        async fn round_trip_quote(quote_log: &str, info_log: Value, expected_log: &str, raw: bool) {
-            let config = DstackAciProviderConfig::default();
-            let dir = tempfile::tempdir().unwrap();
-            let socket_path = dir.path().join("dstack.sock");
-            let listener = UnixListener::bind(&socket_path).unwrap();
             let nonce = [0xa5; 32];
             let mut report_data = [0; 64];
             report_data[..32].copy_from_slice(&nonce);
-            if raw {
-                report_data[32..].fill(0xfe);
-            }
             let report_data_hex = hex::encode(report_data);
-            let app_compose = r#"{"name":"gateway"}"#;
             let tcb_info = json!({
                 "mrtd": "00".repeat(48),
                 "rtmr0": "01".repeat(48),
@@ -598,55 +594,128 @@ mod tests {
                 "rtmr3": "04".repeat(48),
                 "compose_hash": "05".repeat(32),
                 "device_id": "06".repeat(32),
-                "app_compose": app_compose,
-                "event_log": info_log,
+                "app_compose": APP_COMPOSE,
+                "event_log": serde_json::from_str::<Value>(V1_LOG).unwrap(),
             });
+            let quote = request_quote(
+                false,
+                [
+                    rpc(
+                        "/GetQuote",
+                        json!({"report_data": report_data_hex}),
+                        json!({
+                            "quote": "1122",
+                            "event_log": quote_log,
+                            "report_data": report_data_hex,
+                            "vm_config": "{}",
+                        }),
+                    ),
+                    rpc(
+                        "/Info",
+                        json!({}),
+                        json!({
+                            "app_id": "07".repeat(20),
+                            "instance_id": "08".repeat(20),
+                            "app_cert": "",
+                            "tcb_info": serde_json::to_string_pretty(&tcb_info).unwrap(),
+                            "app_name": "gateway",
+                            "device_id": tcb_info["device_id"],
+                            "key_provider_info": "",
+                            "compose_hash": tcb_info["compose_hash"],
+                            "vm_config": "{}",
+                        }),
+                    ),
+                ],
+                async move |provider| provider.get_quote(nonce).await,
+            )
+            .await
+            .unwrap();
+            assert_eq!(quote.report_data, report_data);
+            assert_eq!(quote.raw_quote, [0x11, 0x22]);
+            assert_eq!(quote.event_log.as_str(), Some(V1_LOG));
+            assert_eq!(quote.vm_config.as_str(), Some("{}"));
+            assert_eq!(quote.app_compose.as_deref(), Some(APP_COMPOSE));
+        }
+
+        #[tokio::test]
+        async fn dstack_06_uses_recorded_v1_attestation() {
+            let report_data = [0x42; 64];
+            let quote = request_quote(
+                true,
+                [
+                    rpc(
+                        "/v1/Attest",
+                        json!({"report_data": hex::encode(report_data), "include_boottime_gpu_evidence": false}),
+                        serde_json::from_str(RECORDED_ATTEST).unwrap(),
+                    ),
+                    rpc(
+                        "/v1/Info",
+                        json!({}),
+                        json!({
+                            "app_id": "07".repeat(20),
+                            "instance_id": "08".repeat(20),
+                            "device_id": "06".repeat(32),
+                            "compose_hash": "05".repeat(32),
+                            "app_compose": APP_COMPOSE,
+                        }),
+                    ),
+                ],
+                async move |provider| provider.get_quote_raw(report_data).await,
+            )
+            .await
+            .unwrap();
+            assert_eq!(quote.report_data, report_data);
+            let event_log: Vec<Value> =
+                serde_json::from_str(quote.event_log.as_str().unwrap()).unwrap();
+            assert!(event_log
+                .iter()
+                .any(|event| event["event"] == "compose-hash"));
+            let vm_config: Value = serde_json::from_str(quote.vm_config.as_str().unwrap()).unwrap();
+            assert_eq!(vm_config["tdx_attestation_variant"], "lite");
+            assert_eq!(quote.app_compose.as_deref(), Some(APP_COMPOSE));
+        }
+
+        async fn request_quote(
+            v1: bool,
+            attestation_exchanges: impl IntoIterator<Item = Exchange>,
+            call: impl AsyncFnOnce(DstackAciProvider) -> Result<Quote, KeyError>,
+        ) -> Result<Quote, KeyError> {
+            let config = DstackAciProviderConfig::default();
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("dstack.sock");
+            let listener = UnixListener::bind(&socket_path).unwrap();
             let key = json!({"key": "01".repeat(32), "signature_chain": ["ab", "cd"]});
-            let mut exchanges = vec![];
+            let probe = if v1 {
+                rpc(
+                    "/v1/Version",
+                    json!({}),
+                    json!({"version": "0.6.5", "rev": "test"}),
+                )
+            } else {
+                (
+                    "/v1/Version",
+                    json!({}),
+                    StatusCode::NOT_FOUND,
+                    "<h1>Not Found</h1>".into(),
+                )
+            };
+            let mut exchanges = vec![probe];
             for (path, purpose) in [
                 (&config.receipt_path, "aci.receipt.ed25519.v1"),
                 (&config.x25519_e2ee_path, "aci.e2ee.x25519.v1"),
                 (&config.legacy_e2ee_path, "aci.e2ee.v1"),
                 (&config.legacy_ed25519_path, "aci.legacy.ed25519.v1"),
             ] {
-                exchanges.push((
+                exchanges.push(rpc(
                     "/GetKey",
                     json!({"path": path, "purpose": purpose, "algorithm": "secp256k1"}),
                     key.clone(),
                 ));
             }
-            exchanges.extend([
-                (
-                    "/GetQuote",
-                    json!({"report_data": report_data_hex}),
-                    json!({
-                        "quote": "1122",
-                        "event_log": quote_log,
-                        "report_data": report_data_hex,
-                        "vm_config": "{}",
-                    }),
-                ),
-                (
-                    "/Info",
-                    json!({}),
-                    json!({
-                        "app_id": "07".repeat(20),
-                        "instance_id": "08".repeat(20),
-                        "app_cert": "",
-                        "tcb_info": serde_json::to_string_pretty(&tcb_info).unwrap(),
-                        "app_name": "gateway",
-                        "device_id": tcb_info["device_id"],
-                        "key_provider_info": "",
-                        "compose_hash": tcb_info["compose_hash"],
-                        "vm_config": "{}",
-                        "cloud_vendor": "test",
-                        "cloud_product": "test",
-                    }),
-                ),
-            ]);
+            exchanges.extend(attestation_exchanges);
 
             let server = async {
-                for (path, payload, response) in exchanges {
+                for (path, payload, status, response) in exchanges {
                     let (stream, _) = listener.accept().await.unwrap();
                     http1::Builder::new()
                         .keep_alive(false)
@@ -673,9 +742,9 @@ mod tests {
                                     );
                                     Ok::<_, std::convert::Infallible>(
                                         Response::builder()
-                                            .header("content-type", "application/json")
-                                            .body(Full::new(Bytes::from(
-                                                serde_json::to_vec(response).unwrap(),
+                                            .status(status)
+                                            .body(Full::new(Bytes::copy_from_slice(
+                                                response.as_bytes(),
                                             )))
                                             .unwrap(),
                                     )
@@ -685,28 +754,20 @@ mod tests {
                         .await
                         .unwrap();
                 }
+                Ok(())
             };
             let client = async {
                 let provider =
                     DstackAciProvider::new(Some(format!("unix:{}", socket_path.display())), config)
                         .await
                         .unwrap();
-                let quote = if raw {
-                    provider.get_quote_raw(report_data).await.unwrap()
-                } else {
-                    provider.get_quote(nonce).await.unwrap()
-                };
-                assert_eq!(quote.report_data, report_data);
-                assert_eq!(quote.raw_quote, [0x11, 0x22]);
-                assert_eq!(quote.event_log.as_str(), Some(expected_log));
-                assert_eq!(quote.vm_config.as_str(), Some("{}"));
-                assert_eq!(quote.app_compose.as_deref(), Some(app_compose));
+                call(provider).await
             };
             tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(server, client);
+                tokio::try_join!(server, client).map(|(_, quote)| quote)
             })
             .await
-            .unwrap();
+            .unwrap()
         }
     }
 }
