@@ -23,8 +23,8 @@ feeds and both GPU checks agreed on the live public evidence sampled for this
 update. [Current verification algorithm](verification.md#verification-algorithm)
 
 **Adapter update, 2026-11-24 PST.** The bridge caps decoded measurement,
-evidence, and public-key response sizes and runs at most eight CPU quote
-checks at a time. [Current verification algorithm](verification.md#verification-algorithm)
+evidence, and public-key response sizes.
+[Current verification algorithm](verification.md#verification-algorithm)
 
 ## Round 2 (2026-11-23 PST)
 

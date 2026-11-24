@@ -384,6 +384,9 @@ class SessionMaterialTests(unittest.TestCase):
 
         class StalledReport(BaseHTTPRequestHandler):
             def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
                 reached.set()
                 release.wait(20)
 
@@ -512,7 +515,7 @@ class SessionMaterialTests(unittest.TestCase):
             self.assertEqual(claims["instance_tdx_report_sha256"][instance_id], material["tdx_report_sha256"])
             self.assertEqual(claims["instance_advisory_ids"][instance_id], ["SA-A", "SA-B"])
 
-    def test_chutes_limits_cpu_verification_and_preserves_binding_order(self):
+    def test_chutes_verifies_a_fleet_concurrently_and_preserves_binding_order(self):
         instances = [{"instance_id": f"instance-{i}"} for i in range(20)]
         active = peak = 0
 
@@ -530,7 +533,7 @@ class SessionMaterialTests(unittest.TestCase):
                 active -= 1
 
         result, checked = chutes_output(instances, verify_collateral=verify_collateral)
-        self.assertEqual(peak, 8)
+        self.assertEqual(peak, len(instances))
         self.assertEqual(checked, len(instances))
         self.assertEqual(result["result"], "verified")
         self.assertEqual(

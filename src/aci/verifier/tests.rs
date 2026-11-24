@@ -735,7 +735,58 @@ async fn external_provider_failure_names_a_cause_and_keeps_the_verifiers_words_a
         .verify(request())
         .await;
     assert_eq!(crashed.result, VerificationResult::Failed);
-    assert_eq!(crashed.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(crashed.failure, VerificationFailure::NotVerified);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn near_ai_retries_after_bridge_spawn_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let command = directory.path().join("verifier");
+    let verifier = ExternalProviderVerifier::with_command_and_cache(
+        "near-ai",
+        AttestationScope::PerRouter,
+        vec![command.display().to_string()],
+        5,
+        300,
+    )
+    .unwrap();
+    let request = UpstreamVerificationRequest {
+        upstream_name: "router-upstream".into(),
+        url_origin: Some("https://router.example".into()),
+        model_id: "provider-model".into(),
+        forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+        required: true,
+    };
+
+    let failed = verifier.verify(request.clone()).await;
+    assert_eq!(failed.failure, VerificationFailure::NotVerified);
+    assert!(failed.diagnostic.unwrap().contains("failed to spawn"));
+    let output = json!({
+        "result": "verified",
+        "attested_scope": "router",
+        "evidence": {
+            "digest": crate::aci::digest::sha256_hex(b"evidence"),
+            "data": "data:text/plain;base64,ZXZpZGVuY2U=",
+        },
+        "channel_bindings": [{
+            "type": "tls_spki_sha256",
+            "origin": "https://router.example",
+            "spki_sha256": "ab".repeat(32),
+        }],
+    });
+    std::fs::write(
+        &command,
+        format!("#!/bin/sh\ncat >/dev/null\nprintf '%s' '{output}'\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(command, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        verifier.verify(request).await.result,
+        VerificationResult::Verified
+    );
 }
 
 #[tokio::test]

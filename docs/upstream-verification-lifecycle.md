@@ -70,11 +70,9 @@ begins when verification reports the failure. ACI-service caps expiry at keyset 
 rechecked when verification completes; appraisal uses the wall clock after the
 response. Cold requests and background refresh share its single-flight lock.
 
-Background tasks share `upstream_verification_concurrency` permits (default 4).
-Each gateway process runs up to eight external verifier subprocesses across
-background and request-time verification. Waiting for a subprocess slot
-counts toward the configured verifier timeout. After success, a target cannot
-start again before its previous start plus p, including cacheless verifiers. A failed
+All tasks share `upstream_verification_concurrency` permits (default 4);
+request-time verification is independent. After success, a target cannot start
+again before its previous start plus p, including cacheless verifiers. A failed
 refresh normally keeps a valid entry and retries at expiry, or at start plus p
 if there is no valid entry. NEAR AI preserves a current verification when
 evidence is unavailable. An explicit model name mismatch replaces it

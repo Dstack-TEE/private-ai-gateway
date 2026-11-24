@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use super::CachedProviderEvent;
@@ -31,8 +31,6 @@ use crate::aggregator::upstream_config::AttestationScope;
 
 const NEAR_AI_MODEL_MISMATCH_TTL: Duration = Duration::from_secs(60);
 const NEAR_AI_EVIDENCE_UNAVAILABLE_TTL: Duration = Duration::from_secs(10);
-// The background refresh pool does not cover request-time verification.
-static VERIFIER_PROCESS_PERMITS: Semaphore = Semaphore::const_new(8);
 
 type VerifyLocks = HashMap<Option<ExternalProviderVerifierCacheKey>, Weak<AsyncMutex<()>>>;
 
@@ -342,17 +340,19 @@ impl ExternalProviderVerifier {
             Ok(input) => input,
             Err(err) => {
                 return self
-                    .unavailable_event(request, format!("failed to encode verifier input: {err}"));
+                    .failed_event(request, format!("failed to encode verifier input: {err}"));
             }
         };
         let output = match self.run(input).await {
             Ok(output) => output,
-            Err(err) => return self.unavailable_event(request, err),
+            // A process error or deadline can originate in the gateway.
+            // Fetch failures are reported explicitly by the bridge.
+            Err(err) => return self.failed_event(request, err),
         };
         let output: ExternalProviderVerifierOutput = match serde_json::from_slice(&output) {
             Ok(output) => output,
             Err(err) => {
-                return self.unavailable_event(
+                return self.failed_event(
                     request,
                     format!("provider verifier returned invalid JSON: {err}"),
                 );
@@ -424,27 +424,9 @@ impl ExternalProviderVerifier {
     }
 
     async fn run(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {
-        tokio::time::timeout(
-            Duration::from_secs(self.timeout_seconds),
-            self.run_process(input),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "provider verifier timed out after {}s",
-                self.timeout_seconds
-            )
-        })?
-    }
-
-    async fn run_process(&self, input: Vec<u8>) -> Result<Vec<u8>, String> {
         let Some((program, args)) = self.command.split_first() else {
             return Err("provider verifier command must not be empty".to_string());
         };
-        let _permit = VERIFIER_PROCESS_PERMITS
-            .acquire()
-            .await
-            .expect("provider verifier process semaphore is never closed");
         let mut command = Command::new(program);
         command
             .args(args)
@@ -476,7 +458,7 @@ impl ExternalProviderVerifier {
             .stderr
             .take()
             .ok_or_else(|| "failed to open provider verifier stderr".to_string())?;
-        let output = async {
+        let output = tokio::time::timeout(Duration::from_secs(self.timeout_seconds), async {
             stdin.write_all(&input).await?;
             drop(stdin);
             let mut out = Vec::new();
@@ -491,8 +473,14 @@ impl ExternalProviderVerifier {
                 stdout: out,
                 stderr: err,
             })
-        }
+        })
         .await
+        .map_err(|_| {
+            format!(
+                "provider verifier timed out after {}s",
+                self.timeout_seconds
+            )
+        })?
         .map_err(|e| format!("provider verifier process failed: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -621,18 +609,6 @@ impl ExternalProviderVerifier {
             .record_verified_discovery(chutes_session)
             .map(|_| ())
             .map_err(|e| format!("failed to record Chutes provider session: {e}"))
-    }
-
-    /// The verifier could not run or answer: nothing was judged.
-    fn unavailable_event(
-        &self,
-        request: UpstreamVerificationRequest,
-        reason: impl Into<String>,
-    ) -> UpstreamVerifiedEvent {
-        UpstreamVerifiedEvent {
-            failure: VerificationFailure::EvidenceUnavailable,
-            ..self.failed_event(request, reason)
-        }
     }
 
     fn failed_event(
@@ -844,21 +820,31 @@ mod process_tests {
             let (reaped, waited) = tokio::sync::oneshot::channel();
             let pids = if timeout {
                 let verifier = ExternalProviderVerifier::with_command(
-                    "tinfoil",
+                    "near-ai",
                     AttestationScope::PerRouter,
                     vec!["sh".to_string(), "-c".to_string(), script],
                     1,
                 )
                 .unwrap();
                 *verifier.reaped.lock().unwrap() = Some(reaped);
-                let mut run = Box::pin(verifier.run(Vec::new()));
+                let request = UpstreamVerificationRequest {
+                    upstream_name: "router-upstream".into(),
+                    url_origin: None,
+                    model_id: "provider-model".into(),
+                    forwarded_body_hash: crate::aci::digest::sha256_hex(b""),
+                    required: true,
+                };
+                let mut run = Box::pin(verifier.verify(request.clone()));
                 assert!(futures_util::poll!(&mut run).is_pending());
                 let pids = read_pids();
                 tokio::time::advance(Duration::from_secs(1)).await;
+                let error = run.await;
+                assert_eq!(error.failure, VerificationFailure::NotVerified);
                 assert_eq!(
-                    run.await.unwrap_err(),
-                    "provider verifier timed out after 1s"
+                    error.diagnostic.as_deref(),
+                    Some("provider verifier timed out after 1s")
                 );
+                assert!(verifier.cached_event(&request).is_none());
                 pids
             } else {
                 let mut command = Command::new("sh");

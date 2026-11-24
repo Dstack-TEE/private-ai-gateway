@@ -40,7 +40,6 @@ NRAS_JWKS_TIMEOUT_SECONDS = 5
 NRAS_POST_TIMEOUT_SECONDS = 5
 NRAS_GPU_BUDGET_SECONDS = 10
 NRAS_GPU_CONCURRENCY = 8
-CPU_VERIFICATION_CONCURRENCY = 8
 MAX_MEASUREMENTS_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 40 * 1024 * 1024
 MAX_PUBLIC_KEYS_BYTES = 40 * 1024 * 1024
@@ -485,14 +484,11 @@ async def _verify_chutes(request: dict[str, Any]) -> None:
             continue
         eligible.append((evidence, e2e_pubkey))
 
-    cpu_slots = asyncio.Semaphore(CPU_VERIFICATION_CONCURRENCY)
-
-    async def verify_instance(evidence: dict[str, Any], e2e_pubkey: str) -> tuple[dict[str, Any], str]:
-        async with cpu_slots:
-            return await chutes_verify_instance(evidence, nonce, e2e_pubkey, measurements)
-
     results = await asyncio.gather(
-        *(verify_instance(evidence, e2e_pubkey) for evidence, e2e_pubkey in eligible),
+        *(
+            chutes_verify_instance(evidence, nonce, e2e_pubkey, measurements)
+            for evidence, e2e_pubkey in eligible
+        ),
         return_exceptions=True,
     )
     verified = []
