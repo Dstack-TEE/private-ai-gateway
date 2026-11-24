@@ -52,7 +52,9 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
             .join(helper_binary_name());
         sandbox.projector.helper_exe = stable.clone();
         write_executable(&sandbox.projector.helper_exe, "helper");
-        if matches!(agent, Agent::OpenCode | Agent::Dsh | Agent::OpenClaw) {
+        if matches!(agent, Agent::OpenCode | Agent::Dsh)
+            || (agent == Agent::OpenClaw && !cfg!(windows))
+        {
             assert_scan(&sandbox, true, None);
         } else {
             assert_scan(&sandbox, false, Some("Disconnect, then Connect"));
@@ -256,14 +258,18 @@ fn audit_agent_helpers_use_the_staged_helper_location() {
     apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
     let config = doc(&sandbox, Agent::ClaudeCode);
     let helper = config.get_str(&["apiKeyHelper"]).unwrap();
-    assert!(helper.contains(
-        &sandbox
-            .projector
-            .data_dir
-            .join("helpers")
-            .display()
-            .to_string()
-    ));
+    if cfg!(windows) {
+        assert!(!helper.contains("helpers"));
+    } else {
+        assert!(helper.contains(
+            &sandbox
+                .projector
+                .data_dir
+                .join("helpers")
+                .display()
+                .to_string()
+        ));
+    }
 }
 
 #[test]
