@@ -125,6 +125,7 @@ These behaviors were observed on 2026-10-21 with `glm-5.3` on the round-1 host `
 - The private tier is enforced by the router. PAG's own gates are the on-chain record and quote checks above, so a provider that misdeclares `TargetSeparated` passes them.
 - There is no quote freshness challenge (0G's quote takes no nonce). GPU evidence (0G's `ZG-Quote-Signature` over NVIDIA evidence) and weights are not checked.
 - A send failure does not fall back to another verified provider.
+- The stale-key 409 arrives via the router. A misbehaving router can trigger up to two reverifications per request with a gateway-managed binding. The gateway fails closed if reverification fails or the mismatch persists.
 - Receipts carry no per-response signature-status field: the outcome is implied by the receipt existing (buffered) or by the stream ending in `[DONE]` (streamed).
 - Response cleartext floats can cause a frame to fail closed because `serde_json` float parsing is not guaranteed to round correctly. Round-1 responses carried no cleartext floats.
 
