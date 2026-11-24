@@ -85,8 +85,11 @@ class DstackVerifier(Verifier):
     def __init__(
         self,
         service_url: Optional[str] = None,
+        *,
+        timeout: Optional[tuple[float, float]] = None,
     ):
         self.service_url = service_url or "http://localhost:8080"
+        self.timeout = timeout
 
     def verify(self, quote: str, event_log: str, vm_config: str) -> Dict[str, Any]:
         """Verifies the dstack TEE environment using the dstack-verifier service."""
@@ -102,7 +105,9 @@ class DstackVerifier(Verifier):
                 # verifiers ignore the extra key, so this stays backward compatible.
                 "attestation": None,
             }
-            response = requests.post(f"{self.service_url}/verify", json=payload)
+            response = requests.post(
+                f"{self.service_url}/verify", json=payload, timeout=self.timeout
+            )
             response.raise_for_status()
             return response.json()
         except Exception as e:

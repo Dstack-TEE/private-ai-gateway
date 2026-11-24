@@ -8,6 +8,8 @@ import os
 import sys
 from typing import Any
 
+from requests.exceptions import ConnectionError, HTTPError, Timeout
+
 from .common import (
     emit,
     failed,
@@ -43,8 +45,16 @@ async def verify_nearai(request: dict[str, Any]) -> None:
     )
     dstack_verifier_url = os.getenv("DSTACK_VERIFIER_URL", "http://localhost:8080")
     model_id = request["model_id"]
-    with contextlib.redirect_stdout(sys.stderr):
-        report = await asyncio.to_thread(near_provider.fetch_report, model_id)
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            report = await asyncio.to_thread(near_provider.fetch_report, model_id)
+    except (ConnectionError, HTTPError, Timeout) as exc:
+        failed(
+            provider,
+            f"NEAR AI attestation report fetch failed: {exc}",
+            failure="evidence_unavailable",
+        )
+        return
     raw = report.raw or {}
     attestations = raw.get("model_attestations")
     # An external verifier checkout can supply a different fetch implementation.

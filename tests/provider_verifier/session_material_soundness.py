@@ -10,11 +10,14 @@ import asyncio
 import base64
 import copy
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
 import struct
 import sys
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from contextlib import redirect_stdout
@@ -24,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import dcap_qvl
+from confidential_verifier.providers.nearai import NearaiProvider
 from provider_verifier.common import tdx_session_material
 from provider_verifier import chutes
 import private_ai_provider_verifier as bridge
@@ -55,6 +59,18 @@ def quote_fixture(*, td15=False, report_data=bytes(64), changes=None):
     return header + (struct.pack("<HI", 3, len(body)) if td15 else b"") + body + struct.pack("<I", len(auth)) + auth
 
 
+def run_near_bridge(model_id):
+    request = {
+        "provider": "near-ai",
+        "model_id": model_id,
+        "url_origin": "https://near.example",
+    }
+    output = io.StringIO()
+    with patch("sys.stdin", io.StringIO(json.dumps(request))), redirect_stdout(output):
+        asyncio.run(bridge.main())
+    return json.loads(output.getvalue())
+
+
 def near_output(
     *,
     measured="aa" * 32,
@@ -78,23 +94,14 @@ def near_output(
     result = {"is_valid": valid, "details": {"dstack": {"details": {
         "tcb_status": tcb_status, "app_info": {"compose_hash": measured},
     }}}}
-    request = {
-        "provider": "near-ai",
-        "model_id": "model-a",
-        "url_origin": "https://near.example",
-    }
-    output = io.StringIO()
     with (
         patch("requests.get", return_value=response),
         patch(
             "confidential_verifier.verifiers.nearai.NearAICloudVerifier.verify_gateway_component",
             new=AsyncMock(return_value=result),
         ),
-        patch("sys.stdin", io.StringIO(json.dumps(request))),
-        redirect_stdout(output),
     ):
-        asyncio.run(bridge.main())
-    return json.loads(output.getvalue())
+        return run_near_bridge("model-a")
 
 
 def phala_output(*, changes=None, compose=phala.APP_COMPOSE):
@@ -195,6 +202,38 @@ class SessionMaterialTests(unittest.TestCase):
                 output = near_output(attestations=[entry])
                 self.assertEqual(output["result"], "failed")
                 self.assertIn("no NEAR-hosted attestation (missing intel_quote)", output["reason"])
+
+    def test_near_stalled_report_times_out(self):
+        release = threading.Event()
+        reached = threading.Event()
+
+        class StalledReport(BaseHTTPRequestHandler):
+            def do_GET(self):
+                reached.set()
+                release.wait(20)
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), StalledReport) as server:
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                provider = NearaiProvider(include_tls_fingerprint=True)
+                provider.api_base = f"http://127.0.0.1:{server.server_port}/v1"
+                started = time.monotonic()
+                with patch(
+                    "confidential_verifier.providers.nearai.NearaiProvider",
+                    return_value=provider,
+                ):
+                    output = run_near_bridge("stalled")
+                elapsed = time.monotonic() - started
+                self.assertTrue(reached.is_set())
+                self.assertEqual(output["result"], "failed")
+                self.assertEqual(output["failure"], "evidence_unavailable")
+                self.assertIn("Read timed out", output["reason"])
+                self.assertLess(elapsed, 15)
+            finally:
+                release.set()
+                server.shutdown()
+                thread.join()
 
     def test_phala_compose_and_quote(self):
         base = phala_output()["provider_claims"]

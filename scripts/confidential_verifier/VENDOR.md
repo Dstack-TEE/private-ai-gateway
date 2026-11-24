@@ -29,6 +29,8 @@ Keep this list current so we can diff against upstream and re-sync deliberately.
 - `providers/nearai.py`: `NearaiProvider` takes an optional `api_key` and sends it as a bearer token
   when fetching the attestation report. It raises an explicit error when the
   first model attestation lacks a non-empty `intel_quote` string.
+  NEAR AI report, catalog, dstack, and NVIDIA requests use connect and read
+  timeouts. The shared dstack and NVIDIA clients accept optional timeouts.
 - `RedpillProvider` is renamed `RedPillProvider`.
 - `verifiers/dstack.py`: `DstackVerifier.verify` sends `"attestation": None` in the `/verify` body.
   dstack-verifier >= 0.5.6 serializes the request with `serde_human_bytes` and no field default, so the

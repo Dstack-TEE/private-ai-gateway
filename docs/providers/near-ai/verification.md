@@ -21,6 +21,10 @@ report a `model_name` that exactly matches the configured upstream model ID
 sent in the request. An alias that resolves to a different name fails this
 check.
 
+The report fetch and the gateway's dstack and NVIDIA verifier requests use a
+3-second connect timeout and a 10-second read timeout. The Rust verifier
+deadline bounds the subprocess across those calls.
+
 `NearAICloudVerifier.verify_gateway_component` checks the
 `gateway_attestation` component.
 
@@ -43,10 +47,14 @@ The bridge then requires a `gateway_attestation`, a `tls_cert_fingerprint`, and 
 The accepted TDX quote covers the signing address, nonce, and TLS SPKI digest through `report_data`. The gateway pins that digest against the live NEAR AI HTTPS certificate before sending the request.
 
 The verifier caches and refreshes verification by upstream model ID so each
-model passes the name check. A model name mismatch replaces any cached
-verification for that model. Repeated requests reuse the failed result for
-up to 60 seconds. The receipt records the selected model, and the session records
-the shared router channel evidence.
+model passes the name check. An explicit model name mismatch on refresh
+immediately replaces even a current verified entry for that model because the
+upstream now reports a different model. Requests reuse the mismatch for up to
+60 seconds. If evidence is unavailable, the verifier keeps any still-valid
+verified entry. Otherwise, it caches the failure for up to 10 seconds, capped
+by the time between a scheduled refresh and the verified entry's expiry.
+The receipt records the selected model, and the session records router
+channel evidence.
 
 Middleware injects a per-user `cache_salt`, honored by NEAR's TEE vLLM models. See [Prefix-cache isolation](../../prefix-cache-isolation.md).
 
@@ -93,7 +101,7 @@ Run the hermetic report-data, model selection and bridge checks.
 
 ```sh
 cargo test --locked --test soundness_report_data --test session_material_soundness
-CARGO_BUILD_JOBS=4 cargo test --locked --lib provider_verifier_cache_respects_model_checks
+CARGO_BUILD_JOBS=4 cargo test --locked --lib near_ai_caches_model_failures_and_refreshes_healthy_siblings
 ```
 
 For a live verifier run, start a trusted dstack verifier and set

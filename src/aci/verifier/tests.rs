@@ -877,7 +877,7 @@ printf '%s' '{output}'"#
 }
 
 #[tokio::test]
-async fn near_ai_temporarily_caches_model_mismatches() {
+async fn near_ai_caches_model_failures_and_refreshes_healthy_siblings() {
     let directory = tempfile::tempdir().unwrap();
     let calls = directory.path().join("calls");
     let verified = json!({
@@ -901,6 +901,7 @@ case "$payload" in
     ;;
   *'"model_id":"unavailable"'*)
     printf '%s\n' unavailable >> "$1"
+    sleep 1
     printf '%s' '{"result":"failed","failure":"evidence_unavailable"}'
     ;;
   *)
@@ -908,6 +909,7 @@ case "$payload" in
     printf '%s' "$2"
     ;;
 esac"#;
+    let refresh_lead = std::time::Duration::from_secs(3);
     let verifier = ExternalProviderVerifier::with_command_and_cache(
         "near-ai",
         AttestationScope::PerRouter,
@@ -922,7 +924,8 @@ esac"#;
         5,
         300,
     )
-    .unwrap();
+    .unwrap()
+    .with_near_ai_refresh_lead(refresh_lead);
     let request = |upstream_name: &str, model_id: &str| UpstreamVerificationRequest {
         upstream_name: upstream_name.to_string(),
         url_origin: Some("https://router.example".to_string()),
@@ -944,15 +947,39 @@ esac"#;
             VerificationResult::Verified
         );
     }
-    for _ in 0..2 {
+    let unavailable = request("primary", "unavailable");
+    let mut stalled = Box::pin(verifier.verify(unavailable.clone()));
+    assert!(futures_util::poll!(&mut stalled).is_pending());
+    let (failed, repeated, refreshed) = tokio::time::timeout(refresh_lead, async {
         assert_eq!(
-            verifier
-                .verify(request("primary", "unavailable"))
-                .await
-                .failure,
-            VerificationFailure::EvidenceUnavailable
+            verifier.verify(healthy.clone()).await.result,
+            VerificationResult::Verified
         );
-    }
+        tokio::join!(
+            stalled,
+            verifier.verify(unavailable.clone()),
+            verifier.refresh(healthy.clone()),
+        )
+    })
+    .await
+    .expect("healthy model must refresh within the refresh lead");
+    assert_eq!(failed.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(repeated.failure, VerificationFailure::EvidenceUnavailable);
+    assert_eq!(refreshed.result, VerificationResult::Verified);
+    assert!(verifier.cached(&unavailable).is_none());
+    assert!(verifier.cache_remaining(&unavailable).is_none());
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap(),
+        "alias\nverified\nverified\nunavailable\nverified\n"
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(refresh_lead).await;
+    tokio::time::resume();
+    assert_eq!(
+        verifier.verify(unavailable).await.failure,
+        VerificationFailure::EvidenceUnavailable
+    );
 
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(30)).await;
@@ -966,7 +993,7 @@ esac"#;
     );
     assert_eq!(
         std::fs::read_to_string(&calls).unwrap(),
-        "alias\nverified\nverified\nunavailable\nunavailable\n"
+        "alias\nverified\nverified\nunavailable\nverified\nunavailable\n"
     );
 
     tokio::time::advance(std::time::Duration::from_secs(31)).await;

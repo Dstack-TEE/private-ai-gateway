@@ -6,6 +6,8 @@ from ..types import AttestationReport
 
 
 class NearaiProvider(ServiceProvider):
+    HTTP_TIMEOUT = (3, 10)
+
     def __init__(self, include_tls_fingerprint: bool = False, api_key: Optional[str] = None):
         self.api_base = "https://cloud-api.near.ai/v1"
         self.include_tls_fingerprint = include_tls_fingerprint
@@ -46,7 +48,9 @@ class NearaiProvider(ServiceProvider):
             print(f"[Near] TLS fingerprint binding enabled")
 
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        response = requests.get(url, params=params, headers=headers)
+        response = requests.get(
+            url, params=params, headers=headers, timeout=self.HTTP_TIMEOUT
+        )
         response.raise_for_status()
         data = response.json()
 
@@ -84,7 +88,7 @@ class NearaiProvider(ServiceProvider):
     def list_models(self) -> List[str]:
         url = f"{self.api_base}/model/list"
         print(f"[Near] Fetching models from {url}")
-        response = requests.get(url)
+        response = requests.get(url, timeout=self.HTTP_TIMEOUT)
         response.raise_for_status()
         data = response.json()
 
