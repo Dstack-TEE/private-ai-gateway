@@ -303,10 +303,10 @@ pub(super) fn build_verifier(
                 }
                 Arc::new(verifier)
             }
-            UpstreamProvider::Tinfoil => Arc::new(TinfoilProviderVerifier::new_with_cache(
-                request_timeout_seconds,
-                cache_seconds,
-            )),
+            UpstreamProvider::Tinfoil => Arc::new(
+                TinfoilProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds)
+                    .with_accepted_subjects(cfg.accepted_subjects.as_deref().unwrap_or_default()),
+            ),
             UpstreamProvider::NearAi => {
                 let mut verifier =
                     NearAiProviderVerifier::new_with_cache(request_timeout_seconds, cache_seconds);

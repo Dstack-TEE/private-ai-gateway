@@ -5342,6 +5342,70 @@ fn assert_admitted_receipt(
 }
 
 #[tokio::test]
+async fn tinfoil_enclave_header_is_recorded_in_buffered_and_streaming_receipts() {
+    use admission::{candidate, request, Attempt, Harness, RESPONSE};
+
+    let max_length = "a".repeat(256);
+    let over_limit = format!("{max_length}b");
+    for (streaming, provider, header, recorded) in [
+        (false, "tinfoil", max_length.as_str(), true),
+        (true, "tinfoil", "replica.example", true),
+        (false, "near-ai", "replica.example", false),
+        (false, "tinfoil", over_limit.as_str(), false),
+        (true, "tinfoil", over_limit.as_str(), false),
+    ] {
+        let h = Harness::new(vec![Attempt::Response {
+            status: 200,
+            at: 109,
+        }]);
+        h.verifier.0.lock().unwrap().provider_type = Some(provider.into());
+        h.backend
+            .response_headers
+            .lock()
+            .unwrap()
+            .insert("tinfoil-enclave".into(), header.into());
+        let journal = MiddlewareReceiptJournal::default();
+        let result = h
+            .service
+            .forward_chat_completion_for_middleware(
+                request(vec![]),
+                vec![candidate("first")],
+                streaming,
+                journal.clone(),
+            )
+            .await
+            .unwrap();
+        let (draft, body, content_type) = match result {
+            MiddlewareForwardResult::Forwarded(forwarded) => {
+                (forwarded.receipt, RESPONSE.to_vec(), "application/json")
+            }
+            MiddlewareForwardResult::Stream(mut forwarded) => {
+                let mut body = Vec::new();
+                while let Some(chunk) = forwarded.body.next().await {
+                    body.extend_from_slice(&chunk.unwrap());
+                }
+                (journal.take().unwrap(), body, "text/event-stream")
+            }
+            _ => panic!("expected an admitted upstream response"),
+        };
+        let receipt = h
+            .service
+            .finalize_middleware_receipt(draft, body, Some(content_type), None, None)
+            .unwrap()
+            .receipt
+            .document_json()
+            .unwrap();
+        let event = receipt["event_log"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["type"] == "upstream.tinfoil_enclave");
+        let expected = json!({"type": "upstream.tinfoil_enclave", "enclave": header});
+        assert_eq!(event, recorded.then_some(&expected));
+    }
+}
+
+#[tokio::test]
 async fn delayed_buffered_finalization_and_retained_failover_preserve_admission() {
     use admission::{candidate, request, Attempt, Harness, RESPONSE};
     for retained in [false, true] {
