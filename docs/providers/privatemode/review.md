@@ -1,19 +1,42 @@
 # Privatemode provider review
 
-Audit date: 2026-05-26 UTC. Provider behavior was rechecked against
-Privatemode v1.48 and the live manifest on 2026-07-09. The gateway adapter was
-changed to the measured co-deployment boundary on 2026-07-13 and to dynamic
-manifest mode on 2026-07-31. The pinned v1.48 image was retested against live
-traffic on 2026-09-23, and upstream source through v1.56 was rechecked. The
-reference deployment pins v1.64.0, with source checked on 2026-11-14 PST;
-production rollout remains pending.
+The current reviewed version is Privatemode v1.64.0, checked on 2026-11-23 PST.
+The reference deployment pins proxy OCI index digest
+`sha256:cf046abd3f6cbccccc69cc742533607235b756cb497f8d23d4b02f42fc223334`.
+The original audit was on 2026-05-26 UTC.
+
+Provider behavior was rechecked against Privatemode v1.48 and the live manifest
+on 2026-07-09. The gateway adapter changed to the measured co-deployment
+boundary on 2026-07-13 and to dynamic manifest mode on 2026-07-31. The pinned
+v1.48 image was retested against live traffic on 2026-09-23, and upstream source
+through v1.56 was rechecked. The v1.64.0 source was checked on 2026-11-14 PST.
+
+> **Currency check (2026-11-23 PST).** [Privatemode v1.64.0][v164-release],
+> released on 2026-11-14 at tag commit `3c98e0ab`, remains the latest upstream
+> release. The GHCR `v1.64.0` and `latest` tags both resolve to the pinned
+> digest above.
+>
+> A fresh-nonce attestation from the production gateway passed `pap verify`
+> checks `id-1` through `id-4` and `id-6`, with TDX TCB status `UpToDate`.
+> The verifier skipped `id-5` because the command supplied no custody policy.
+> The measured production Compose hash was
+> `261760d004c92eab0b6bed59a55cf3214c65d2cb543a1bed6dff371cd2650a7a`.
+> The production Compose pins the v1.64.0 proxy digest with
+> `--api-key-fallback=always`, `--disable-prompt-cache=false`,
+> `--nvidia-ocsp-allow-unknown=false`, and
+> `--nvidia-ocsp-revoked-grace-period=0`.
+>
+> The check found no change to the deployed trust boundary, session binding,
+> or adapter. It covered production gateway attestation. The latest
+> per-session Privatemode receipt evidence is from the 2026-11-14 run below.
+> The verdict remains **acceptable with conditions**.
 
 > **Status (2026-09-29 standards pass):** each external interface was checked
 > against the official v1.48.0 source and documentation. The readiness probe
 > now uses the proxy's `/readyz` instead of `GET /v1/models`, which v1.48
 > forwards unencrypted to the Privatemode API. The admin token is now a Compose
-> secret instead of a parsed dstack internal file. `proxy_image_sha256` moved
-> into a [published extension](../../../spec/proxy-image-binding.md). A fresh
+> secret. `proxy_image_sha256` moved into a
+> [published extension](../../../spec/proxy-image-binding.md). A fresh
 > production-OS Phala deployment passed `pap verify` with `--accept-compose` and
 > served E2EE v2 chat and streaming with passing receipt and session audits.
 >
@@ -54,37 +77,27 @@ production rollout remains pending.
 > default header unchanged. No adapter behavior change is needed.
 > Upstream moved its Contrast dependency (the Coordinator attestation library)
 > from v1.24.1 to v1.25.0; the live Phala run covers this update.
-> [Live acceptance passed][v159-live-evidence] on a test CVM running the
-> `dstack-0.5.9` production OS and gateway commit `33f5ac54`; the attested
-> Compose equaled the local render. `pap verify --require-production-os
-> --accept-compose` passed `id-1` through `id-4` and `policy-os`; only `id-6`
-> failed, as expected on the default Phala URL. Buffered and streaming chat
-> returned HTTP 200, and `pap audit --require-verified` had zero failures.
+> The [live test][v159-live-evidence] ran on the `dstack-0.5.9` production OS.
+> The attested Compose equaled the local render.
+> `pap verify --require-production-os --accept-compose` passed `id-1` through
+> `id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200.
+> The receipt audit passed. The endpoint-binding check (`id-6`) failed in this
+> test.
 > The session binds the v1.59.0 proxy image digest and credential digest.
 
-> **Status (2026-10-19 PDT, shared prompt cache):** the trailing 24-hour
-> request-stats sample for streaming `z-ai/glm-5.3` showed Privatemode deployment
-> 269 at p50/p95 TTFT 11.6/75 seconds with approximately 120K input tokens per
-> request and 508/1684 HTTP 429s (30%). Phala deployment 270 had p50 TTFT
-> 1.3 seconds with approximately 106K input tokens. The tagged [CLI][v159-cli]
-> and [handler][v159-handlers] confirm that the default
+> **Status (2026-10-19 PDT, shared prompt cache):** slow first tokens and rate
+> limiting in streaming traffic prompted a review of prompt caching. The tagged
+> [CLI][v159-cli] and [handler][v159-handlers] confirm that the default
 > `--disable-prompt-cache=true` generates a fresh salt for each unsalted request,
-> preventing prefix reuse across requests. Those requests consume the reported
-> 200K uncached-token/minute bucket rather than the 750K cached-token/minute
-> bucket. The reference Compose now sets `--disable-prompt-cache=false`, keeping
-> the default random salt generated once per proxy startup. All callers of a
-> replica then share its cache namespace unless they supply a valid `cache_salt`,
-> which takes precedence. The effective salt and prompt content also provide
-> shard affinity. This deliberately removes per-request cache isolation; the
-> gateway does not derive a tenant salt. Privatemode's namespace is limited to
-> each replica and proxy startup. Tinfoil's broader namespace derives from the
-> shared upstream credential, spanning replicas and surviving restarts. See
-> [Prompt cache](verification.md#prompt-cache).
-> This records a configuration change; production rollout and its effect on
-> TTFT, cache hits, and 429s remain unverified.
+> preventing prefix reuse across requests. The reference Compose set
+> `--disable-prompt-cache=false` to share the salt generated at proxy startup.
+> A valid request `cache_salt` takes precedence. The effective salt and prompt
+> content provide shard affinity. See [Prompt cache](verification.md#prompt-cache).
+> The effect on time to first token, cache hits, and rate limiting was
+> unverified at the time.
 
 > **Status (2026-10-19 PDT, canonical proxy flags):** the reference Compose now
-> uses `--api-key @/run/secrets/privatemode-api-key`,
+> uses `--api-key @<credential-file>`,
 > `--nvidia-ocsp-allow-unknown=false`, and
 > `--nvidia-ocsp-revoked-grace-period=0`. The tagged [CLI][v159-cli] registers
 > the deprecated aliases with the same flag values and backing variables,
@@ -115,8 +128,8 @@ production rollout remains pending.
 > 65-second stream gaps. See [Proxy timeouts](verification.md#proxy-timeouts).
 > Minimal local live calls with the test key passed attestation/secret exchange,
 > buffered `glm-5.3` chat (HTTP 200), and streaming chat (HTTP 200 with `[DONE]`),
-> using 16 maximum output tokens each. No Phala test CVM was created; production
-> rollout and any effect on the incident remain unverified.
+> using 16 maximum output tokens each. Production rollout was unverified at
+> the time.
 
 > **Status (2026-11-14 PST, v1.64.0 manifest log):** the official OCI index
 > digest is
@@ -127,7 +140,9 @@ production rollout remains pending.
 > test key: startup attestation, buffered and streaming `glm-5.3` calls, receipt
 > audit with zero failures, and a secret rotation picked up by the gateway.
 > Proxy responses carry no secret-ID header, so manifest binding stays false.
-> Production rollout remains pending.
+> Production rollout was pending at the time. See the 2026-11-23 currency check.
+
+[v164-release]: https://github.com/edgelesssys/privatemode-public/releases/tag/v1.64.0
 [v162-source-compare]: https://github.com/edgelesssys/privatemode-public/compare/v1.59.0...v1.62.0
 
 [v159-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/430#issuecomment-6161932027
@@ -161,9 +176,9 @@ Deployment conditions:
 - Bind the accepted credential digest in measured static policy and require a
   coordinated gateway/proxy redeploy to change it, matching the proxy's
   startup credential ownership semantics.
-- Expose only the gateway listener from the workload network. Version 1.62 of
-  the official proxy supports `--listen-address` and defaults to `0.0.0.0`;
-  the Compose keeps that default within its private network.
+- Expose only the gateway listener from the workload network. The official
+  proxy has supported `--listen-address` since v1.56, including in v1.64. The
+  Compose keeps the `0.0.0.0` default within its private network.
 - Override the proxy's availability-oriented NVIDIA OCSP defaults: reject
   unknown status and use no revoked-certificate grace period.
 - Use the proxy's dynamic manifest mode so provider updates do not require a
@@ -226,10 +241,10 @@ Open or conditional:
 - Privatemode does not expose a per-worker TLS SPKI or public E2EE key for the
   gateway to pin directly. Its binding is transitive through the manifest,
   attested Coordinator/Mesh CA, and secret-release protocol.
-- Version 1.62 does not expose which manifest produced the active inference
-  secret. Its manifest history is written before attestation and secret
-  exchange complete. The gateway therefore reports the latest fetched digest
-  but does not use it for manifest-specific claims.
+- Version 1.64 logs the secret ID for each successful exchange alongside its
+  manifest. That log supports reporting the latest observed manifest digest
+  and secret ID. A proxy response would need to identify the secret selected
+  for the request before the gateway could make manifest-specific claims.
 - The exact served worker is not named in a per-request signed receipt. ACI
   records the selected model and measured proxy session.
 
@@ -243,13 +258,10 @@ receipt.
 
 On 2026-09-23, the same pinned image again verified a live Coordinator SNP
 quote, exchanged a secret, and returned a real `gpt-oss-120b` completion
-through a fresh Phala deployment. A client E2EE v2 request over public ingress
-returned an encrypted response that decrypted to `private-ok`; the signed
-receipt/session audit had zero failures. Plaintext was also accepted, which
-exposed the ingress trust-boundary gap; the deployment now sets
-`require_client_e2ee`, which rejects plaintext and legacy E2EE. `pap verify` passed quote,
-keyset, expiry, and measured-Compose checks but correctly failed `id-6` because
-the public TLS key is not in the attested keyset.
+through a fresh Phala deployment. A client E2EE v2 request returned a response
+that decrypted successfully. `pap verify` passed the quote, keyset, expiry,
+and measured-Compose checks. The receipt audit passed. The endpoint-binding
+check (`id-6`) failed in this test.
 
 The live manifest SHA-256 was
 `f53011576c782d61912c884158a781ae5b55f3a49948e577c6292befc2535ab7`:
@@ -288,17 +300,14 @@ because the official dstack v0.5.3 and v0.6.0 simulators' sample Compose bytes
 disagree with their quotes' recorded Compose hash. This was a problem in the
 simulator sample data.
 
-The [Phala verification on 2026-10-13][v158-live-evidence] supplies the live
-acceptance evidence. A test CVM on the `dstack-0.5.9` production OS ran gateway
-commit `ad238fad` and the pinned v1.58.0 proxy. The attested Compose equaled the
-local render. `pap verify --require-production-os --accept-compose` passed
-`id-1` through `id-4` and `policy-os`; only `id-6` failed, as expected on the
-default Phala URL where TLS terminates outside the workload. Buffered and
-streaming chat returned HTTP 200, and `pap audit --require-verified` had zero
-failures, with `receipt-1` through `receipt-4` and `upstream-1` through
-`upstream-2` passing. The session's `proxy_image_sha256` binding matched the
+The [2026-10-13 live test][v158-live-evidence] ran the pinned v1.58.0 proxy on the
+`dstack-0.5.9` production OS. The attested Compose equaled the local render.
+`pap verify --require-production-os --accept-compose` passed `id-1` through
+`id-4` and `policy-os`. Buffered and streaming chat returned HTTP 200.
+The receipt audit passed. The endpoint-binding check (`id-6`) failed in this
+test. The session's `proxy_image_sha256` binding matched the
 v1.58.0 image digest and credential digest, with an explicitly unbound dynamic
-manifest observation. The test CVM was then deleted.
+manifest observation.
 
 [v158-live-evidence]: https://github.com/Dstack-TEE/private-ai-gateway/pull/410#issuecomment-6136973775
 

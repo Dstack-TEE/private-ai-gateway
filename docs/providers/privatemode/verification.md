@@ -142,11 +142,11 @@ unstructured handlers, which the gateway does not expose; it forwards
 
 The gateway sends no internal Bearer token. The proxy applies its measured
 startup credential outbound because the Compose explicitly sets
-`--api-key-fallback=always`. Upstream v1.62 warns that the default will change
+`--api-key-fallback=always`. Upstream v1.64.0 warns that the default will change
 to `never` in a future release; the explicit flag preserves this behavior.
 As of 2026-10-19 PDT, the Compose uses the canonical `--api-key`,
 `--nvidia-ocsp-allow-unknown=false`, and
-`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.62.0 [CLI][cli-source]
+`--nvidia-ocsp-revoked-grace-period=0` flags. The tagged v1.64.0 [CLI][cli-source]
 shares each deprecated alias's flag value and backing variable with its
 canonical spelling, including the same `@file` credential loading and whitespace
 trimming. Switching spellings preserves behavior and removes deprecation
@@ -169,7 +169,7 @@ the request after it leaves that workload.
 
 ## Proxy timeouts
 
-The v1.62.0 [CLI][cli-source] exposes the incoming HTTP server's timeouts as
+The v1.64.0 [CLI][cli-source] exposes the incoming HTTP server's timeouts as
 flags. Their defaults match the values already hard-coded in v1.59.0:
 `--timeout-read=2m`, `--timeout-read-header=10s`, `--timeout-idle=1m`, and
 `--timeout-write=0`. The upstream response-header timeout remains one hour,
@@ -221,7 +221,7 @@ provider rate-limit responses. It guarantees neither a cache hit nor a
 particular worker. Obtain appropriate provider quota; do not add quota
 workarounds. The provider must honor the salt for isolation to hold.
 
-See the tagged v1.62.0 [CLI][cli-source], [handler][handler-source], and
+See the tagged v1.64.0 [CLI][cli-source], [handler][handler-source], and
 [shard-key implementation][shard-source]. Hermetic gateway coverage:
 `cargo test --test middleware_completion cache_salt` checks authenticated and
 anonymous requests, streaming, failover, caller sub-partitions, and receipt
