@@ -57,6 +57,8 @@ pub(super) fn parse_account_balance(
                 can_top_up: true,
                 organization_id: None,
                 granted_usd: Some(amount(credits, "granted_balance")?),
+                used_percent: None,
+                resets_at: None,
                 scope: AccountScope {
                     workspace_slug: Some(string(
                         data.get("workspace").ok_or("Missing workspace")?,
@@ -78,6 +80,16 @@ pub(super) fn parse_account_balance(
                 .ok_or("Invalid billing permissions response")?,
             organization_id: Some(string(data, "organization_id")?),
             granted_usd: None,
+            used_percent: data
+                .get("used_percent")
+                .and_then(Value::as_u64)
+                .filter(|percent| *percent <= 100)
+                .map(|percent| percent as u8),
+            resets_at: data
+                .get("resets_at")
+                .and_then(Value::as_str)
+                .and_then(desktop_core::account::subscription_reset_at)
+                .map(str::to_owned),
             scope: AccountScope {
                 organization_id: Some(string(data, "organization_id")?),
                 organization_slug: Some(string(data, "organization_slug")?),

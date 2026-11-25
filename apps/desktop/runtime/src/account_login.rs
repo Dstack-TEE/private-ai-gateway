@@ -31,8 +31,8 @@ use desktop_core::account::LoginPresentation;
 #[cfg(test)]
 use desktop_core::account::{organization_url, top_up_url};
 use desktop_core::contracts::{
-    AccountBalance, AccountImages, AccountLoginDetails, AccountScope, AccountWorkspace,
-    ConfidentialProfileInput, ProfileAuth, ServiceProvider,
+    AccountBalance, AccountFunding, AccountImages, AccountLoginDetails, AccountScope,
+    AccountWorkspace, ConfidentialProfileInput, ProfileAuth, ServiceProvider,
 };
 
 const REDPILL_CLIENT_ID: &str = "cGrHCOWG3S91oa0A";
@@ -73,18 +73,25 @@ impl Authorization {
         &self,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
+        funding: Option<AccountFunding>,
     ) -> Result<Credential, Error> {
         match self {
             Self::Inference(key) => {
                 if profile.provider == ServiceProvider::Redpill {
-                    let saved = match &key.auth {
-                        ProfileAuth::OAuth {
-                            scope: Some(scope), ..
-                        } => scope.workspace_id,
-                        _ => None,
+                    let (saved_workspace, saved_funding) = match &key.auth {
+                        ProfileAuth::OAuth { scope, funding, .. } => (
+                            scope.as_ref().and_then(|scope| scope.workspace_id),
+                            *funding,
+                        ),
+                        _ => (None, None),
                     };
-                    if saved != workspace_id {
+                    if saved_workspace != workspace_id {
                         return Err("Reconnect RedPill to change workspace".into());
+                    }
+                    if funding.is_some_and(|funding| {
+                        funding != saved_funding.unwrap_or(AccountFunding::Credits)
+                    }) {
+                        return Err("Reconnect RedPill to change billing method".into());
                     }
                 }
                 Ok(key.clone())
@@ -96,9 +103,14 @@ impl Authorization {
                 let selected = workspace_id
                     .filter(|id| details.workspaces.iter().any(|w| w.id == *id))
                     .ok_or("Choose a workspace before saving")?;
-                let result = response(client()?.post(KEY_URL).bearer_auth(access_token).json(
-                    &json!({"installation_id": installation_id(&profile.id)?.to_string(), "name": profile.name, "workspace_id": selected}),
-                )).await?;
+                let client = client()?;
+                let request = KeyRequest {
+                    installation_id: installation_id(&profile.id)?.to_string(),
+                    name: &profile.name,
+                    workspace_id: selected,
+                    funding,
+                };
+                let result = issue_redpill_key(&client, KEY_URL, access_token, request).await?;
                 if result.get("workspace_id").and_then(Value::as_i64) != Some(selected) {
                     return Err("Unexpected workspace in the account response".into());
                 }
@@ -133,6 +145,7 @@ impl Authorization {
                             workspace_slug: None,
                             workspace_id: Some(selected),
                         })),
+                        funding: issued_funding(&result, funding)?,
                     },
                 })
             }
@@ -229,6 +242,7 @@ impl PendingLogin {
         id: &str,
         profile: &ConfidentialProfileInput,
         workspace_id: Option<i64>,
+        funding: Option<AccountFunding>,
     ) -> Result<Credential, Error> {
         self.validate(id)?;
         let candidate = desktop_core::config::resolve_profile(profile.clone(), None)?;
@@ -239,7 +253,10 @@ impl PendingLogin {
             return Err("Reconnect the selected provider".into());
         }
         let authorization = self.resolve().await?.ok_or("Finish connecting first")?;
-        let credential = authorization.issue(profile, workspace_id).await?;
+        if candidate.provider != ServiceProvider::Redpill && funding.is_some() {
+            return Err("Billing method selection is only available for RedPill".into());
+        }
+        let credential = authorization.issue(profile, workspace_id, funding).await?;
         // Save retries reuse this authorization’s issued key.
         *authorization = Authorization::Inference(credential.clone());
         Ok(credential)

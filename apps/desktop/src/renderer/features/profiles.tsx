@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAccountLogin } from "../lib/use-account-login";
 import { afterVerification, useSetAppState } from "../lib/use-app-state";
-import { AccountTools } from "../components/account-tools";
+import { AccountTools, accountBalanceQuery, balanceCacheKey, useAccountBalance } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { AuthoredError, errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
@@ -21,7 +21,7 @@ import { useConfirm, type Confirmation } from "../components/confirm";
 import { DialogFooter } from "../components/ui/dialog";
 import { FormField } from "../components/settings";
 import { ChoiceSelect } from "../components/choice-select";
-import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type ConfidentialProfile, type ConfidentialProfileInput, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
+import { DEFAULT_SERVICE_PROVIDER, SERVICE_PROVIDERS, type AccountBalanceTarget, type AccountFunding, type ConfidentialProfile, type ConfidentialProfileInput, type LoginPresentation, type ServiceProvider } from "../../shared/contracts";
 import { desktopApi, distributionCapabilities, web } from "../lib/environment";
 import { activeProfile, profileIsAvailable } from "../lib/protection";
 import { useShell } from "../lib/shell";
@@ -165,6 +165,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   const { copy, isCopied, status: copyStatus } = useCopy(reportError);
   const { session: login, auth: authorized } = account;
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<number>();
+  const [selectedFunding, setSelectedFunding] = useState<AccountFunding>();
 
   const provider = SERVICE_PROVIDERS[draft.provider];
   const keyLabel = provider.keyLabel;
@@ -198,12 +199,24 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   const selectedAccount = authorized?.kind === "oauth" ? authorized
     : !account.busy && savedCredentialApplies ? savedAccount : undefined;
   const accountScope = selectedAccount?.scope;
+  const balanceTarget: AccountBalanceTarget = authorized && login
+    ? { kind: "login", id: login.id }
+    : { kind: "profile", profileId: draft.id };
+  const balanceIdentity = { provider: draft.provider, target: balanceTarget, credentialRef: profile?.credentialRef };
+  const balance = useAccountBalance({ ...balanceIdentity, enabled: Boolean(selectedAccount) });
+  const redpillLogin = draft.provider === "redpill" && Boolean(authorized);
+  const checkingFunding = redpillLogin && balance.isPending;
+  const savedFunding = profile?.auth.kind === "oauth" ? profile.auth.funding : undefined;
+  const funding = redpillLogin
+    ? selectedFunding ?? savedFunding ?? (balance.data?.usedPercent != null ? "subscription" : undefined)
+    : !authorized ? savedFunding : undefined;
   const needsAccountLogin = provider.accountLogin && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
   const chooseService = async (next: ServiceProvider) => {
     if (!await account.cancel()) return;
     setSelectedWorkspaceId(undefined);
+    setSelectedFunding(undefined);
     const nextProvider = SERVICE_PROVIDERS[next];
     setDraft((current) => {
       const currentProvider = SERVICE_PROVIDERS[current.provider];
@@ -239,8 +252,8 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
     onError: reportError,
   });
   const saveLogin = useMutation({
-    mutationFn: async ({ login: authorization, workspace }: { login: LoginPresentation; workspace: number | undefined }) => {
-      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, workspace);
+    mutationFn: async ({ login: authorization, workspace, funding }: { login: LoginPresentation; workspace?: number; funding?: AccountFunding }) => {
+      const saved = await desktopApi.saveAccountLogin(authorization.id, draft, workspace, funding);
       setState(saved);
       account.consume();
       if (startAfterSave) setState(await desktopApi.start(saved.config));
@@ -249,12 +262,12 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
     onSuccess: onClose,
     onError: reportError,
   });
-  // Signs in, and saves at once when the sign-in leaves nothing to choose:
-  // Phala, whose authorization selects the workspace, or another RedPill
-  // workspace chosen before signing in again. Otherwise Save completes it.
+  // Save automatically when the workspace is known and the user has no
+  // billing method to choose.
   const connect = useMutation({
     mutationFn: async ({ workspace, question }: { workspace: number | undefined; question?: Confirmation }) => {
       if (question && !await confirm(question)) return;
+      setSelectedFunding(undefined);
       const signedIn = await account.authorize(draft);
       if (!signedIn || (provider.workspaces && workspace === undefined)) return;
       const offered = signedIn.details.workspaces;
@@ -262,9 +275,19 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
         setSelectedWorkspaceId(undefined);
         throw new AuthoredError("The selected workspace is no longer available. Choose a workspace and save again.");
       }
+      if (draft.provider === "redpill") {
+        const signedInBalance = await client.fetchQuery(accountBalanceQuery({
+          ...balanceIdentity, target: { kind: "login", id: signedIn.login.id },
+        })).catch(() => undefined);
+        if (signedInBalance?.usedPercent != null) return;
+      }
       // As the form does, saving waits while protection verifies.
       await afterVerification(client);
-      await saveLogin.mutateAsync({ login: signedIn.login, workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined) });
+      await saveLogin.mutateAsync({
+        login: signedIn.login,
+        workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined),
+        funding: draft.provider === "redpill" ? savedFunding : undefined,
+      });
     },
     onMutate: () => setError(undefined),
     onError: reportError,
@@ -291,8 +314,8 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
     if (!saving && await account.cancel()) onClose();
   };
   const submit = () => {
-    if (working || frozen || needsAccountLogin || needsWorkspace) return;
-    if (authorized && login && authMethod === "account") saveLogin.mutate({ login, workspace: workspaceId });
+    if (working || frozen || needsAccountLogin || needsWorkspace || checkingFunding) return;
+    if (authorized && login && authMethod === "account") saveLogin.mutate({ login, workspace: workspaceId, funding });
     // Another workspace needs a new sign-in.
     else if (authMethod === "account" && provider.workspaces && workspaceId !== undefined && workspaceId !== savedScope?.workspaceId) {
       connect.mutate({ workspace: workspaceId, question: running && profile?.id === state.activeProfileId ? reconnectQuestion : undefined });
@@ -337,10 +360,10 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
                   </div>
                   </div>
                 </div> : selectedAccount ? <>
-                  <AccountTools key={login?.id ?? draft.id} provider={draft.provider}
-                    target={authorized && login ? { kind: "login", id: login.id } : { kind: "profile", profileId: draft.id }}
+                  <AccountTools key={balanceCacheKey(balanceIdentity)} provider={draft.provider}
+                    balance={balance.data} busy={balance.isFetching} funding={funding}
                     scope={accountScope} images={selectedAccount.images} onSignIn={signIn}
-                    credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
+                    onError={reportError} disabled={working || frozen} />
                   {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" className="gap-2" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },
@@ -350,6 +373,16 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
                     ]} disabled={working || frozen || !workspaces?.length} onChange={(value) => setSelectedWorkspaceId(Number(value))} />
                     {!authorized && <FieldError>{workspaceError && `Could not load account workspaces. ${workspaceError}`}</FieldError>}
                   </FormField>}
+                  {checkingFunding && <p role="status" className="text-sm text-muted-foreground">Checking billing method…</p>}
+                  {redpillLogin && funding && <FormField id="profile-funding" className="gap-2" label="Billing method">
+                    <ChoiceSelect id="profile-funding" label="Billing method" className="w-full" value={funding} options={[
+                      { value: "subscription", label: "Subscription" },
+                      { value: "credits", label: "Balance" },
+                    ]} disabled={working || frozen} onChange={(value) => {
+                      if (value === "subscription" || value === "credits") setSelectedFunding(value);
+                    }} />
+                  </FormField>}
+                  {!redpillLogin && funding && <p className="text-sm">Billing method · {funding === "subscription" ? "Subscription" : "Balance"}</p>}
                 </> : <Button type="button" variant="default" size="lg" className="w-full" disabled={working || frozen || !draft.name.trim()} onClick={signIn}><ServiceLogo provider={draft.provider} className="size-4" />Connect {provider.label}</Button>}
               </FieldGroup>
             </TabsContent>
@@ -369,7 +402,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
         <DialogFooter>
           {!isNew && <Button type="button" variant="destructive" className="sm:mr-auto" disabled={working || frozen} onClick={() => remove.mutate()}><Trash2 size={14} />Delete Profile</Button>}
           <Button type="button" variant="outline" onClick={() => void closeEditor()} disabled={saving || account.working}>Cancel</Button>
-          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || frozen ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
+          {!needsAccountLogin && <Button type="submit" variant="default" disabled={working || frozen || !draft.name.trim() || !draft.remoteUrl.trim() || needsWorkspace || checkingFunding || (!authorized && !savedCredentialApplies && !apiKeyDraft.trim())}>{saving || frozen ? "Saving…" : authorized && !provider.workspaces ? "Retry" : "Save"}</Button>}
         </DialogFooter>
       </form>
     </AppDialog>

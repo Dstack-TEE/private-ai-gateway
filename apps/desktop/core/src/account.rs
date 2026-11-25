@@ -2,6 +2,7 @@
 //! itself stays in the backend's `account_login`.
 
 use serde::{Deserialize, Serialize};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::contracts::ServiceProvider;
 
@@ -26,6 +27,15 @@ pub const ACCOUNT_RETURN_URL: &str = concat!(crate::app_identifier!(), "://oauth
 
 pub fn account_return_url() -> String {
     ACCOUNT_RETURN_URL.to_string()
+}
+
+/// Accept the API's RFC 3339 UTC reset time, retaining its wire representation.
+pub fn subscription_reset_at(value: &str) -> Option<&str> {
+    (OffsetDateTime::parse(value, &Rfc3339)
+        .ok()?
+        .offset()
+        .is_utc())
+    .then_some(value)
 }
 
 pub fn top_up_url(provider: &ServiceProvider, scope_slug: Option<&str>) -> Result<String, String> {

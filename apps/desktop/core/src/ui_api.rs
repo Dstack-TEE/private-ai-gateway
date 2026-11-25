@@ -10,7 +10,7 @@ use crate::{
     client::{CallError, Client},
     config::{Appearance, Config, NotificationPreferences},
     contracts::{
-        AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput,
+        AccountFunding, AccountSaveResult, AppState, AppStateWire, ConfidentialProfileInput,
         NotificationConfiguration, NotificationPermission, NotificationPermissionStatus,
         ServiceProvider,
     },
@@ -126,6 +126,7 @@ pub mod requests {
             id: String,
             profile: ConfidentialProfileInput,
             workspace_id: Option<i64>,
+            funding: Option<AccountFunding>,
         } -> AppStateWire;
         GetOrganizationUrl { organization_slug: String } -> String;
         GetTopUpUrl { provider: ServiceProvider, scope_slug: Option<String> } -> String;
@@ -472,6 +473,7 @@ async fn save_account_login(
             id: input.id,
             profile: input.profile,
             workspace_id: input.workspace_id,
+            funding: input.funding,
         },
     )
     .await;

@@ -1,7 +1,11 @@
 use super::*;
 use std::sync::Arc;
 
-use axum::{http::HeaderMap, routing::get, Router};
+use axum::{
+    http::HeaderMap,
+    routing::{get, post},
+    Json, Router,
+};
 use tokio::net::TcpListener;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -19,6 +23,7 @@ fn account_presentation_uses_clerk_identity_and_restricts_avatar_sources() {
         account_name,
         images,
         scope,
+        ..
     } = details.auth
     else {
         panic!("Expected OAuth identity")
@@ -66,6 +71,8 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
         .unwrap()
         .unwrap();
     assert_eq!(balance.balance_usd, "0");
+    assert_eq!(balance.used_percent, None);
+    assert_eq!(balance.resets_at, None);
     let phala = parse_account_balance(&ServiceProvider::Phala, StatusCode::OK,
         &json!({"workspace":{"name":"Research","slug":"phala-research"},"credits":{"balance":"2","granted_balance":"0"}})
     ).unwrap().unwrap();
@@ -107,6 +114,186 @@ fn billing_permissions_hide_denied_balances_and_bind_links_to_the_organization()
         assert!(top_up_url(&ServiceProvider::Redpill, id).is_err());
         assert!(top_up_url(&ServiceProvider::Phala, id).is_err());
         assert!(organization_url(id).is_err());
+    }
+}
+
+#[test]
+fn redpill_balance_keeps_credit_balance_and_only_accepts_valid_subscription_usage() {
+    let mut data = json!({
+        "balance_usd": "12.50", "can_top_up": true, "organization_id": "org_test",
+        "organization_slug": "research-team", "organization_name": "Research",
+        "used_percent": 0, "resets_at": "2026-11-27T09:00:00Z"
+    });
+    let parse = |data: &Value| {
+        parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, data)
+            .unwrap()
+            .unwrap()
+    };
+    let active = parse(&data);
+    assert_eq!(active.balance_usd, "12.50");
+    assert_eq!(active.used_percent, Some(0));
+    assert_eq!(active.resets_at.as_deref(), Some("2026-11-27T09:00:00Z"));
+    data["used_percent"] = Value::Null;
+    data["resets_at"] = Value::Null;
+    let inactive = parse(&data);
+    assert_eq!(inactive.used_percent, None);
+    assert_eq!(inactive.resets_at, None);
+    data["used_percent"] = json!(101);
+    data["resets_at"] = json!("tomorrow");
+    let malformed = parse(&data);
+    assert_eq!(malformed.used_percent, None);
+    assert_eq!(malformed.resets_at, None);
+    assert_eq!(malformed.balance_usd, "12.50");
+}
+
+async fn serve_test_app(app: Router) -> (String, AbortOnDropHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    (base, server)
+}
+
+fn key_request(installation_id: &str, funding: Option<AccountFunding>) -> KeyRequest<'static> {
+    KeyRequest {
+        installation_id: installation_id.into(),
+        name: "Test",
+        workspace_id: 1,
+        funding,
+    }
+}
+
+#[tokio::test]
+async fn redpill_funding_uses_the_same_installation_and_retries_balance_for_legacy_servers() {
+    let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = Router::new().route(
+        "/key",
+        post({
+            let legacy = legacy.clone();
+            let requests = requests.clone();
+            move |Json(request): Json<Value>| async move {
+                let funding = request.get("funding").cloned();
+                requests.lock().unwrap().push(request);
+                let response = if legacy.load(std::sync::atomic::Ordering::Relaxed) {
+                    if funding.is_some() {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(json!({"detail": [{"type": "extra_forbidden", "loc": ["body", "funding"]}]})),
+                        );
+                    }
+                    json!({})
+                } else {
+                    json!({"funding": funding.unwrap_or(json!("subscription"))})
+                };
+                (StatusCode::OK, Json(response))
+            }
+        }),
+    );
+    let (base, _server) = serve_test_app(app).await;
+    let client = client().unwrap();
+    let key_url = format!("{base}/key");
+    let installation_id = Uuid::new_v4().to_string();
+    let issue = |funding| {
+        issue_redpill_key(
+            &client,
+            &key_url,
+            "test-token",
+            key_request(&installation_id, funding),
+        )
+    };
+    use AccountFunding::{Credits, Subscription};
+    for (requested, expected) in [
+        (None, Subscription),
+        (Some(Credits), Credits),
+        (Some(Subscription), Subscription),
+    ] {
+        let result = issue(requested).await.unwrap();
+        assert_eq!(issued_funding(&result, requested).unwrap(), Some(expected));
+        if requested == Some(Subscription) {
+            assert!(issued_funding(&result, Some(Credits)).is_err());
+        }
+    }
+
+    legacy.store(true, std::sync::atomic::Ordering::Relaxed);
+    let legacy_default = issue(None).await.unwrap();
+    assert_eq!(issued_funding(&legacy_default, None).unwrap(), None);
+    let legacy_credits = issue(Some(AccountFunding::Credits)).await.unwrap();
+    assert_eq!(
+        issued_funding(&legacy_credits, Some(AccountFunding::Credits)).unwrap(),
+        None
+    );
+    let error = issue(Some(AccountFunding::Subscription)).await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("does not support subscription keys"));
+    assert!(issued_funding(&legacy_default, Some(AccountFunding::Subscription)).is_err());
+
+    let requests = requests.lock().unwrap();
+    assert!(requests
+        .iter()
+        .all(|request| request["installation_id"] == installation_id));
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["funding"].as_str())
+            .collect::<Vec<_>>(),
+        [
+            None,
+            Some("credits"),
+            Some("subscription"),
+            None,
+            Some("credits"),
+            None,
+            Some("subscription")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn redpill_does_not_retry_balance_without_funding_for_other_key_errors() {
+    let cases = [
+        (
+            StatusCode::FORBIDDEN,
+            json!({"error": "keys_permission_required"}),
+            "grant key-management permission",
+        ),
+        (StatusCode::TOO_MANY_REQUESTS, Value::Null, "HTTP 429"),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!([{"type": "extra_forbidden", "loc": ["body", "workspace_id"]}]),
+            "HTTP 422",
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!([{"type": "literal_error", "loc": ["body", "funding"]}]),
+            "HTTP 422",
+        ),
+    ];
+    let client = client().unwrap();
+    let installation_id = Uuid::new_v4().to_string();
+    for (status, detail, expected_error) in cases {
+        let (base, _server) = serve_test_app(Router::new().route(
+            "/key",
+            post(move |Json(request): Json<Value>| async move {
+                if request.get("funding").is_none() {
+                    return (StatusCode::OK, Json(json!({"funding": "subscription"})));
+                }
+                assert_eq!(request["funding"], "credits");
+                (status, Json(json!({"detail": detail})))
+            }),
+        ))
+        .await;
+        let error = issue_redpill_key(
+            &client,
+            &format!("{base}/key"),
+            "test-token",
+            key_request(&installation_id, Some(AccountFunding::Credits)),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(expected_error), "{error}");
     }
 }
 
@@ -160,6 +347,7 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
                 account_name: None,
                 images: None,
                 scope: None,
+                funding: None,
             },
             workspaces: vec![AccountWorkspace {
                 id: 7,
@@ -169,7 +357,7 @@ async fn redpill_requires_an_explicit_accessible_workspace() {
         },
     };
     for selection in [None, Some(999)] {
-        let result = authorization.issue(&profile, selection).await;
+        let result = authorization.issue(&profile, selection, None).await;
         assert_eq!(
             result.err().unwrap().to_string(),
             "Choose a workspace before saving"
@@ -370,12 +558,7 @@ async fn device_server(rejection: Option<&'static str>) -> (String, AbortOnDropH
                 }))
             }),
         );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let server = AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    }));
-    (base, server)
+    serve_test_app(app).await
 }
 
 fn device_client(base: &str) -> RedpillClient {

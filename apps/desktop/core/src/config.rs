@@ -23,8 +23,8 @@ use url::Url;
 
 use crate::{
     contracts::{
-        AccountImages, AccountScope, ConfidentialProfile, ConfidentialProfileInput, ListenConfig,
-        ProfileAuth, ServiceProvider, StartConfig,
+        AccountFunding, AccountImages, AccountScope, ConfidentialProfile, ConfidentialProfileInput,
+        ListenConfig, ProfileAuth, ServiceProvider, StartConfig,
     },
     listen::{self, ResolvedListen},
 };
@@ -273,6 +273,8 @@ enum ProfileAuthTable {
             with = "AccountScopeTable"
         )]
         scope: Option<Box<AccountScope>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        funding: Option<AccountFunding>,
     },
 }
 
@@ -932,6 +934,7 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
                         workspace_slug: None,
                         workspace_id: Some(7),
                     })),
+                    funding: Some(AccountFunding::Subscription),
                 },
                 verified_at: Some(1_700_000_000),
             },

@@ -1,5 +1,5 @@
 use desktop_core::contracts::{
-    AccountBalance, AccountBalanceTarget, AccountLoginDetails, AccountSaveResult,
+    AccountBalance, AccountBalanceTarget, AccountFunding, AccountLoginDetails, AccountSaveResult,
 };
 use tokio::sync::{MappedMutexGuard, MutexGuard as AsyncMutexGuard};
 
@@ -56,6 +56,7 @@ impl DesktopRuntime {
         id: String,
         profile: ConfidentialProfileInput,
         workspace_id: Option<i64>,
+        funding: Option<AccountFunding>,
     ) -> Result<AccountSaveResult, Error> {
         uuid::Uuid::parse_str(&operation_id).map_err(|_| "Invalid save operation ID")?;
         let mut operation = self
@@ -78,7 +79,10 @@ impl DesktopRuntime {
         // The operation belongs to the service, not to the lifetime of an IPC
         // request. A reconnect can read its final outcome without issuing again.
         tokio::spawn(async move {
-            let result = match runtime.save_account_login(id, profile, workspace_id).await {
+            let result = match runtime
+                .save_account_login(id, profile, workspace_id, funding)
+                .await
+            {
                 Ok(state) => AccountSaveResult::Complete {
                     state: Box::new(state.into()),
                 },
@@ -117,12 +121,13 @@ impl DesktopRuntime {
         id: String,
         profile: ConfidentialProfileInput,
         workspace_id: Option<i64>,
+        funding: Option<AccountFunding>,
     ) -> Result<AppState, Error> {
         let mut slot = self.account_login.lock().await;
         let credential = slot
             .as_mut()
             .ok_or("Account connection is no longer active")?
-            .credential(&id, &profile, workspace_id)
+            .credential(&id, &profile, workspace_id, funding)
             .await?;
         let saved = self
             .persist_configuration(

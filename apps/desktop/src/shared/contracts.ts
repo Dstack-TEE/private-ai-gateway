@@ -4,6 +4,7 @@ import type {
   Appearance,
   ConfidentialProfileInput,
   AccountBalanceTarget,
+  AccountFunding,
   CliRegistration,
   AppState,
   LaunchPreference,
@@ -92,7 +93,7 @@ export interface DesktopApi {
   saveConfiguration(profile: ConfidentialProfileInput, key?: string): UiResult<"save_configuration">;
   beginAccountLogin(profile: ConfidentialProfileInput): UiResult<"begin_account_login">;
   pollAccountLogin(id: string): UiResult<"poll_account_login">;
-  saveAccountLogin(id: string, profile: ConfidentialProfileInput, workspaceId?: number): UiResult<"save_account_login">;
+  saveAccountLogin(id: string, profile: ConfidentialProfileInput, workspaceId?: number, funding?: AccountFunding): UiResult<"save_account_login">;
   getAccountDetails(profileId: string): UiResult<"get_account_details">;
   getAccountBalance(target: AccountBalanceTarget): UiResult<"get_account_balance">;
   openOrganization(organizationSlug: string): Promise<void>;

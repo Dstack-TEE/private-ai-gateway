@@ -7,6 +7,66 @@ use oauth2::{
 };
 pub(super) use oauth2::{DeviceAuthorizationUrl, TokenUrl};
 
+#[derive(serde::Serialize)]
+pub(super) struct KeyRequest<'a> {
+    pub installation_id: String,
+    pub name: &'a str,
+    pub workspace_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding: Option<AccountFunding>,
+}
+
+pub(super) async fn issue_redpill_key(
+    client: &Client,
+    key_url: &str,
+    access_token: &str,
+    mut request: KeyRequest<'_>,
+) -> Result<Value, Error> {
+    let send =
+        |request: &KeyRequest<'_>| client.post(key_url).bearer_auth(access_token).json(request);
+    let (status, data) = request_json(send(&request)).await?;
+    if status.is_success() {
+        return Ok(data);
+    }
+    // Legacy FastAPI validation rejects the extra field before issuing a key.
+    // Omitting funding on a current server can issue a subscription key.
+    if status == StatusCode::UNPROCESSABLE_ENTITY
+        && matches!(data["detail"].as_array().map(Vec::as_slice), Some([error])
+            if error["type"] == "extra_forbidden" && error["loc"] == json!(["body", "funding"]))
+    {
+        match request.funding {
+            Some(AccountFunding::Credits) => {
+                request.funding = None;
+                return response(send(&request)).await;
+            }
+            Some(AccountFunding::Subscription) => {
+                return Err(Error::account(
+                    "Account: This RedPill server does not support subscription keys.",
+                ));
+            }
+            None => {}
+        }
+    }
+    Err(account_error(status, &data))
+}
+
+pub(super) fn issued_funding(
+    data: &Value,
+    requested: Option<AccountFunding>,
+) -> Result<Option<AccountFunding>, Error> {
+    let funding = data
+        .get("funding")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|_| "Invalid funding in the account response")?;
+    if requested.is_some_and(|requested| funding.unwrap_or(AccountFunding::Credits) != requested) {
+        return Err(
+            "RedPill returned a key with an unexpected billing method. Reconnect and try again."
+                .into(),
+        );
+    }
+    Ok(funding)
+}
 /// The device authorization grant (RFC 8628) Clerk advertises in discovery.
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -189,6 +249,7 @@ pub(super) fn redpill_details(account: &Value) -> Result<AccountLoginDetails, Er
                 organization: Some(string(account, "organization_name")?),
                 ..AccountScope::default()
             })),
+            funding: None,
         },
         workspaces: parse_workspaces(account)?,
     })

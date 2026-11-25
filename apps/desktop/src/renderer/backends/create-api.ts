@@ -81,7 +81,7 @@ export function createDesktopApi(transport: UiTransport, { presentAccountLogin, 
       return login;
     },
     pollAccountLogin: (id) => call("poll_account_login", { id }),
-    saveAccountLogin: (id, profile, workspaceId) => call("save_account_login", { id, profile, workspaceId }),
+    saveAccountLogin: (id, profile, workspaceId, funding) => call("save_account_login", { id, profile, workspaceId, funding }),
     getAccountDetails: (profileId) => call("get_account_details", { profileId }),
     getAccountBalance: (target) => call("get_account_balance", { target }),
     cancelAccountLogin: (id) => call("cancel_account_login", { id }),

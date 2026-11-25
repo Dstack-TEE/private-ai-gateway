@@ -1,7 +1,7 @@
 import { useId } from "react";
 import { ArrowLeftRight, Ellipsis, ExternalLink } from "lucide-react";
-import type { AccountBalance, AccountBalanceTarget, AccountImages, AccountScope, ServiceProvider } from "../../shared/contracts";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import type { AccountBalance, AccountBalanceTarget, AccountFunding, AccountImages, AccountScope, ServiceProvider } from "../../shared/contracts";
+import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { currency } from "../lib/usage-presentation";
 import { Avatar, AvatarFallback, AvatarImage } from "./ui/avatar";
 import { Button } from "./ui/button";
@@ -19,7 +19,11 @@ type BalanceIdentity = {
   credentialRef?: string;
 };
 
-type Props = BalanceIdentity & {
+type Props = {
+  provider: ServiceProvider;
+  balance?: AccountBalance | null;
+  busy: boolean;
+  funding?: AccountFunding;
   scope?: AccountScope;
   images?: AccountImages;
   onSignIn?(): void;
@@ -28,43 +32,45 @@ type Props = BalanceIdentity & {
   disabled?: boolean;
 };
 
-function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
+export function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
   const id = target.kind === "login" ? target.id : target.profileId;
   return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
 
-function useAccountBalance({ enabled = true, ...identity }: BalanceIdentity & { enabled?: boolean }) {
-  return useQuery({
+export function accountBalanceQuery(identity: BalanceIdentity) {
+  return queryOptions({
     queryKey: ["account-balance", balanceCacheKey(identity)],
     queryFn: () => desktopApi.getAccountBalance(identity.target),
-    enabled,
-    refetchInterval: enabled ? 60_000 : false,
-    // Returning from the billing page shows the balance it changed.
-    refetchOnWindowFocus: "always",
     staleTime: 30_000,
     retry: false,
     meta: { errorTitle: "Could not read the account balance" },
   });
 }
 
+export function useAccountBalance({ enabled, ...identity }: BalanceIdentity & { enabled: boolean }) {
+  return useQuery({
+    ...accountBalanceQuery(identity),
+    enabled,
+    refetchInterval: enabled ? 60_000 : false,
+    // Returning from the billing page shows the balance it changed.
+    refetchOnWindowFocus: "always",
+  });
+}
+
 /** Compact account balance for a profile whose credential is already in active use. */
-export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean }) {
+export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean; funding?: AccountFunding }) {
   const { data: balance, isFetching } = useAccountBalance(props);
   const reportFailure = useReportFailure();
   const { opening, openPage } = useAccountPage((error) => reportFailure("Could not open billing", error));
   if (!balance) return null;
+  if (props.funding === "subscription") {
+    return balance.usedPercent != null ? <WeeklyUsage balance={balance} /> : null;
+  }
   return <BillingBalanceButton balance={balance} provider={props.provider} busy={isFetching || opening} disabled={opening}
     onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(props.provider, scopeSlug))} />;
 }
 
-/** Changing account or credential must never display the previous account's balance. */
-export function AccountTools(props: Props) {
-  const cacheKey = balanceCacheKey(props);
-  return <AccountDetailsView key={cacheKey} {...props} />;
-}
-
-function AccountDetailsView({ provider, target, scope, credentialRef, images, onSignIn, onError, disabled = false }: Props) {
-  const { data: balance, isFetching: busy } = useAccountBalance({ provider, target, credentialRef });
+export function AccountTools({ provider, balance, busy, funding, scope, images, onSignIn, onError, disabled = false }: Props) {
   const { opening, openPage } = useAccountPage(onError, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
   const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => desktopApi.openOrganization(organizationSlug)) : undefined;
@@ -78,11 +84,24 @@ function AccountDetailsView({ provider, target, scope, credentialRef, images, on
         <ItemTitle className="line-clamp-none wrap-anywhere">{name}</ItemTitle>
       </ItemContent>
       <ItemActions>
-        {balance && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
+        {balance && funding !== "subscription" && <BillingBalanceButton balance={balance} provider={provider} busy={busy || opening} disabled={disabled || opening}
           onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(provider, scopeSlug))} />}
         <AccountActions disabled={disabled || opening} onManage={manage} onSignIn={onSignIn} />
       </ItemActions>
+      {balance?.usedPercent != null && <div className="col-start-2 col-span-2"><WeeklyUsage balance={balance} /></div>}
     </Item>
+  </div>;
+}
+
+const resetDate = new Intl.DateTimeFormat(undefined, {
+  month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
+});
+
+function WeeklyUsage({ balance }: { balance: AccountBalance }) {
+  const reset = balance.resetsAt ? new Date(balance.resetsAt) : undefined;
+  return <div className="text-xs">
+    <p className="font-medium">Weekly subscription usage · {balance.usedPercent}% used</p>
+    {reset && Number.isFinite(reset.getTime()) && <p className="text-muted-foreground">Resets <time dateTime={balance.resetsAt ?? undefined}>{resetDate.format(reset)}</time></p>}
   </div>;
 }
 

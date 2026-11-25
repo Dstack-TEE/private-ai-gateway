@@ -1,5 +1,8 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, graphical_session, open_browser};
+use super::{
+    args::{AccountLoginOptions, FundingChoice},
+    graphical_session, open_browser,
+};
 use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
@@ -51,6 +54,9 @@ pub(super) fn login(
                 .into(),
         );
     }
+    if options.funding.is_some() && provider != ServiceProvider::Redpill {
+        return Err("--funding is only available for RedPill.".into());
+    }
     let label = provider.label();
     let remote_url = provider
         .preset_url()
@@ -92,12 +98,23 @@ pub(super) fn login(
         std::thread::sleep(Duration::from_millis(500));
     };
     let workspace_id = workspace(&details, options.workspace, global)?;
+    let funding = if provider == ServiceProvider::Redpill {
+        choose_funding(
+            client,
+            global,
+            &login.id,
+            requested_funding(options.funding, existing),
+        )?
+    } else {
+        None
+    };
     let operation_id = uuid::Uuid::new_v4().to_string();
     let initial = client.call(rpc::BeginAccountSave {
         operation_id: operation_id.clone(),
         id: login.id,
         profile,
         workspace_id,
+        funding,
     });
     // Once submitted, an uncertain response must be reconciled by operation ID.
     pending.id = None;
@@ -119,6 +136,63 @@ pub(super) fn login(
                 })?;
             }
         }
+    }
+}
+
+fn requested_funding(
+    explicit: Option<FundingChoice>,
+    existing: Option<&ConfidentialProfile>,
+) -> Option<AccountFunding> {
+    explicit.map(Into::into).or_else(|| match &existing?.auth {
+        ProfileAuth::OAuth { funding, .. } => *funding,
+        ProfileAuth::ApiKey => None,
+    })
+}
+
+fn choose_funding(
+    client: &Client,
+    global: &Global,
+    login_id: &str,
+    requested: Option<AccountFunding>,
+) -> Result<Option<AccountFunding>, String> {
+    let Some(AccountBalance {
+        used_percent: Some(used),
+        resets_at,
+        ..
+    }) = client
+        .call(rpc::GetAccountBalance {
+            target: AccountBalanceTarget::Login {
+                id: login_id.into(),
+            },
+        })
+        .ok()
+        .flatten()
+    else {
+        return Ok(requested);
+    };
+    eprintln!("Weekly subscription usage: {used}% used.");
+    if let Some(reset) = resets_at {
+        eprintln!("Resets at {reset}.");
+    }
+    if requested.is_some() || !global.interactive() {
+        return Ok(requested);
+    }
+    eprint!("Billing method [Subscription / Balance] (Subscription): ");
+    io::stderr()
+        .flush()
+        .map_err(|_| "Cannot show billing method prompt")?;
+    let mut input = String::new();
+    if io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| "Cannot read billing method")?
+        == 0
+    {
+        return Err("Choose a billing method with --funding and retry login.".into());
+    }
+    match input.trim().to_ascii_lowercase().as_str() {
+        "" | "subscription" => Ok(Some(AccountFunding::Subscription)),
+        "balance" => Ok(Some(AccountFunding::Credits)),
+        _ => Err("Choose Subscription or Balance with --funding and retry login.".into()),
     }
 }
 
@@ -172,7 +246,30 @@ fn workspace(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use clap::Parser;
+
+    #[test]
+    fn relogin_keeps_saved_balance_without_a_funding_flag() {
+        let profile: ConfidentialProfile = serde_json::from_value(serde_json::json!({
+            "id": "work",
+            "name": "Work",
+            "provider": "redpill",
+            "remoteUrl": "https://tee.redpill.ai",
+            "auth": {"kind": "oauth", "accountId": "test", "funding": "credits"},
+            "credentialSaved": true
+        }))
+        .unwrap();
+        assert_eq!(
+            requested_funding(None, Some(&profile)),
+            Some(AccountFunding::Credits)
+        );
+        assert_eq!(
+            requested_funding(Some(FundingChoice::Subscription), Some(&profile)),
+            Some(AccountFunding::Subscription)
+        );
+        assert_eq!(requested_funding(None, None), None);
+    }
 
     #[test]
     fn oauth_login_supports_headless_device_code() {
@@ -186,6 +283,8 @@ mod tests {
             "redpill",
             "--workspace",
             "123",
+            "--funding",
+            "balance",
             "--no-browser",
         ])
         .unwrap();
@@ -197,6 +296,10 @@ mod tests {
         };
         assert_eq!(options.id, "work");
         assert_eq!(options.workspace, Some(123));
+        assert_eq!(
+            options.funding.map(Into::into),
+            Some(super::AccountFunding::Credits)
+        );
         assert!(options.no_browser);
         assert!(crate::Cli::try_parse_from([
             "private-ai-proxy",

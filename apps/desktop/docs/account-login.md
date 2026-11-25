@@ -7,7 +7,8 @@ Phala keys are created under Private AI → API Keys. Account sign-in continues
 to use the existing official authorization flow. Provider buttons with their icons stay in the form
 content. Phala completes automatically after browser authorization, which already
 selects its workspace. RedPill displays a standard workspace selector and Save,
-including when only one workspace is available. Failed persistence
+including when only one workspace is available. An active API subscription
+adds a billing method selector with Subscription selected by default. Failed persistence
 keeps the authorization available through Retry, without signing in again.
 Manual keys and ordinary profile edits use Save. Persistence does not start gateway verification. Preset service endpoints are hidden. The runtime owns the
 browser authorization, verification and `credentials.toml`; the renderer only
@@ -109,15 +110,19 @@ that organization. One workspace is preselected; multiple workspaces require a
 choice. Save sends that workspace ID and the API rechecks its ownership and membership. The saved profile retains non-secret
 organization/workspace names. Changing organization requires signing in again;
 saved RedPill profiles load their workspace options using their managed key.
-Choosing another workspace and clicking Save starts fresh authorization, then
-finishes that same save if the chosen workspace remains available. Cancellation
-or failure preserves the saved profile. Deploy the API's managed-key account
+Choosing another workspace and clicking Save starts fresh authorization. A
+RedPill account with an active subscription can review its billing method
+before saving. Use **Switch**
+in the account menu to reconnect with a different billing method. Subscription
+and balance use separate RedPill keys for the same installation UUID. A
+subscription key counts toward the plan's key limit. Cancellation or failure
+preserves the saved profile. Deploy the API's managed-key account
 read support before releasing this editor change. Phala
 has no separate organization tier: its workspace (team) is selected in the browser.
 
 Balances load in the profile editor after authorization or when opening a saved
-account. Overview does not query balances or read credentials for this purpose.
-The editor refreshes every minute and whenever the window becomes active, as on
+account, and in Overview while protection is active. The display refreshes
+every minute and whenever the window becomes active, as on
 returning from the billing page.
 The runtime coalesces concurrent windows by login ID or profile ID plus
 credential reference; successful results live for 30 seconds and failures for 10.
@@ -126,8 +131,11 @@ profile settings or hold the authorization lock during network requests. The ren
 
 Loading and unavailable states never masquerade as a zero balance. Balance
 failures stay local to this display and
-cannot interrupt protection. RedPill shows the shared organization USD balance;
-workspace and key limits still apply. Saved app keys require current live Clerk
+cannot interrupt protection. RedPill shows weekly subscription usage as a
+percentage with the reset time. Balance-funded profiles and older servers
+continue to show the organization's credit balance in USD. The local API
+relays RedPill's subscription refusals and reset times to agents, and the
+Usage view records the documented refusal messages. Saved app keys require current live Clerk
 billing-read and workspace permissions, so a later permission grant no longer
 requires another sign-in. The API limits balance requests to ten per minute per
 bearer credential across workers using Redis; Redis failure only makes balance
@@ -164,11 +172,17 @@ CLI account login shares the runtime authorization and save state:
 pap profiles login work --provider redpill
 pap profiles login personal --provider phala
 pap profiles login work --provider redpill --workspace 123 --no-browser
+pap profiles login work --funding balance
 pap start --profile work
 ```
 
 Login prints/opens the verification URL and prints the device code. Multiple
 workspaces prompt in an interactive terminal; automation supplies --workspace.
+An existing RedPill profile reuses its saved billing method on sign-in.
+Use `--funding subscription` or `--funding balance` to select one explicitly.
+When there is no saved or explicit choice, pap prompts users with an active
+subscription for a billing method in interactive mode. In noninteractive mode,
+RedPill selects its default.
 No-browser supports remote terminals. CLI JSON mode returns
 non-secret profile state; login links/prompts go to stderr. A lost save response
 is reconciled by operation ID. Explicit `pap profiles verify` remains available;
