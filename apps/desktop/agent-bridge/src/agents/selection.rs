@@ -343,7 +343,7 @@ pub(super) fn restoration(
         }
         File::DshCredentials => {}
     }
-    let edit = restore(&mut doc, &record, secrets).map_err(|error| error.to_string())?;
+    let edit = restore(agent, &mut doc, &record, secrets).map_err(|error| error.to_string())?;
     let after = doc.render()?;
     Ok(Some(Edit {
         path,

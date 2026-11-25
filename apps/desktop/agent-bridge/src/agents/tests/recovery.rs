@@ -155,7 +155,7 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
-        Some(ConfigValue::Str("original".into()))
+        Some(ConfigValue::Str("user-choice".into()))
     );
 }
 
@@ -230,6 +230,70 @@ fn disconnect_restores_original_opencode_model_after_private_model_edit() {
         doc(&sandbox, agent).get_str(&["model"]).as_deref(),
         Some("other/original")
     );
+}
+
+#[test]
+fn opencode_stop_and_disconnect_preserve_models_selected_from_another_provider() {
+    for (name, v2, external) in [
+        ("string", false, ConfigValue::Str("other/new".into())),
+        (
+            "object",
+            true,
+            ConfigValue::Json(json!({"providerID":"other","model":"new"})),
+        ),
+    ] {
+        for stop in [true, false] {
+            let sandbox = sandbox(&format!("keep-external-opencode-model-{name}-{stop}"));
+            let agent = Agent::OpenCode;
+            let path = agent.config_path(&sandbox.home, false);
+            let original = if v2 {
+                r#"{"model":{"providerID":"other","model":"original"},"providers":{}}"#
+            } else {
+                r#"{"model":"other/original"}"#
+            };
+            write(&path, original);
+            let catalog = catalog();
+            assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+            let mut config = doc(&sandbox, agent);
+            config.set_value(&["model"], &external).unwrap();
+            write(&path, &config.render().unwrap());
+            if stop {
+                assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+            } else {
+                assert!(!disconnect(&sandbox, agent).recorded);
+            }
+            assert_eq!(
+                doc(&sandbox, agent).get_value(&["model"]),
+                Some(external.clone())
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
+    for (selected, provider, expected) in [
+        ("native-new", "private_ai_proxy", "native-new"),
+        ("phala/qwen", "other", "phala/qwen"),
+        ("phala/qwen", "private_ai_proxy", "native-original"),
+    ] {
+        let sandbox =
+            sandbox(&format!("restore-codex-selection-{selected}-{provider}").replace('/', "-"));
+        let agent = Agent::Codex;
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, "model = \"native-original\"\n");
+        let catalog = catalog();
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        let mut config = doc(&sandbox, agent);
+        config.set_str(&["model"], selected).unwrap();
+        config.set_str(&["model_provider"], provider).unwrap();
+        write(&path, &config.render().unwrap());
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+            Some(expected)
+        );
+    }
 }
 
 #[test]

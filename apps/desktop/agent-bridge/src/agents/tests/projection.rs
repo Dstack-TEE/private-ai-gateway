@@ -63,8 +63,13 @@ fn equal_fields_keep_their_original_values_and_bytes_for_every_agent() {
         let record = serde_json::from_str(&serialized).unwrap();
         let second = project(&mut doc, &fields, Some(&record), agent).unwrap();
         assert!(second.changes.is_empty(), "{}", agent.id());
-        let restored =
-            restore(&mut doc, &second.record.unwrap(), sandbox.secrets.as_ref()).unwrap();
+        let restored = restore(
+            agent,
+            &mut doc,
+            &second.record.unwrap(),
+            sandbox.secrets.as_ref(),
+        )
+        .unwrap();
         assert_eq!(doc.render().unwrap(), original, "{}", agent.id());
         // Exact YAML rows may report an equal scalar's source restoration.
         if agent != Agent::Dsh {

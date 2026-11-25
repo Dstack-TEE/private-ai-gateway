@@ -123,7 +123,7 @@ impl Projector {
     ) -> Result<Edit, AgentError> {
         if !connect {
             let record = store.get(agent.id()).ok_or(AgentError::InvalidState)?;
-            let mut edit = restore(doc, record, self.secrets.as_ref())?;
+            let mut edit = restore(agent, doc, record, self.secrets.as_ref())?;
             if let Some(journal) = &record.selection {
                 edit.selection = selection::restoration(
                     agent,

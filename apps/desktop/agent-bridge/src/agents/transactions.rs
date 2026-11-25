@@ -323,7 +323,7 @@ impl Projector {
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
-            restore(&mut doc, &record, self.secrets.as_ref())?
+            restore(agent, &mut doc, &record, self.secrets.as_ref())?
         } else {
             // A removed config is an uninstall/user action, not a request to
             // recreate fields the gateway previously removed.
@@ -421,6 +421,17 @@ impl Projector {
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
+        if matches!(
+            agent,
+            Agent::Codex | Agent::ClaudeCode | Agent::Hermes | Agent::Dsh
+        ) {
+            next_record.catalog_model_ids = catalog
+                .into_iter()
+                .flat_map(|catalog| &catalog.models)
+                .filter(|model| model.supports(agent.surface()))
+                .map(|model| model.id().to_owned())
+                .collect();
+        }
         next_record.endpoint = Some(self.endpoint.clone());
         next_record.empty_original = match &text {
             _ if agent.format() != Format::YamlList => None,

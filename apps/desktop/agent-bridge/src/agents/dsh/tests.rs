@@ -121,7 +121,7 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
         .entry(&EntryKey::id("agent-default-model"))
         .unwrap()
         .unwrap()
-        .set_str(&["config", "model"], "user-model")
+        .set_str(&["config", "model"], "openai/gpt-oss-20b")
         .unwrap();
     write(&files.patch, &edited.render().unwrap());
 

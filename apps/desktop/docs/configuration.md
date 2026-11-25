@@ -262,7 +262,8 @@ unlocked OS keychain for a process running as you.
   can show a notice. Changing routing or credential settings inside the
   Private AI Proxy provider pauses that agent without restoring its file
   while protection is running. Reconnect projects the recorded settings again,
-  and Disconnect or stopping protection restores the saved configuration.
+  and Disconnect or stopping protection restores the saved configuration
+  while keeping a default model you selected from another provider.
   PAP accepts JSON with comments and trailing commas in both OpenCode
   `opencode.json` and `opencode.jsonc` files.
   OpenCode 2 configurations use the native `providers` provider shape when

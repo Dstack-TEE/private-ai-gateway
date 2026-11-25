@@ -105,6 +105,9 @@ struct Connection {
     /// Last catalog reconciled, including failed attempts, to avoid repeated writes.
     #[serde(default)]
     catalog_revision: Option<String>,
+    /// Compatible PAP model IDs for restoring edited bare selectors offline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    catalog_model_ids: Vec<String>,
     config_path: PathBuf,
     fields: Vec<OwnedField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

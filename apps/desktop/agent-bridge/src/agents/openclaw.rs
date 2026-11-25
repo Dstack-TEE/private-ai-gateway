@@ -691,6 +691,7 @@ mod tests {
         );
         let mut normal = doc.clone();
         restore(
+            Agent::OpenClaw,
             &mut normal,
             &record,
             &crate::secrets::MemoryStore::default(),
@@ -712,11 +713,17 @@ mod tests {
             &ConfigValue::List(vec!["external/new-fallback".into()]),
         )
         .unwrap();
-        restore(&mut doc, &record, &crate::secrets::MemoryStore::default()).unwrap();
+        restore(
+            Agent::OpenClaw,
+            &mut doc,
+            &record,
+            &crate::secrets::MemoryStore::default(),
+        )
+        .unwrap();
         assert_eq!(
             doc.get_str(model_selection_paths(Agent::OpenClaw)[0].path)
                 .as_deref(),
-            Some("external/original")
+            Some("external/new")
         );
         assert_eq!(
             doc.get_value(&["agents", "defaults", "model", "fallbacks"]),
@@ -743,6 +750,7 @@ mod tests {
             .unwrap();
         assert!(validate_config(&drifted, Some(&record)).is_err());
         restore(
+            Agent::OpenClaw,
             &mut drifted,
             &record,
             &crate::secrets::MemoryStore::default(),

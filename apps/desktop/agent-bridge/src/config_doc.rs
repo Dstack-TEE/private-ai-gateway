@@ -7,6 +7,7 @@
 //! to what restores byte for byte.
 
 use jsonc_parser::cst::{CstInputValue, CstRootNode};
+use jsonc_parser::{common::Ranged, parse_to_ast, tokens::Token, CollectOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
@@ -731,7 +732,7 @@ fn edit_json(
     value: Option<Value>,
     format: Format,
 ) -> Result<String, String> {
-    let updated = edit_cst(json_root(text, format)?, text, path, value)?;
+    let updated = edit_cst(json_root(text, format)?, text, path, value, format)?;
     json_value(&updated, format)?;
     Ok(updated)
 }
@@ -742,6 +743,7 @@ fn edit_cst(
     text: &str,
     path: &[&str],
     value: Option<Value>,
+    format: Format,
 ) -> Result<String, String> {
     let (leaf, parents) = split_leaf(path)?;
     let mut object = root
@@ -764,10 +766,87 @@ fn edit_cst(
         (None, Some(value)) => {
             object.append(leaf, cst_input(value));
         }
-        (Some(property), None) => property.remove(),
+        (Some(property), None) => {
+            // The CST remover treats nearby comments as part of the property.
+            // Use source spans when removing a JSONC property near comments.
+            if format == Format::Jsonc
+                && object
+                    .children()
+                    .iter()
+                    .chain(property.children().iter())
+                    .any(|node| node.is_comment())
+            {
+                return remove_commented_jsonc_property(text, path);
+            }
+            property.remove();
+        }
         (None, None) => {}
     }
     Ok(root.to_string())
+}
+
+fn remove_commented_jsonc_property(text: &str, path: &[&str]) -> Result<String, String> {
+    let invalid = || "cannot locate the JSONC property to remove".to_string();
+    let parsed = parse_to_ast(
+        text,
+        &CollectOptions {
+            tokens: true,
+            ..CollectOptions::default()
+        },
+        &json_options(Format::Jsonc),
+    )
+    .map_err(|_| invalid())?;
+    let mut value = parsed.value.as_ref().ok_or_else(invalid)?;
+    let (leaf, parents) = split_leaf(path)?;
+    for key in parents {
+        value = &value
+            .as_object()
+            .and_then(|object| object.get(key))
+            .ok_or_else(invalid)?
+            .value;
+    }
+    let property = value
+        .as_object()
+        .and_then(|object| object.get(leaf))
+        .ok_or_else(invalid)?;
+    let tokens = parsed.tokens.as_ref().ok_or_else(invalid)?;
+    // Keep a comma between the surviving properties. Prefer removing the
+    // following comma, including a trailing comma on the removed property.
+    let comma = tokens
+        .iter()
+        .find(|token| token.start() >= property.end())
+        .filter(|token| token.token == Token::Comma)
+        .or_else(|| {
+            tokens
+                .iter()
+                .rev()
+                .find(|token| token.end() <= property.start())
+                .filter(|token| token.token == Token::Comma)
+        });
+    let gap = &text[property.name.end()..property.value.start()];
+    let mut spans = Vec::new();
+    if gap.contains('/') {
+        // Preserve comments between the key, colon, and value.
+        let colon = tokens
+            .iter()
+            .find(|token| token.start() >= property.name.end())
+            .filter(|token| token.token == Token::Colon)
+            .ok_or_else(invalid)?;
+        spans.extend([
+            property.name.start()..property.name.end(),
+            colon.start()..colon.end(),
+            property.value.start()..property.value.end(),
+        ]);
+    } else {
+        spans.push(property.start()..property.end());
+    }
+    spans.extend(comma.map(|token| token.start()..token.end()));
+    spans.sort_unstable_by_key(|span| span.start);
+    let mut updated = text.to_owned();
+    for span in spans.into_iter().rev() {
+        updated.replace_range(span, "");
+    }
+    Ok(updated)
 }
 
 fn yaml_value(node: yaml_edit::YamlNode) -> Option<ConfigValue> {
