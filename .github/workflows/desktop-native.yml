@@ -543,15 +543,16 @@ jobs:
             extract "release/private-ai-proxy-cli-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "cli-$suffix"
             node scripts/cli-package-smoke.mjs "$scratch/cli-$suffix/usr/libexec/private-ai-proxy" "$VERSION" "$scratch/cli-$suffix/usr/bin"
             test "$(readlink "$scratch/cli-$suffix/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
-            test -f "$scratch/cli-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
+            grep -Fx 'ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service --supervised' "$scratch/cli-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
+            extract "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "desktop-$suffix"
+            grep -Fx 'ExecStart=/usr/bin/private-ai-proxy-service --supervised' "$scratch/desktop-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
           done
-          extract "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.pkg.tar.zst" desktop-arch
           expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-linux.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$VERSION")"
           grep -Fx "pkgver = $expected_pkgver" "$scratch/cli-pkg.tar.zst/.PKGINFO"
-          grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop-arch/.PKGINFO"
-          grep -Fx "pkgver = $expected_pkgver" "$scratch/desktop-arch/.PKGINFO"
-          test "$(cat "$scratch/desktop-arch/usr/share/private-ai-proxy/package-manager")" = pacman
-          node scripts/packaged-sidecars-smoke.mjs "$scratch/desktop-arch/usr/bin"
+          grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop-pkg.tar.zst/.PKGINFO"
+          grep -Fx "pkgver = $expected_pkgver" "$scratch/desktop-pkg.tar.zst/.PKGINFO"
+          test "$(cat "$scratch/desktop-pkg.tar.zst/usr/share/private-ai-proxy/package-manager")" = pacman
+          node scripts/packaged-sidecars-smoke.mjs "$scratch/desktop-pkg.tar.zst/usr/bin"
       - name: Notarize production macOS disk image
         if: runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
         working-directory: apps/desktop
@@ -609,6 +610,9 @@ jobs:
           $installers = @(Get-ChildItem "$env:PAP_BUNDLE_DIR/nsis/*.exe")
           if ($installers.Count -ne 1) { throw 'Expected one NSIS installer' }
           $installDir = Join-Path $env:RUNNER_TEMP 'Tauri Installed Check'
+          $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $runName = 'Private AI Proxy'
+          $runCommand = '"{0}" --autostart' -f "$installDir\private-ai-proxy-desktop.exe"
           if (Test-Path $installDir) { throw 'Install check directory already exists' }
           function Run-Installer($executable, $arguments) {
             $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru
@@ -650,7 +654,21 @@ jobs:
             try {
               New-Item -ItemType Directory -Force $env:PRIVATE_AI_PROXY_HOME | Out-Null
               Start-Backend | Out-Null
+              $flag = Join-Path $env:PRIVATE_AI_PROXY_HOME '.private-ai-proxy/windows-open-at-login-default-applied'
+              $app = Start-Process -FilePath "$installDir/private-ai-proxy-desktop.exe" -ArgumentList '--autostart' -PassThru
+              try {
+                for ($attempt = 0; $attempt -lt 40 -and !(Test-Path $flag); $attempt++) {
+                  if ($app.HasExited) { throw 'App exited before setting its Open at Login default' }
+                  Start-Sleep -Milliseconds 250
+                }
+                if (!(Test-Path $flag)) { throw 'App did not record its Open at Login default' }
+                if ((Get-ItemPropertyValue $runKey $runName) -ne $runCommand) { throw 'App did not register its quoted Open at Login entry' }
+              } finally {
+                Stop-Process -Id $app.Id -ErrorAction SilentlyContinue
+                $app.WaitForExit()
+              }
               Run-Installer $installers[0].FullName "/P /UPDATE /D=$installDir"
+              if ((Get-ItemPropertyValue $runKey $runName) -ne $runCommand) { throw 'Update changed the Open at Login entry' }
               $stopped = (& "$installDir/private-ai-proxy.exe" --json service status | ConvertFrom-Json)
               if ($LASTEXITCODE -ne 0 -or $stopped.status -ne 'not_running') { throw 'The update installer left the previous backend running' }
               $restarted = Start-Backend
@@ -677,6 +695,7 @@ jobs:
             }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
             if (($userPath -split ';') -contains $installDir) { throw 'Uninstall left the NSIS-owned private-ai-proxy PATH entry' }
+            if ($null -ne (Get-ItemPropertyValue $runKey $runName -ErrorAction SilentlyContinue)) { throw 'Uninstall left the Open at Login entry' }
           }
 
       - name: Check installed Linux sidecars without UI

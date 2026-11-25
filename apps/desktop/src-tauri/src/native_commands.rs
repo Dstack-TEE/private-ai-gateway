@@ -33,6 +33,7 @@ macro_rules! native_commands {
             commands::settings::export_diagnostics,
             cli_registration::get_cli_registration,
             cli_registration::set_cli_registration,
+            supervision::take_supervision_notice,
             notifications::request_notification_permission,
             notifications::open_notification_settings,
             updates::prepare_update,

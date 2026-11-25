@@ -41,9 +41,11 @@ off and require the default PAP paths for `pap service enable`. If the backend
 started directly while the manager was unavailable, `pap start` or
 `pap service enable` can move it under its already enabled login service.
 `pap service disable` stops protection, restores agents, and turns off
-supervision. The desktop app has its own Open at Login. On Windows or without
-a user service manager, run `pap service start` after restarting the machine
-to bring back the Local API. See [Standalone CLI](cli-distribution.md#standalone-cli).
+supervision. The Linux and direct macOS app uses this same registration for
+**Run in background at login**. **Open at Login** opens the app in the tray.
+On Windows it starts on by default once, and opening the tray starts the
+backend. You can also run `pap service start` after restarting the machine.
+See [Standalone CLI](cli-distribution.md#standalone-cli).
 
 ## Discover Commands
 
@@ -317,7 +319,8 @@ pap service stop --yes
 ```
 
 `service start` starts the management backend; Protect on launch
-(`connect-on-launch`) may also start protection. `start` waits for verified
+(`connect-on-launch`) may also start protection, including at login when the
+backend login service is enabled. `start` waits for verified
 protection. `stop` stops protection and restores managed agent configuration
 but keeps management available.
 `service stop` shuts down the backend. Closing the desktop app does not stop it.
@@ -335,9 +338,10 @@ The Windows uninstaller runs it after `service stop`; if it fails, the
 uninstaller shows why and asks whether to uninstall anyway, keeping the restore
 data (a silent uninstall continues and logs why). If the app data was also
 to be deleted, it cancels instead, since the app data holds the restore data.
-On macOS and Linux, run `pap service disable` before removing a supervised CLI
-installation. For other installations run `pap --yes service stop` before
-removing the app. Mac App Store builds restore
+On macOS and Linux, run `pap service disable` before removing a supervised
+CLI or desktop installation, or turn off **Run in background at login** in
+Settings and then choose Stop All and Quit. On Windows, uninstall removes the
+app's Open at Login entry. Mac App Store builds restore
 agents through the app's Stop All and Quit.
 Stopping first restores the coding-agent configuration; if that fails, `service
 stop` is refused so agents are not left pointing at a stopped Local API: it

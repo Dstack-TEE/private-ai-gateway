@@ -69,7 +69,11 @@ impl Default for Admission {
     }
 }
 
-pub async fn serve(runtime: Arc<DesktopRuntime>, supervised: bool) -> Result<(), String> {
+pub async fn serve(
+    runtime: Arc<DesktopRuntime>,
+    supervised: bool,
+    protect_on_launch: bool,
+) -> Result<(), String> {
     let listener = transport::Listener::bind(runtime.instance_lock()?)
         .map_err(|error| format!("Cannot bind the private management endpoint: {error}"))?;
     let admission = runtime.admission();
@@ -87,7 +91,7 @@ pub async fn serve(runtime: Arc<DesktopRuntime>, supervised: bool) -> Result<(),
             }
         };
         let resume_session = startup.state().reconnecting;
-        if connect_on_launch || resume_session {
+        if (protect_on_launch && connect_on_launch) || resume_session {
             let result = startup.start_on_launch();
             if let Err(error) = result {
                 startup.report_error(error);

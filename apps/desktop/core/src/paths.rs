@@ -18,6 +18,10 @@ pub const APP_DATA_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_DATA_DIR";
 pub const CONFIG_OVERRIDE_ENV: &str = "PRIVATE_AI_PROXY_CONFIG_DIR";
 pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 pub const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
+
+/// Environment that changes which agent configs the backend manages.
+pub mod agent_environment;
+
 /// The settings directory name under `~/.config` (`$XDG_CONFIG_HOME` on Linux).
 const CONFIG_DIR_NAME: &str = "private-ai-proxy";
 /// The settings subdirectory of the app directory where settings cannot live
@@ -192,6 +196,14 @@ fn home_dir_in(platform: Platform, env: Env) -> Result<PathBuf, String> {
         .or_else(|| env("USERPROFILE"))
         .or_else(std::env::home_dir)
         .ok_or_else(|| "Cannot determine the home directory".to_string())
+}
+
+/// Whether a macOS executable is on a disk image or in App Translocation.
+pub fn transient_macos_app_path(path: &std::path::Path) -> bool {
+    path.starts_with("/Volumes")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "AppTranslocation")
 }
 
 #[cfg(test)]

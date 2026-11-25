@@ -29,6 +29,8 @@ pub const API_VERSION_HEADER: &str = "api-version";
 pub const VERSION_PATH: &str = "/api/version";
 pub const RPC_PATH: &str = "/api/rpc/";
 pub const EVENTS_PATH: &str = "/api/events";
+/// Local event stream terminator for an orderly shutdown, even from another client.
+pub const BACKEND_STOPPING_EVENT: &str = "backend-stopping";
 /// The committed app version; Mac App Store builds append their build number
 /// (`runtimeBuildVersion` in `scripts/distribution.mjs`).
 pub const BUILD_VERSION: &str = match option_env!("PAP_BUILD_VERSION") {

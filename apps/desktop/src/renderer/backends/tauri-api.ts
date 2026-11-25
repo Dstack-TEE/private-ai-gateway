@@ -42,6 +42,7 @@ const platform: UiPlatform = {
   restartToUpdate: () => invoke("restart_to_update"),
   getCliRegistration: () => invoke("get_cli_registration"),
   setCliRegistration: (installed) => invoke("set_cli_registration", { installed }),
+  takeSupervisionNotice: () => invoke("take_supervision_notice"),
   stopAllAndQuit: () => invoke("stop_all_and_quit"),
   onNavigate,
   onCheckForUpdates: (listener) => subscribe(CHECK_FOR_UPDATES_EVENT, listener),

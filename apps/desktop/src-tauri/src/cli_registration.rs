@@ -143,21 +143,13 @@ fn stable_location() -> Result<(), String> {
     let executable = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|_| "Cannot locate the installed application".to_string())?;
-    if transient_macos_app_path(&executable) {
+    if desktop_core::paths::transient_macos_app_path(&executable) {
         return Err(
             "Move Private AI Proxy to a stable location before installing the pap command"
                 .to_string(),
         );
     }
     Ok(())
-}
-
-#[cfg(any(target_os = "macos", test))]
-fn transient_macos_app_path(path: &std::path::Path) -> bool {
-    path.starts_with("/Volumes")
-        || path
-            .components()
-            .any(|component| component.as_os_str() == "AppTranslocation")
 }
 
 fn require_registration() -> Result<(), String> {
@@ -221,9 +213,9 @@ mod tests {
     #[cfg(unix)]
     use std::time::{Duration, Instant};
 
-    use super::transient_macos_app_path;
     #[cfg(unix)]
     use super::{output, MAX_OUTPUT};
+    use desktop_core::paths::transient_macos_app_path;
 
     #[cfg(unix)]
     fn shell(script: &str) -> tokio::process::Command {

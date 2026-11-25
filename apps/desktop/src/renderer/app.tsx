@@ -16,7 +16,7 @@ import { WebUiDialog } from "./features/web-ui";
 import { UsageProofDialog } from "./features/usage";
 import { LocalApiExamplesDialog } from "./components/local-api-examples";
 import { NotificationsDialog } from "./components/notifications";
-import { useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
+import { useAlert, useConfirm, useConfirmOpen, useReportFailure } from "./components/confirm";
 import { useDialog } from "./components/app-dialog";
 import { AppearanceProvider } from "./components/appearance";
 import { AuthoredError } from "./lib/error-message";
@@ -55,6 +55,19 @@ function Window(): React.JSX.Element {
   const backendReady = Boolean(appState.data) && state.backendConnected !== false;
   const agents = useAgents(state, backendReady);
   const confirm = useConfirm();
+  const alert = useAlert();
+  const { data: supervisionNotice } = useQuery({
+    queryKey: ["supervision-notice"],
+    queryFn: () => desktopApi.takeSupervisionNotice(),
+    enabled: distributionCapabilities.backgroundAtLogin,
+    staleTime: Infinity,
+  });
+  const shownSupervisionNotice = useRef(false);
+  useEffect(() => {
+    if (!supervisionNotice || shownSupervisionNotice.current) return;
+    shownSupervisionNotice.current = true;
+    alert("Background service at login", supervisionNotice);
+  }, [alert, supervisionNotice]);
   const reportFailure = useReportFailure();
   const confirming = useConfirmOpen();
   const dialog = useDialog<AppDialog>();

@@ -266,6 +266,7 @@ fn watch_status(global: &Global) -> Result<(), CallError> {
     let watched = Client::watch_connection(|watched| {
         let state = match watched {
             Watched::State(state) => *state,
+            Watched::Stopping => return true,
             Watched::Busy => {
                 if !std::mem::replace(&mut waiting, true) {
                     eprintln!("pap: every event stream of the backend is in use; waiting for one to close");
@@ -339,6 +340,10 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable => {
+            // Windows uses the app's login item and has no backend registration.
+            if cfg!(windows) {
+                return Ok(json!({"startAtLogin": false}));
+            }
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if desktop_core::supervisor::enabled() && client.is_running()? {

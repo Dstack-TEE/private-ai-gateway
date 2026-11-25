@@ -102,24 +102,27 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
-The first successful `pap start` registers the backend with the user's service
-manager on supported CLI installations. The backend starts at login and after
-a crash. A shutdown signal while supervised preserves its protection session
+The desktop app on Linux and direct macOS automatically registers the backend
+with the user's service manager. On supported CLI installations the first
+successful `pap start` registers it. The backend starts at login and after a
+crash. A shutdown signal while supervised preserves its protection session
 and agent routing, and protection resumes after verification on the next start.
 `pap service disable` stops the backend, ends protection, restores agents, and
-turns off supervision. Run it before uninstalling a supervised CLI.
+turns off supervision. Before uninstalling a supervised desktop app or CLI,
+run `pap service disable` or turn off **Run in background at login** in Settings.
 
 Automatic registration skips shells with agent or proxy settings such as
-`HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. The first `pap start` reports the
-variables that caused the skip. Configure those variables in the service
-manager's environment first, then run `pap service enable` to opt in. PAP path
-overrides keep automatic supervision off and require the default PAP paths for
-`pap service enable`.
+`HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. The desktop app or `pap start` reports
+the variables that caused the skip once per installation. Configure those
+variables in the service manager's environment first, then run
+`pap service enable` to opt in. PAP path overrides keep automatic supervision
+off and require the default PAP paths for `pap service enable`.
 
 | Installation | Registration | Runs |
 | --- | --- | --- |
-| Linux DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service`, as Syncthing's packages ship one | the packaged backend with `--supervised` |
+| Linux desktop or CLI DEB, RPM, Arch package | the package's `/usr/lib/systemd/user/private-ai-proxy.service` | `/usr/bin/private-ai-proxy-service --supervised` for the desktop or `/usr/libexec/private-ai-proxy/private-ai-proxy-service --supervised` for the CLI |
 | Linux npm, install script, archive | `$XDG_CONFIG_HOME/systemd/user/private-ai-proxy.service` (defaults to `~/.config/systemd/user/`), written with the same settings | `<command> service run` |
+| Direct macOS app | `~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist` | `<App>.app/Contents/MacOS/private-ai-proxy service run` |
 | macOS npm, install script, Homebrew, archive | `~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist`, with `RunAtLoad` and `KeepAlive` on a failed exit | `<command> service run` |
 
 `<command>` is the entry on `PATH` that links to the installed command, which
@@ -164,8 +167,8 @@ during installation. Run `pap start` to turn protection back on.
 
 A plain `systemctl --user restart` would find that backend holding the instance
 lock: the unit's backend exits with status 75 (already running), and
-`RestartPreventExitStatus=75` keeps systemd from retrying it. The desktop app package
-ships no unit, because the app manages its own backend.
+`RestartPreventExitStatus=75` keeps systemd from retrying it. Both the desktop
+app and its CLI use the same registration.
 
 The web UI renderer comes from `npm run build:web` in `apps/desktop`, which
 writes `runtime/web-dist` for the CLI package's default `web-ui` feature. Plain

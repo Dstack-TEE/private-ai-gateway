@@ -53,6 +53,31 @@ mod platform {
         .map_err(|error| error.to_string())
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn enable_default(app: &AppHandle) -> Result<(), String> {
+        let flag =
+            desktop_core::paths::app_data_dir()?.join("windows-open-at-login-default-applied");
+        apply_default(&flag, || {
+            if !is_enabled(app)? {
+                set_enabled(app, true)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn apply_default(
+        flag: &Path,
+        enable: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        if flag.try_exists().map_err(|error| error.to_string())? {
+            return Ok(());
+        }
+        enable()?;
+        desktop_core::private_fs::write_private_atomic(flag, "", None)
+            .map_err(|error| format!("Cannot record the Open at Login default: {error}"))
+    }
+
     fn manager(app: &AppHandle) -> Result<tauri::State<'_, ManagerState>, String> {
         app.try_state()
             .ok_or_else(|| "Open at Login is unavailable for this installation".into())
@@ -158,6 +183,28 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn default_open_at_login_retries_a_failure_and_respects_opt_out() {
+            let directory = tempfile::tempdir().unwrap();
+            let flag = directory.path().join("default-applied");
+            assert!(apply_default(&flag, || Err("registration unavailable".into())).is_err());
+            assert!(!flag.exists());
+            let mut enabled = false;
+            apply_default(&flag, || {
+                enabled = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(enabled && flag.exists());
+            enabled = false;
+            apply_default(&flag, || {
+                enabled = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(!enabled);
+        }
 
         #[cfg(target_os = "linux")]
         #[test]

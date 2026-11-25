@@ -202,6 +202,28 @@ try {
     `App Store runtime backend readiness timed out. ${await diagnostic(log, launcherOutput)}`,
   );
 
+  const crashedPid = servicePid;
+  await stop(crashedPid, "SIGKILL");
+  servicePid = undefined;
+  const restartDeadline = Date.now() + 10_000;
+  while (Date.now() < restartDeadline && !servicePid) {
+    const service = (await runningProcesses()).find(
+      (process) =>
+        process.pid !== crashedPid &&
+        process.parentPid === appPid &&
+        runsExecutable(process, serviceExecutable),
+    );
+    if (service && (await backendIsReady(service.pid))) {
+      servicePid = service.pid;
+      break;
+    }
+    await delay(250);
+  }
+  assert.ok(
+    servicePid,
+    `App Store runtime did not restart the backend. ${await diagnostic(log, launcherOutput)}`,
+  );
+
   await stop(appPid);
   const exitDeadline = Date.now() + 10_000;
   while (Date.now() < exitDeadline) {
@@ -212,7 +234,7 @@ try {
     );
     if (!appRunning && !serviceRunning) {
       console.log(
-        "App Store runtime launch, backend readiness, and owner-exit cleanup passed",
+        "App Store runtime launch, crash recovery, and owner-exit cleanup passed",
       );
       ownerExitPassed = true;
       break;

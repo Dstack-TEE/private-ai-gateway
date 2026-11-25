@@ -15,6 +15,7 @@ pub(crate) const CAPABILITIES: DistributionCapabilities = DistributionCapabiliti
     account_portal_links: !APP_STORE,
     sandbox_home_access: APP_STORE && cfg!(target_os = "macos"),
     launch_at_login: true,
+    background_at_login: !APP_STORE && cfg!(any(target_os = "linux", target_os = "macos")),
     notifications: true,
     web_ui: !APP_STORE,
 };
@@ -56,6 +57,7 @@ mod tests {
                 "accountPortalLinks": !app_store,
                 "sandboxHomeAccess": app_store && cfg!(target_os = "macos"),
                 "launchAtLogin": true,
+                "backgroundAtLogin": !app_store && cfg!(any(target_os = "linux", target_os = "macos")),
                 "notifications": true,
                 "webUi": !app_store,
             })

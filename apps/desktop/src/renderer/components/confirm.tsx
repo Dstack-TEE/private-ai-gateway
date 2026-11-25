@@ -118,6 +118,11 @@ export function useConfirm(): Confirm {
   return useCallback((options) => ask({ ...options, kind: "confirm" }), [ask]);
 }
 
+export function useAlert(): (title: string, message: string) => void {
+  const ask = useConfirmContext();
+  return useCallback((title, message) => { void ask({ kind: "alert", title, message }); }, [ask]);
+}
+
 /**
  * Reports a failed action that has no dialog, form or row to explain it, as
  * an alert titled with what failed and the reason as its message.

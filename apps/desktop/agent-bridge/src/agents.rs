@@ -25,7 +25,7 @@ pub use error::AgentError;
 use projection::*;
 use providers::*;
 pub(crate) use registry::AgentIntegration;
-pub use registry::{environment_overridden, environment_overrides};
+pub use desktop_core::paths::agent_environment::{environment_overridden, environment_overrides};
 
 use std::{
     collections::BTreeMap,

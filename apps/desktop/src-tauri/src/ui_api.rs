@@ -6,13 +6,14 @@ use desktop_core::{
     config::{Appearance, NotificationPreferences},
     contracts::{AppStateWire, NotificationConfiguration},
     protocol::rpc,
+    supervisor,
     ui_api::{self as shared, Backend, Event, Host, Method},
 };
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::{autostart, notifications, run_blocking, tray, updates, window};
+use crate::{autostart, distribution, notifications, run_blocking, tray, updates, window};
 
 #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
 static AGENT_ACCESS_REQUEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -45,6 +46,25 @@ impl Host for TauriHost {
 
     fn set_open_at_login(&self, enabled: bool) -> Result<(), String> {
         tray::set_open_at_login(&self.0, enabled)
+    }
+
+    fn background_at_login(&self) -> bool {
+        distribution::CAPABILITIES.background_at_login && supervisor::enabled()
+    }
+
+    fn set_background_at_login(&self, enabled: bool) -> Result<(), String> {
+        distribution::require(
+            distribution::CAPABILITIES.background_at_login,
+            "Running in the background at login is unavailable in this distribution",
+        )?;
+        let client = self.0.state::<Arc<Client>>();
+        if enabled {
+            supervisor::enable()?;
+            client.handoff_to_supervisor()?;
+            Client::ensure_service()
+        } else {
+            client.disable_login_service()
+        }
     }
 
     fn present_account_login(&self, url: &str) {

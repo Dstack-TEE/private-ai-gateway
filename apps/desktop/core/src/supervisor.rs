@@ -52,7 +52,13 @@ fn relocated() -> bool {
 }
 
 fn supported() -> bool {
-    service_manager_platform_supported() && !relocated()
+    let available = service_manager_platform_supported() && !relocated();
+    #[cfg(target_os = "macos")]
+    let available = available
+        && std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .is_ok_and(|path| !crate::paths::transient_macos_app_path(&path));
+    available
 }
 
 fn service_manager_platform_supported() -> bool {
@@ -62,10 +68,18 @@ fn service_manager_platform_supported() -> bool {
     ))
 }
 
-/// This command by a path that survives an upgrade: the entry on `PATH` that
-/// links to it, as install scripts and Homebrew create, or else its own path,
-/// which a package manager keeps.
+/// The CLI path that survives an upgrade. Desktop shells and their bundled
+/// CLI share the same registration, even when the CLI was invoked via PATH.
 fn command() -> Result<(PathBuf, bool), String> {
+    if matches!(
+        installation(),
+        Installation::DesktopApp | Installation::DesktopPacman
+    ) {
+        return Ok((
+            crate::launch::sibling_executable("private-ai-proxy")?,
+            false,
+        ));
+    }
     let current = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| format!("Cannot locate this command: {error}"))?;
@@ -123,13 +137,12 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::SystemPackage
         | Installation::Npm => true,
         Installation::Portable => command().is_ok_and(|(_, linked)| linked),
-        Installation::DesktopApp | Installation::DesktopPacman => false,
+        Installation::DesktopApp | Installation::DesktopPacman => true,
     }
 }
 
 fn automatic_supervision_supported() -> bool {
-    service_manager_platform_supported()
-        && !relocated()
+    supported()
         && installation_supports_automatic_supervision()
         && user_service_manager_available()
 }
@@ -205,8 +218,7 @@ pub fn automatic_blockers(agent_environment_overrides: &[&'static str]) -> Autom
     )
 }
 
-/// Whether `pap start` turns this on by itself: installations whose command
-/// keeps a path across upgrades. A desktop app owns its backend's lifetime.
+/// Whether the desktop shell or `pap start` turns this on by itself.
 pub fn automatic(agent_environment_overrides: &[&'static str]) -> bool {
     automatic_blockers(agent_environment_overrides).is_eligible()
 }
@@ -383,6 +395,7 @@ mod platform {
     const UNIT_OBJECT: &str = "/org/freedesktop/systemd1/unit/private_2dai_2dproxy_2eservice";
     const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/private-ai-proxy.service";
     const PACKAGED_BACKEND: &str = "/usr/libexec/private-ai-proxy/private-ai-proxy-service";
+    const DESKTOP_BACKEND: &str = "/usr/bin/private-ai-proxy-service";
     const PACKAGED_CONTENTS: &str =
         include_str!("../../src-tauri/installer/private-ai-proxy.service");
     const MARKER: &str = "# Written by `pap service enable`; `pap service disable` removes it.";
@@ -524,10 +537,21 @@ mod platform {
     }
 
     /// The package's unit, when it starts this installation's backend.
-    fn packaged() -> bool {
-        Path::new(PACKAGED_UNIT).is_file()
-            && crate::launch::service_executable()
-                .is_ok_and(|backend| backend == Path::new(PACKAGED_BACKEND))
+    fn packaged() -> Option<String> {
+        if !Path::new(PACKAGED_UNIT).is_file() {
+            return None;
+        }
+        packaged_contents(&crate::launch::service_executable().ok()?)
+    }
+
+    fn packaged_contents(backend: &Path) -> Option<String> {
+        if backend == Path::new(PACKAGED_BACKEND) {
+            Some(PACKAGED_CONTENTS.into())
+        } else if backend == Path::new(DESKTOP_BACKEND) {
+            Some(PACKAGED_CONTENTS.replace(PACKAGED_BACKEND, DESKTOP_BACKEND))
+        } else {
+            None
+        }
     }
 
     /// The unit a user may write, as systemd.unit(5) places it.
@@ -575,17 +599,19 @@ mod platform {
 
     impl Registration {
         fn for_installation() -> Result<Self, String> {
-            let packaged = packaged();
-            let (path, contents) = if packaged {
-                (PathBuf::from(PACKAGED_UNIT), PACKAGED_CONTENTS.into())
+            if let Some(contents) = packaged() {
+                Ok(Self {
+                    path: PathBuf::from(PACKAGED_UNIT),
+                    contents,
+                    packaged: true,
+                })
             } else {
-                (user_unit()?, unit(&command()?.0)?)
-            };
-            Ok(Self {
-                path,
-                contents,
-                packaged,
-            })
+                Ok(Self {
+                    path: user_unit()?,
+                    contents: unit(&command()?.0)?,
+                    packaged: false,
+                })
+            }
         }
 
         fn exists(&self) -> Result<bool, String> {
@@ -765,6 +791,19 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn native_packages_use_the_unit_for_their_own_bundled_backend() {
+            use std::path::Path;
+            for backend in [super::PACKAGED_BACKEND, super::DESKTOP_BACKEND] {
+                let contents = super::packaged_contents(Path::new(backend)).unwrap();
+                assert!(contents
+                    .lines()
+                    .any(|line| line == format!("ExecStart={backend} --supervised")));
+                assert!(contents.contains("RestartPreventExitStatus=75\n"));
+            }
+            assert!(super::packaged_contents(Path::new("/opt/private-ai-proxy-service")).is_none());
+        }
+
         #[test]
         fn effective_restart_policy_keeps_deliberate_quits_stopped() {
             use serde_json::json;
@@ -1153,5 +1192,75 @@ mod platform {
     }
     pub(super) fn start() -> bool {
         false
+    }
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "mac-app-store"))
+    )
+))]
+mod desktop_tests {
+    use super::*;
+    use std::{fs, process::Command};
+
+    #[test]
+    fn desktop_shell_and_cli_use_the_same_command_and_respect_the_enrollment_guard() {
+        const CHILD: &str = "PAP_TEST_DESKTOP_ENROLLMENT";
+        if let Ok(case) = std::env::var(CHILD) {
+            let cli = PathBuf::from(std::env::var_os("PAP_TEST_CANONICAL_COMMAND").unwrap());
+            assert_eq!(command().unwrap(), (cli, false));
+            assert_eq!(
+                automatic(crate::paths::agent_environment::overridden()),
+                case == "default"
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let shell = root.join("private-ai-proxy-desktop");
+        let cli = root.join("private-ai-proxy");
+        let links = root.join("links");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for executable in [&shell, &cli] {
+            if fs::hard_link(&exe, executable).is_err() {
+                fs::copy(&exe, executable).unwrap();
+            }
+        }
+        fs::create_dir(&links).unwrap();
+        let alias = links.join("private-ai-proxy");
+        std::os::unix::fs::symlink(&cli, &alias).unwrap();
+
+        for (program, flag) in [
+            (&shell, None),
+            (&alias, None),
+            (&shell, Some("CODEX_HOME")),
+            (&shell, Some("HTTPS_PROXY")),
+        ] {
+            let mut command = Command::new(program);
+            command
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &links)
+                .env("PAP_TEST_CANONICAL_COMMAND", &cli)
+                .env(CHILD, if flag.is_some() { "override" } else { "default" })
+                .args([
+                    "--exact",
+                    "supervisor::desktop_tests::desktop_shell_and_cli_use_the_same_command_and_respect_the_enrollment_guard",
+                ]);
+            if let Some(flag) = flag {
+                command.env(flag, &root);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 }

@@ -66,7 +66,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     await mkdir(path.join(payload, "usr/bin"), { recursive: true });
     await mkdir(path.join(payload, "usr/share/applications"), { recursive: true });
     await writeFile(path.join(payload, "usr/bin/private-ai-proxy"), "binary", { mode: 0o755 });
-    await writeFile(path.join(payload, "usr/share/applications/Private AI Proxy.desktop"), "entry");
+    await writeFile(path.join(payload, "usr/share/applications/Private AI Proxy.desktop"), "entry", { mode: 0o644 });
     await writeFile(path.join(payload, "DEBIAN/control"), "Package: private-ai-proxy\nVersion: 1.2.3-beta.4\nArchitecture: amd64\nMaintainer: Test\nDescription: Test\n");
     const bundle = path.join(root, "bundle");
     await mkdir(path.join(bundle, "deb"), { recursive: true });
@@ -93,6 +93,13 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.equal(output("dpkg-deb", ["-f", deb, "Depends"]), "libayatana-appindicator3-1, libwebkit2gtk-4.1-0, libgtk-3-0");
     assert.equal(output("dpkg-deb", ["-f", deb, "Provides"]), "private-ai-proxy-cli (= 1.2.3~beta.4)");
     assert.equal(output("dpkg-deb", ["-f", deb, "Conflicts"]), "private-ai-proxy-cli");
+    const unit = "usr/lib/systemd/user/private-ai-proxy.service";
+    assert.match(debListing(deb), /-rw-r--r-- root\/root .* \.\/usr\/lib\/systemd\/user\/private-ai-proxy\.service$/m);
+    const expectedStart = /^ExecStart=\/usr\/bin\/private-ai-proxy-service --supervised$/m;
+    const payloadTar = execFileSync("dpkg-deb", ["--fsys-tarfile", deb]);
+    assert.match(execFileSync("bsdtar", ["-xOf", "-", `./${unit}`], { input: payloadTar, encoding: "utf8" }), expectedStart);
+    assert.match(member(rpm, `/${unit}`), expectedStart);
+    assert.match(member(arch, unit), expectedStart);
     assert.equal(output("dpkg-deb", ["-f", deb, "Replaces"]), "private-ai-proxy-cli");
     assert.match(debListing(deb), /-rwxr-xr-x root\/root +6 .* \.\/usr\/bin\/private-ai-proxy$/m);
     assert.match(debListing(deb), /\.\/usr\/bin\/pap -> private-ai-proxy$/m);
@@ -116,7 +123,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.equal(query("%{PACKAGER}"), maintainer);
       assert.equal(
         query("[%{FILENAMES}|%{FILEMODES:perms}|%{FILELINKTOS}\n]").replace(/\|l[-rwx]{9}\|/g, "|link|"),
-        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
+        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
       );
       assert.match(output("rpm", ["-qp", "--requires", rpm]), /^libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)$/m);
       assert.match(output("rpm", ["-qp", "--provides", rpm]), /^private-ai-proxy-cli = 1\.2\.3~beta\.4-1$/m);

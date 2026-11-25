@@ -160,10 +160,16 @@ protection problems, is stored under that key.
 - Notifications follow the saved preferences from startup. The failed proofs
   a backend reports when it first answers are history; only later ones alert.
 - The desktop shell starts the backend in the background; until it answers,
-  the window shows it as starting. A disconnected UI offers Start Backend. It does not silently restart a service
-  during an updater operation or replay an earlier mutation.
-- Protect on launch (`connect-on-launch`) belongs to backend startup, not opening/reopening a UI.
-  Login startup remains an explicit desktop OS preference.
+  the window shows it as starting. When a detached backend crashes, the open
+  app attempts up to four restarts per minute. The startup gate prevents
+  restarts during updates. The UI also offers Start Backend.
+- On supported Linux and direct macOS installs, the user service manager
+  starts the backend at login and restarts it after a crash. Use **Run in
+  background at login** in Settings to change that. **Open at Login** opens
+  the app in the tray and defaults on once on Windows.
+- Protect on launch (`connect-on-launch`) applies at backend startup. With
+  the login service enabled, it starts protection when the backend starts
+  at login, even if the app stays closed.
 - Native wake monitoring also belongs to the backend: IOKit on macOS, power
   callbacks on Windows, and login1 on Linux. Recovery does not need an open UI.
 - The service acquires its instance lock before loading state; a second

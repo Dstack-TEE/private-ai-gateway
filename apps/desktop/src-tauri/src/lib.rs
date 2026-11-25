@@ -10,6 +10,7 @@ mod clipboard;
 mod distribution;
 mod menu;
 mod notifications;
+mod supervision;
 mod tray;
 #[cfg(target_os = "windows")]
 mod tray_theme;
@@ -172,6 +173,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = autostart::setup(app.handle()) {
         tracing::warn!("Open at Login is unavailable: {error}");
     }
+    #[cfg(target_os = "windows")]
+    if let Err(error) = autostart::enable_default(app.handle()) {
+        tracing::warn!("Cannot enable the default Open at Login setting: {error}");
+    }
     if updates::configured(app.handle()) {
         app.handle()
             .plugin(tauri_plugin_updater::Builder::new().build())?;
@@ -179,7 +184,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Starting the backend can take a while (the first launch after an
     // update); it runs in the background while the window shows the
     // backend as starting. Preferences apply once it answers.
-    let client = Client::attach(tauri::async_runtime::handle().inner().clone());
+    let (send_notice, receive_notice) = tokio::sync::oneshot::channel();
+    app.manage(supervision::StartupNotice(tokio::sync::Mutex::new(Some(
+        receive_notice,
+    ))));
+    let client = Client::attach_with_startup(
+        tauri::async_runtime::handle().inner().clone(),
+        move |client| {
+            let _ = send_notice.send(supervision::at_startup(client));
+        },
+    );
     app.manage(client.clone());
     configure_account_return(app);
 

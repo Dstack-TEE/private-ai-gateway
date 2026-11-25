@@ -34,6 +34,7 @@ export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst
 // Debian Policy 6.6: lets an upgrade continue past the refusing prerm of
 // packages up to 0.1.7-beta.n. Remove in 0.3.
 const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
+const userUnit = "private-ai-proxy.service";
 
 // Tauri names the desktop package after the product and describes it with the
 // bundle metadata; the CLI and Arch packages use the same values.
@@ -196,7 +197,15 @@ export async function packageDesktop({ bundleDir, version, arch, output }) {
   try {
     const root = path.join(scratch, "root");
     execFileSync("dpkg-deb", ["-x", tauriDeb, root], { stdio: "inherit" });
-    const contents = [{ src: path.join(root, "usr"), dst: "/usr" }, ...aliasLinks];
+    const unit = (await readFile(path.join(appRoot, "src-tauri/installer", userUnit), "utf8"))
+      .replace("ExecStart=/usr/libexec/private-ai-proxy/", "ExecStart=/usr/bin/");
+    const unitPath = path.join(scratch, userUnit);
+    await writeFile(unitPath, unit);
+    const contents = [
+      { src: path.join(root, "usr"), dst: "/usr" },
+      ...aliasLinks,
+      { src: unitPath, dst: `/usr/lib/systemd/user/${userUnit}`, file_info: { mode: 0o644 } },
+    ];
     packages = await buildLinuxPackages({ kind: "desktop", version, arch, contents, output });
   } finally {
     await rm(scratch, { recursive: true, force: true });
