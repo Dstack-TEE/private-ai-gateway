@@ -271,6 +271,81 @@ fn opencode_stop_and_disconnect_preserve_models_selected_from_another_provider()
 }
 
 #[test]
+fn codex_keeps_config_comments_through_connect_stop_and_disconnect() {
+    let original = r#"# Preferred model
+"model"  =  "gpt-5.4"  # model note
+
+# Preferred provider
+model_provider= "x" # provider note
+
+# Existing provider
+[model_providers.x]  # table note
+# Existing provider name
+name  = 'User provider' # keep this spelling
+"#;
+    let (selectors, provider) = original.split_once("\n\n# Existing provider").unwrap();
+    let provider = format!("\n\n# Existing provider{provider}");
+    let managed_selectors = selectors
+        .replace("\"gpt-5.4\"", "\"openai/gpt-oss-20b\"")
+        .replace("\"x\"", "\"private_ai_proxy\"");
+    let catalog = catalog();
+
+    for stop_first in [false, true] {
+        let sandbox = sandbox(&format!("codex-config-comments-{stop_first}"));
+        let agent = Agent::Codex;
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, original);
+
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        let connected = fs::read_to_string(&path).unwrap();
+        assert!(connected.starts_with(&managed_selectors), "{connected}");
+        assert!(connected.contains(&provider), "{connected}");
+
+        if stop_first {
+            assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+            let stopped = fs::read_to_string(&path).unwrap();
+            assert!(stopped.starts_with(original), "{stopped}");
+        }
+        assert!(!disconnect(&sandbox, agent).recorded);
+        let disconnected = fs::read_to_string(&path).unwrap();
+        assert!(disconnected.starts_with(original), "{disconnected}");
+    }
+}
+
+#[test]
+fn codex_keeps_comments_added_to_a_managed_model_on_stop_and_disconnect() {
+    let catalog = catalog();
+    let agent = Agent::Codex;
+    let model = "model = \"openai/gpt-oss-20b\"";
+
+    for stop in [false, true] {
+        let sandbox = sandbox(&format!("codex-added-model-comments-{stop}"));
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, "approval_policy = 'on-request'\n");
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+
+        let connected = fs::read_to_string(&path).unwrap();
+        assert!(connected.contains(model), "{connected}");
+        write(
+            &path,
+            &connected.replacen(model, &format!("# above\n{model} # beside"), 1),
+        );
+        if stop {
+            assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        } else {
+            assert!(!disconnect(&sandbox, agent).recorded);
+        }
+
+        let restored = fs::read_to_string(&path).unwrap();
+        assert!(!doc(&sandbox, agent).contains(&["model"]));
+        assert!(
+            restored.starts_with("approval_policy = 'on-request'\n# above\n # beside\n"),
+            "{restored}"
+        );
+    }
+}
+
+#[test]
 fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
     for (selected, provider, expected) in [
         ("native-new", "private_ai_proxy", "native-new"),

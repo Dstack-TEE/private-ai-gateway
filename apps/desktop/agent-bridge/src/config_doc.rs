@@ -10,7 +10,7 @@ use jsonc_parser::cst::{CstInputValue, CstRootNode};
 use jsonc_parser::{common::Ranged, parse_to_ast, tokens::Token, CollectOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use toml_edit::{DocumentMut, Item, Table, TableLike};
+use toml_edit::{Document, DocumentMut, Item, RawString, Table, TableLike};
 use yaml_edit::{path::YamlPath, AsYaml, Mapping, Sequence, YamlFile, YamlNode};
 
 /// Inspect an OpenCode JSONC layer without editing it.
@@ -296,7 +296,17 @@ impl ConfigDoc {
                 *text = edit_json(text, path, Some(value.to_json()), Format::Json5)?
             }
             Self::Toml(doc) => {
-                toml_container(doc.as_item_mut(), parents)?.insert(leaf, value.to_toml()?);
+                let table = toml_container(doc.as_item_mut(), parents)?;
+                let mut replacement = value.to_toml()?;
+                if let Some(item) = table.get_mut(leaf) {
+                    // Inserting an existing key resets its formatting in toml_edit.
+                    if let (Item::Value(old), Item::Value(new)) = (&*item, &mut replacement) {
+                        *new.decor_mut() = old.decor().clone();
+                    }
+                    *item = replacement;
+                } else {
+                    table.insert(leaf, replacement);
+                }
             }
             Self::Yaml(file) => yaml_set(&yaml_document(file)?, path, value)?,
             Self::YamlItem(item) => yaml_set(item, path, value)?,
@@ -354,12 +364,7 @@ impl ConfigDoc {
                     .ok()
                     .and_then(|root| json_get(&root, parents)?.as_object().map(Map::is_empty))
             }
-            Self::Toml(doc) => toml_get_mut(doc.as_item_mut(), parents)
-                .and_then(|item| item.as_table_like_mut())
-                .map(|table| {
-                    table.remove(leaf);
-                    table.is_empty()
-                }),
+            Self::Toml(doc) => remove_toml(doc, leaf, parents)?,
             Self::YamlItem(_) => return self.remove_exact(path),
             Self::Yaml(file) => {
                 let Some(doc) = file.documents().next() else {
@@ -950,6 +955,120 @@ fn toml_get<'a>(root: &'a Item, path: &[&str]) -> Option<&'a Item> {
 
 fn toml_get_mut<'a>(root: &'a mut Item, path: &[&str]) -> Option<&'a mut Item> {
     path.iter().try_fold(root, |node, key| node.get_mut(*key))
+}
+
+fn remove_toml(
+    doc: &mut DocumentMut,
+    leaf: &str,
+    parents: &[&str],
+) -> Result<Option<bool>, String> {
+    let Some(table) = toml_get_mut(doc.as_item_mut(), parents).and_then(Item::as_table_like_mut)
+    else {
+        return Ok(None);
+    };
+    let commented = table.get_key_value(leaf).is_some_and(|(key, item)| {
+        let decor = item.as_value().map(toml_edit::Value::decor).or_else(|| {
+            item.as_table()
+                .filter(|table| table.is_empty())
+                .map(Table::decor)
+        });
+        has_toml_comment(key.leaf_decor().prefix())
+            || decor.is_some_and(|decor| {
+                has_toml_comment(decor.prefix()) || has_toml_comment(decor.suffix())
+            })
+    });
+    if commented {
+        // toml_edit removes an entry's decor along with the entry. Cut only
+        // the syntax from the rendered source so comments stay in place.
+        let source = doc.to_string();
+        *doc = remove_commented_toml_entry(&source, leaf, parents)?;
+    } else {
+        table.remove(leaf);
+    }
+    Ok(toml_get(doc.as_item(), parents).and_then(|item| {
+        let table = item.as_table_like()?;
+        let holds_comments = item
+            .as_inline_table()
+            .is_some_and(|table| has_toml_comment(Some(table.trailing())));
+        Some(table.is_empty() && !holds_comments)
+    }))
+}
+
+fn has_toml_comment(raw: Option<&RawString>) -> bool {
+    raw.and_then(RawString::as_str)
+        .is_some_and(|text| text.contains('#'))
+}
+
+fn remove_commented_toml_entry(
+    source: &str,
+    leaf: &str,
+    parents: &[&str],
+) -> Result<DocumentMut, String> {
+    let invalid = || "cannot locate the TOML entry to remove".to_string();
+    let parsed = Document::parse(source).map_err(|_| invalid())?;
+    let parent = toml_get(parsed.as_item(), parents).ok_or_else(invalid)?;
+    let (key, item) = parent
+        .as_table_like()
+        .and_then(|table| table.get_key_value(leaf))
+        .ok_or_else(invalid)?;
+    let span = item.span().ok_or_else(invalid)?;
+    let mut updated = source.to_string();
+    if parent.is_inline_table() {
+        let prefix = key
+            .leaf_decor()
+            .prefix()
+            .and_then(RawString::span)
+            .ok_or_else(invalid)?;
+        let value = item.as_value().ok_or_else(invalid)?;
+        let suffix_end = value
+            .decor()
+            .suffix()
+            .and_then(RawString::span)
+            .map_or(span.end, |span| span.end);
+        let interior_comment = value
+            .decor()
+            .prefix()
+            .and_then(RawString::span)
+            .map(|range| &source[range])
+            .filter(|trivia| trivia.contains('#'))
+            .unwrap_or_default();
+        // Keep a comma between remaining entries, preferring to remove the
+        // following comma (including a trailing comma).
+        let following_comma = source.as_bytes().get(suffix_end) == Some(&b',');
+        let preceding_comma = prefix
+            .start
+            .checked_sub(1)
+            .filter(|&index| !following_comma && source.as_bytes()[index] == b',');
+        if following_comma {
+            updated.remove(suffix_end);
+        }
+        updated.replace_range(prefix.end..span.end, interior_comment);
+        if let Some(comma) = preceding_comma {
+            updated.remove(comma);
+        }
+    } else {
+        let entry_start = if item.is_table() {
+            span.start
+        } else {
+            key.span().ok_or_else(invalid)?.start
+        };
+        let line_start = source[..entry_start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let line_end = source[span.end..]
+            .find('\n')
+            .map_or(source.len(), |index| span.end + index + 1);
+        if source[span.end..line_end].contains('#') {
+            let line = &source[line_start..entry_start];
+            let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+            updated.replace_range(line_start + indent..span.end, "");
+        } else {
+            updated.replace_range(line_start..line_end, "");
+        }
+    }
+    updated
+        .parse()
+        .map_err(|_| "TOML removal produced invalid syntax".to_string())
 }
 
 fn toml_container<'a>(root: &'a mut Item, path: &[&str]) -> Result<&'a mut dyn TableLike, String> {
