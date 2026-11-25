@@ -160,6 +160,56 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
 }
 
 #[test]
+fn opencode_json_comments_keep_authorization_and_survive_stop_and_disconnect() {
+    let sandbox = sandbox("opencode-json-comments");
+    let agent = Agent::OpenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let catalog = catalog();
+    let options = claude_options();
+    let original = "{\n  \"model\": \"other/original\"\n}\n";
+    write(&path, original);
+    assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+
+    let comment = "// User comment after connecting";
+    let connected = fs::read_to_string(&path).unwrap();
+    write(&path, &connected.replacen('{', &format!("{{ {comment}"), 1));
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(status.connected && status.authorized, "{status:?}");
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+
+    assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+    assert!(!disconnect(&sandbox, agent).recorded);
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+    assert_eq!(
+        doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+        Some("other/original")
+    );
+}
+
+#[test]
+fn commented_json_config_is_rejected_for_strict_json_agents() {
+    let sandbox = sandbox("strict-json-agents");
+    for agent in [Agent::ClaudeCode, Agent::Pi] {
+        assert!(sandbox
+            .projector
+            .parse_config(agent, Some("{/* not valid strict JSON */}"))
+            .is_err());
+    }
+}
+
+#[test]
+fn opencode_json_config_rejects_json5_only_syntax() {
+    let sandbox = sandbox("opencode-json5");
+    assert!(sandbox
+        .projector
+        .parse_config(Agent::OpenCode, Some("{model: 'other/original'}"))
+        .is_err());
+}
+
+#[test]
 fn disconnect_restores_original_opencode_model_after_private_model_edit() {
     let sandbox = sandbox("restore-private-opencode-model");
     let agent = Agent::OpenCode;

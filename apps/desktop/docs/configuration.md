@@ -263,6 +263,8 @@ unlocked OS keychain for a process running as you.
   Private AI Proxy provider pauses that agent without restoring its file
   while protection is running. Reconnect projects the recorded settings again,
   and Disconnect or stopping protection restores the saved configuration.
+  PAP accepts JSON with comments and trailing commas in both OpenCode
+  `opencode.json` and `opencode.jsonc` files.
   OpenCode 2 configurations use the native `providers` provider shape when
   their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
   shape. In Oh My Pi's companion `config.yml` or `config.yaml`, a global

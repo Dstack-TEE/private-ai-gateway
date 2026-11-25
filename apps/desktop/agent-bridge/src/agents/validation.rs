@@ -875,27 +875,7 @@ impl Projector {
         agent: Agent,
         text: Option<&str>,
     ) -> Result<ConfigDoc, AgentError> {
-        let path = agent.config_path(&self.home, self.tool_env);
-        self.parse_config_at(agent, &path, text)
-    }
-
-    pub(super) fn parse_config_at(
-        &self,
-        agent: Agent,
-        path: &Path,
-        text: Option<&str>,
-    ) -> Result<ConfigDoc, AgentError> {
-        let jsonc = agent == Agent::OpenCode
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "jsonc");
-        if jsonc {
-            parse_jsonc(text.unwrap_or_default()).map_err(|reason| {
-                AgentError::InvalidConfiguration(self.parse_error(agent, &reason))
-            })?;
-        }
-        let format = if jsonc { Format::Json5 } else { agent.format() };
-        ConfigDoc::parse(format, text.unwrap_or_default())
+        ConfigDoc::parse(agent.format(), text.unwrap_or_default())
             .map_err(|reason| AgentError::InvalidConfiguration(self.parse_error(agent, &reason)))
     }
 

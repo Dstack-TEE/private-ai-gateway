@@ -37,7 +37,9 @@ impl AgentIntegration for Agent {
     fn format(self) -> Format {
         match self {
             Agent::Codex => Format::Toml,
-            Agent::ClaudeCode | Agent::OpenCode | Agent::Pi => Format::Json,
+            Agent::ClaudeCode | Agent::Pi => Format::Json,
+            // OpenCode v1 and v2 load both .json and .jsonc as JSONC.
+            Agent::OpenCode => Format::Jsonc,
             Agent::Hermes => Format::Yaml,
             Agent::OpenClaw => Format::Json5,
             Agent::OhMyPi => Format::Yaml,

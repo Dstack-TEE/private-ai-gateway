@@ -313,15 +313,13 @@ impl Projector {
             }
         }
         let text = self.read_config_at(path)?;
-        let mut doc = self
-            .parse_config_at(agent, path, text.as_deref())
-            .map_err(|error| {
-                AgentError::InvalidConfiguration(format!(
-                    "Cannot restore {} at {}: {error}",
-                    agent.name(),
-                    path.display()
-                ))
-            })?;
+        let mut doc = self.parse_config(agent, text.as_deref()).map_err(|error| {
+            AgentError::InvalidConfiguration(format!(
+                "Cannot restore {} at {}: {error}",
+                agent.name(),
+                path.display()
+            ))
+        })?;
         let default_model =
             selected_model(agent, Some(&doc)).or_else(|| record.options.default_model.clone());
         let edit = if text.is_some() {
