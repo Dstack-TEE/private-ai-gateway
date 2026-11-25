@@ -20,6 +20,7 @@ use std::pin::Pin;
 
 use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 use crate::aci::upstream::request_id::{request_id_from_body, request_id_from_headers};
 use crate::aci::upstream::UpstreamError;
@@ -299,6 +300,7 @@ async fn run_inner(
         started,
         is_streaming: stream,
         armed: None,
+        attempt_delivery: None,
         images: None,
         audio: None,
     };
@@ -550,6 +552,7 @@ async fn run_inner(
             // under control's (request_id, attempt, status) idempotency gate and
             // mislabeling a failed-over serve as a first-choice one.
             let attempt_index = forward.failed_attempts.len() as u32;
+            meter.failed_attempts(&forward.failed_attempts, false);
             let upstream_request_id = request_id_from_headers(&forward.upstream_headers);
             if client_endpoint == Endpoint::AudioSpeech {
                 if let (Some(usage), Some(content_type)) = (
@@ -564,7 +567,6 @@ async fn run_inner(
                         None,
                         upstream_request_id,
                     );
-                    meter.failed_attempts(&forward.failed_attempts, false);
                     return finalize_buffered(
                         forward.receipt,
                         upstream_status,
@@ -672,9 +674,7 @@ async fn run_inner(
                             error = %err,
                             "upstream success body cannot be represented on the client surface"
                         );
-                        meter.failed_attempts(&forward.failed_attempts, false);
-                        meter.disarm();
-                        meter.spawn(PostReport {
+                        meter.finish(PostReport {
                             status: 502,
                             attempt_index: Some(attempt_index),
                             selected_route_id: Some(forward.selected_route.clone()),
@@ -791,7 +791,6 @@ async fn run_inner(
                     failed_response.then_some(ErrorClass::UpstreamResponseFailed),
                     upstream_request_id,
                 );
-                meter.failed_attempts(&forward.failed_attempts, false);
                 (
                     upstream_status,
                     serde_json::to_vec(&transformed).unwrap_or_default(),
@@ -817,7 +816,6 @@ async fn run_inner(
                     Some(class),
                     upstream_request_id,
                 );
-                meter.failed_attempts(&forward.failed_attempts, false);
                 (mapped, body)
             };
 
@@ -851,15 +849,19 @@ async fn run_inner(
             meter.failed_attempts(&forward.failed_attempts, true);
 
             // An E2EE response can only be re-encrypted as SSE. Decided here,
-            // before the pipeline exists, so the caller's request shape is
-            // answered as such — a 400 with no usage report, like the other
-            // client-attributable failures — rather than reaching the
-            // finalizer, which would refuse a stream already built.
+            // before the pipeline exists. Settle the refusal here because no
+            // response owner will be created to settle the request.
             if e2ee.is_some() && !forward.is_sse {
                 let err = ServiceError::Upstream(UpstreamError::InvalidRequest(
                     "this streamed response cannot be end-to-end encrypted".into(),
                 ));
-                meter.disarm();
+                meter.gateway_failure_at(
+                    attempt_index,
+                    400,
+                    ErrorSource::Gateway,
+                    ErrorClass::E2eeFailed,
+                    true,
+                );
                 return service_error_response(outcome_ctx, err, None);
             }
 
@@ -977,40 +979,13 @@ async fn run_inner(
         // see the full chain, then a summary row placed after them carrying
         // the class of the aggregate failure.
         Ok(MiddlewareForwardResult::AllFailed(forward)) => {
-            let status = errors::client_error_status(&forward.error);
-            meter.failed_attempts(&forward.failed_attempts, stream);
-            if status >= 500 {
-                meter.gateway_failure_at(
-                    forward.failed_attempts.len() as u32,
-                    None,
-                    status,
-                    forward_error_source(&forward.error),
-                    ErrorClass::from(&forward.error),
-                    stream,
-                );
-            } else {
-                meter.disarm();
-            }
+            meter.forward_failure(&forward.error, &forward.failed_attempts);
             service_error_response(outcome_ctx, forward.error, e2ee)
         }
         // Failures where no attempt chain is available (pre-forward errors,
-        // plus the forwarder's rare mid-walk internal-error abort): record the
-        // failure so the request is visible to billing/health, attributed by
-        // `forward_error_source` (upstream, except the gateway's own TEE-policy
-        // rejection). Client-attributable errors (E2EE/4xx) are not recorded.
-        // The E2EE context is still available to encrypt the body.
+        // plus the forwarder's rare mid-walk internal-error abort).
         Err(err) => {
-            let status = errors::client_error_status(&err);
-            if status >= 500 {
-                meter.gateway_failure(
-                    status,
-                    forward_error_source(&err),
-                    ErrorClass::from(&err),
-                    stream,
-                );
-            } else {
-                meter.disarm();
-            }
+            meter.forward_failure(&err, &[]);
             service_error_response(outcome_ctx, err, e2ee)
         }
     }
@@ -1070,6 +1045,7 @@ pub(super) struct Meter {
     is_streaming: bool,
     /// Present only between arming the forward and reporting its outcome.
     armed: Option<MiddlewareReceiptJournal>,
+    pub(super) attempt_delivery: Option<JoinHandle<()>>,
 }
 
 impl Meter {
@@ -1117,36 +1093,9 @@ impl Meter {
                 status
             }
             Ok(MiddlewareForwardResult::AllFailed(forward)) => {
-                let status = errors::client_error_status(&forward.error);
-                meter.failed_attempts(&forward.failed_attempts, is_streaming);
-                if status >= 500 {
-                    meter.gateway_failure_at(
-                        forward.failed_attempts.len() as u32,
-                        None,
-                        status,
-                        forward_error_source(&forward.error),
-                        ErrorClass::from(&forward.error),
-                        is_streaming,
-                    );
-                } else {
-                    meter.disarm();
-                }
-                status
+                meter.forward_failure(&forward.error, &forward.failed_attempts)
             }
-            Err(err) => {
-                let status = errors::client_error_status(&err);
-                if status >= 500 {
-                    meter.gateway_failure(
-                        status,
-                        forward_error_source(&err),
-                        ErrorClass::from(&err),
-                        is_streaming,
-                    );
-                } else {
-                    meter.disarm();
-                }
-                status
-            }
+            Err(err) => meter.forward_failure(&err, &[]),
             // A streaming request never resolves to a buffered forward, and the
             // Stream case is handled by the caller; an unexpected value is recorded
             // as a gateway failure rather than dropped.
@@ -1464,9 +1413,7 @@ impl Meter {
         self.armed = Some(journal);
     }
 
-    /// The request's outcome is settled without a report — a client-
-    /// attributable failure that the usage pipeline deliberately does not
-    /// record. A later drop must then stay silent.
+    /// The terminal report has been scheduled or is owned by stream accounting.
     pub(super) fn disarm(&mut self) {
         self.armed = None;
     }
@@ -1482,6 +1429,7 @@ impl Meter {
         self.disarm();
         StreamReport {
             upstream_request_id,
+            attempt_delivery: self.attempt_delivery.take(),
             ..self.stream_report(Some(selected_route_id), attempt_index, upstream_status)
         }
     }
@@ -1494,6 +1442,7 @@ impl Meter {
     ) -> StreamReport {
         StreamReport {
             control: self.control.clone(),
+            attempt_delivery: None,
             request_id: self.request_id.clone(),
             endpoint: self.endpoint_path.to_string(),
             request_model: self.request_model.clone(),
@@ -1516,6 +1465,7 @@ impl Meter {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint_path.to_string(),
             status: 0,
+            terminal: false,
             duration_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms: None,
             is_streaming: Some(false),
@@ -1551,8 +1501,7 @@ impl Meter {
         error_class: Option<ErrorClass>,
         upstream_request_id: Option<String>,
     ) {
-        self.armed = None;
-        self.spawn(PostReport {
+        self.finish(PostReport {
             status,
             attempt_index: Some(attempt_index),
             upstream_request_id,
@@ -1573,8 +1522,7 @@ impl Meter {
         error_class: Option<ErrorClass>,
         upstream_request_id: Option<String>,
     ) {
-        self.armed = None;
-        self.spawn(PostReport {
+        self.finish(PostReport {
             status,
             upstream_request_id,
             is_streaming: Some(true),
@@ -1585,12 +1533,12 @@ impl Meter {
         });
     }
 
-    pub(super) fn failed_attempts(&self, attempts: &[FailedAttempt], is_streaming: bool) {
-        for (index, attempt) in attempts.iter().enumerate() {
-            if attempt.status == 0 {
-                continue;
-            }
-            self.spawn(PostReport {
+    pub(super) fn failed_attempts(&mut self, attempts: &[FailedAttempt], is_streaming: bool) {
+        let reports: Vec<_> = attempts
+            .iter()
+            .enumerate()
+            .filter(|(_, attempt)| attempt.status != 0)
+            .map(|(index, attempt)| PostReport {
                 status: attempt.status,
                 duration_ms: attempt.duration_ms,
                 is_streaming: Some(is_streaming),
@@ -1598,8 +1546,30 @@ impl Meter {
                 selected_route_id: Some(attempt.route_id.clone()),
                 upstream_request_id: attempt.upstream_request_id.clone(),
                 ..self.base()
-            });
+            })
+            .collect();
+        if !reports.is_empty() {
+            self.attempt_delivery = self
+                .control
+                .spawn_posts(self.attempt_delivery.take(), reports.into_iter());
         }
+    }
+
+    fn forward_failure(&mut self, err: &ServiceError, attempts: &[FailedAttempt]) -> u16 {
+        let status = errors::client_error_status(err);
+        let class = match err {
+            ServiceError::Upstream(UpstreamError::Routing(_)) => ErrorClass::ModelNotFound,
+            _ => ErrorClass::from(err),
+        };
+        self.failed_attempts(attempts, self.is_streaming);
+        self.gateway_failure_at(
+            attempts.len() as u32,
+            status,
+            forward_error_source(err, status),
+            class,
+            self.is_streaming,
+        );
+        status
     }
 
     fn gateway_failure(
@@ -1609,7 +1579,7 @@ impl Meter {
         class: ErrorClass,
         is_streaming: bool,
     ) {
-        self.gateway_failure_at(0, None, status, source, class, is_streaming);
+        self.gateway_failure_at(0, status, source, class, is_streaming);
     }
 
     // Like `gateway_failure`, but placed at an explicit attempt index. Control
@@ -1619,26 +1589,26 @@ impl Meter {
     fn gateway_failure_at(
         &mut self,
         attempt_index: u32,
-        selected_route_id: Option<&str>,
         status: u16,
         source: ErrorSource,
         class: ErrorClass,
         is_streaming: bool,
     ) {
-        self.armed = None;
-        self.spawn(PostReport {
+        self.finish(PostReport {
             status,
             is_streaming: Some(is_streaming),
             attempt_index: Some(attempt_index),
-            selected_route_id: selected_route_id.map(str::to_string),
             error_source: Some(source),
             error_message: Some(class),
             ..self.base()
         });
     }
 
-    fn spawn(&self, report: PostReport) {
-        spawn_report(&self.control, report);
+    fn finish(&mut self, mut report: PostReport) {
+        self.disarm();
+        report.terminal = true;
+        self.control
+            .spawn_posts(self.attempt_delivery.take(), std::iter::once(report));
     }
 }
 
@@ -1661,7 +1631,7 @@ impl Drop for Meter {
         let abandoned = journal.abandoned_attempts();
         self.failed_attempts(&abandoned, self.is_streaming);
         let in_flight = journal.in_flight();
-        self.spawn(PostReport {
+        self.finish(PostReport {
             status: 499,
             is_streaming: Some(self.is_streaming),
             attempt_index: Some(
@@ -1672,18 +1642,6 @@ impl Drop for Meter {
             selected_route_id: in_flight.map(|a| a.route_id),
             error_message: Some(ErrorClass::ClientDisconnected),
             ..self.base()
-        });
-    }
-}
-
-/// Fire-and-forget delivery of one usage report. Safe to call from a `Drop`
-/// that may run outside a Tokio runtime (shutdown teardown), where a bare
-/// `tokio::spawn` would panic and abort the process.
-fn spawn_report(control: &ControlClient, report: PostReport) {
-    let control = control.clone();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.spawn(async move {
-            control.consult_post(&report).await;
         });
     }
 }
@@ -1715,17 +1673,16 @@ fn reported_status(mapped: u16, upstream_status: u16, upstream_body: &[u8]) -> u
 // failure. The exceptions are ACI constraints that leave no eligible route or
 // current session — no prompt was forwarded, so attributing them to a provider
 // would report the gateway's policy decision as someone else's failure.
-fn forward_error_source(err: &ServiceError) -> ErrorSource {
+fn forward_error_source(err: &ServiceError, status: u16) -> ErrorSource {
     match err {
         ServiceError::UpstreamVerification(
             UpstreamVerificationError::NoEligibleAttestedRoute(_)
             | UpstreamVerificationError::NoEligibleAttestedSession(_),
         )
         | ServiceError::EarlyResponseKeysetExpired => ErrorSource::Gateway,
-        // A 500 is the gateway's own fault (keys, receipts, the session
-        // store): reported as an upstream's, it would count against the
-        // health of a route that did nothing wrong.
-        _ if errors::client_error_status(err) == 500 => ErrorSource::Gateway,
+        // A client-attributable rejection or a gateway internal error should
+        // stay out of route health signals.
+        _ if (400..=500).contains(&status) => ErrorSource::Gateway,
         _ => ErrorSource::Upstream,
     }
 }
@@ -1924,10 +1881,15 @@ mod tests {
             ServiceError::Keyset("seal failed".into()),
             ServiceError::NoReceiptKey,
         ] {
-            assert_eq!(forward_error_source(&own), ErrorSource::Gateway, "{own:?}");
+            assert_eq!(
+                forward_error_source(&own, errors::client_error_status(&own)),
+                ErrorSource::Gateway,
+                "{own:?}"
+            );
         }
+        let upstream = UpstreamError::Transport("refused".into()).into();
         assert_eq!(
-            forward_error_source(&UpstreamError::Transport("refused".into()).into()),
+            forward_error_source(&upstream, errors::client_error_status(&upstream)),
             ErrorSource::Upstream
         );
     }

@@ -405,14 +405,15 @@ and `errorSource: "control"`.
 
 ## `POST /consult/post`
 
-The gateway emits post-consult records for completed attempts and selected
-gateway failures. The JSON shape is camelCase:
+The gateway emits post-consult records for completed attempts and request
+outcomes. The JSON shape is camelCase:
 
 ```json
 {
   "requestId": "req_0123...",
   "endpoint": "/v1/chat/completions",
   "status": 200,
+  "terminal": true,
   "durationMs": 812,
   "ttftMs": 94,
   "isStreaming": true,
@@ -446,8 +447,9 @@ The stable fields are:
 | `requestId` | Always | Groups every attempt and summary record for one client request. |
 | `endpoint` | Always | Public inference path. |
 | `status` | Always | Status attributed to this attempt or summary. It can differ from the already-committed downstream HTTP status for a streaming failure. |
+| `terminal` | Always on gateways that support it | `true` on the last report for the request, `false` on every preceding report. Older gateways omit the field. |
 | `durationMs` | Always | Elapsed request time when the report was produced. |
-| `selectedRouteId` | Always, nullable | Route for an attempt. `null` identifies a request-level summary. |
+| `selectedRouteId` | Always, nullable | Route for an attempt, or `null` when no route is attributed. |
 | `requestModel` | Always | Public model requested by the client, or an empty string when absent. |
 | `prefixHash` | Optional | Echo of the pre-consult request feature. Use it as a cache-affinity key, not as proof of request content. |
 | `sessionKind` | When `prefixHash` is present | Echo of the pre-consult's `sessionKind`: `explicit` or `inferred`. |
@@ -467,6 +469,15 @@ A request can produce multiple reports. Count attempts only when
 `selectedRouteId` is non-null. A record with a null route and a non-empty
 `errorSource` is a request-level failure, such as a reported consult denial, a
 no-route result, or the summary after the candidate chain failed.
+
+Every request with an allowed pre-consult produces exactly one terminal report.
+The gateway sends it after all preceding attempt reports for the same
+`requestId`. It can be a buffered serving attempt, a stream settlement, or a
+request-level summary. An exhausted chain with no upstream response to relay
+ends with a summary, including client-attributable 4xx failures. When an
+upstream error response is relayed, its serving attempt is terminal. Control
+can release the concurrency reservation on the terminal report. Delivery is
+best effort and ingestion must remain idempotent because a send may be retried.
 
 Streaming and cancellation do not erase accounting:
 

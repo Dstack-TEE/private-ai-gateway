@@ -667,6 +667,18 @@ async fn wait_for_post(posts: &Arc<Mutex<Vec<Value>>>, pred: impl Fn(&Value) -> 
     panic!("no matching consult_post report captured");
 }
 
+async fn assert_post_sequence(posts: &Arc<Mutex<Vec<Value>>>, statuses: &[u16]) {
+    wait_for_post(posts, |r| r["terminal"] == true).await;
+    // Give any duplicate or incorrectly scheduled late report time to arrive.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let posts = posts.lock().unwrap();
+    assert_eq!(posts.len(), statuses.len(), "{posts:?}");
+    for (index, (report, status)) in posts.iter().zip(statuses).enumerate() {
+        assert_eq!(report["status"], *status, "{posts:?}");
+        assert_eq!(report["terminal"], index + 1 == statuses.len(), "{posts:?}");
+    }
+}
+
 /// Marker planted in upstream error text. It stands in for caller content a
 /// provider quotes back, and must reach the caller's response and nothing else.
 const CANARY: &str = "CANARY-7f3a";
@@ -991,7 +1003,7 @@ async fn cache_salt_survives_bridges_and_subpartitions_without_forwarding_caller
 #[tokio::test]
 async fn cache_salt_failover_uses_each_selected_providers_partition() {
     for stream in [false, true] {
-        let control_url = spawn_control(200, json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
+        let (control_url, posts) = spawn_control_capturing(200, json!({"allow":true,"userId":7,"organizationId":11,"workspaceId":13,
             "candidates":[{"routeId":"first:gpt-test","format":"openai"},{"routeId":"second:gpt-test","format":"openai"}]})).await;
         let (service, requests) = cache_salt_service(
             &[
@@ -1017,7 +1029,12 @@ async fn cache_salt_failover_uses_each_selected_providers_partition() {
             .handle_completion(&service, input)
             .await;
         assert_eq!(response.status(), 200);
+        if stream {
+            wait_for_post(&posts, |r| r["status"] == 503).await;
+            assert_eq!(posts.lock().unwrap()[0]["terminal"], false);
+        }
         let _ = raw_body(response).await;
+        assert_post_sequence(&posts, &[503, 200]).await;
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body["cache_salt"].as_str().unwrap().len(), 64);
@@ -1482,7 +1499,7 @@ async fn systemone_preserves_sanitized_inband_errors() {
 async fn streamed_success_hides_which_upstream_served_it() {
     // Same-format streaming is the path that relayed provider bytes verbatim,
     // so it gets its own end-to-end check rather than only a unit test.
-    let control_url = spawn_control(
+    let (control_url, posts) = spawn_control_capturing(
         200,
         json!({
             "allow": true,
@@ -1500,7 +1517,9 @@ async fn streamed_success_hides_which_upstream_served_it() {
     let mut input = chat_input();
     input.stream = true;
 
-    let (headers, body) = raw_body(mw.handle_completion(&service, input).await).await;
+    let response = mw.handle_completion(&service, input).await;
+    assert!(posts.lock().unwrap().is_empty());
+    let (headers, body) = raw_body(response).await;
     assert_no_upstream_headers(&headers);
     assert!(!body.contains("matched_stop"), "{body}");
     assert!(!body.contains("vendor-model-int"), "{body}");
@@ -1510,6 +1529,7 @@ async fn streamed_success_hides_which_upstream_served_it() {
     // Framing and content survive intact.
     assert!(body.contains(r#""content":"hi""#), "{body}");
     assert!(body.contains("data: [DONE]"), "{body}");
+    assert_post_sequence(&posts, &[200]).await;
 }
 
 #[tokio::test]
@@ -1814,6 +1834,7 @@ async fn empty_candidates_is_reported_as_a_control_failure() {
     assert_eq!(report["errorSource"], json!("control"));
     assert_eq!(report["userId"], json!(7));
     assert!(report["selectedRouteId"].is_null());
+    assert_post_sequence(&posts, &[404]).await;
 }
 
 #[tokio::test]
@@ -2112,6 +2133,7 @@ async fn buffered_success_transforms_injects_cost_and_meters() {
     assert_eq!(report["organizationId"], json!(11));
     assert_eq!(report["workspaceId"], json!(13));
     assert_eq!(report["isStreaming"], json!(false));
+    assert_post_sequence(&posts, &[200]).await;
 }
 
 #[tokio::test]
@@ -2762,6 +2784,7 @@ async fn total_forward_failure_reports_upstream_failure() {
     let report = wait_for_post(&posts, |r| r["errorSource"] == json!("upstream")).await;
     assert_eq!(report["status"].as_i64(), Some(503));
     assert_eq!(report["selectedRouteId"], Value::Null);
+    assert_post_sequence(&posts, &[502, 503]).await;
 }
 
 #[tokio::test]
@@ -2901,6 +2924,32 @@ async fn streaming_upstream_non_2xx_reports_the_serving_route() {
             .unwrap_or(true),
         "a real upstream attempt must not be tagged as a gateway failure"
     );
+    assert_post_sequence(&posts, &[503]).await;
+}
+
+#[tokio::test]
+async fn non_retryable_upstream_4xx_is_the_terminal_attempt() {
+    for stream in [false, true] {
+        let (url, posts) = spawn_control_capturing(
+            200,
+            json!({ "allow": true, "candidates": [
+                { "routeId": "a:gpt-test", "format": "openai" },
+                { "routeId": "b:gpt-test", "format": "openai" }
+            ] }),
+        )
+        .await;
+        let service =
+            build_service_with_upstream(400, br#"{"error":{"message":"bad input"}}"#.to_vec());
+        let mut input = chat_input();
+        input.stream = stream;
+        let (status, _, _) =
+            response_parts(middleware(url).handle_completion(&service, input).await).await;
+        assert_eq!(status, 400);
+        assert_post_sequence(&posts, &[400]).await;
+        let report = &posts.lock().unwrap()[0];
+        assert_eq!(report["selectedRouteId"], "a:gpt-test");
+        assert_eq!(report["attemptIndex"], 0);
+    }
 }
 
 #[tokio::test]
@@ -3185,24 +3234,19 @@ async fn a_request_the_route_cannot_carry_is_a_400_and_no_provider_failure() {
             )
             .await;
             assert_eq!(status, expected, "stream={stream}");
-            if expected == 200 {
-                wait_for_post(&posts, |r| r["selectedRouteId"] == json!("plain:gpt-test")).await;
-            } else {
+            if expected == 400 {
                 assert_eq!(body["error"]["type"], json!("invalid_request_error"));
                 assert!(forwarded.lock().unwrap().is_empty());
             }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let posts = posts.lock().unwrap();
-            // A client 4xx is not recorded at all; a served request reports
-            // only the route that served it.
-            assert_eq!(
-                posts.len(),
-                usize::from(expected == 200),
-                "stream={stream}: {posts:?}"
-            );
-            assert!(posts
-                .iter()
-                .all(|r| r["selectedRouteId"] != json!("invalid-a:gpt-test")));
+            assert_post_sequence(&posts, &[expected]).await;
+            let report = &posts.lock().unwrap()[0];
+            if expected == 400 {
+                assert!(report["selectedRouteId"].is_null());
+                assert_eq!(report["errorSource"], "gateway");
+                assert_eq!(report["errorMessage"], "request_shaping_failed");
+            } else {
+                assert_eq!(report["selectedRouteId"], "plain:gpt-test");
+            }
         }
     }
 }
@@ -3223,8 +3267,8 @@ async fn a_real_failure_outranks_a_tee_ineligible_route_in_either_order() {
             { "routeId": "missing-a:gpt-test", "format": "openai" }
         ]),
     ] {
-        let control_url =
-            spawn_control(200, json!({ "allow": true, "candidates": candidates })).await;
+        let (control_url, posts) =
+            spawn_control_capturing(200, json!({ "allow": true, "candidates": candidates })).await;
         let mw = middleware(control_url);
         let (service, _) = build_tee_aware_service();
         let mut input = chat_input();
@@ -3235,6 +3279,11 @@ async fn a_real_failure_outranks_a_tee_ineligible_route_in_either_order() {
             status, 404,
             "the routing failure must outrank the ineligible route"
         );
+        assert_post_sequence(&posts, &[502, 404]).await;
+        let reports = posts.lock().unwrap();
+        assert_eq!(reports[0]["selectedRouteId"], "missing-a:gpt-test");
+        assert!(reports[1]["selectedRouteId"].is_null());
+        assert_eq!(reports[1]["errorMessage"], "model_not_found");
     }
 }
 
@@ -4300,15 +4349,8 @@ async fn client_disconnect_before_upstream_response_reports_499_with_route() {
         .unwrap_or(true));
     assert_eq!(report["errorMessage"], json!("client_disconnected"));
 
-    // Exactly one report for this request: the drop must not race a second row.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    let count = posts
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r["requestId"] == json!("req-1"))
-        .count();
-    assert_eq!(count, 1, "the guard fires once, not per poll");
+    assert_eq!(report["requestId"], "req-1");
+    assert_post_sequence(&posts, &[499]).await;
 }
 
 #[tokio::test]
@@ -4355,16 +4397,17 @@ async fn upstream_timeout_is_recorded_as_504_per_attempt_and_summary() {
     .await;
     assert_eq!(summary["errorSource"], json!("upstream"));
     assert_eq!(summary["selectedRouteId"], Value::Null);
+    assert_post_sequence(&posts, &[504, 504, 504]).await;
 }
 
-// A mock upstream that waits before returning a normal streaming success —
-// long enough for the pre-first-byte keep-alive to have committed the 200.
-struct SlowStreamUpstream {
+// The first route times out immediately. The fallback waits long enough for
+// the keep-alive to commit HTTP 200 before returning a normal SSE response.
+struct SlowFallbackUpstream {
     delay: Duration,
 }
 
 #[async_trait]
-impl UpstreamBackend for SlowStreamUpstream {
+impl UpstreamBackend for SlowFallbackUpstream {
     fn response_protocol(
         &self,
         _req: &private_ai_gateway::aci::upstream::PreparedUpstreamRequest,
@@ -4394,9 +4437,12 @@ impl UpstreamBackend for SlowStreamUpstream {
     }
     async fn forward_stream_verified_prepared(
         &self,
-        _req: PreparedUpstreamRequest,
+        req: PreparedUpstreamRequest,
         _event: &UpstreamVerifiedEvent,
     ) -> Result<UpstreamStreamResponse, UpstreamError> {
+        if req.request.target_route_id.as_deref() == Some("openai:first") {
+            return Err(UpstreamError::Timeout("read timeout".into()));
+        }
         tokio::time::sleep(self.delay).await;
         let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
         let mut headers = HashMap::new();
@@ -4800,21 +4846,21 @@ async fn assert_early_keepalive_rejects_expired_admission(delay: AdmissionDelay,
 }
 
 #[tokio::test]
-async fn early_keepalive_commits_200_before_upstream_headers() {
-    // The upstream takes longer than the keep-alive interval to answer. The
-    // gateway must commit a 200 SSE body first, heartbeat, then splice in the
-    // real stream once it arrives — and still meter the request as a success.
+async fn early_keepalive_commits_200_while_waiting_for_a_fallback() {
     let (control_url, posts) = spawn_control_capturing(
         200,
         json!({
             "allow": true,
-            "candidates": [{ "routeId": "openai:gpt", "format": "openai" }],
+            "candidates": [
+                { "routeId": "openai:first", "format": "openai" },
+                { "routeId": "openai:fallback", "format": "openai" }
+            ],
             "pricing": { "inputCostPerToken": "0", "outputCostPerToken": "0" }
         }),
     )
     .await;
     let mw = middleware_with_keepalive(control_url, 100);
-    let service = build_service_with_backend(Arc::new(SlowStreamUpstream {
+    let service = build_service_with_backend(Arc::new(SlowFallbackUpstream {
         delay: Duration::from_millis(400),
     }));
     let mut input = chat_input();
@@ -4835,7 +4881,9 @@ async fn early_keepalive_commits_200_before_upstream_headers() {
 
     let report = wait_for_post(&posts, |r| r["status"].as_i64() == Some(200)).await;
     assert_eq!(report["isStreaming"], json!(true));
+    assert_eq!(report["selectedRouteId"], "openai:fallback");
     assert!(report["ttftMs"].as_i64().unwrap_or(0) >= 400);
+    assert_post_sequence(&posts, &[504, 200]).await;
 }
 
 #[tokio::test]
@@ -4873,16 +4921,7 @@ async fn early_keepalive_turns_forward_failure_into_in_band_error() {
     })
     .await;
     assert_eq!(summary["selectedRouteId"], Value::Null);
-    // No client-disconnect row: the client stayed, the upstream failed.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(
-        !posts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|r| r["status"].as_i64() == Some(499)),
-        "a slow upstream failure is not a client disconnect"
-    );
+    assert_post_sequence(&posts, &[504, 504]).await;
 }
 
 #[tokio::test]
@@ -5084,6 +5123,7 @@ async fn mid_failover_disconnect_reports_the_finished_attempts_too() {
     let cancelled = wait_for_post(&posts, |r| r["status"].as_i64() == Some(499)).await;
     assert_eq!(cancelled["selectedRouteId"], json!("b:gpt-test"));
     assert_eq!(cancelled["attemptIndex"], json!(1));
+    assert_post_sequence(&posts, &[504, 499]).await;
 }
 
 // Streams an immediate 429 for every attempt — the same-route capacity-retry
@@ -5321,15 +5361,7 @@ async fn deployment_streaming_usage_reports_latest_partial_once_on_disconnect() 
         requests.lock().unwrap()[0]["stream_options"],
         json!({"include_usage":true,"continuous_usage_stats":true})
     );
-    assert_eq!(
-        posts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|r| r["status"] == json!(499))
-            .count(),
-        1
-    );
+    assert_post_sequence(&posts, &[499]).await;
 }
 
 fn assert_admitted_receipt(
@@ -6244,7 +6276,16 @@ async fn typed_pipeline_meters_multiline_data_and_preserves_named_failures() {
             }),
         )
         .await;
-        let (service, _) = build_recording_service(200, wire.to_vec(), "text/event-stream");
+        let upstream_format = match *format {
+            "anthropic" => ProviderFormat::Anthropic,
+            _ => ProviderFormat::Openai,
+        };
+        let (service, _) = build_recording_service_with_format(
+            200,
+            wire.to_vec(),
+            "text/event-stream",
+            upstream_format,
+        );
         let mut input = chat_input();
         input.stream = true;
         let (_, body) = raw_body(
@@ -6272,11 +6313,7 @@ async fn typed_pipeline_meters_multiline_data_and_preserves_named_failures() {
             assert!(body.contains("\"error\""), "{body}");
             assert!(!report.to_string().contains("private failure"), "{report}");
         }
-        assert_eq!(
-            posts.lock().unwrap().len(),
-            1,
-            "one response owner settles once"
-        );
+        assert_post_sequence(&posts, &[*expected_status]).await;
     }
 }
 
@@ -6329,8 +6366,7 @@ async fn client_disconnect_after_early_commit_while_forward_pending_preserves_cl
     assert!(report["errorSource"].is_null());
     assert!(report["ttftMs"].is_null());
     assert!(report["usage"].is_null());
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(posts.lock().unwrap().len(), 1);
+    assert_post_sequence(&posts, &[499]).await;
 }
 
 #[tokio::test]
@@ -6374,13 +6410,14 @@ async fn buffered_non_success_reports_filtered_source_usage() {
         .await;
     let (status, _, _) = response_parts(response).await;
     assert_eq!(status, 429);
-    let report = wait_for_post(&posts, |_| true).await;
+    let report = wait_for_post(&posts, |r| r["terminal"] == true).await;
     assert_eq!(report["status"], 429);
     assert_eq!(
         report["usage"],
         json!({"prompt_tokens":2,"completion_tokens":3})
     );
     assert!(report["errorSource"].is_null());
+    assert_post_sequence(&posts, &[429, 429]).await;
 }
 
 const CHAT_SUCCESS_BODY: &[u8] = br#"{"id":"7bdaaade50304502b0fe7e66e9a4bec2","object":"chat.completion","model":"vendor-model-int","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;

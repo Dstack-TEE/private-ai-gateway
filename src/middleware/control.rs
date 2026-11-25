@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::task::JoinHandle;
 
 use super::config::MiddlewareConfig;
 use super::request_features::RequestFeatures;
@@ -231,6 +232,26 @@ impl ControlClient {
         if let Err(err) = self.send_idempotent(build).await {
             tracing::error!(error = %err, "consult_post request failed");
         }
+    }
+
+    /// Deliver reports in request order without waiting in the response path.
+    /// Stream settlement can follow a batch already started at route selection.
+    pub(super) fn spawn_posts(
+        &self,
+        preceding: Option<JoinHandle<()>>,
+        reports: impl Iterator<Item = PostReport> + Send + 'static,
+    ) -> Option<JoinHandle<()>> {
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let control = self.clone();
+        Some(handle.spawn(async move {
+            if let Some(preceding) = preceding {
+                // The terminal is still needed if an earlier delivery task failed.
+                let _ = preceding.await;
+            }
+            for report in reports {
+                control.consult_post(&report).await;
+            }
+        }))
     }
 
     /// Fetch a model catalog from the control plane and relay it verbatim.

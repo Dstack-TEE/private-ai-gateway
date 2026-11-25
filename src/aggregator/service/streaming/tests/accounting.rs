@@ -56,6 +56,7 @@ impl Control {
     fn report(&self) -> StreamReport {
         StreamReport {
             control: self.client.clone(),
+            attempt_delivery: None,
             request_id: "fixture-request".into(),
             endpoint: "/v1/chat/completions".into(),
             request_model: "fixture".into(),
@@ -200,6 +201,8 @@ async fn only_an_exact_dispatched_terminal_rescues_a_read_timeout() {
         while stream.next().await.is_some() {}
         let report = control.captured().await;
         assert_eq!(report["status"], status, "{protocol:?} {wire:?}");
+        assert_eq!(report["terminal"], true);
+        assert_eq!(control.reports.lock().unwrap().len(), 1);
         if status == 504 {
             assert_eq!(report["errorMessage"], "upstream_timeout");
         }
@@ -231,6 +234,7 @@ async fn typed_accounting_preserves_eof_boundaries_and_inband_failures_on_every_
         let bytes: Vec<_> = output.into_iter().flat_map(Result::unwrap).collect();
         let report = control.captured().await;
         assert_eq!(report["status"], status, "{protocol:?} {wire:?}");
+        assert_eq!(report["terminal"], true);
         assert_eq!(report["errorMessage"].as_str(), class, "{protocol:?} {wire:?}");
         assert!(!report.to_string().contains("CANARY"));
         if status == 200 && protocol == Chat {

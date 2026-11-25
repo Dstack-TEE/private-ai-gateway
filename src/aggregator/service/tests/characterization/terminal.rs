@@ -202,21 +202,16 @@ async fn candidate_format_must_match_the_configured_upstream_protocol() {
             let wire = snapshot["wire"].as_str().unwrap();
             if matches {
                 assert!(wire.contains("ok"), "{snapshot}");
+                assert_eq!(snapshot["reports"].as_array().unwrap().len(), 1);
+                assert_eq!(snapshot["reports"][0]["status"], 200);
+                assert_eq!(snapshot["reports"][0]["selectedRouteId"], "fixture:model");
             } else {
                 assert!(snapshot["receipt"].is_null(), "{snapshot}");
                 assert!(!wire.contains("message_stop"), "{snapshot}");
                 assert!(!wire.contains("[DONE]"), "{snapshot}");
                 assert!(!wire.contains("ATTACKER OUTPUT"), "{snapshot}");
+                assert_protocol_rejection_reports(&snapshot);
             }
-            assert_eq!(snapshot["reports"].as_array().unwrap().len(), 1);
-            assert_eq!(
-                snapshot["reports"][0]["status"],
-                if matches { 200 } else { 502 }
-            );
-            assert_eq!(
-                snapshot["reports"][0]["selectedRouteId"], "fixture:model",
-                "{snapshot}"
-            );
         }
     }
 }
@@ -388,15 +383,21 @@ async fn mismatching_evidence_rejects_a_non_chat_operation() {
     .await;
     assert_eq!(snapshot["status"], 404, "{snapshot}");
     assert!(snapshot["receipt"].is_null(), "{snapshot}");
-    assert_eq!(snapshot["reports"][0]["status"], 502, "{snapshot}");
-    assert_eq!(
-        snapshot["reports"][0]["selectedRouteId"], "fixture:model",
-        "{snapshot}"
-    );
+    assert_protocol_rejection_reports(&snapshot);
     assert!(!snapshot["wire"]
         .as_str()
         .unwrap()
         .contains("response.completed"));
+}
+
+fn assert_protocol_rejection_reports(snapshot: &Value) {
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 2, "{snapshot}");
+    assert_eq!(reports[0]["status"], 502);
+    assert_eq!(reports[0]["selectedRouteId"], "fixture:model");
+    assert_eq!(reports[1]["status"], 404);
+    assert!(reports[1]["selectedRouteId"].is_null());
+    assert_eq!(reports[1]["errorMessage"], "model_not_found");
 }
 
 #[tokio::test]
@@ -456,9 +457,7 @@ async fn backend_protocol_declarations_accept_only_the_matching_format() {
                 } else {
                     assert_eq!(snapshot["status"], 404, "{path}: {snapshot}");
                     assert!(snapshot["receipt"].is_null());
-                    assert_eq!(snapshot["reports"].as_array().unwrap().len(), 1);
-                    assert_eq!(snapshot["reports"][0]["status"], 502);
-                    assert_eq!(snapshot["reports"][0]["selectedRouteId"], "fixture:model");
+                    assert_protocol_rejection_reports(&snapshot);
                 }
             }
         }
