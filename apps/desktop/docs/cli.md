@@ -33,10 +33,13 @@ at any time.
 
 On supported Linux and macOS CLI installations, `pap start` registers the
 backend with systemd or launchd. Protection resumes after login and crashes.
-Automatic registration skips shells with agent configuration or proxy
-overrides. `pap service enable` uses the service manager's environment.
-If the backend started directly while the manager was unavailable, `pap start`
-or `pap service enable` can move it under its already enabled login service.
+Automatic registration skips shells with agent or proxy overrides. When that
+happens, the first `pap start` names the variables and shows `pap service enable`
+as the opt-in. Configure those variables in the service manager's environment
+first, then run `pap service enable`. PAP path overrides keep automatic supervision
+off and require the default PAP paths for `pap service enable`. If the backend
+started directly while the manager was unavailable, `pap start` or
+`pap service enable` can move it under its already enabled login service.
 `pap service disable` stops protection, restores agents, and turns off
 supervision. The desktop app has its own Open at Login. On Windows or without
 a user service manager, run `pap service start` after restarting the machine

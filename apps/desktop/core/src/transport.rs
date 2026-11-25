@@ -28,6 +28,17 @@ pub fn endpoint_path() -> io::Result<PathBuf> {
     platform::endpoint_path(&data_dir()?, platform::SOCKET_FILE)
 }
 
+/// Resolve a Unix endpoint for an explicit data and runtime directory.
+/// Callers that own a sandbox can use this without changing process-global
+/// environment variables.
+#[cfg(unix)]
+pub fn endpoint_path_for(
+    data_dir: &std::path::Path,
+    runtime_dir: &std::path::Path,
+) -> io::Result<PathBuf> {
+    platform::endpoint_path_for(data_dir, platform::SOCKET_FILE, runtime_dir)
+}
+
 /// The endpoint where a 0.1.4 to 0.2 beta backend answers its NDJSON protocol.
 pub fn legacy_endpoint_path() -> io::Result<PathBuf> {
     platform::endpoint_path(&data_dir()?, platform::LEGACY_SOCKET_FILE)

@@ -77,14 +77,17 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
         Action::Start { profile, timeout } => {
-            let state = start(&client, profile.as_deref(), *timeout)?;
+            let mut state = start(&client, profile.as_deref(), *timeout)?;
             // Protection the user turned on goes on across logins and crashes
             // until they stop it: the backend moves under the service manager
             // and resumes the session there.
-            let registration =
-                desktop_core::supervisor::automatic(agent_bridge::agents::environment_overridden())
-                    .then(|| desktop_core::supervisor::enable().ok())
-                    .flatten();
+            let agent_environment_overrides = agent_bridge::agents::environment_overrides();
+            let blockers =
+                desktop_core::supervisor::automatic_blockers(&agent_environment_overrides);
+            let registration = blockers
+                .is_eligible()
+                .then(|| desktop_core::supervisor::enable().ok())
+                .flatten();
             if let Some(newly_enabled) = registration {
                 let moved = client.handoff_to_supervisor()?;
                 if !global.json && (newly_enabled || moved) {
@@ -96,6 +99,19 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
                     state
                 }
             } else {
+                if matches!(
+                    &blockers,
+                    desktop_core::supervisor::AutomaticBlockers::Environment(_)
+                ) && !desktop_core::supervisor::enabled()
+                {
+                    if let Some(notice) = notice_if_unowned(blockers, false) {
+                        if let Some(notice) =
+                            apply_supervision_notice(global.json, &mut state, notice)
+                        {
+                            eprintln!("{notice}");
+                        }
+                    }
+                }
                 state
             }
         }
@@ -214,6 +230,30 @@ fn warn_deprecated_os_flags(action: &Action) {
     if require_production_os {
         warning("--require-production-os");
     }
+}
+
+fn apply_supervision_notice(
+    json_output: bool,
+    state: &mut Value,
+    notice: String,
+) -> Option<String> {
+    if json_output {
+        if let Some(object) = state.as_object_mut() {
+            object.insert("supervisionNotice".into(), json!(notice));
+        }
+        None
+    } else {
+        Some(notice)
+    }
+}
+
+fn notice_if_unowned(
+    blockers: desktop_core::supervisor::AutomaticBlockers,
+    owned_registration: bool,
+) -> Option<String> {
+    (!owned_registration)
+        .then(|| desktop_core::supervisor::automatic_skip_notice(blockers))
+        .flatten()
 }
 
 /// `status --watch`: the current state, then each change. Human output skips
@@ -1388,5 +1428,27 @@ mod tests {
                 crate::Cli::try_parse_from(["private-ai-proxy", mode, "--yes", "status"]).unwrap();
             assert!(confirm(&approved.global, "Confirm?").is_ok());
         }
+    }
+
+    #[test]
+    fn start_supervision_notice_uses_stderr_for_human_output_and_json_for_machine_output() {
+        let notice = "Automatic supervision was skipped because CODEX_HOME is set. Run `pap service enable` to use the service manager's environment; configure those variables there.";
+        let mut json_state = json!({"status": "verified"});
+        assert!(apply_supervision_notice(true, &mut json_state, notice.into()).is_none());
+        assert_eq!(json_state["supervisionNotice"], notice);
+
+        let mut human_state = json!({"status": "verified"});
+        assert_eq!(
+            apply_supervision_notice(false, &mut human_state, notice.into()).as_deref(),
+            Some(notice)
+        );
+        assert!(human_state.get("supervisionNotice").is_none());
+    }
+
+    #[test]
+    fn owned_supervision_does_not_emit_a_skip_notice() {
+        let blockers =
+            desktop_core::supervisor::AutomaticBlockers::Environment(vec!["HTTPS_PROXY"]);
+        assert!(notice_if_unowned(blockers, true).is_none());
     }
 }
