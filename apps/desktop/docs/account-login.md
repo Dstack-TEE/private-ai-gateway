@@ -6,7 +6,7 @@ Phala and RedPill, opening their official dashboard in the system browser;
 Phala keys are created under Private AI → API Keys. Account sign-in continues
 to use the existing official authorization flow. Provider buttons with their icons stay in the form
 content. Phala completes automatically after browser authorization, which already
-selects its workspace. RedPill displays a workspace selector and Save,
+selects its workspace. RedPill displays a standard workspace selector and Save,
 including when only one workspace is available. An active API subscription
 adds a billing method selector with Subscription selected by default. Failed persistence
 keeps the authorization available through Retry, without signing in again.
