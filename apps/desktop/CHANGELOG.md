@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.10.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0...desktop-v0.10.0) (2026-11-25)
+
+Private AI Proxy 0.10.0 keeps protection on across logins, reboots and crashes, and keeps coding agents connected while you change their settings.
+
+### Features
+
+* **Protection survives logins, reboots and crashes.** CLI-only Linux packages, npm and script installs on Linux and macOS, the Linux desktop packages and the macOS app now run the backend under the user's service manager (a systemd user unit or a launchd agent that Private AI Proxy owns). It starts at login, restarts after a crash, and resumes the protection session without any command. The first `pap start` or app launch turns it on and says so; turn it off in Settings or with `pap service disable`. On Windows, Open at Login is turned on once and the app restarts a crashed backend while it runs; the Mac App Store build restarts a crashed backend while the app runs ([#591](https://github.com/Dstack-TEE/private-ai-gateway/pull/591), [#635](https://github.com/Dstack-TEE/private-ai-gateway/pull/635)).
+* **`pap agents connect` starts protection.** With protection off it asks to start it (or starts it with `--yes`) instead of saving an inactive connection; `--dry-run` and `--non-interactive` never start anything ([#591](https://github.com/Dstack-TEE/private-ai-gateway/pull/591)).
+* **OpenCode 2.** The connection writes OpenCode 2's native `providers` configuration when your file uses it, understands object-form `model` and `policies`, and accepts comments in `opencode.json` ([#631](https://github.com/Dstack-TEE/private-ai-gateway/pull/631), [#637](https://github.com/Dstack-TEE/private-ai-gateway/pull/637)).
+
+### Bug Fixes
+
+* **Changing the default model no longer disconnects an agent.** Picking another model inside Codex, Claude Code, OpenCode, Hermes, OpenClaw, Pi, Oh My Pi or DeepSeek Harness keeps the connection; picking another provider's model is shown as not routed through the proxy instead of revoking access. Claude Code's `/model` choice is now the selection the connection uses ([#631](https://github.com/Dstack-TEE/private-ai-gateway/pull/631)).
+* **Agents can no longer be routed around the proxy while shown as connected.** Provider switches (`CLAUDE_CODE_USE_BEDROCK` and similar), OpenCode policies and per-model endpoints, Hermes fallback providers and profiles, Oh My Pi provider filters and OpenClaw per-agent models are checked ([#631](https://github.com/Dstack-TEE/private-ai-gateway/pull/631)).
+* **Stop and Disconnect restore what you had.** The original default model comes back unless you chose another provider's model; comments in Codex and OpenCode configs are kept; edits made while protection was off are kept; tokens are revoked only on Disconnect, so a stop and start no longer breaks running agents ([#631](https://github.com/Dstack-TEE/private-ai-gateway/pull/631), [#637](https://github.com/Dstack-TEE/private-ai-gateway/pull/637), [#639](https://github.com/Dstack-TEE/private-ai-gateway/pull/639)).
+* **App updates no longer disconnect agents.** Agent configurations reference a helper path that survives updates ([#631](https://github.com/Dstack-TEE/private-ai-gateway/pull/631)).
+* **`pap start` says when it cannot keep protection on at login**, naming the environment variables that prevented it ([#634](https://github.com/Dstack-TEE/private-ai-gateway/pull/634)).
+* **Gateway verification checks the dstack event log more strictly.** Every RTMR3 runtime event must match the quoted measurements, following dstack's own verifier, for both version 1 and version 2 event logs ([#531](https://github.com/Dstack-TEE/private-ai-gateway/pull/531)).
+* **Verifier reads are bounded** for the remaining attestation and artifact responses ([#530](https://github.com/Dstack-TEE/private-ai-gateway/pull/530)).
+
+### Upgrade notes
+
+* If you ran `pap service enable` from the desktop app's CLI on 0.10.0-beta.1, run `pap service disable` before updating, or remove that registration afterwards (see the [CLI distribution guide](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/apps/desktop/docs/cli-distribution.md)).
+* Run `pap service disable` before uninstalling a supervised CLI or app.
+* A few formatting details of agent files are not kept when connecting, stopping and disconnecting: Claude Code's `env` object, Codex's Windows line endings and a one-line OpenCode `model` object (see [Configuration](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/apps/desktop/docs/configuration.md), [#642](https://github.com/Dstack-TEE/private-ai-gateway/pull/642)).
+
+### Verification
+
+Checked on the published 0.10.0-beta.4: the live end-to-end suite for every supported agent and OpenCode 2; the Mac App Store package validation; and, in Ubuntu 24.04 containers with a real systemd user manager, CLI and desktop packages through first start, `kill -9`, orderly restart, reboot with the app closed, opt-out, stop and disconnect restoration, and upgrade from the previous beta. Not exercised: a signed macOS DMG login item and a Windows reboot outside CI, and the signed in-app updater path.
+
 ## [0.10.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.3...desktop-v0.10.0-beta.4) (2026-11-25)
 
 
