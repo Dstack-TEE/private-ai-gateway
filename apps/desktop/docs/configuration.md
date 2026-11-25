@@ -279,6 +279,12 @@ unlocked OS keychain for a process running as you.
   `managed_config.toml` is outside this integration. Oh My Pi project config
   and non-default roles such as `smol`, `slow`, `plan` and `commit` are not
   routed by this connection.
+- **Agent file formatting.** Connecting, stopping and disconnecting keep the
+  comments and layout of OpenCode and Codex files. A few formatting details
+  are not kept: Claude Code's `settings.json` has its `env` object rewritten
+  one key per line, Codex's `config.toml` has Windows (CRLF) line endings
+  rewritten as LF, and an OpenCode object-form `model` written on one line is
+  restored across several lines.
 - Clients do not check whether the gateway runs a production or development dstack
   OS image. A development image permits operator access to the gateway. Users who
   need assurance about the OS image should verify the quote, event log, and VM
