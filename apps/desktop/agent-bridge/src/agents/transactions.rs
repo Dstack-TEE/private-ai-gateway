@@ -1,5 +1,20 @@
 use super::*;
 
+fn catalog_model_ids(agent: Agent, catalog: Option<&Catalog>) -> Vec<String> {
+    if !matches!(
+        agent,
+        Agent::Codex | Agent::ClaudeCode | Agent::Hermes | Agent::Dsh
+    ) {
+        return Vec::new();
+    }
+    catalog
+        .into_iter()
+        .flat_map(|catalog| &catalog.models)
+        .filter(|model| model.supports(agent.surface()))
+        .map(|model| model.id().to_owned())
+        .collect()
+}
+
 impl Projector {
     /// Apply the previewed edits under the cross-process config lock.
     pub fn apply(
@@ -128,11 +143,19 @@ impl Projector {
                     continue;
                 }
                 let status = self.status(agent, &store, catalog);
-                if !record.suspended && record.attention.is_some() && status.authorized {
-                    if let Some(record) = store.get_mut(agent.id()) {
-                        record.attention = None;
-                    }
+                let clear_attention =
+                    !record.suspended && record.attention.is_some() && status.authorized;
+                if clear_attention {
                     record.attention = None;
+                }
+                // Journals from before catalog membership was recorded need
+                // the IDs even when the catalog revision has not changed.
+                let backfilled = record.catalog_model_ids.is_empty() && {
+                    record.catalog_model_ids = catalog_model_ids(agent, catalog);
+                    !record.catalog_model_ids.is_empty()
+                };
+                if clear_attention || backfilled {
+                    store.insert(agent.id().to_owned(), record.clone());
                     self.save_store(&store)?;
                 }
                 let result = if record.cleanup_pending {
@@ -421,17 +444,7 @@ impl Projector {
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
         next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
-        if matches!(
-            agent,
-            Agent::Codex | Agent::ClaudeCode | Agent::Hermes | Agent::Dsh
-        ) {
-            next_record.catalog_model_ids = catalog
-                .into_iter()
-                .flat_map(|catalog| &catalog.models)
-                .filter(|model| model.supports(agent.surface()))
-                .map(|model| model.id().to_owned())
-                .collect();
-        }
+        next_record.catalog_model_ids = catalog_model_ids(agent, catalog);
         next_record.endpoint = Some(self.endpoint.clone());
         next_record.empty_original = match &text {
             _ if agent.format() != Format::YamlList => None,

@@ -1132,7 +1132,9 @@ pub(super) fn restore(
             _ => {
                 routing_unchanged
                     && matches!(current, Some(ConfigValue::Str(id))
-                        if field.holds(current) || record.catalog_model_ids.contains(id))
+                        if field.holds(current)
+                            || record.catalog_model_ids.is_empty()
+                            || record.catalog_model_ids.contains(id))
             }
         }
     };

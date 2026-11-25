@@ -297,6 +297,82 @@ fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
 }
 
 #[test]
+fn legacy_bare_model_journals_restore_an_edited_pap_model_without_reconcile() {
+    let catalog = catalog();
+    for agent in [Agent::Codex, Agent::ClaudeCode] {
+        let sandbox = legacy_bare_model_journal(agent, "offline", &catalog);
+        edit_bare_model(&sandbox, agent, "phala/qwen");
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+            Some("native-original")
+        );
+    }
+}
+
+#[test]
+fn reconcile_backfills_legacy_bare_model_journals_at_the_same_catalog_revision() {
+    let catalog = catalog();
+    for agent in [Agent::Codex, Agent::ClaudeCode] {
+        for (case, selected, expected) in [
+            ("catalog", "phala/qwen", "native-original"),
+            ("external", "native-new", "native-new"),
+        ] {
+            let sandbox = legacy_bare_model_journal(agent, case, &catalog);
+            edit_bare_model(&sandbox, agent, "native-before-reconcile");
+            let path = agent.config_path(&sandbox.home, false);
+            let before = fs::read_to_string(&path).unwrap();
+            assert!(sandbox
+                .projector
+                .reconcile(Some(&catalog))
+                .unwrap()
+                .is_empty());
+            let store = sandbox.projector.load_store().unwrap();
+            assert!(store[agent.id()]
+                .catalog_model_ids
+                .iter()
+                .any(|id| id == "phala/qwen"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+            edit_bare_model(&sandbox, agent, selected);
+            assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+            assert_eq!(
+                doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+}
+
+fn legacy_bare_model_journal(agent: Agent, case: &str, catalog: &Catalog) -> Sandbox {
+    let sandbox = sandbox(&format!("legacy-bare-model-{}-{case}", agent.id()));
+    let original = match agent {
+        Agent::Codex => "model = \"native-original\"\n",
+        Agent::ClaudeCode => r#"{"model":"native-original"}"#,
+        _ => unreachable!(),
+    };
+    write(&agent.config_path(&sandbox.home, false), original);
+    assert!(apply_connect(&sandbox, agent, catalog, &claude_options()).authorized);
+    let path = sandbox.projector.store_path();
+    let mut store: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let record = store[agent.id()].as_object_mut().unwrap();
+    assert_eq!(record["catalog_revision"], catalog.revision);
+    assert!(record.remove("catalog_model_ids").is_some());
+    write(&path, &store.to_string());
+    sandbox
+}
+
+fn edit_bare_model(sandbox: &Sandbox, agent: Agent, selected: &str) {
+    let mut config = doc(sandbox, agent);
+    config.set_str(&["model"], selected).unwrap();
+    write(
+        &agent.config_path(&sandbox.home, false),
+        &config.render().unwrap(),
+    );
+}
+
+#[test]
 fn reconnect_after_endpoint_drift_preserves_original_value() {
     let sandbox = sandbox("reconnect-endpoint-drift");
     let agent = Agent::ClaudeCode;
