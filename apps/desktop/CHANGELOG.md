@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.3...desktop-v0.10.0-beta.4) (2026-11-25)
+
+
+### Bug Fixes
+
+* **desktop:** keep comments when editing Codex config ([#639](https://github.com/Dstack-TEE/private-ai-gateway/issues/639)) ([297f38a](https://github.com/Dstack-TEE/private-ai-gateway/commit/297f38a51cfbff2e58f4996e49b55b66de78d4dd))
+
 ## [0.10.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.2...desktop-v0.10.0-beta.3) (2026-11-25)
 
 
