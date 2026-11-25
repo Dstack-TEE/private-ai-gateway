@@ -721,9 +721,12 @@ pub(super) fn project(
         {
             return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));
         }
-        let recorded = still_ours.or_else(|| prior.iter().find(|owned| owned.path == field.path));
-        let previous = match recorded {
+        let previous = match still_ours {
             Some(owned) => owned.previous.clone(),
+            None if prior.iter().any(|owned| owned.path == field.path) => prior
+                .iter()
+                .find(|owned| owned.path == field.path)
+                .and_then(|owned| owned.previous.clone()),
             None => match current.clone() {
                 Some(held) if sensitive => {
                     let entry = secret_entry(agent, &field.path);
@@ -736,17 +739,6 @@ pub(super) fn project(
                 Some(held) => Some(Previous::Plain(held)),
                 None => None,
             },
-        };
-        let source = if agent == Agent::OpenCode
-            && path == OPENCODE_MODEL.path
-            && matches!(&previous, Some(Previous::Plain(ConfigValue::Json(value))) if value.is_object())
-        {
-            match recorded {
-                Some(owned) => owned.source.clone(),
-                None => doc.jsonc_value_source(&path),
-            }
-        } else {
-            None
         };
         if current != field.value {
             match &field.value {
@@ -772,7 +764,6 @@ pub(super) fn project(
             path: field.path.clone(),
             value: field.value.clone(),
             previous,
-            source,
             ..OwnedField::default()
         });
     }
@@ -1253,12 +1244,9 @@ pub(super) fn restore(
         if current == restored {
             continue;
         }
-        match (&restored, &field.source) {
-            (Some(value @ ConfigValue::Json(_)), Some(source)) if path == OPENCODE_MODEL.path => {
-                doc.restore_jsonc_object(&path, value, source)
-            }
-            (Some(value), _) => doc.set_value(&path, value),
-            (None, _) => doc.remove(&path),
+        match &restored {
+            Some(value) => doc.set_value(&path, value),
+            None => doc.remove(&path),
         }
         .map_err(|_| AgentError::RestorationFailed)?;
         changes.push(if sensitive {

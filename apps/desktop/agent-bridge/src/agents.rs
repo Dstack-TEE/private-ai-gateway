@@ -180,7 +180,7 @@ struct OwnedField {
     /// for byte: the added key is removed, or the scalar's `source` put back.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     exact: bool,
-    /// Source text of a previous YAML scalar or OpenCode model object.
+    /// The previous scalar's YAML source text, quoting included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
     /// `value` is the SHA-256 of what was written ([`value_digest`]): a
