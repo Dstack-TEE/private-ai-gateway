@@ -233,6 +233,31 @@ fn disconnect_restores_original_opencode_model_after_private_model_edit() {
 }
 
 #[test]
+fn opencode_stop_restores_compact_model_object_after_private_model_edit() {
+    let sandbox = sandbox("restore-compact-opencode-model");
+    let agent = Agent::OpenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let original = r#""model": {"providerID":"original","model":"native"}"#;
+    write(
+        &path,
+        &format!("{{\n  {original},\n  \"providers\": {{}}\n}}\n"),
+    );
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_value(
+            &["model"],
+            &ConfigValue::Json(json!({"providerID":"private-ai-proxy","model":"phala/qwen"})),
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    let stopped = fs::read_to_string(&path).unwrap();
+    assert!(stopped.contains(original), "{stopped}");
+}
+
+#[test]
 fn reconnect_after_endpoint_drift_preserves_original_value() {
     let sandbox = sandbox("reconnect-endpoint-drift");
     let agent = Agent::ClaudeCode;

@@ -7,6 +7,7 @@
 //! to what restores byte for byte.
 
 use jsonc_parser::cst::{CstInputValue, CstRootNode};
+use jsonc_parser::{common::Ranged, parse_to_ast, CollectOptions};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, TableLike};
@@ -465,6 +466,41 @@ impl ConfigDoc {
         .map_err(|_| format!("cannot edit YAML path {path_text}"))
     }
 
+    /// Source of a JSONC value, including whitespace and comments inside it.
+    pub(crate) fn jsonc_value_source(&self, path: &[&str]) -> Option<String> {
+        let Self::Jsonc(text) = self else {
+            return None;
+        };
+        Some(text.get(jsonc_value_range(text, path)?)?.to_string())
+    }
+
+    /// Restore a JSONC object using its recorded layout when the source is
+    /// exactly one object and represents the recorded value.
+    pub(crate) fn restore_jsonc_object(
+        &mut self,
+        path: &[&str],
+        value: &ConfigValue,
+        source: &str,
+    ) -> Result<(), String> {
+        let Self::Jsonc(text) = self else {
+            return self.set_value(path, value);
+        };
+        if !json_root(source, Format::Jsonc)
+            .ok()
+            .and_then(|root| root.object_value())
+            .is_some_and(|object| object.to_string() == source)
+            || parse_jsonc(source).map(recorded).ok().as_ref() != Some(&value.to_json())
+        {
+            return self.set_value(path, value);
+        }
+        let mut updated = edit_json(text, path, Some(value.to_json()), Format::Jsonc)?;
+        let range = jsonc_value_range(&updated, path)
+            .ok_or_else(|| "cannot locate the restored JSONC object".to_string())?;
+        updated.replace_range(range, source);
+        *text = updated;
+        Ok(())
+    }
+
     /// Whether the YAML collection at `path` (`[]` is the root or the item)
     /// is written in flow style and has entries.
     pub fn is_flow(&self, path: &[&str]) -> bool {
@@ -708,6 +744,20 @@ fn json_options(format: Format) -> jsonc_parser::ParseOptions {
             ..Default::default()
         }
     }
+}
+
+fn jsonc_value_range(text: &str, path: &[&str]) -> Option<std::ops::Range<usize>> {
+    let parsed = parse_to_ast(
+        text,
+        &CollectOptions::default(),
+        &json_options(Format::Jsonc),
+    )
+    .ok()?;
+    let mut value = parsed.value.as_ref()?;
+    for key in path {
+        value = &value.as_object()?.get(key)?.value;
+    }
+    Some(value.start()..value.end())
 }
 
 fn json_root(text: &str, format: Format) -> Result<CstRootNode, String> {
