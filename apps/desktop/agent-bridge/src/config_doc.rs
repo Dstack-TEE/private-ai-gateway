@@ -296,7 +296,17 @@ impl ConfigDoc {
                 *text = edit_json(text, path, Some(value.to_json()), Format::Json5)?
             }
             Self::Toml(doc) => {
-                toml_container(doc.as_item_mut(), parents)?.insert(leaf, value.to_toml()?);
+                let table = toml_container(doc.as_item_mut(), parents)?;
+                let mut replacement = value.to_toml()?;
+                if let Some(item) = table.get_mut(leaf) {
+                    // Inserting an existing key resets its formatting in toml_edit.
+                    if let (Item::Value(old), Item::Value(new)) = (&*item, &mut replacement) {
+                        *new.decor_mut() = old.decor().clone();
+                    }
+                    *item = replacement;
+                } else {
+                    table.insert(leaf, replacement);
+                }
             }
             Self::Yaml(file) => yaml_set(&yaml_document(file)?, path, value)?,
             Self::YamlItem(item) => yaml_set(item, path, value)?,
