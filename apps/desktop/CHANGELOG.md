@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.4...desktop-v0.10.0) (2026-11-25)
+
+
+### Documentation
+
+* **desktop:** list the agent file formatting PAP does not keep ([#642](https://github.com/Dstack-TEE/private-ai-gateway/issues/642)) ([908a067](https://github.com/Dstack-TEE/private-ai-gateway/commit/908a06737aa3f5b474e8fe2b224ef4349573e5b1))
+
 ## [0.10.0-beta.4](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.3...desktop-v0.10.0-beta.4) (2026-11-25)
 
 
