@@ -333,19 +333,41 @@ fn desktop_follow_fixture() {
 #[cfg(unix)]
 #[test]
 fn desktop_follower_recovers_crashes_respects_the_gate_and_leaves_expected_stops_down() {
-    assert_desktop_follower(false);
+    assert_desktop_follower(FollowerScenario::Normal);
 }
 
 #[cfg(unix)]
 #[test]
 fn desktop_follower_leaves_an_orderly_stop_down_when_event_streams_are_full() {
-    assert_desktop_follower(true);
+    assert_desktop_follower(FollowerScenario::FullStreams);
 }
 
 #[cfg(unix)]
-fn assert_desktop_follower(saturated: bool) {
+#[test]
+fn desktop_follower_recovers_replacements_that_crash_before_their_first_event() {
+    assert_desktop_follower(FollowerScenario::EarlyCrashes);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_leaves_a_replacement_stopped_before_its_first_event() {
+    assert_desktop_follower(FollowerScenario::EarlyStop);
+}
+
+#[cfg(unix)]
+#[derive(PartialEq, Eq)]
+enum FollowerScenario {
+    Normal,
+    FullStreams,
+    EarlyCrashes,
+    EarlyStop,
+}
+
+#[cfg(unix)]
+fn assert_desktop_follower(scenario: FollowerScenario) {
     let backend = Backend::start();
-    let _streams = saturated.then(|| saturate_backend_events(&backend));
+    let _streams =
+        (scenario == FollowerScenario::FullStreams).then(|| saturate_backend_events(&backend));
     let sandbox = backend.directory.path();
     let ready = sandbox.join("follower.ready");
     let fixture = sandbox.join("desktop-follower");
@@ -390,7 +412,7 @@ fn assert_desktop_follower(saturated: bool) {
             std::thread::sleep(Duration::from_millis(1250));
             assert_eq!(backend.run(&["service", "status"])["status"], "not_running");
         };
-        if saturated {
+        if scenario == FollowerScenario::FullStreams {
             wait("");
             backend.run(&["service", "stop", "--yes"]);
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -400,9 +422,53 @@ fn assert_desktop_follower(saturated: bool) {
             }
             return;
         }
-        let gate = desktop_core::lock::startup(&home.join(".private-ai-proxy"))
-            .unwrap()
-            .unwrap();
+        let data = home.join(".private-ai-proxy");
+        if matches!(
+            scenario,
+            FollowerScenario::EarlyCrashes | FollowerScenario::EarlyStop
+        ) {
+            let original = wait("");
+            let mut previous = original.clone();
+            kill();
+            for _ in 0..4 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let gate = loop {
+                    let state = backend.run(&["service", "status"]);
+                    if let Some(instance) = state["backend"]["instanceId"].as_str() {
+                        if instance != previous {
+                            // Recovery holds this gate until its own version
+                            // handshake succeeds. Keep it held through the exit.
+                            if let Some(gate) = desktop_core::lock::startup(&data).unwrap() {
+                                previous = instance.to_owned();
+                                break gate;
+                            }
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "The follower did not start another replacement"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                if scenario == FollowerScenario::EarlyStop {
+                    backend.run(&["service", "stop", "--yes"]);
+                } else {
+                    kill();
+                }
+                assert_eq!(
+                    fs::read_to_string(&ready).unwrap(),
+                    original,
+                    "The follower received a replacement's state before it exited"
+                );
+                drop(gate);
+                if scenario == FollowerScenario::EarlyStop {
+                    break;
+                }
+            }
+            assert_down();
+            return;
+        }
+        let gate = desktop_core::lock::startup(&data).unwrap().unwrap();
         let original = wait("");
         kill();
         assert_down();
