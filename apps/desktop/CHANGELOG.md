@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0-beta.3](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.2...desktop-v0.10.0-beta.3) (2026-11-25)
+
+
+### Bug Fixes
+
+* **desktop:** accept comments in OpenCode's opencode.json and keep external model choices ([#637](https://github.com/Dstack-TEE/private-ai-gateway/issues/637)) ([a0626a0](https://github.com/Dstack-TEE/private-ai-gateway/commit/a0626a04779a8fc76f0966f96b5ed9df7d47b2e1))
+
 ## [0.10.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.1...desktop-v0.10.0-beta.2) (2026-11-25)
 
 
