@@ -150,6 +150,24 @@ fn redpill_balance_keeps_credit_balance_and_only_accepts_valid_subscription_usag
     assert_eq!(malformed.balance_usd, "12.50");
 }
 
+async fn serve_test_app(app: Router) -> (String, AbortOnDropHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    (base, server)
+}
+
+fn key_request(installation_id: &str, funding: Option<AccountFunding>) -> KeyRequest<'static> {
+    KeyRequest {
+        installation_id: installation_id.into(),
+        name: "Test",
+        workspace_id: 1,
+        funding,
+    }
+}
+
 #[tokio::test]
 async fn redpill_funding_uses_the_same_installation_and_retries_balance_for_legacy_servers() {
     let legacy = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -177,11 +195,7 @@ async fn redpill_funding_uses_the_same_installation_and_retries_balance_for_lega
             }
         }),
     );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let _server = AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    }));
+    let (base, _server) = serve_test_app(app).await;
     let client = client().unwrap();
     let key_url = format!("{base}/key");
     let installation_id = Uuid::new_v4().to_string();
@@ -190,31 +204,21 @@ async fn redpill_funding_uses_the_same_installation_and_retries_balance_for_lega
             &client,
             &key_url,
             "test-token",
-            KeyRequest {
-                installation_id: installation_id.clone(),
-                name: "Test",
-                workspace_id: 1,
-                funding,
-            },
+            key_request(&installation_id, funding),
         )
     };
-
-    let default = issue(None).await.unwrap();
-    assert_eq!(
-        issued_funding(&default, None).unwrap(),
-        Some(AccountFunding::Subscription)
-    );
-    let credits = issue(Some(AccountFunding::Credits)).await.unwrap();
-    assert_eq!(
-        issued_funding(&credits, Some(AccountFunding::Credits)).unwrap(),
-        Some(AccountFunding::Credits)
-    );
-    let subscription = issue(Some(AccountFunding::Subscription)).await.unwrap();
-    assert_eq!(
-        issued_funding(&subscription, Some(AccountFunding::Subscription)).unwrap(),
-        Some(AccountFunding::Subscription)
-    );
-    assert!(issued_funding(&subscription, Some(AccountFunding::Credits)).is_err());
+    use AccountFunding::{Credits, Subscription};
+    for (requested, expected) in [
+        (None, Subscription),
+        (Some(Credits), Credits),
+        (Some(Subscription), Subscription),
+    ] {
+        let result = issue(requested).await.unwrap();
+        assert_eq!(issued_funding(&result, requested).unwrap(), Some(expected));
+        if requested == Some(Subscription) {
+            assert!(issued_funding(&result, Some(Credits)).is_err());
+        }
+    }
 
     legacy.store(true, std::sync::atomic::Ordering::Relaxed);
     let legacy_default = issue(None).await.unwrap();
@@ -253,62 +257,43 @@ async fn redpill_funding_uses_the_same_installation_and_retries_balance_for_lega
 
 #[tokio::test]
 async fn redpill_does_not_retry_balance_without_funding_for_other_key_errors() {
-    let app = Router::new().route(
-        "/key/{failure}",
-        post(
-            |axum::extract::Path(failure): axum::extract::Path<String>,
-             Json(request): Json<Value>| async move {
+    let cases = [
+        (
+            StatusCode::FORBIDDEN,
+            json!({"error": "keys_permission_required"}),
+            "grant key-management permission",
+        ),
+        (StatusCode::TOO_MANY_REQUESTS, Value::Null, "HTTP 429"),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!([{"type": "extra_forbidden", "loc": ["body", "workspace_id"]}]),
+            "HTTP 422",
+        ),
+        (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!([{"type": "literal_error", "loc": ["body", "funding"]}]),
+            "HTTP 422",
+        ),
+    ];
+    let client = client().unwrap();
+    let installation_id = Uuid::new_v4().to_string();
+    for (status, detail, expected_error) in cases {
+        let (base, _server) = serve_test_app(Router::new().route(
+            "/key",
+            post(move |Json(request): Json<Value>| async move {
                 if request.get("funding").is_none() {
                     return (StatusCode::OK, Json(json!({"funding": "subscription"})));
                 }
                 assert_eq!(request["funding"], "credits");
-                let (status, detail) = match failure.as_str() {
-                    "forbidden" => (
-                        StatusCode::FORBIDDEN,
-                        json!({"error": "keys_permission_required"}),
-                    ),
-                    "rate-limited" => (StatusCode::TOO_MANY_REQUESTS, Value::Null),
-                    "different-field" => (
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        json!([
-                            {"type": "extra_forbidden", "loc": ["body", "workspace_id"]}
-                        ]),
-                    ),
-                    "different-type" => (
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        json!([
-                            {"type": "literal_error", "loc": ["body", "funding"]}
-                        ]),
-                    ),
-                    _ => panic!("Unexpected test path"),
-                };
                 (status, Json(json!({"detail": detail})))
-            },
-        ),
-    );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let _server = AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    }));
-    let client = client().unwrap();
-    let installation_id = Uuid::new_v4().to_string();
-    for (path, expected_error) in [
-        ("forbidden", "grant key-management permission"),
-        ("rate-limited", "HTTP 429"),
-        ("different-field", "HTTP 422"),
-        ("different-type", "HTTP 422"),
-    ] {
+            }),
+        ))
+        .await;
         let error = issue_redpill_key(
             &client,
-            &format!("{base}/key/{path}"),
+            &format!("{base}/key"),
             "test-token",
-            KeyRequest {
-                installation_id: installation_id.clone(),
-                name: "Test",
-                workspace_id: 1,
-                funding: Some(AccountFunding::Credits),
-            },
+            key_request(&installation_id, Some(AccountFunding::Credits)),
         )
         .await
         .unwrap_err();
@@ -577,12 +562,7 @@ async fn device_server(rejection: Option<&'static str>) -> (String, AbortOnDropH
                 }))
             }),
         );
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let server = AbortOnDropHandle::new(tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    }));
-    (base, server)
+    serve_test_app(app).await
 }
 
 fn device_client(base: &str) -> RedpillClient {

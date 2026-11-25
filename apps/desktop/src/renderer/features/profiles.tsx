@@ -2,7 +2,7 @@ import React, { useRef, useState } from "react";
 import { skipToken, useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAccountLogin } from "../lib/use-account-login";
 import { afterVerification, useSetAppState } from "../lib/use-app-state";
-import { AccountTools, accountBalanceQuery, useAccountBalance } from "../components/account-tools";
+import { AccountTools, accountBalanceQuery, balanceCacheKey, useAccountBalance } from "../components/account-tools";
 import { ToggleGroup, ToggleGroupItem } from "../components/ui/toggle-group";
 import { AuthoredError, errorMessage } from "../lib/error-message";
 import { useCopy } from "../hooks/use-copy";
@@ -202,9 +202,8 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   const balanceTarget: AccountBalanceTarget = authorized && login
     ? { kind: "login", id: login.id }
     : { kind: "profile", profileId: draft.id };
-  const balance = useAccountBalance({
-    provider: draft.provider, target: balanceTarget, credentialRef: profile?.credentialRef, enabled: Boolean(selectedAccount),
-  });
+  const balanceIdentity = { provider: draft.provider, target: balanceTarget, credentialRef: profile?.credentialRef };
+  const balance = useAccountBalance({ ...balanceIdentity, enabled: Boolean(selectedAccount) });
   const redpillLogin = draft.provider === "redpill" && Boolean(authorized);
   const checkingFunding = redpillLogin && balance.isPending;
   const savedFunding = profile?.auth.kind === "oauth" ? profile.auth.funding : undefined;
@@ -278,7 +277,7 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
       }
       if (draft.provider === "redpill") {
         const signedInBalance = await client.fetchQuery(accountBalanceQuery({
-          provider: draft.provider, target: { kind: "login", id: signedIn.login.id }, credentialRef: profile?.credentialRef,
+          ...balanceIdentity, target: { kind: "login", id: signedIn.login.id },
         })).catch(() => undefined);
         if (signedInBalance?.usedPercent != null) return;
       }
@@ -361,10 +360,10 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
                   </div>
                   </div>
                 </div> : selectedAccount ? <>
-                  <AccountTools key={login?.id ?? draft.id} provider={draft.provider}
-                    target={balanceTarget} balance={balance.data} busy={balance.isFetching} funding={funding}
+                  <AccountTools key={balanceCacheKey(balanceIdentity)} provider={draft.provider}
+                    balance={balance.data} busy={balance.isFetching} funding={funding}
                     scope={accountScope} images={selectedAccount.images} onSignIn={signIn}
-                    credentialRef={profile?.credentialRef} onError={reportError} disabled={working || frozen} />
+                    onError={reportError} disabled={working || frozen} />
                   {provider.workspaces && Boolean(workspaces?.length || accountScope?.workspace) && <FormField id="profile-workspace" className="gap-2" label="Workspace">
                     <ChoiceSelect id="profile-workspace" label="Workspace" className="w-full" value={workspaceId === undefined ? "" : String(workspaceId)} options={[
                       { value: "", label: "Select workspace", disabled: true },

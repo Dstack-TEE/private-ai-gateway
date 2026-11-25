@@ -137,36 +137,34 @@ fn choose_funding(
     login_id: &str,
     requested: Option<AccountFunding>,
 ) -> Result<Option<AccountFunding>, String> {
-    let balance = client
+    let Some(AccountBalance {
+        used_percent: Some(used),
+        resets_at,
+        ..
+    }) = client
         .call(rpc::GetAccountBalance {
             target: AccountBalanceTarget::Login {
                 id: login_id.into(),
             },
         })
         .ok()
-        .flatten();
-    let Some(balance) = balance.filter(|balance| balance.used_percent.is_some()) else {
+        .flatten()
+    else {
         return Ok(requested);
     };
-    if let Some(used) = balance.used_percent {
-        eprintln!("Weekly subscription usage: {used}% used.");
-    }
-    if let Some(reset) = balance.resets_at {
+    eprintln!("Weekly subscription usage: {used}% used.");
+    if let Some(reset) = resets_at {
         eprintln!("Resets at {reset}.");
     }
     if requested.is_some() || !global.interactive() {
         return Ok(requested);
     }
-    eprint!("Billing method [Subscription / Balance] (Subscription): ");
-    io::stderr()
-        .flush()
-        .map_err(|_| "Cannot show billing method prompt")?;
-    let mut input = String::new();
-    if io::stdin()
-        .read_line(&mut input)
-        .map_err(|_| "Cannot read billing method")?
-        == 0
-    {
+    let input = prompt(
+        "Billing method [Subscription / Balance] (Subscription): ",
+        "billing method",
+        "billing method",
+    )?;
+    if input.is_empty() {
         return Err("Choose a billing method with --funding and retry login.".into());
     }
     match input.trim().to_ascii_lowercase().as_str() {
@@ -205,14 +203,7 @@ fn workspace(
     if !global.interactive() {
         return Err("Choose a workspace with --workspace <id> and retry login.".into());
     }
-    eprint!("Workspace ID: ");
-    io::stderr()
-        .flush()
-        .map_err(|_| "Cannot show workspace prompt")?;
-    let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|_| "Cannot read workspace selection")?;
+    let input = prompt("Workspace ID: ", "workspace", "workspace selection")?;
     let id = input
         .trim()
         .parse::<i64>()
@@ -222,6 +213,18 @@ fn workspace(
     } else {
         Err("Choose a listed workspace.".into())
     }
+}
+
+fn prompt(message: &str, name: &str, selection: &str) -> Result<String, String> {
+    eprint!("{message}");
+    io::stderr()
+        .flush()
+        .map_err(|_| format!("Cannot show {name} prompt"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| format!("Cannot read {selection}"))?;
+    Ok(input)
 }
 
 #[cfg(test)]

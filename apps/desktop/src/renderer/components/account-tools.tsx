@@ -19,7 +19,8 @@ type BalanceIdentity = {
   credentialRef?: string;
 };
 
-type Props = BalanceIdentity & {
+type Props = {
+  provider: ServiceProvider;
   balance?: AccountBalance | null;
   busy: boolean;
   funding?: AccountFunding;
@@ -31,7 +32,7 @@ type Props = BalanceIdentity & {
   disabled?: boolean;
 };
 
-function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
+export function balanceCacheKey({ provider, target, credentialRef }: BalanceIdentity) {
   const id = target.kind === "login" ? target.id : target.profileId;
   return `${provider}:${target.kind}:${id}:${credentialRef ?? ""}`;
 }
@@ -69,13 +70,7 @@ export function AccountBalanceValue(props: BalanceIdentity & { enabled: boolean;
     onOpen={(scopeSlug) => openPage(() => desktopApi.openTopUp(props.provider, scopeSlug))} />;
 }
 
-/** Changing account or credential must never display the previous account's balance. */
-export function AccountTools(props: Props) {
-  const cacheKey = balanceCacheKey(props);
-  return <AccountDetailsView key={cacheKey} {...props} />;
-}
-
-function AccountDetailsView({ provider, balance, busy, funding, scope, images, onSignIn, onError, disabled = false }: Props) {
+export function AccountTools({ provider, balance, busy, funding, scope, images, onSignIn, onError, disabled = false }: Props) {
   const { opening, openPage } = useAccountPage(onError, disabled);
   const organizationSlug = balance?.scope.organizationSlug ?? scope?.organizationSlug;
   const manage = distributionCapabilities.accountPortalLinks && provider === "redpill" && organizationSlug ? () => void openPage(() => desktopApi.openOrganization(organizationSlug)) : undefined;
