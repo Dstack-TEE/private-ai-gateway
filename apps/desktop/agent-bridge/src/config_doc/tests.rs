@@ -158,6 +158,39 @@ fn toml_lists_and_numbers_round_trip_and_prune() {
 }
 
 #[test]
+fn toml_removal_preserves_comments_when_pruning_tables() {
+    let source = "# table\n[proxy] # header\n# above\nold = 1 # beside\n\n[next]\nkeep = 2\n";
+    let mut doc = ConfigDoc::parse(Format::Toml, source).unwrap();
+    doc.remove(&["proxy", "old"]).unwrap();
+    assert_eq!(
+        doc.render().unwrap(),
+        "# table\n # header\n# above\n # beside\n\n[next]\nkeep = 2\n"
+    );
+}
+
+#[test]
+fn toml_inline_removal_preserves_comments_and_separators() {
+    for (source, expected) in [
+        (
+            "proxy = {\n  # above\n  old = 1 # beside\n  , keep = 2\n}\n",
+            "proxy = {\n  # above\n   # beside\n   keep = 2\n}\n",
+        ),
+        (
+            "proxy = {\n  keep = 2,\n  # above\n  old = 1 # beside\n}\n",
+            "proxy = {\n  keep = 2\n  # above\n   # beside\n}\n",
+        ),
+        (
+            "proxy = {\n  # above\n  old = 1 # beside\n}\n",
+            "proxy = {\n  # above\n   # beside\n}\n",
+        ),
+    ] {
+        let mut doc = ConfigDoc::parse(Format::Toml, source).unwrap();
+        doc.remove(&["proxy", "old"]).unwrap();
+        assert_eq!(doc.render().unwrap(), expected);
+    }
+}
+
+#[test]
 fn json_numbers_are_typed() {
     let mut doc = ConfigDoc::parse(Format::Json, "").unwrap();
     doc.set_value(&["limit", "context"], &ConfigValue::Number(4096))

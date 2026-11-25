@@ -313,6 +313,39 @@ name  = 'User provider' # keep this spelling
 }
 
 #[test]
+fn codex_keeps_comments_added_to_a_managed_model_on_stop_and_disconnect() {
+    let catalog = catalog();
+    let agent = Agent::Codex;
+    let model = "model = \"openai/gpt-oss-20b\"";
+
+    for stop in [false, true] {
+        let sandbox = sandbox(&format!("codex-added-model-comments-{stop}"));
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, "approval_policy = 'on-request'\n");
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+
+        let connected = fs::read_to_string(&path).unwrap();
+        assert!(connected.contains(model), "{connected}");
+        write(
+            &path,
+            &connected.replacen(model, &format!("# above\n{model} # beside"), 1),
+        );
+        if stop {
+            assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        } else {
+            assert!(!disconnect(&sandbox, agent).recorded);
+        }
+
+        let restored = fs::read_to_string(&path).unwrap();
+        assert!(!doc(&sandbox, agent).contains(&["model"]));
+        assert!(
+            restored.starts_with("approval_policy = 'on-request'\n# above\n # beside\n"),
+            "{restored}"
+        );
+    }
+}
+
+#[test]
 fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
     for (selected, provider, expected) in [
         ("native-new", "private_ai_proxy", "native-new"),
