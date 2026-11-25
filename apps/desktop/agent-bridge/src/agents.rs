@@ -105,6 +105,9 @@ struct Connection {
     /// Last catalog reconciled, including failed attempts, to avoid repeated writes.
     #[serde(default)]
     catalog_revision: Option<String>,
+    /// Compatible PAP model IDs for restoring edited bare selectors offline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    catalog_model_ids: Vec<String>,
     config_path: PathBuf,
     fields: Vec<OwnedField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -463,13 +466,8 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
-        let configured = agent.config_path(&self.home, self.tool_env);
         let mut restore_problem = path.as_ref().err().cloned();
-        let edit = match self.parse_config_at(
-            agent,
-            path.as_deref().unwrap_or(&configured),
-            text.as_deref(),
-        ) {
+        let edit = match self.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
             Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {

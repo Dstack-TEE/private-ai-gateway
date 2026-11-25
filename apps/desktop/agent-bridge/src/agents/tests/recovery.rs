@@ -155,8 +155,58 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert_eq!(
         doc(&sandbox, agent).get_value(&["model"]),
-        Some(ConfigValue::Str("original".into()))
+        Some(ConfigValue::Str("user-choice".into()))
     );
+}
+
+#[test]
+fn opencode_json_comments_keep_authorization_and_survive_stop_and_disconnect() {
+    let sandbox = sandbox("opencode-json-comments");
+    let agent = Agent::OpenCode;
+    let path = agent.config_path(&sandbox.home, false);
+    let catalog = catalog();
+    let options = claude_options();
+    let original = "{\n  \"model\": \"other/original\"\n}\n";
+    write(&path, original);
+    assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+
+    let comment = "// User comment after connecting";
+    let connected = fs::read_to_string(&path).unwrap();
+    write(&path, &connected.replacen('{', &format!("{{ {comment}"), 1));
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    let status = agent_status(&statuses, agent);
+    assert!(status.connected && status.authorized, "{status:?}");
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+
+    assert!(apply_connect(&sandbox, agent, &catalog, &options).authorized);
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+    assert!(!disconnect(&sandbox, agent).recorded);
+    assert!(fs::read_to_string(&path).unwrap().contains(comment));
+    assert_eq!(
+        doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+        Some("other/original")
+    );
+}
+
+#[test]
+fn commented_json_config_is_rejected_for_strict_json_agents() {
+    let sandbox = sandbox("strict-json-agents");
+    for agent in [Agent::ClaudeCode, Agent::Pi] {
+        assert!(sandbox
+            .projector
+            .parse_config(agent, Some("{/* not valid strict JSON */}"))
+            .is_err());
+    }
+}
+
+#[test]
+fn opencode_json_config_rejects_json5_only_syntax() {
+    let sandbox = sandbox("opencode-json5");
+    assert!(sandbox
+        .projector
+        .parse_config(Agent::OpenCode, Some("{model: 'other/original'}"))
+        .is_err());
 }
 
 #[test]
@@ -179,6 +229,146 @@ fn disconnect_restores_original_opencode_model_after_private_model_edit() {
     assert_eq!(
         doc(&sandbox, agent).get_str(&["model"]).as_deref(),
         Some("other/original")
+    );
+}
+
+#[test]
+fn opencode_stop_and_disconnect_preserve_models_selected_from_another_provider() {
+    for (name, v2, external) in [
+        ("string", false, ConfigValue::Str("other/new".into())),
+        (
+            "object",
+            true,
+            ConfigValue::Json(json!({"providerID":"other","model":"new"})),
+        ),
+    ] {
+        for stop in [true, false] {
+            let sandbox = sandbox(&format!("keep-external-opencode-model-{name}-{stop}"));
+            let agent = Agent::OpenCode;
+            let path = agent.config_path(&sandbox.home, false);
+            let original = if v2 {
+                r#"{"model":{"providerID":"other","model":"original"},"providers":{}}"#
+            } else {
+                r#"{"model":"other/original"}"#
+            };
+            write(&path, original);
+            let catalog = catalog();
+            assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+            let mut config = doc(&sandbox, agent);
+            config.set_value(&["model"], &external).unwrap();
+            write(&path, &config.render().unwrap());
+            if stop {
+                assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+            } else {
+                assert!(!disconnect(&sandbox, agent).recorded);
+            }
+            assert_eq!(
+                doc(&sandbox, agent).get_value(&["model"]),
+                Some(external.clone())
+            );
+        }
+    }
+}
+
+#[test]
+fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
+    for (selected, provider, expected) in [
+        ("native-new", "private_ai_proxy", "native-new"),
+        ("phala/qwen", "other", "phala/qwen"),
+        ("phala/qwen", "private_ai_proxy", "native-original"),
+    ] {
+        let sandbox =
+            sandbox(&format!("restore-codex-selection-{selected}-{provider}").replace('/', "-"));
+        let agent = Agent::Codex;
+        let path = agent.config_path(&sandbox.home, false);
+        write(&path, "model = \"native-original\"\n");
+        let catalog = catalog();
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        let mut config = doc(&sandbox, agent);
+        config.set_str(&["model"], selected).unwrap();
+        config.set_str(&["model_provider"], provider).unwrap();
+        write(&path, &config.render().unwrap());
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn legacy_bare_model_journals_restore_an_edited_pap_model_without_reconcile() {
+    let catalog = catalog();
+    for agent in [Agent::Codex, Agent::ClaudeCode] {
+        let sandbox = legacy_bare_model_journal(agent, "offline", &catalog);
+        edit_bare_model(&sandbox, agent, "phala/qwen");
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        assert_eq!(
+            doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+            Some("native-original")
+        );
+    }
+}
+
+#[test]
+fn reconcile_backfills_legacy_bare_model_journals_at_the_same_catalog_revision() {
+    let catalog = catalog();
+    for agent in [Agent::Codex, Agent::ClaudeCode] {
+        for (case, selected, expected) in [
+            ("catalog", "phala/qwen", "native-original"),
+            ("external", "native-new", "native-new"),
+        ] {
+            let sandbox = legacy_bare_model_journal(agent, case, &catalog);
+            edit_bare_model(&sandbox, agent, "native-before-reconcile");
+            let path = agent.config_path(&sandbox.home, false);
+            let before = fs::read_to_string(&path).unwrap();
+            assert!(sandbox
+                .projector
+                .reconcile(Some(&catalog))
+                .unwrap()
+                .is_empty());
+            let store = sandbox.projector.load_store().unwrap();
+            assert!(store[agent.id()]
+                .catalog_model_ids
+                .iter()
+                .any(|id| id == "phala/qwen"));
+            assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+            edit_bare_model(&sandbox, agent, selected);
+            assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+            assert_eq!(
+                doc(&sandbox, agent).get_str(&["model"]).as_deref(),
+                Some(expected)
+            );
+        }
+    }
+}
+
+fn legacy_bare_model_journal(agent: Agent, case: &str, catalog: &Catalog) -> Sandbox {
+    let sandbox = sandbox(&format!("legacy-bare-model-{}-{case}", agent.id()));
+    let original = match agent {
+        Agent::Codex => "model = \"native-original\"\n",
+        Agent::ClaudeCode => r#"{"model":"native-original"}"#,
+        _ => unreachable!(),
+    };
+    write(&agent.config_path(&sandbox.home, false), original);
+    assert!(apply_connect(&sandbox, agent, catalog, &claude_options()).authorized);
+    let path = sandbox.projector.store_path();
+    let mut store: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let record = store[agent.id()].as_object_mut().unwrap();
+    assert_eq!(record["catalog_revision"], catalog.revision);
+    assert!(record.remove("catalog_model_ids").is_some());
+    write(&path, &store.to_string());
+    sandbox
+}
+
+fn edit_bare_model(sandbox: &Sandbox, agent: Agent, selected: &str) {
+    let mut config = doc(sandbox, agent);
+    config.set_str(&["model"], selected).unwrap();
+    write(
+        &agent.config_path(&sandbox.home, false),
+        &config.render().unwrap(),
     );
 }
 

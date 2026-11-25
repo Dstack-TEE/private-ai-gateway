@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn jsonc_removal_preserves_comments_outside_the_removed_property() {
+    for (original, expected, remaining) in [
+        (
+            r#"{ "keep": 1, /* user note */ "model":"private-ai-proxy/x" }"#,
+            r#"{ "keep": 1 /* user note */  }"#,
+            serde_json::json!({"keep": 1}),
+        ),
+        (
+            "{ // before\n  \"model\": {\"nested\": /* inside */ 1}, // between\n  \"keep\": 1 // after\n}",
+            "{ // before\n   // between\n  \"keep\": 1 // after\n}",
+            serde_json::json!({"keep": 1}),
+        ),
+        (
+            "{ \"first\": 1, /* before */ \"model\": \"x\" /* after */, /* between */ \"last\": 2 }",
+            "{ \"first\": 1, /* before */  /* after */ /* between */ \"last\": 2 }",
+            serde_json::json!({"first": 1, "last": 2}),
+        ),
+        (
+            "{ \"outer\": { /* before */ \"model\": \"x\", // after\n} }",
+            "{ \"outer\": { /* before */  // after\n} }",
+            serde_json::json!({"outer": {}}),
+        ),
+        (
+            "{ \"model\" /* before colon */ : // after colon\n  \"x\" }",
+            "{  /* before colon */  // after colon\n   }",
+            serde_json::json!({}),
+        ),
+    ] {
+        let mut doc = ConfigDoc::parse(Format::Jsonc, original).unwrap();
+        let path: &[&str] = if remaining.get("outer").is_some() {
+            &["outer", "model"]
+        } else {
+            &["model"]
+        };
+        doc.remove(path).unwrap();
+        assert_eq!(doc.as_json(), Some(remaining));
+        assert_eq!(doc.render().unwrap(), expected);
+    }
+}
+
+#[test]
 fn json5_cst_preserves_unrelated_syntax_and_rejects_ambiguous_edits() {
     let source = "{\n // keep this comment\n untouched: 'single quoted',\n nested: { /* keep inside */ flag: true, },\n}\n";
     let original = ConfigDoc::parse(Format::Json5, source).unwrap();

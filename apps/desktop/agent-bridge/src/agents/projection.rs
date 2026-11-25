@@ -1091,6 +1091,7 @@ pub(super) fn owned_value(doc: &ConfigDoc, field: &OwnedField) -> Option<ConfigV
 /// fields put back the recorded bytes, and list items the connection appended
 /// are removed whole, first to last, while every field in them is unchanged.
 pub(super) fn restore(
+    agent: Agent,
     doc: &mut ConfigDoc,
     record: &Connection,
     secrets: &dyn SecretStore,
@@ -1122,6 +1123,21 @@ pub(super) fn restore(
                 )
         })
         .all(|field| field.holds(owned_value(doc, field).as_ref()));
+    let should_restore = |field: &OwnedField, current: Option<&ConfigValue>| {
+        if !is_model_selection_field(agent, field) {
+            return field.holds(current);
+        }
+        match agent {
+            Agent::OpenCode | Agent::OpenClaw => private_model_selection(current),
+            _ => {
+                routing_unchanged
+                    && matches!(current, Some(ConfigValue::Str(id))
+                        if field.holds(current)
+                            || record.catalog_model_ids.is_empty()
+                            || record.catalog_model_ids.contains(id))
+            }
+        }
+    };
     if !routing_unchanged
         && record.fields.iter().any(|field| {
             is_sensitive(&field.path)
@@ -1181,14 +1197,14 @@ pub(super) fn restore(
                     .map_err(AgentError::ConfigurationConflict)?
                 {
                     Some(mut item) => {
-                        restore_exact(&mut item, field, routing_unchanged)?.map(|mut change| {
+                        restore_exact(&mut item, field, should_restore)?.map(|mut change| {
                             change.key = format!("{}.{}", entry.key.id, change.key);
                             change
                         })
                     }
                     None => None,
                 },
-                None => restore_exact(doc, field, routing_unchanged)?,
+                None => restore_exact(doc, field, should_restore)?,
             };
             changes.extend(change);
             continue;
@@ -1218,10 +1234,8 @@ pub(super) fn restore(
         }
         // The owned Claude model picker is regenerated on start. Restore it
         // even after edits so the next projection can take ownership again.
-        if !field.holds(current.as_ref())
+        if !should_restore(field, current.as_ref())
             && !is_regenerable_field(Agent::ClaudeCode, field)
-            && !(is_any_model_selection_field(field)
-                && (routing_unchanged || private_model_selection(current.as_ref())))
             && !hermes_model_override(field, current.as_ref(), record)
         {
             continue;
@@ -1327,14 +1341,11 @@ pub(super) fn private_model_selection(value: Option<&ConfigValue>) -> bool {
 fn restore_exact(
     target: &mut ConfigDoc,
     field: &OwnedField,
-    routing_unchanged: bool,
+    should_restore: impl Fn(&OwnedField, Option<&ConfigValue>) -> bool,
 ) -> Result<Option<ConfigChange>, AgentError> {
     let path = refs(&field.path);
     let current = target.get_value(&path);
-    if !field.holds(current.as_ref())
-        && !(is_any_model_selection_field(field)
-            && (routing_unchanged || private_model_selection(current.as_ref())))
-    {
+    if !should_restore(field, current.as_ref()) {
         return Ok(None);
     }
     let restored = match &field.previous {
