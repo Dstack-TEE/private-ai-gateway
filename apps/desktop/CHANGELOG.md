@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0-beta.2](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0-beta.1...desktop-v0.10.0-beta.2) (2026-11-25)
+
+
+### Features
+
+* **desktop:** keep protection on across logins and crashes for desktop app installs ([#635](https://github.com/Dstack-TEE/private-ai-gateway/issues/635)) ([e8a0ca8](https://github.com/Dstack-TEE/private-ai-gateway/commit/e8a0ca8f21408f2fba0820abfde4a0e3c13e3bf2))
+
+
+### Bug Fixes
+
+* **desktop:** say when pap start skips login supervision ([#634](https://github.com/Dstack-TEE/private-ai-gateway/issues/634)) ([fc3e513](https://github.com/Dstack-TEE/private-ai-gateway/commit/fc3e513d72fbc273ce2f13be43fa7a0c6501d858))
+
 ## [0.10.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0...desktop-v0.10.0-beta.1) (2026-11-24)
 
 
