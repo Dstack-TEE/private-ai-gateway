@@ -99,7 +99,7 @@ function AccountDetailsView({ provider, balance, busy, funding, scope, images, o
 }
 
 const resetDate = new Intl.DateTimeFormat(undefined, {
-  month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/Los_Angeles", timeZoneName: "short",
+  month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZoneName: "short",
 });
 
 function WeeklyUsage({ balance }: { balance: AccountBalance }) {

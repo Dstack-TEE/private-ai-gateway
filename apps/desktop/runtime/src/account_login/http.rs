@@ -12,21 +12,10 @@ pub(super) fn client() -> Result<Client, Error> {
 pub(super) async fn request_json(
     request: reqwest::RequestBuilder,
 ) -> Result<(StatusCode, Value), Error> {
-    parse_json_response(send_account_request(request).await?).await
-}
-
-pub(super) async fn send_account_request(
-    request: reqwest::RequestBuilder,
-) -> Result<reqwest::Response, Error> {
-    request
+    let result = request
         .send()
         .await
-        .map_err(|_| "Account service could not be reached".into())
-}
-
-pub(super) async fn parse_json_response(
-    result: reqwest::Response,
-) -> Result<(StatusCode, Value), Error> {
+        .map_err(|_| "Account service could not be reached")?;
     let status = result.status();
     let bytes = body(result).await?;
     let data = serde_json::from_slice(&bytes).map_err(|_| {

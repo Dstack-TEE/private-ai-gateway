@@ -110,14 +110,7 @@ impl Authorization {
                     workspace_id: selected,
                     funding,
                 };
-                let result = issue_redpill_key(
-                    &client,
-                    KEY_URL,
-                    billing::BALANCE_URL,
-                    access_token,
-                    request,
-                )
-                .await?;
+                let result = issue_redpill_key(&client, KEY_URL, access_token, request).await?;
                 if result.get("workspace_id").and_then(Value::as_i64) != Some(selected) {
                     return Err("Unexpected workspace in the account response".into());
                 }

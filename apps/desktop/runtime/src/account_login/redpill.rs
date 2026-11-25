@@ -19,42 +19,35 @@ pub(super) struct KeyRequest<'a> {
 pub(super) async fn issue_redpill_key(
     client: &Client,
     key_url: &str,
-    balance_url: &str,
     access_token: &str,
     mut request: KeyRequest<'_>,
 ) -> Result<Value, Error> {
-    if let Some(funding) = request.funding {
-        // Legacy key endpoints reject unknown fields. Check the read-only
-        // balance contract before sending an explicit funding choice.
-        let balance =
-            send_account_request(client.get(balance_url).bearer_auth(access_token)).await?;
-        request.funding = if !balance.status().is_success() && funding == AccountFunding::Credits {
-            // Billing read permissions and rate limits are independent of key issuance.
-            // The caller still checks the returned key's funding before saving it.
-            None
-        } else {
-            let (status, data) = parse_json_response(balance).await?;
-            if !status.is_success() {
-                return Err(account_error(status, &data));
+    let send =
+        |request: &KeyRequest<'_>| client.post(key_url).bearer_auth(access_token).json(request);
+    let (status, data) = request_json(send(&request)).await?;
+    if status.is_success() {
+        return Ok(data);
+    }
+    // Legacy FastAPI validation rejects the extra field before issuing a key.
+    // Omitting funding on a current server can issue a subscription key.
+    if status == StatusCode::UNPROCESSABLE_ENTITY
+        && matches!(data["detail"].as_array().map(Vec::as_slice), Some([error])
+            if error["type"] == "extra_forbidden" && error["loc"] == json!(["body", "funding"]))
+    {
+        match request.funding {
+            Some(AccountFunding::Credits) => {
+                request.funding = None;
+                return response(send(&request)).await;
             }
-            if data.get("used_percent").is_some() && data.get("resets_at").is_some() {
-                Some(funding)
-            } else if funding == AccountFunding::Credits {
-                None
-            } else {
+            Some(AccountFunding::Subscription) => {
                 return Err(Error::account(
                     "Account: This RedPill server does not support subscription keys.",
                 ));
             }
-        };
+            None => {}
+        }
     }
-    response(
-        client
-            .post(key_url)
-            .bearer_auth(access_token)
-            .json(&request),
-    )
-    .await
+    Err(account_error(status, &data))
 }
 
 pub(super) fn issued_funding(

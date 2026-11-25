@@ -39,6 +39,7 @@ fn subscription_refusal(status: u16, body: &[u8]) -> Option<String> {
         (402, "Subscription is not active. Renew your subscription or use a credits key.")
         | (403, "This model is not included in your subscription plan. Use a credits key for this model.")
         | (403, "The requested provider is not available on your subscription plan.")
+        | (429, "Too many concurrent requests for this subscription. Please retry shortly.")
         | (429, "Subscription usage limit reached.") => Some(message.to_owned()),
         (429, _) => {
             let reset = message.strip_prefix("Subscription usage limit reached. Resets at ")?.strip_suffix('.')?;
@@ -221,6 +222,7 @@ mod tests {
             (402, "Subscription is not active. Renew your subscription or use a credits key."),
             (403, "This model is not included in your subscription plan. Use a credits key for this model."),
             (403, "The requested provider is not available on your subscription plan."),
+            (429, "Too many concurrent requests for this subscription. Please retry shortly."),
             (429, "Subscription usage limit reached."),
             (429, "Subscription usage limit reached. Resets at 2026-11-27T09:00:00.000Z."),
         ] {
@@ -228,11 +230,6 @@ mod tests {
             assert!(parse(400, message).is_none());
         }
         assert!(parse(429, "Subscription usage limit reached. Resets at tomorrow.").is_none());
-        assert!(parse(
-            429,
-            "Too many concurrent requests for this subscription. Please retry shortly."
-        )
-        .is_none());
         assert!(parse(403, "An arbitrary upstream error.").is_none());
     }
 }

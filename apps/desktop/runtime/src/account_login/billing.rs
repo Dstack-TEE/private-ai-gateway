@@ -1,7 +1,5 @@
 use super::*;
 
-pub(super) const BALANCE_URL: &str = "https://service.redpill.ai/api/oauth/balance";
-
 pub async fn account_details(key: &str) -> Result<AccountLoginDetails, Error> {
     let account = response(client()?.get(ACCOUNT_URL).bearer_auth(key)).await?;
     redpill_details(&account).map_err(|_| {
@@ -25,7 +23,7 @@ pub(crate) async fn account_balance(
 ) -> Result<Option<AccountBalance>, Error> {
     let url = match provider {
         ServiceProvider::Phala => "https://cloud-api.phala.com/api/v1/private_ai/self",
-        ServiceProvider::Redpill => BALANCE_URL,
+        ServiceProvider::Redpill => "https://service.redpill.ai/api/oauth/balance",
         ServiceProvider::Custom => {
             return Err("Balance is only available for Phala and RedPill accounts".into())
         }

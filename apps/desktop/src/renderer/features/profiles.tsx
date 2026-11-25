@@ -207,9 +207,10 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
   });
   const redpillLogin = draft.provider === "redpill" && Boolean(authorized);
   const checkingFunding = redpillLogin && balance.isPending;
+  const savedFunding = profile?.auth.kind === "oauth" ? profile.auth.funding : undefined;
   const funding = redpillLogin
-    ? selectedFunding ?? (balance.data?.usedPercent != null ? "subscription" : undefined)
-    : !authorized && profile?.auth.kind === "oauth" ? profile.auth.funding : undefined;
+    ? selectedFunding ?? savedFunding ?? (balance.data?.usedPercent != null ? "subscription" : undefined)
+    : !authorized ? savedFunding : undefined;
   const needsAccountLogin = provider.accountLogin && authMethod === "account"
     && !authorized && (!savedCredentialApplies || profile?.auth.kind !== "oauth");
 
@@ -283,7 +284,11 @@ export function ProfileEditorDialog({ profile, startAfterSave = false, onClose, 
       }
       // As the form does, saving waits while protection verifies.
       await afterVerification(client);
-      await saveLogin.mutateAsync({ login: signedIn.login, workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined) });
+      await saveLogin.mutateAsync({
+        login: signedIn.login,
+        workspace: workspace ?? (offered.length === 1 ? offered[0]?.id : undefined),
+        funding: draft.provider === "redpill" ? savedFunding : undefined,
+      });
     },
     onMutate: () => setError(undefined),
     onError: reportError,
