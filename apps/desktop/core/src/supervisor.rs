@@ -142,9 +142,7 @@ fn installation_supports_automatic_supervision() -> bool {
 }
 
 fn automatic_supervision_supported() -> bool {
-    supported()
-        && installation_supports_automatic_supervision()
-        && user_service_manager_available()
+    supported() && installation_supports_automatic_supervision() && user_service_manager_available()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -229,11 +227,9 @@ impl AutomaticBlockers {
     }
 }
 
-fn record_automatic_skip_notice(marker: &std::path::Path, names: &[&str]) -> Option<String> {
-    let result = crate::private_fs::write_private(marker, "");
-    if result.is_err() {
-        return None;
-    }
+fn record_automatic_skip_notice(data: &std::path::Path, names: &[&str]) -> Option<String> {
+    crate::private_fs::create_private_dir(data).ok()?;
+    crate::private_fs::write_private(&data.join(SKIP_NOTICE_MARKER), "").ok()?;
     let variables = match names {
         [name] => format!("{name} is set"),
         names => format!("{} are set", names.join(", ")),
@@ -249,8 +245,8 @@ pub fn automatic_skip_notice(blockers: AutomaticBlockers) -> Option<String> {
     let AutomaticBlockers::Environment(names) = blockers else {
         return None;
     };
-    let marker = crate::paths::app_data_dir().ok()?.join(SKIP_NOTICE_MARKER);
-    record_automatic_skip_notice(&marker, &names)
+    let data = crate::paths::app_data_dir().ok()?;
+    record_automatic_skip_notice(&data, &names)
 }
 
 /// Has the service manager start the backend at login and after a crash.
@@ -346,13 +342,13 @@ mod tests {
     #[test]
     fn automatic_skip_notice_is_recorded_only_once() {
         let directory = tempfile::tempdir().unwrap();
-        let marker = directory.path().join("notice-shown");
-        let notice = record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"])
+        let data = directory.path().join("app-data");
+        let notice = record_automatic_skip_notice(&data, &["CODEX_HOME", "HTTPS_PROXY"])
             .expect("first start should show the notice");
         assert!(notice.contains("CODEX_HOME, HTTPS_PROXY"));
         assert!(notice.contains("pap service enable"));
         assert!(notice.contains("environment first, then run"));
-        assert!(record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"]).is_none());
+        assert!(record_automatic_skip_notice(&data, &["CODEX_HOME", "HTTPS_PROXY"]).is_none());
     }
 
     #[test]
@@ -1261,7 +1257,9 @@ mod desktop_tests {
         if std::env::var_os(CHILD).is_some() {
             let cli = PathBuf::from(std::env::var_os("PAP_TEST_CANONICAL_COMMAND").unwrap());
             assert_eq!(command().unwrap(), (cli, false));
-            assert!(!automatic(&crate::paths::agent_environment::environment_overrides()));
+            assert!(!automatic(
+                &crate::paths::agent_environment::environment_overrides()
+            ));
             return;
         }
         let temp = tempfile::tempdir().unwrap();

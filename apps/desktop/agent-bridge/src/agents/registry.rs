@@ -147,10 +147,7 @@ mod tests {
     fn enrollment_ignores_default_xdg_config_and_checks_windows_paths_only_on_windows() {
         const CHILD: &str = "PAP_TEST_AGENT_ENVIRONMENT";
         if let Ok(case) = env::var(CHILD) {
-            assert_eq!(
-                environment_overridden(),
-                case == "custom" || cfg!(windows)
-            );
+            assert_eq!(environment_overridden(), case == "custom" || cfg!(windows));
             return;
         }
         let home = tempfile::tempdir().unwrap();
