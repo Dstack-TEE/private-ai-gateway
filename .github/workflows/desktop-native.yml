@@ -695,7 +695,9 @@ jobs:
             }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
             if (($userPath -split ';') -contains $installDir) { throw 'Uninstall left the NSIS-owned private-ai-proxy PATH entry' }
-            if ($null -ne (Get-ItemPropertyValue $runKey $runName -ErrorAction SilentlyContinue)) { throw 'Uninstall left the Open at Login entry' }
+            if ((Test-Path -LiteralPath $runKey) -and ($runName -in (Get-Item -LiteralPath $runKey).GetValueNames())) {
+              throw 'Uninstall left the Open at Login entry'
+            }
           }
 
       - name: Check installed Linux sidecars without UI
