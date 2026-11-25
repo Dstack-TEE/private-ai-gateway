@@ -268,9 +268,7 @@ pub struct AccountBalance {
     pub organization_id: Option<String>,
     pub granted_usd: Option<String>,
     pub scope: AccountScope,
-    #[serde(default)]
     pub used_percent: Option<u8>,
-    #[serde(default)]
     pub resets_at: Option<String>,
 }
 

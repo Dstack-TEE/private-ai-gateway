@@ -12,7 +12,7 @@ impl Drop for UsageReport {
         if let Some(capture) = self.capture.take() {
             // Record known billing refusals without altering the response
             // delivered to the agent or logging arbitrary upstream text.
-            if self.event.detail.is_empty() && !capture.streamed && !capture.body_overflow {
+            if self.event.detail.is_empty() {
                 if let Some(refusal) = subscription_refusal(self.event.status, &capture.body) {
                     self.event.detail = refusal;
                 }

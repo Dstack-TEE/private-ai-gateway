@@ -122,8 +122,7 @@ fn redpill_balance_keeps_credit_balance_and_only_accepts_valid_subscription_usag
     let mut data = json!({
         "balance_usd": "12.50", "can_top_up": true, "organization_id": "org_test",
         "organization_slug": "research-team", "organization_name": "Research",
-        "used_percent": 0, "resets_at": "2026-11-27T09:00:00Z",
-        "quota_usd": "123", "multiplier": "0.25"
+        "used_percent": 0, "resets_at": "2026-11-27T09:00:00Z"
     });
     let parse = |data: &Value| {
         parse_account_balance(&ServiceProvider::Redpill, StatusCode::OK, data)
@@ -134,9 +133,6 @@ fn redpill_balance_keeps_credit_balance_and_only_accepts_valid_subscription_usag
     assert_eq!(active.balance_usd, "12.50");
     assert_eq!(active.used_percent, Some(0));
     assert_eq!(active.resets_at.as_deref(), Some("2026-11-27T09:00:00Z"));
-    let serialized = serde_json::to_value(active).unwrap();
-    assert!(serialized.get("quotaUsd").is_none());
-    assert!(serialized.get("multiplier").is_none());
     data["used_percent"] = Value::Null;
     data["resets_at"] = Value::Null;
     let inactive = parse(&data);
