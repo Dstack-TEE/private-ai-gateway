@@ -25,6 +25,7 @@ use crate::{
 };
 
 use desktop_core::{
+    lock::BackendLifecycle,
     protocol::{self, rpc, Command, ErrorCode, ShutdownMode},
     transport,
 };
@@ -76,6 +77,7 @@ pub async fn serve(
 ) -> Result<(), String> {
     let listener = transport::Listener::bind(runtime.instance_lock()?)
         .map_err(|error| format!("Cannot bind the private management endpoint: {error}"))?;
+    runtime.record_backend_lifecycle(BackendLifecycle::Running)?;
     let admission = runtime.admission();
     let stopped = admission.stopped.clone();
     let handle = Handle::current();
@@ -321,9 +323,23 @@ fn shutdown(
     }
     tracing::info!("Shutting down ({mode:?})");
     let watchdog = Watchdog::arm();
-    let result = handle.block_on(drain_and_stop(runtime, admission, mode, refusable));
+    // Publish the intent before draining, while we still own the instance
+    // lock. A follower may never have obtained an event stream.
+    let record = runtime.record_backend_lifecycle(BackendLifecycle::Stopping);
+    let result = match record {
+        Err(error) if refusable => Err(error),
+        result => {
+            if let Err(ref error) = result {
+                tracing::warn!("{error}");
+            }
+            handle.block_on(drain_and_stop(runtime, admission, mode, refusable))
+        }
+    };
     match &result {
         Err(error) if refusable => {
+            if let Err(error) = runtime.record_backend_lifecycle(BackendLifecycle::Running) {
+                tracing::warn!("{error}");
+            }
             admission.draining.store(false, Ordering::Release);
             admission.refused.notify_waiters();
             tracing::error!("Shutdown refused; the backend keeps running: {error}");

@@ -272,7 +272,6 @@ async fn events<B: Backend>(
     if let Ok((_, events)) = ui_api::preference_events(&api.backend, &api.host).await {
         snapshot.extend(events);
     }
-    let local = matches!(&api.listener, Listener::Local);
     let session_live = move || match (&api.listener, &caller) {
         #[cfg(feature = "web-ui")]
         (Listener::Web(gate), Caller::Browser { session, .. }) => gate.session_live(session),
@@ -287,12 +286,7 @@ async fn events<B: Backend>(
         let mut session = tokio::time::interval(SESSION_CHECK);
         loop {
             tokio::select! {
-                () = shutdown.cancelled() => {
-                    if local {
-                        yield Ok(sse(&Event::new(protocol::BACKEND_STOPPING_EVENT, Value::Null)));
-                    }
-                    break;
-                }
+                () = shutdown.cancelled() => break,
                 changed = states.changed() => {
                     if changed.is_err() {
                         break;

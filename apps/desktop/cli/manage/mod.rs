@@ -266,7 +266,6 @@ fn watch_status(global: &Global) -> Result<(), CallError> {
     let watched = Client::watch_connection(|watched| {
         let state = match watched {
             Watched::State(state) => *state,
-            Watched::Stopping => return true,
             Watched::Busy => {
                 if !std::mem::replace(&mut waiting, true) {
                     eprintln!("pap: every event stream of the backend is in use; waiting for one to close");

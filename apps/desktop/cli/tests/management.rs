@@ -333,7 +333,19 @@ fn desktop_follow_fixture() {
 #[cfg(unix)]
 #[test]
 fn desktop_follower_recovers_crashes_respects_the_gate_and_leaves_expected_stops_down() {
+    assert_desktop_follower(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_leaves_an_orderly_stop_down_when_event_streams_are_full() {
+    assert_desktop_follower(true);
+}
+
+#[cfg(unix)]
+fn assert_desktop_follower(saturated: bool) {
     let backend = Backend::start();
+    let _streams = saturated.then(|| saturate_backend_events(&backend));
     let sandbox = backend.directory.path();
     let ready = sandbox.join("follower.ready");
     let fixture = sandbox.join("desktop-follower");
@@ -378,6 +390,16 @@ fn desktop_follower_recovers_crashes_respects_the_gate_and_leaves_expected_stops
             std::thread::sleep(Duration::from_millis(1250));
             assert_eq!(backend.run(&["service", "status"])["status"], "not_running");
         };
+        if saturated {
+            wait("");
+            backend.run(&["service", "stop", "--yes"]);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                assert_eq!(backend.run(&["service", "status"])["status"], "not_running");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            return;
+        }
         let gate = desktop_core::lock::startup(&home.join(".private-ai-proxy"))
             .unwrap()
             .unwrap();
@@ -403,6 +425,34 @@ fn desktop_follower_recovers_crashes_respects_the_gate_and_leaves_expected_stops
     if let Err(error) = check {
         std::panic::resume_unwind(error);
     }
+}
+
+#[cfg(unix)]
+fn saturate_backend_events(
+    backend: &Backend,
+) -> Vec<std::io::BufReader<std::os::unix::net::UnixStream>> {
+    use std::{io::BufRead, os::unix::net::UnixStream};
+
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let diagnostic: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let endpoint = diagnostic["endpoint"].as_str().unwrap();
+    let open = |status: &str| {
+        let mut stream = UnixStream::connect(endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with(status), "{line}");
+        reader
+    };
+    let streams = (0..32).map(|_| open("HTTP/1.1 200 ")).collect();
+    drop(open("HTTP/1.1 503 "));
+    streams
 }
 
 #[cfg(unix)]

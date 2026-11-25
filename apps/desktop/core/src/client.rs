@@ -59,6 +59,7 @@ const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
 const RESTART_LIMIT: usize = 4;
+const SUPERVISION_RECHECK: Duration = Duration::from_secs(10);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
 const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run pap service start to replace it.";
 const OTHER_INSTALLATION: &str = "The running backend belongs to another installation. Update it through its owning package manager.";
@@ -135,8 +136,6 @@ pub enum Watched {
     /// Every event stream of the backend is taken; the watch retries until
     /// another client closes one.
     Busy,
-    /// The backend finished a deliberate shutdown.
-    Stopping,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -337,11 +336,11 @@ impl Client {
     fn follow(weak: std::sync::Weak<Self>) {
         let mut attempts = VecDeque::new();
         let mut recovering = false;
+        let mut supervised_until = None;
         loop {
             if weak.strong_count() == 0 {
                 break;
             }
-            let mut stopping = false;
             let result = Self::watch_connection(|watched| {
                 let Some(client) = weak.upgrade() else {
                     return false;
@@ -350,8 +349,8 @@ impl Client {
                     Watched::State(state) => {
                         client.states.send_replace(*state);
                         recovering = false;
+                        supervised_until = None;
                     }
-                    Watched::Stopping => stopping = true,
                     Watched::Busy => {}
                 }
                 true
@@ -361,16 +360,16 @@ impl Client {
             };
             if let Err(error) = result {
                 let state = client.states.borrow();
-                recovering = !stopping
-                    && !client.expected_shutdown_of(&state)
-                    && (recovering
-                        || (state.backend_instance.is_some()
-                            && state.backend_connected != Some(false)));
+                let disconnected = state.backend_instance.clone().filter(|_| {
+                    !client.expected_shutdown_of(&state)
+                        && (recovering || state.backend_connected != Some(false))
+                });
+                recovering = disconnected.is_some();
                 drop(state);
                 client.report_disconnect(error);
-                if recovering {
-                    match Self::restart_detached(&mut attempts) {
-                        Ok(()) => {}
+                if let Some(instance) = disconnected {
+                    match Self::restart_detached(&instance, &mut attempts, &mut supervised_until) {
+                        Ok(retry) => recovering = retry,
                         Err(error) => tracing::warn!("Cannot recover the PAP backend: {error}"),
                     }
                 }
@@ -380,8 +379,17 @@ impl Client {
         }
     }
 
-    fn restart_detached(attempts: &mut VecDeque<Instant>) -> Result<(), String> {
+    /// Returns false once this instance's exit is known to be intentional
+    /// or the instance has been superseded.
+    fn restart_detached(
+        disconnected: &str,
+        attempts: &mut VecDeque<Instant>,
+        supervised_until: &mut Option<Instant>,
+    ) -> Result<bool, String> {
         let now = Instant::now();
+        if supervised_until.is_some_and(|until| now < until) {
+            return Ok(true);
+        }
         while attempts
             .front()
             .is_some_and(|last| now.duration_since(*last) >= RESTART_WINDOW)
@@ -389,19 +397,34 @@ impl Client {
             attempts.pop_front();
         }
         if attempts.len() >= RESTART_LIMIT {
-            return Ok(());
+            return Ok(true);
         }
         let data = crate::paths::app_data_dir()?;
-        let Some(_startup) = crate::lock::startup_shared(&data)
+        let Some(_startup) = crate::lock::startup(&data)
             .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
         else {
-            return Ok(());
+            return Ok(true);
         };
+        // Wait until the old backend has released ownership so it cannot
+        // begin an orderly shutdown between the receipt check and startup.
+        let Some(instance) = crate::lock::instance(&data)
+            .map_err(|error| format!("Cannot inspect backend ownership: {error}"))?
+        else {
+            return Ok(true);
+        };
+        let may_restart = crate::lock::backend_may_restart(&data, disconnected)
+            .map_err(|error| format!("Cannot read backend lifecycle: {error}"))?;
+        drop(instance);
+        if !may_restart {
+            return Ok(false);
+        }
         if crate::supervisor::enabled() {
-            return Ok(());
+            *supervised_until = Some(now + SUPERVISION_RECHECK);
+            return Ok(true);
         }
         attempts.push_back(now);
-        Self::ensure_service_locked(StartMode::Normal)
+        Self::ensure_service_locked(StartMode::Normal)?;
+        Ok(true)
     }
 
     fn expected_shutdown_of(&self, state: &AppState) -> bool {
@@ -474,8 +497,6 @@ impl Client {
                                 state.backend_instance = Some(instance.clone());
                                 events.push(Watched::State(Box::new(state)));
                             }
-                        } else if event.event == protocol::BACKEND_STOPPING_EVENT {
-                            events.push(Watched::Stopping);
                         }
                     }
                 });
