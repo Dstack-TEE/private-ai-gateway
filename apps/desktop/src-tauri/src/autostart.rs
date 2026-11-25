@@ -53,6 +53,58 @@ mod platform {
         .map_err(|error| error.to_string())
     }
 
+    #[cfg(target_os = "windows")]
+    pub fn enable_default(app: &AppHandle) -> Result<(), String> {
+        // The Tauri NSIS installer writes InstallLocation under the current
+        // user's uninstall entry and removes that entry on uninstall.
+        let install_dir = windows_registry::CURRENT_USER
+            .open(format!(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}",
+                desktop_core::brand::PRODUCT_NAME
+            ))
+            .and_then(|key| key.get_string("InstallLocation"))
+            .ok();
+        let install_dir = install_dir
+            .as_deref()
+            .map(|path| Path::new(path.trim_matches('"')));
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("Cannot locate the application executable: {error}"))?;
+        let flag =
+            desktop_core::paths::app_data_dir()?.join("windows-open-at-login-default-applied");
+        apply_default(&executable, install_dir, &flag, || {
+            if !is_enabled(app)? {
+                set_enabled(app, true)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    fn apply_default(
+        executable: &Path,
+        install_dir: Option<&Path>,
+        flag: &Path,
+        enable: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let installed = install_dir
+            .filter(|path| path.is_absolute())
+            .and_then(|path| path.canonicalize().ok())
+            .is_some_and(|directory| {
+                executable
+                    .canonicalize()
+                    .is_ok_and(|path| path.parent() == Some(directory.as_path()))
+            });
+        if !installed {
+            return Ok(());
+        }
+        if flag.try_exists().map_err(|error| error.to_string())? {
+            return Ok(());
+        }
+        enable()?;
+        desktop_core::private_fs::write_private_atomic(flag, "", None)
+            .map_err(|error| format!("Cannot record the Open at Login default: {error}"))
+    }
+
     fn manager(app: &AppHandle) -> Result<tauri::State<'_, ManagerState>, String> {
         app.try_state()
             .ok_or_else(|| "Open at Login is unavailable for this installation".into())
@@ -158,6 +210,52 @@ mod platform {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn default_open_at_login_requires_nsis_installation_and_respects_opt_out() {
+            let directory = tempfile::tempdir().unwrap();
+            let flag = directory.path().join("default-applied");
+            let installed = directory.path().join("installed");
+            let dev = directory.path().join("target/debug");
+            for path in [&installed, &dev] {
+                std::fs::create_dir_all(path).unwrap();
+                std::fs::write(path.join("private-ai-proxy-desktop.exe"), "").unwrap();
+            }
+            let app = installed.join("private-ai-proxy-desktop.exe");
+            apply_default(
+                &dev.join("private-ai-proxy-desktop.exe"),
+                Some(&installed),
+                &flag,
+                || {
+                    panic!("development build called the registration callback");
+                },
+            )
+            .unwrap();
+            apply_default(&app, None, &flag, || {
+                panic!("unregistered app called the registration callback");
+            })
+            .unwrap();
+            assert!(!flag.exists());
+            assert!(apply_default(&app, Some(&installed), &flag, || {
+                Err("registration unavailable".into())
+            })
+            .is_err());
+            assert!(!flag.exists());
+            let mut enabled = false;
+            apply_default(&app, Some(&installed), &flag, || {
+                enabled = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(enabled && flag.exists());
+            enabled = false;
+            apply_default(&app, Some(&installed), &flag, || {
+                enabled = true;
+                Ok(())
+            })
+            .unwrap();
+            assert!(!enabled);
+        }
 
         #[cfg(target_os = "linux")]
         #[test]

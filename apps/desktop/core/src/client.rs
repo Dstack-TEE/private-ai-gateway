@@ -8,6 +8,7 @@
 //! are made from threads that run no async tasks (the CLI, blocking pools).
 
 use std::{
+    collections::VecDeque,
     fmt,
     future::Future,
     io,
@@ -56,6 +57,9 @@ const BACKEND_EXIT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long an installer or updater may hold the startup gate before a client
 /// reports it instead of waiting.
 const STARTUP_GATE_WAIT: Duration = Duration::from_secs(5);
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+const RESTART_LIMIT: usize = 4;
+const SUPERVISION_RECHECK: Duration = Duration::from_secs(10);
 const STARTUP_IN_PROGRESS: &str = "Backend startup or an update is already in progress.";
 const OTHER_BUILD: &str = "A backend of another Private AI Proxy version is running. Run pap service start to replace it.";
 const OTHER_INSTALLATION: &str = "The running backend belongs to another installation. Update it through its owning package manager.";
@@ -134,6 +138,14 @@ pub enum Watched {
     Busy,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StartMode {
+    Normal,
+    AppStartup,
+    Supervised,
+    AfterDisablingLogin,
+}
+
 impl Client {
     pub fn new() -> Self {
         let (states, _) = watch::channel(AppState::default());
@@ -158,19 +170,26 @@ impl Client {
     }
 
     pub fn ensure_service() -> Result<(), String> {
+        Self::ensure_service_in_mode(StartMode::Normal)
+    }
+
+    fn ensure_service_in_mode(mode: StartMode) -> Result<(), String> {
         let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         if block_on(open())?.is_ok_and(|connection| current(&connection.version)) {
             return Ok(());
         }
         let data = crate::paths::app_data_dir()?;
         let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup_shared)?;
-        Self::ensure_service_locked(false)
+        Self::ensure_service_locked(mode).map(|_| ())
     }
 
-    fn ensure_service_locked(require_supervision: bool) -> Result<(), String> {
+    /// Starts the backend and returns the instance ID from its readiness handshake.
+    fn ensure_service_locked(mode: StartMode) -> Result<String, String> {
         let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         match block_on(open())? {
-            Ok(connection) if current(&connection.version) => return Ok(()),
+            Ok(connection) if current(&connection.version) => {
+                return Ok(connection.version.instance_id);
+            }
             Ok(connection) => {
                 let expected = installed_backend()?;
                 if !executable_matches(&connection.version.executable, &expected)? {
@@ -188,17 +207,31 @@ impl Client {
             Err(error) => return Err(connection_error(error)),
         }
         // Under the service manager a crashed backend is started again.
-        let child = if crate::supervisor::start()? {
-            None
-        } else if require_supervision {
-            return Err("The backend's login service became unavailable during handoff".into());
-        } else {
-            Some(crate::launch::spawn_background()?)
+        let child = match mode {
+            StartMode::AfterDisablingLogin => Some(crate::launch::spawn_background_with_args(&[
+                "--skip-protect-on-launch",
+            ])?),
+            _ => match crate::supervisor::start() {
+                Ok(true) => None,
+                Ok(false) if mode == StartMode::Supervised => {
+                    return Err(
+                        "The backend's login service became unavailable during handoff".into(),
+                    )
+                }
+                Ok(false) => Some(crate::launch::spawn_background()?),
+                Err(error) if mode == StartMode::AppStartup => {
+                    tracing::warn!("Cannot start the PAP login service: {error}");
+                    Some(crate::launch::spawn_background()?)
+                }
+                Err(error) => return Err(error),
+            },
         };
         Self::wait_for_service(child)
     }
 
-    fn wait_for_service(mut child: Option<crate::launch::BackgroundService>) -> Result<(), String> {
+    fn wait_for_service(
+        mut child: Option<crate::launch::BackgroundService>,
+    ) -> Result<String, String> {
         // A backend that exits is reported immediately below; this only bounds a
         // live but slow start.
         let deadline = Instant::now() + BACKEND_START_TIMEOUT;
@@ -206,7 +239,7 @@ impl Client {
             match block_on(open())? {
                 Ok(connection) if connection.version.version == protocol::BUILD_VERSION => {
                     reap(child);
-                    return Ok(());
+                    return Ok(connection.version.instance_id);
                 }
                 Ok(_) => {
                     if let Some(mut child) = child {
@@ -268,6 +301,13 @@ impl Client {
     /// the backend answers, the state reports it disconnected without an
     /// error: starting.
     pub fn attach(handle: tokio::runtime::Handle) -> Arc<Self> {
+        Self::attach_with_startup(handle, |_| {})
+    }
+
+    pub fn attach_with_startup(
+        handle: tokio::runtime::Handle,
+        before_start: impl FnOnce(&Self) + Send + 'static,
+    ) -> Arc<Self> {
         let client = Arc::new(Self::new());
         client
             .states
@@ -277,7 +317,10 @@ impl Client {
             let Some(client) = weak.upgrade() else {
                 return;
             };
-            match Self::ensure_service().and_then(|()| client.state().map_err(String::from)) {
+            before_start(&client);
+            match Self::ensure_service_in_mode(StartMode::AppStartup)
+                .and_then(|()| client.state().map_err(String::from))
+            {
                 Ok(state) => {
                     client.states.send_replace(state);
                 }
@@ -293,8 +336,12 @@ impl Client {
     }
 
     /// Mirrors the backend's state until the client is dropped, reconnecting
-    /// after each disconnection.
+    /// after each disconnection. A detached backend that crashed gets a
+    /// limited number of restart attempts while the app is open.
     fn follow(weak: std::sync::Weak<Self>) {
+        let mut attempts = VecDeque::new();
+        let mut recovering = None;
+        let mut supervised_until = None;
         loop {
             if weak.strong_count() == 0 {
                 break;
@@ -303,8 +350,13 @@ impl Client {
                 let Some(client) = weak.upgrade() else {
                     return false;
                 };
-                if let Watched::State(state) = watched {
-                    client.states.send_replace(*state);
+                match watched {
+                    Watched::State(state) => {
+                        client.states.send_replace(*state);
+                        recovering = None;
+                        supervised_until = None;
+                    }
+                    Watched::Busy => {}
                 }
                 true
             });
@@ -312,22 +364,91 @@ impl Client {
                 break;
             };
             if let Err(error) = result {
+                recovering = recovering
+                    .take()
+                    .or_else(|| {
+                        let state = client.states.borrow();
+                        state
+                            .backend_instance
+                            .as_ref()
+                            .filter(|_| state.backend_connected != Some(false))
+                            .cloned()
+                    })
+                    .filter(|instance| !client.expected_shutdown_of(Some(instance)));
                 client.report_disconnect(error);
+                if let Err(error) =
+                    Self::restart_detached(&mut recovering, &mut attempts, &mut supervised_until)
+                {
+                    tracing::warn!("Cannot recover the PAP backend: {error}");
+                }
             }
             drop(client);
             std::thread::sleep(Duration::from_secs(1));
         }
     }
 
+    /// Carries the verified replacement ID even if it exits before the next
+    /// event stream opens. An intentional or superseded exit ends recovery.
+    fn restart_detached(
+        recovering: &mut Option<String>,
+        attempts: &mut VecDeque<Instant>,
+        supervised_until: &mut Option<Instant>,
+    ) -> Result<(), String> {
+        let Some(disconnected) = recovering.as_deref() else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if supervised_until.is_some_and(|until| now < until) {
+            return Ok(());
+        }
+        while attempts
+            .front()
+            .is_some_and(|last| now.duration_since(*last) >= RESTART_WINDOW)
+        {
+            attempts.pop_front();
+        }
+        if attempts.len() >= RESTART_LIMIT {
+            return Ok(());
+        }
+        let data = crate::paths::app_data_dir()?;
+        let Some(_startup) = crate::lock::startup(&data)
+            .map_err(|error| format!("Cannot acquire backend startup lock: {error}"))?
+        else {
+            return Ok(());
+        };
+        // Wait until the old backend has released ownership so it cannot
+        // begin an orderly shutdown between the receipt check and startup.
+        let Some(instance) = crate::lock::instance(&data)
+            .map_err(|error| format!("Cannot inspect backend ownership: {error}"))?
+        else {
+            return Ok(());
+        };
+        let may_restart = crate::lock::backend_may_restart(&data, disconnected)
+            .map_err(|error| format!("Cannot read backend lifecycle: {error}"))?;
+        drop(instance);
+        if !may_restart {
+            *recovering = None;
+            return Ok(());
+        }
+        if crate::supervisor::enabled() {
+            *supervised_until = Some(now + SUPERVISION_RECHECK);
+            return Ok(());
+        }
+        attempts.push_back(now);
+        *recovering = Some(Self::ensure_service_locked(StartMode::Normal)?);
+        Ok(())
+    }
+
+    fn expected_shutdown_of(&self, instance: Option<&str>) -> bool {
+        self.expected_shutdown
+            .lock()
+            .is_ok_and(|expected| instance.is_some() && expected.as_deref() == instance)
+    }
+
     fn report_disconnect(&self, error: String) {
         let mut state = self.states.borrow().clone();
-        let expected = self
-            .expected_shutdown
-            .lock()
-            .ok()
-            .and_then(|value| value.clone());
         // Only a shutdown initiated by this client for this exact instance is expected.
-        if expected.is_some() && expected == state.backend_instance {
+        if self.expected_shutdown_of(state.backend_instance.as_deref()) {
             return;
         }
         if state.backend_connected == Some(false) && state.error.is_some() {
@@ -379,17 +500,20 @@ impl Client {
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
-                let mut states = Vec::new();
+                let mut events = Vec::new();
                 lines.push(&data, |value| {
                     if let Ok(event) = serde_json::from_str::<Event>(value) {
                         if event.event == crate::ui_api::STATE_EVENT {
-                            states.extend(serde_json::from_value::<AppState>(event.payload).ok());
+                            if let Ok(mut state) = serde_json::from_value::<AppState>(event.payload)
+                            {
+                                state.backend_instance = Some(instance.clone());
+                                events.push(Watched::State(Box::new(state)));
+                            }
                         }
                     }
                 });
-                for mut state in states {
-                    state.backend_instance = Some(instance.clone());
-                    if !receive(Watched::State(Box::new(state))) {
+                for event in events {
+                    if !receive(event) {
                         return Ok(());
                     }
                 }
@@ -447,6 +571,16 @@ impl Client {
         self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::Quit)
     }
 
+    /// Turns off backend login startup and gives the open app a detached
+    /// backend without starting a new protection session in this operation.
+    pub fn disable_login_service(&self) -> Result<(), String> {
+        let data = crate::paths::app_data_dir()?;
+        let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup)?;
+        self.shutdown_installed()?;
+        crate::supervisor::disable()?;
+        Self::ensure_service_locked(StartMode::AfterDisablingLogin).map(|_| ())
+    }
+
     /// Stops this installation's backend as a restart does: the protection
     /// session stays for the next backend to resume, and connected agents
     /// stay pointed at the Local API.
@@ -494,8 +628,8 @@ impl Client {
                 .as_ref()
                 .map(|version| version.instance_id.as_str()),
         )?;
-        match Self::ensure_service_locked(true) {
-            Ok(()) => Ok(true),
+        match Self::ensure_service_locked(StartMode::Supervised) {
+            Ok(_) => Ok(true),
             Err(manager_error) => match Self::recover_detached(&data) {
                 Ok(()) => Err(manager_error),
                 Err(recovery_error) => Err(format!(
@@ -525,7 +659,7 @@ impl Client {
         drop(instance);
         // Bypass the supervisor that just failed. If a backend starts in this
         // gap, the instance lock lets only one process initialize the service.
-        Self::wait_for_service(Some(crate::launch::spawn_background()?))
+        Self::wait_for_service(Some(crate::launch::spawn_background()?)).map(|_| ())
     }
 
     /// Stops the running backend, of this build or another, and waits for it

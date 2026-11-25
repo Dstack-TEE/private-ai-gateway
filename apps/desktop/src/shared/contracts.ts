@@ -43,6 +43,7 @@ export interface DesktopApi {
   onLaunchPreferencesChange(listener: (preferences: LaunchPreferences) => void): () => void;
   getCliRegistration(): Promise<CliRegistration>;
   setCliRegistration(installed: boolean): Promise<CliRegistration>;
+  takeSupervisionNotice(): Promise<string | null>;
   stopAllAndQuit(): Promise<void>;
   // Desktop-only capabilities are absent in the web UI.
   /** Closes the window as its close button does; the app keeps running. */

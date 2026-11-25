@@ -52,7 +52,13 @@ fn relocated() -> bool {
 }
 
 fn supported() -> bool {
-    service_manager_platform_supported() && !relocated()
+    let available = service_manager_platform_supported() && !relocated();
+    #[cfg(target_os = "macos")]
+    let available = available
+        && std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .is_ok_and(|path| !crate::paths::transient_macos_app_path(&path));
+    available
 }
 
 fn service_manager_platform_supported() -> bool {
@@ -62,10 +68,18 @@ fn service_manager_platform_supported() -> bool {
     ))
 }
 
-/// This command by a path that survives an upgrade: the entry on `PATH` that
-/// links to it, as install scripts and Homebrew create, or else its own path,
-/// which a package manager keeps.
+/// The CLI path that survives an upgrade. Desktop shells and their bundled
+/// CLI share the same registration, even when the CLI was invoked via PATH.
 fn command() -> Result<(PathBuf, bool), String> {
+    if matches!(
+        installation(),
+        Installation::DesktopApp | Installation::DesktopPacman
+    ) {
+        return Ok((
+            crate::launch::sibling_executable("private-ai-proxy")?,
+            false,
+        ));
+    }
     let current = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|error| format!("Cannot locate this command: {error}"))?;
@@ -123,15 +137,12 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::SystemPackage
         | Installation::Npm => true,
         Installation::Portable => command().is_ok_and(|(_, linked)| linked),
-        Installation::DesktopApp | Installation::DesktopPacman => false,
+        Installation::DesktopApp | Installation::DesktopPacman => platform::installed_desktop(),
     }
 }
 
 fn automatic_supervision_supported() -> bool {
-    service_manager_platform_supported()
-        && !relocated()
-        && installation_supports_automatic_supervision()
-        && user_service_manager_available()
+    supported() && installation_supports_automatic_supervision() && user_service_manager_available()
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -205,8 +216,7 @@ pub fn automatic_blockers(agent_environment_overrides: &[&'static str]) -> Autom
     )
 }
 
-/// Whether `pap start` turns this on by itself: installations whose command
-/// keeps a path across upgrades. A desktop app owns its backend's lifetime.
+/// Whether the desktop shell or `pap start` turns this on by itself.
 pub fn automatic(agent_environment_overrides: &[&'static str]) -> bool {
     automatic_blockers(agent_environment_overrides).is_eligible()
 }
@@ -217,11 +227,9 @@ impl AutomaticBlockers {
     }
 }
 
-fn record_automatic_skip_notice(marker: &std::path::Path, names: &[&str]) -> Option<String> {
-    let result = crate::private_fs::write_private(marker, "");
-    if result.is_err() {
-        return None;
-    }
+fn record_automatic_skip_notice(data: &std::path::Path, names: &[&str]) -> Option<String> {
+    crate::private_fs::create_private_dir(data).ok()?;
+    crate::private_fs::write_private(&data.join(SKIP_NOTICE_MARKER), "").ok()?;
     let variables = match names {
         [name] => format!("{name} is set"),
         names => format!("{} are set", names.join(", ")),
@@ -237,8 +245,8 @@ pub fn automatic_skip_notice(blockers: AutomaticBlockers) -> Option<String> {
     let AutomaticBlockers::Environment(names) = blockers else {
         return None;
     };
-    let marker = crate::paths::app_data_dir().ok()?.join(SKIP_NOTICE_MARKER);
-    record_automatic_skip_notice(&marker, &names)
+    let data = crate::paths::app_data_dir().ok()?;
+    record_automatic_skip_notice(&data, &names)
 }
 
 /// Has the service manager start the backend at login and after a crash.
@@ -334,13 +342,13 @@ mod tests {
     #[test]
     fn automatic_skip_notice_is_recorded_only_once() {
         let directory = tempfile::tempdir().unwrap();
-        let marker = directory.path().join("notice-shown");
-        let notice = record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"])
+        let data = directory.path().join("app-data");
+        let notice = record_automatic_skip_notice(&data, &["CODEX_HOME", "HTTPS_PROXY"])
             .expect("first start should show the notice");
         assert!(notice.contains("CODEX_HOME, HTTPS_PROXY"));
         assert!(notice.contains("pap service enable"));
         assert!(notice.contains("environment first, then run"));
-        assert!(record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"]).is_none());
+        assert!(record_automatic_skip_notice(&data, &["CODEX_HOME", "HTTPS_PROXY"]).is_none());
     }
 
     #[test]
@@ -383,6 +391,7 @@ mod platform {
     const UNIT_OBJECT: &str = "/org/freedesktop/systemd1/unit/private_2dai_2dproxy_2eservice";
     const PACKAGED_UNIT: &str = "/usr/lib/systemd/user/private-ai-proxy.service";
     const PACKAGED_BACKEND: &str = "/usr/libexec/private-ai-proxy/private-ai-proxy-service";
+    const DESKTOP_BACKEND: &str = "/usr/bin/private-ai-proxy-service";
     const PACKAGED_CONTENTS: &str =
         include_str!("../../src-tauri/installer/private-ai-proxy.service");
     const MARKER: &str = "# Written by `pap service enable`; `pap service disable` removes it.";
@@ -524,10 +533,29 @@ mod platform {
     }
 
     /// The package's unit, when it starts this installation's backend.
-    fn packaged() -> bool {
-        Path::new(PACKAGED_UNIT).is_file()
-            && crate::launch::service_executable()
-                .is_ok_and(|backend| backend == Path::new(PACKAGED_BACKEND))
+    fn packaged_backend() -> Option<PathBuf> {
+        if !Path::new(PACKAGED_UNIT).is_file() {
+            return None;
+        }
+        crate::launch::service_executable().ok()
+    }
+
+    pub(super) fn installed_desktop() -> bool {
+        packaged_backend().is_some_and(|backend| backend == Path::new(DESKTOP_BACKEND))
+    }
+
+    fn packaged() -> Option<String> {
+        packaged_contents(&packaged_backend()?)
+    }
+
+    fn packaged_contents(backend: &Path) -> Option<String> {
+        if backend == Path::new(PACKAGED_BACKEND) {
+            Some(PACKAGED_CONTENTS.into())
+        } else if backend == Path::new(DESKTOP_BACKEND) {
+            Some(PACKAGED_CONTENTS.replace(PACKAGED_BACKEND, DESKTOP_BACKEND))
+        } else {
+            None
+        }
     }
 
     /// The unit a user may write, as systemd.unit(5) places it.
@@ -575,17 +603,19 @@ mod platform {
 
     impl Registration {
         fn for_installation() -> Result<Self, String> {
-            let packaged = packaged();
-            let (path, contents) = if packaged {
-                (PathBuf::from(PACKAGED_UNIT), PACKAGED_CONTENTS.into())
+            if let Some(contents) = packaged() {
+                Ok(Self {
+                    path: PathBuf::from(PACKAGED_UNIT),
+                    contents,
+                    packaged: true,
+                })
             } else {
-                (user_unit()?, unit(&command()?.0)?)
-            };
-            Ok(Self {
-                path,
-                contents,
-                packaged,
-            })
+                Ok(Self {
+                    path: user_unit()?,
+                    contents: unit(&command()?.0)?,
+                    packaged: false,
+                })
+            }
         }
 
         fn exists(&self) -> Result<bool, String> {
@@ -766,6 +796,19 @@ mod platform {
     #[cfg(test)]
     mod tests {
         #[test]
+        fn native_packages_use_the_unit_for_their_own_bundled_backend() {
+            use std::path::Path;
+            for backend in [super::PACKAGED_BACKEND, super::DESKTOP_BACKEND] {
+                let contents = super::packaged_contents(Path::new(backend)).unwrap();
+                assert!(contents
+                    .lines()
+                    .any(|line| line == format!("ExecStart={backend} --supervised")));
+                assert!(contents.contains("RestartPreventExitStatus=75\n"));
+            }
+            assert!(super::packaged_contents(Path::new("/opt/private-ai-proxy-service")).is_none());
+        }
+
+        #[test]
         fn effective_restart_policy_keeps_deliberate_quits_stopped() {
             use serde_json::json;
             let safe = [
@@ -826,6 +869,12 @@ mod platform {
 
     const MARKER: &str =
         "<!-- Written by `pap service enable`; `pap service disable` removes it. -->";
+
+    pub(super) fn installed_desktop() -> bool {
+        std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .is_ok_and(|path| super::macos_desktop_bundle(&path))
+    }
 
     fn launchctl(arguments: &[&str]) -> bool {
         Command::new("launchctl")
@@ -1142,6 +1191,10 @@ mod platform {
 mod platform {
     use super::UNSUPPORTED;
 
+    pub(super) fn installed_desktop() -> bool {
+        false
+    }
+
     pub(super) fn running_pid() -> Result<Option<u32>, String> {
         Ok(None)
     }
@@ -1153,5 +1206,103 @@ mod platform {
     }
     pub(super) fn start() -> bool {
         false
+    }
+}
+
+#[cfg(any(test, all(target_os = "macos", not(feature = "mac-app-store"))))]
+fn macos_desktop_bundle(executable: &std::path::Path) -> bool {
+    let Some(contents) = executable
+        .parent()
+        .filter(|path| path.ends_with("Contents/MacOS"))
+        .and_then(std::path::Path::parent)
+    else {
+        return false;
+    };
+    contents
+        .parent()
+        .and_then(std::path::Path::extension)
+        .is_some_and(|extension| extension == "app")
+        && contents.join("Info.plist").is_file()
+}
+
+#[cfg(test)]
+#[test]
+fn macos_desktop_enrollment_requires_an_app_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let contents = temp.path().join("Private AI Proxy.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    let executable = contents.join("MacOS/private-ai-proxy-desktop");
+    assert!(!macos_desktop_bundle(&executable));
+    std::fs::write(contents.join("Info.plist"), "").unwrap();
+    assert!(macos_desktop_bundle(&executable));
+    assert!(!macos_desktop_bundle(
+        &temp.path().join("target/debug/private-ai-proxy-desktop")
+    ));
+}
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "mac-app-store"))
+    )
+))]
+mod desktop_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+    #[test]
+    fn unbundled_desktop_shell_and_cli_use_the_same_command_without_enrolling() {
+        const CHILD: &str = "PAP_TEST_DESKTOP_ENROLLMENT";
+        if std::env::var_os(CHILD).is_some() {
+            let cli = PathBuf::from(std::env::var_os("PAP_TEST_CANONICAL_COMMAND").unwrap());
+            assert_eq!(command().unwrap(), (cli, false));
+            assert!(!automatic(
+                &crate::paths::agent_environment::environment_overrides()
+            ));
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let shell = root.join("private-ai-proxy-desktop");
+        let cli = root.join("private-ai-proxy");
+        let links = root.join("links");
+        let home = root.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        for executable in [&shell, &cli] {
+            if fs::hard_link(&exe, executable).is_err() {
+                fs::copy(&exe, executable).unwrap();
+            }
+        }
+        fs::create_dir(&links).unwrap();
+        let manager = links.join(if cfg!(target_os = "linux") {
+            "systemctl"
+        } else {
+            "launchctl"
+        });
+        fs::write(&manager, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&manager, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = links.join("private-ai-proxy");
+        std::os::unix::fs::symlink(&cli, &alias).unwrap();
+
+        for program in [&shell, &alias] {
+            let output = Command::new(program)
+                .env_clear()
+                .env("HOME", &home)
+                .env("PATH", &links)
+                .env("PAP_TEST_CANONICAL_COMMAND", &cli)
+                .env(CHILD, "1")
+                .args([
+                    "--exact",
+                    "supervisor::desktop_tests::unbundled_desktop_shell_and_cli_use_the_same_command_without_enrolling",
+                ])
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
     }
 }

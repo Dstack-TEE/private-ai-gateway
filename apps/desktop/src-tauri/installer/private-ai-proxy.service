@@ -1,5 +1,5 @@
-# User service for CLI-only Linux packages, like Syncthing's
-# syncthing.service. `pap start` enables it, so that the backend starts at
+# User service for Linux CLI and desktop packages. `pap start` or the
+# desktop app enables it, so that the backend starts at
 # login and after a crash. The login service keeps an active protection
 # session across a shutdown signal. `pap service disable` stops protection
 # and turns off supervision.

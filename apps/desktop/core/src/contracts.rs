@@ -651,6 +651,7 @@ pub struct DistributionCapabilities {
     pub account_portal_links: bool,
     pub sandbox_home_access: bool,
     pub launch_at_login: bool,
+    pub background_at_login: bool,
     pub notifications: bool,
     pub web_ui: bool,
 }
@@ -666,6 +667,7 @@ impl DistributionCapabilities {
         account_portal_links: true,
         sandbox_home_access: false,
         launch_at_login: false,
+        background_at_login: false,
         notifications: false,
         web_ui: true,
     };

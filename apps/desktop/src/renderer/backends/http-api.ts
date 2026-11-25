@@ -70,6 +70,7 @@ const platform: UiPlatform = {
   },
   restartToUpdate: async () => undefined,
   getCliRegistration: unavailable,
+  takeSupervisionNotice: async () => null,
   setCliRegistration: unavailable,
   stopAllAndQuit: async () => undefined,
   // Only the desktop app has a tray and a menu bar.

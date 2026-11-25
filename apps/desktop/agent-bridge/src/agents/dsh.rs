@@ -16,11 +16,10 @@ use std::{
 };
 
 use super::{registry::DSH_HOME, *};
+pub(super) use desktop_core::paths::agent_environment::DSH_TOKEN_REF as TOKEN_REF;
 use serde_json::{json, Value};
 
 const PROVIDER: &str = "private-ai-proxy";
-/// The credential reference the provider's `apiKeyEnv` names.
-pub(super) const TOKEN_REF: &str = "PRIVATE_AI_PROXY_DSH_TOKEN";
 const PI_AI: &str = "llm-pi-ai";
 const DEFAULT_MODEL: &str = "agent-default-model";
 /// The acp profile's row, which selects its own model instead of the default:

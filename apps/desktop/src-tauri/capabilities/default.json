@@ -72,6 +72,7 @@
     "allow-set-cli-registration",
     "allow-quit-app",
     "allow-stop-all-and-quit",
+    "allow-take-supervision-notice",
     "allow-take-navigation"
   ]
 }

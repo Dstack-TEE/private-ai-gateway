@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cliRegistrationQuery } from "../lib/queries";
-import { useReportFailure } from "../components/confirm";
+import { useConfirm, useReportFailure } from "../components/confirm";
 import { ChevronRight } from "lucide-react";
 import { brand } from "../brand/brand";
 import { UpdateControl, UpdateChannelControl } from "../updates";
@@ -89,6 +89,7 @@ function useLaunchPreferences() {
     mutationFn: ({ name, enabled }: { name: LaunchPreference; enabled: boolean }) => desktopApi.setLaunchPreference(name, enabled),
     onMutate: () => client.cancelQueries({ queryKey }),
     onSuccess: (next) => { client.setQueryData(queryKey, next); },
+    onError: () => { void client.invalidateQueries({ queryKey }); },
     meta: { errorTitle: "Could not change the preference" },
   });
   return {
@@ -102,9 +103,19 @@ export function SettingsPage(): React.JSX.Element {
   const shell = useShell();
   const { state, updates } = shell;
   const launch = useLaunchPreferences();
+  const confirm = useConfirm();
   const locked = shell.applying || shell.agents.changing;
   const profile = activeProfile(state);
   const starting = state.protection.phase === "starting";
+  const toggleBackgroundAtLogin = async () => {
+    const enabled = !launch.preferences?.backgroundAtLogin;
+    if (enabled || await confirm({
+      title: "Stop running in the background at login?",
+      message: "Protection stops now, and managed agent configurations are restored.",
+      confirmLabel: "Turn Off",
+      destructive: true,
+    })) launch.change("backgroundAtLogin", enabled);
+  };
   return (
     <div className="mx-auto min-h-full max-w-230">
       {state.configFiles.error && <Alert variant="destructive" className="mb-5">
@@ -119,6 +130,7 @@ export function SettingsPage(): React.JSX.Element {
 
       <SettingsSection title="General">
           {distribution.launchAtLogin && <SettingsToggle label="Open at Login" checked={launch.preferences?.openAtLogin ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("openAtLogin", !launch.preferences?.openAtLogin)} />}
+          {distribution.backgroundAtLogin && <SettingsToggle label="Run in background at login" checked={launch.preferences?.backgroundAtLogin ?? false} disabled={!launch.preferences || launch.saving || locked} onToggle={() => void toggleBackgroundAtLogin()} />}
           <SettingsToggle label="Protect on launch" checked={launch.preferences?.connectOnLaunch ?? false} disabled={!launch.preferences || launch.saving} onToggle={() => launch.change("connectOnLaunch", !launch.preferences?.connectOnLaunch)} />
           <AppearanceControl />
           {distribution.notifications && <SettingsLink title="Notifications" aria-haspopup="dialog" onClick={() => shell.openDialog({ kind: "notifications" })} />}

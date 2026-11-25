@@ -510,6 +510,19 @@ impl DesktopRuntime {
             .ok_or_else(|| "The backend does not own its instance lock".to_string())
     }
 
+    pub(crate) fn record_backend_lifecycle(
+        &self,
+        lifecycle: lock::BackendLifecycle,
+    ) -> Result<(), String> {
+        self.instance_lock()?;
+        lock::record_backend_lifecycle(
+            &self.data_dir,
+            &crate::api::version().instance_id,
+            lifecycle,
+        )
+        .map_err(|error| format!("Cannot record backend lifecycle: {error}"))
+    }
+
     pub fn state(&self) -> AppState {
         self.manager.snapshot()
     }

@@ -98,6 +98,40 @@ pub fn instance_within(data_dir: &Path, wait: Duration) -> io::Result<Option<Ins
     }
 }
 
+const BACKEND_LIFECYCLE: &str = "backend-lifecycle";
+
+/// Published by the backend while it owns the instance lock. An exit intent
+/// survives the management stream and remains until the next instance starts.
+pub enum BackendLifecycle {
+    Running,
+    Stopping,
+}
+
+pub fn record_backend_lifecycle(
+    data_dir: &Path,
+    instance: &str,
+    lifecycle: BackendLifecycle,
+) -> io::Result<()> {
+    let status = match lifecycle {
+        BackendLifecycle::Running => "running:",
+        BackendLifecycle::Stopping => "stopping:",
+    };
+    crate::private_fs::write_private_atomic(
+        &data_dir.join(BACKEND_LIFECYCLE),
+        &format!("{status}{instance}"),
+        None,
+    )
+}
+
+/// Call only when the startup and instance locks are held. A record for a
+/// different instance supersedes the one the follower last observed.
+pub(crate) fn backend_may_restart(data_dir: &Path, instance: &str) -> io::Result<bool> {
+    Ok(
+        crate::private_fs::read_private_text(&data_dir.join(BACKEND_LIFECYCLE))?
+            .is_none_or(|record| record.strip_prefix("running:") == Some(instance)),
+    )
+}
+
 /// Failure to open or acquire the transaction lock, separate from operation errors.
 #[derive(Debug, thiserror::Error)]
 #[error("Cannot lock the agent configurations: {0}")]
@@ -123,6 +157,22 @@ pub fn with_apply_lock<T, E: From<ApplyLockError>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_restart_requires_the_latest_instance_to_be_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let _startup = startup(data).unwrap().unwrap();
+        let _instance = instance(data).unwrap().unwrap();
+        assert!(backend_may_restart(data, "before-records").unwrap());
+        record_backend_lifecycle(data, "first", BackendLifecycle::Running).unwrap();
+        assert!(backend_may_restart(data, "first").unwrap());
+        record_backend_lifecycle(data, "first", BackendLifecycle::Stopping).unwrap();
+        assert!(!backend_may_restart(data, "first").unwrap());
+        record_backend_lifecycle(data, "second", BackendLifecycle::Running).unwrap();
+        assert!(!backend_may_restart(data, "first").unwrap());
+        assert!(backend_may_restart(data, "second").unwrap());
+    }
 
     #[cfg(unix)]
     #[test]

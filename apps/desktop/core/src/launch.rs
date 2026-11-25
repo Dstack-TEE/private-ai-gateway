@@ -55,7 +55,7 @@ pub fn service_executable() -> Result<PathBuf, String> {
     sibling_executable(SERVICE_BINARY)
 }
 
-fn sibling_executable(name: &str) -> Result<PathBuf, String> {
+pub(crate) fn sibling_executable(name: &str) -> Result<PathBuf, String> {
     let current = std::env::current_exe()
         .map_err(|error| format!("Cannot locate the application executable: {error}"))?;
     let current = std::fs::canonicalize(&current).map_err(|error| {
@@ -123,12 +123,17 @@ pub fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 pub fn spawn_background() -> Result<BackgroundService, String> {
+    spawn_background_with_args(&[])
+}
+
+pub(crate) fn spawn_background_with_args(args: &[&str]) -> Result<BackgroundService, String> {
     let executable = service_executable()?;
     let working_directory = executable
         .parent()
         .ok_or_else(|| "Cannot locate the service executable directory".to_string())?;
     let mut command = child_command(&executable);
     command
+        .args(args)
         .current_dir(working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

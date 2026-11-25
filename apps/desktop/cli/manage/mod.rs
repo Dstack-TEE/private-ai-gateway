@@ -339,6 +339,10 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable => {
+            // Windows uses the app's login item and has no backend registration.
+            if cfg!(windows) {
+                return Ok(json!({"startAtLogin": false}));
+            }
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if desktop_core::supervisor::enabled() && client.is_running()? {

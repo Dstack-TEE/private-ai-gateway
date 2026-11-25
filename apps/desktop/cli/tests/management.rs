@@ -191,6 +191,17 @@ fn start_reports_skipped_supervision_once_in_human_and_json_output() {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn service_disable_succeeds_without_a_windows_backend_login_service() {
+    let backend = Backend::start();
+    assert_eq!(
+        backend.run(&["service", "disable", "--yes"]),
+        json!({"startAtLogin": false})
+    );
+    assert!(backend.run(&["service", "status"])["backend"].is_object());
+}
+
 #[test]
 fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
     let backend = Backend::start();
@@ -242,7 +253,281 @@ fn service_stop_after_supervised_sigterm_restores_agents_offline() {
 }
 
 #[cfg(unix)]
+#[test]
+fn detached_sigterm_ends_the_session_and_restores_agents() {
+    assert_signal_shutdown(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn replacement_after_disabling_login_stays_unprotected_despite_protect_on_launch() {
+    let backend = Backend::start_with_credentials("[profiles.test]\napi-key = \"test-key\"\n");
+    backend.run(&["service", "stop", "--yes"]);
+    let home = backend.directory.path().join("home");
+    let config = home.join(".private-ai-proxy/Config/config.toml");
+    let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
+    fs::write(
+        &config,
+        format!(
+            "active-profile = \"test\"\nconnect-on-launch = true\n{}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"https://{}\"\n",
+            fs::read_to_string(&config).unwrap(),
+            gateway.local_addr().unwrap(),
+        ),
+    )
+    .unwrap();
+    let mut replacement =
+        std::process::Command::new(backend.cli().with_file_name("private-ai-proxy-service"))
+            .arg("--skip-protect-on-launch")
+            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+            .spawn()
+            .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if backend.run(&["status"])["backend"].is_object() {
+            break;
+        }
+        assert!(replacement.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
+    assert_eq!(
+        backend.run(&["settings", "show"])["settings"]["connect-on-launch"],
+        true
+    );
+    backend.run(&["service", "stop", "--yes"]);
+    assert!(replacement.wait().unwrap().success());
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess fixture running the desktop client's background follower"]
+fn desktop_follow_fixture() {
+    let ready = std::env::var_os("PAP_TEST_FOLLOW_READY").unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let client = desktop_core::client::Client::attach(runtime.handle().clone());
+    let mut states = client.subscribe();
+    runtime.block_on(async move {
+        let mut previous = None;
+        loop {
+            let state = states
+                .wait_for(|state| {
+                    state.backend_instance.is_some()
+                        && state.backend_connected != Some(false)
+                        && state.backend_instance != previous
+                })
+                .await
+                .unwrap();
+            previous.clone_from(&state.backend_instance);
+            desktop_core::private_fs::write_private_atomic(
+                std::path::Path::new(&ready),
+                previous.as_deref().unwrap(),
+                None,
+            )
+            .unwrap();
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_recovers_crashes_respects_the_gate_and_leaves_expected_stops_down() {
+    assert_desktop_follower(FollowerScenario::Normal);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_leaves_an_orderly_stop_down_when_event_streams_are_full() {
+    assert_desktop_follower(FollowerScenario::FullStreams);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_recovers_replacements_that_crash_before_their_first_event() {
+    assert_desktop_follower(FollowerScenario::EarlyCrashes);
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_follower_leaves_a_replacement_stopped_before_its_first_event() {
+    assert_desktop_follower(FollowerScenario::EarlyStop);
+}
+
+#[cfg(unix)]
+#[derive(PartialEq, Eq)]
+enum FollowerScenario {
+    Normal,
+    FullStreams,
+    EarlyCrashes,
+    EarlyStop,
+}
+
+#[cfg(unix)]
+fn assert_desktop_follower(scenario: FollowerScenario) {
+    let backend = Backend::start();
+    let _streams =
+        (scenario == FollowerScenario::FullStreams).then(|| saturate_backend_events(&backend));
+    let sandbox = backend.directory.path();
+    let ready = sandbox.join("follower.ready");
+    let fixture = sandbox.join("desktop-follower");
+    let home = sandbox.join("home");
+    support::install(std::env::current_exe().unwrap().to_str().unwrap(), &fixture);
+    let mut follower = std::process::Command::new(fixture)
+        .args([
+            "--exact",
+            "desktop_follow_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("PAP_TEST_FOLLOW_READY", &ready)
+        .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+        .spawn()
+        .unwrap();
+    let check = std::panic::catch_unwind(|| {
+        let wait = |previous: &str| {
+            let started = Instant::now();
+            loop {
+                if let Ok(instance) = fs::read_to_string(&ready) {
+                    if !instance.is_empty() && instance != previous {
+                        return instance;
+                    }
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(8),
+                    "The desktop never attached to a new backend"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        let kill = || {
+            let version = backend.run(&["status"]);
+            let id = version["backend"]["processId"].as_u64().unwrap();
+            let pid = rustix::process::Pid::from_raw(i32::try_from(id).unwrap()).unwrap();
+            rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+            desktop_core::launch::wait_for_exit(u32::try_from(id).unwrap(), Duration::from_secs(5))
+                .unwrap();
+        };
+        let assert_down = || {
+            std::thread::sleep(Duration::from_millis(1250));
+            assert_eq!(backend.run(&["service", "status"])["status"], "not_running");
+        };
+        if scenario == FollowerScenario::FullStreams {
+            wait("");
+            backend.run(&["service", "stop", "--yes"]);
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while Instant::now() < deadline {
+                assert_eq!(backend.run(&["service", "status"])["status"], "not_running");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            return;
+        }
+        let data = home.join(".private-ai-proxy");
+        if matches!(
+            scenario,
+            FollowerScenario::EarlyCrashes | FollowerScenario::EarlyStop
+        ) {
+            let original = wait("");
+            let mut previous = original.clone();
+            kill();
+            for _ in 0..4 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let gate = loop {
+                    let state = backend.run(&["service", "status"]);
+                    if let Some(instance) = state["backend"]["instanceId"].as_str() {
+                        if instance != previous {
+                            // Recovery holds this gate until its own version
+                            // handshake succeeds. Keep it held through the exit.
+                            if let Some(gate) = desktop_core::lock::startup(&data).unwrap() {
+                                previous = instance.to_owned();
+                                break gate;
+                            }
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "The follower did not start another replacement"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                };
+                if scenario == FollowerScenario::EarlyStop {
+                    backend.run(&["service", "stop", "--yes"]);
+                } else {
+                    kill();
+                }
+                assert_eq!(
+                    fs::read_to_string(&ready).unwrap(),
+                    original,
+                    "The follower received a replacement's state before it exited"
+                );
+                drop(gate);
+                if scenario == FollowerScenario::EarlyStop {
+                    break;
+                }
+            }
+            assert_down();
+            return;
+        }
+        let gate = desktop_core::lock::startup(&data).unwrap().unwrap();
+        let original = wait("");
+        kill();
+        assert_down();
+        drop(gate);
+        let restarted = wait(&original);
+        std::thread::sleep(Duration::from_millis(200));
+        backend.run(&["service", "stop", "--yes"]);
+        assert_down();
+        backend.run(&["service", "start"]);
+        let mut last = wait(&restarted);
+        for _ in 0..3 {
+            kill();
+            last = wait(&last);
+        }
+        kill();
+        assert_down();
+    });
+    let _ = follower.kill();
+    follower.wait().unwrap();
+    if let Err(error) = check {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[cfg(unix)]
+fn saturate_backend_events(
+    backend: &Backend,
+) -> Vec<std::io::BufReader<std::os::unix::net::UnixStream>> {
+    use std::{io::BufRead, os::unix::net::UnixStream};
+
+    let doctor = backend.command(&["doctor", "--json"]).output().unwrap();
+    let diagnostic: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let endpoint = diagnostic["endpoint"].as_str().unwrap();
+    let open = |status: &str| {
+        let mut stream = UnixStream::connect(endpoint).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET /api/events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with(status), "{line}");
+        reader
+    };
+    let streams = (0..32).map(|_| open("HTTP/1.1 200 ")).collect();
+    drop(open("HTTP/1.1 503 "));
+    streams
+}
+
+#[cfg(unix)]
 fn assert_supervised_stop(offline_stop: bool) {
+    assert_signal_shutdown(true, offline_stop);
+}
+
+#[cfg(unix)]
+fn assert_signal_shutdown(supervised: bool, offline_stop: bool) {
     use agent_bridge::{agents::Projector, catalog::Catalog};
     use desktop_core::agents::{Agent, ConnectOptions};
     use desktop_runtime::{local_state::LocalState, usage::UsageStore};
@@ -272,7 +557,7 @@ fn assert_supervised_stop(offline_stop: bool) {
     let original = json!({"env": {"ANTHROPIC_API_KEY": "original-key"}});
     fs::write(&agent, original.to_string()).unwrap();
     let projector = Projector::new_for_home(
-        home,
+        home.clone(),
         data.clone(),
         backend.directory.path().join("private-ai-proxy-helper"),
         "http://127.0.0.1:4180",
@@ -294,8 +579,16 @@ fn assert_supervised_stop(offline_stop: bool) {
     let start = || {
         // Discard any retry queued by the previous backend before it exited.
         while gateway.accept().is_ok() {}
-        let mut child = backend
-            .command(&["service", "run"])
+        let mut command = if supervised {
+            backend.command(&["service", "run"])
+        } else {
+            let mut command = std::process::Command::new(
+                backend.cli().with_file_name("private-ai-proxy-service"),
+            );
+            command.env(desktop_core::paths::HOME_OVERRIDE_ENV, &home);
+            command
+        };
+        let mut child = command
             .env("NO_PROXY", "*")
             .stdin(Stdio::null())
             .spawn()
@@ -324,6 +617,14 @@ fn assert_supervised_stop(offline_stop: bool) {
         assert!(child.wait().unwrap().success());
     };
     terminate(&mut start());
+    if !supervised {
+        assert_eq!(usage.active_session().unwrap(), None);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&agent).unwrap()).unwrap(),
+            original
+        );
+        return;
+    }
     assert_eq!(
         usage.active_session().unwrap(),
         Some(("saved-session".into(), 1))

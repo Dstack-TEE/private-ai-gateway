@@ -10,6 +10,9 @@ struct Arguments {
     /// The login manager starts the next backend after a signal shutdown.
     #[arg(long, hide = true)]
     supervised: bool,
+    /// The app just turned off login supervision and stopped protection.
+    #[arg(long, hide = true)]
+    skip_protect_on_launch: bool,
 }
 
 fn main() {
@@ -32,7 +35,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let result = executor.block_on(run(arguments.supervised));
+    let result = executor.block_on(run(arguments));
     // A blocking task (a command waiting on the network) cannot be cancelled;
     // stop waiting for it after the bound instead of hanging the exit.
     executor.shutdown_timeout(desktop_runtime::server::EXIT_DRAIN_TIMEOUT);
@@ -75,7 +78,7 @@ fn init_logging() {
     }
 }
 
-async fn run(supervised: bool) -> Result<(), String> {
+async fn run(arguments: Arguments) -> Result<(), String> {
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     let service_access = desktop_core::agent_access::acquire_for_service();
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
@@ -143,7 +146,12 @@ async fn run(supervised: bool) -> Result<(), String> {
             None
         }
     };
-    let result = desktop_runtime::server::serve(runtime, supervised).await;
+    let result = desktop_runtime::server::serve(
+        runtime,
+        arguments.supervised,
+        !arguments.skip_protect_on_launch,
+    )
+    .await;
     drop(power_monitor);
     #[cfg(all(target_os = "macos", feature = "mac-app-store"))]
     drop(agent_home_access);

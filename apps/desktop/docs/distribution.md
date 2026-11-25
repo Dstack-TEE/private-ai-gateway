@@ -10,7 +10,8 @@ Gateway server. Build and submission instructions live in [Mac App Store](mac-ap
 | Area | Direct | Mac App Store | Classification |
 | --- | --- | --- | --- |
 | macOS Open at Login | `SMAppService.mainAppService` | Same | Shared; explicit user action only |
-| Windows / Linux startup | Existing auto-launch backend | Not a MAS target | Platform difference, not a distribution capability |
+| Windows / Linux Open at Login | App's tray startup. On by default once on Windows. | Not a MAS target | Platform difference |
+| Run in background at login | systemd user service on Linux, launchd user agent on macOS | Unavailable | Backend startup and crash recovery |
 | Minimum macOS | 13.0 | 13.0 | Shared SMAppService requirement |
 | Agent discovery, config projection, token issuance / revocation | Shared projector | Same | Shared |
 | Home filesystem access | Ordinary Home | NSOpenPanel selection and persistent security-scoped bookmark | Sandbox requirement |
@@ -335,9 +336,9 @@ publishing stable releases to the beta feed.
 
 | Installation | Update key or source | How it updates | Backend and restart |
 | --- | --- | --- | --- |
-| macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first; the relaunched app starts the new bundled backend |
+| macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first. The relaunched app starts the new backend using the same LaunchAgent when enabled |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
-| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first; the app restarts and starts the new backend |
+| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
 | Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
 | Arch desktop package | Version from `latest.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |

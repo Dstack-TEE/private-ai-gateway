@@ -20,12 +20,12 @@ mod transactions;
 mod validation;
 
 pub use codex_service::{CodexService, StopFailed};
+pub use desktop_core::paths::agent_environment::{environment_overridden, environment_overrides};
 use discovery::*;
 pub use error::AgentError;
 use projection::*;
 use providers::*;
 pub(crate) use registry::AgentIntegration;
-pub use registry::{environment_overridden, environment_overrides};
 
 use std::{
     collections::BTreeMap,

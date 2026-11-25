@@ -155,6 +155,12 @@ Var PapStartupLockPath
 
   StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
   ${If} ${FileExists} "$R4"
+    ${If} $UpdateMode <> 1
+      ExecWait '"$R4" --yes service disable' $R0
+      ${If} $R0 != 0
+        !insertmacro PAP_FAIL "The Private AI Proxy login service could not be disabled. Uninstall was cancelled."
+      ${EndIf}
+    ${EndIf}
     ExecWait '"$R4" --yes service stop' $R0
     ${If} $R0 != 0
       !insertmacro PAP_FAIL "The Private AI Proxy backend could not be stopped. Uninstall was cancelled."
@@ -189,6 +195,16 @@ Var PapStartupLockPath
     ${If} $R0 != 0
       !insertmacro PAP_FAIL "Private AI Proxy could not remove its CLI registration. Uninstall was cancelled."
     ${EndIf}
+  ${EndIf}
+  ${If} $UpdateMode <> 1
+    ; auto-launch uses the app's product name for its per-user Run value.
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+    ClearErrors
+    ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}"
+    ${IfNot} ${Errors}
+      !insertmacro PAP_FAIL "The Private AI Proxy Open at Login entry could not be removed. Uninstall was cancelled."
+    ${EndIf}
+    ClearErrors
   ${EndIf}
 !macroend
 

@@ -5,7 +5,7 @@ directory, which holds nothing else:
 
 | File | Holds | Permissions |
 | --- | --- | --- |
-| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`), command registration | Owner-only when created; never holds a secret |
+| `config.toml` | Profiles (without keys), the active profile, the Local API and web UI listeners, appearance, notifications, update channel, Protect on launch (`connect-on-launch`, which also protects at login when the backend login service is enabled), command registration | Owner-only when created; never holds a secret |
 | `credentials.toml` | The user's credentials: provider API keys (manual and account sign-in) and the web UI password | Always owner-only: `0600` on macOS and Linux, a protected owner-only DACL on Windows |
 | `config.schema.json` | The JSON Schema of `config.toml`, rewritten by each version | Generated |
 
@@ -301,8 +301,10 @@ unlocked OS keychain for a process running as you.
   it. A backend that is not running cannot restore agents;
   `pap stop --offline` restores them without it, and the Windows uninstaller
   runs it.
-  Before removing the app on macOS or Linux, choose Stop All and Quit, or run
-  `pap --yes service stop` and then `pap stop --offline`.
+  Before removing a supervised app on macOS or Linux, turn off **Run in
+  background at login** in Settings or run `pap service disable`. If you
+  turned it off in Settings, choose Stop All and Quit to stop the detached
+  backend before removing the app. Mac App Store users can use Stop All and Quit.
 
 ## Upgrading from 0.1
 

@@ -227,6 +227,7 @@ pub fn state_event(state: &AppState) -> Event {
 #[serde(rename_all = "camelCase")]
 pub struct LaunchPreferences {
     pub open_at_login: bool,
+    pub background_at_login: bool,
     pub connect_on_launch: bool,
 }
 
@@ -235,6 +236,7 @@ pub struct LaunchPreferences {
 #[serde(rename_all = "camelCase")]
 pub enum LaunchPreference {
     OpenAtLogin,
+    BackgroundAtLogin,
     ConnectOnLaunch,
 }
 
@@ -302,6 +304,16 @@ pub trait Host: Clone + Send + Sync + 'static {
     /// May block; callers run it on the blocking pool.
     fn set_open_at_login(&self, _enabled: bool) -> Result<(), String> {
         Err("Open at Login is unavailable in this interface".into())
+    }
+
+    /// May block; callers run it on the blocking pool.
+    fn background_at_login(&self) -> bool {
+        false
+    }
+
+    /// May block; callers run it on the blocking pool.
+    fn set_background_at_login(&self, _enabled: bool) -> Result<(), String> {
+        Err("Running in the background at login is unavailable in this interface".into())
     }
 
     fn present_account_login(&self, _url: &str) {}
@@ -531,6 +543,10 @@ pub async fn set_launch_preference(
             let host = host.clone();
             blocking(move || host.set_open_at_login(enabled)).await?;
         }
+        LaunchPreference::BackgroundAtLogin => {
+            let host = host.clone();
+            blocking(move || host.set_background_at_login(enabled)).await?;
+        }
         LaunchPreference::ConnectOnLaunch => {
             set_preference(backend, Preference::ConnectOnLaunch(enabled)).await?;
         }
@@ -547,9 +563,11 @@ pub async fn launch_preferences(
     host: &impl Host,
 ) -> Result<LaunchPreferences, CallError> {
     let reader = host.clone();
-    let open_at_login = blocking(move || reader.open_at_login()).await?;
+    let (open_at_login, background_at_login) =
+        blocking(move || Ok((reader.open_at_login()?, reader.background_at_login()))).await?;
     Ok(LaunchPreferences {
         open_at_login,
+        background_at_login,
         connect_on_launch: preferences(backend).await?.connect_on_launch,
     })
 }
