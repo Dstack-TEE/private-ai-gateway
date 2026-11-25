@@ -102,8 +102,8 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
-The desktop app on Linux and direct macOS automatically registers the backend
-with the user's service manager. On supported CLI installations the first
+Installed Linux desktop packages and direct macOS app bundles automatically
+register the backend with the user's service manager. On supported CLI installations the first
 successful `pap start` registers it. The backend starts at login and after a
 crash. A shutdown signal while supervised preserves its protection session
 and agent routing, and protection resumes after verification on the next start.
@@ -143,6 +143,16 @@ and run `pap service enable`. PAP uses the installed systemd unit for native
 packages and leaves that package file in place when disabling supervision.
 On macOS, PAP checks the plist source and arguments of the loaded job before
 starting or unloading it.
+
+Before moving the macOS app, turn off **Run in background at login** or run
+`pap service disable` from the app bundle at its current location. Moving the
+bundle while enrolled leaves the LaunchAgent pointing at the old location,
+which the moved app reports as foreign. Move the app back and disable the
+service before moving it again. If the old location is unavailable, inspect
+`~/Library/LaunchAgents/org.dstack.private-ai-proxy.backend.plist` and confirm
+it points to your old Private AI Proxy app. Unload the job with
+`launchctl bootout "gui/$(id -u)/org.dstack.private-ai-proxy.backend"` if it
+is loaded, delete that plist, and turn the setting on from the new location.
 
 PAP leaves a mask, per-service drop-in, or foreign registration alone. Global
 policies such as Fedora's shutdown timeout can coexist with supervision.

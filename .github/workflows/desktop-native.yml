@@ -655,6 +655,28 @@ jobs:
               New-Item -ItemType Directory -Force $env:PRIVATE_AI_PROXY_HOME | Out-Null
               Start-Backend | Out-Null
               $flag = Join-Path $env:PRIVATE_AI_PROXY_HOME '.private-ai-proxy/windows-open-at-login-default-applied'
+              $unbundledDir = Join-Path $env:RUNNER_TEMP 'PAP target/debug'
+              New-Item -ItemType Directory -Path $unbundledDir | Out-Null
+              $unbundledExe = Join-Path $unbundledDir 'private-ai-proxy-desktop.exe'
+              Copy-Item "$installDir/private-ai-proxy-desktop.exe" $unbundledExe
+              $app = Start-Process -FilePath $unbundledExe -PassThru
+              try {
+                for ($attempt = 0; $attempt -lt 40; $attempt++) {
+                  $app.Refresh()
+                  if ($app.HasExited) { throw 'Unbundled app exited before opening its window' }
+                  if ($app.MainWindowHandle -ne 0) { break }
+                  Start-Sleep -Milliseconds 250
+                }
+                if ($app.MainWindowHandle -eq 0) { throw 'Unbundled app did not open its window' }
+                if (Test-Path $flag) { throw 'Unbundled app consumed the Open at Login default' }
+                if ((Test-Path -LiteralPath $runKey) -and ($runName -in (Get-Item -LiteralPath $runKey).GetValueNames())) {
+                  throw 'Unbundled app registered Open at Login'
+                }
+              } finally {
+                Stop-Process -Id $app.Id -ErrorAction SilentlyContinue
+                $app.WaitForExit()
+                Remove-Item -LiteralPath $unbundledExe
+              }
               $app = Start-Process -FilePath "$installDir/private-ai-proxy-desktop.exe" -ArgumentList '--autostart' -PassThru
               try {
                 for ($attempt = 0; $attempt -lt 40 -and !(Test-Path $flag); $attempt++) {

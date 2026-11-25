@@ -137,7 +137,7 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::SystemPackage
         | Installation::Npm => true,
         Installation::Portable => command().is_ok_and(|(_, linked)| linked),
-        Installation::DesktopApp | Installation::DesktopPacman => true,
+        Installation::DesktopApp | Installation::DesktopPacman => platform::installed_desktop(),
     }
 }
 
@@ -537,11 +537,19 @@ mod platform {
     }
 
     /// The package's unit, when it starts this installation's backend.
-    fn packaged() -> Option<String> {
+    fn packaged_backend() -> Option<PathBuf> {
         if !Path::new(PACKAGED_UNIT).is_file() {
             return None;
         }
-        packaged_contents(&crate::launch::service_executable().ok()?)
+        crate::launch::service_executable().ok()
+    }
+
+    pub(super) fn installed_desktop() -> bool {
+        packaged_backend().is_some_and(|backend| backend == Path::new(DESKTOP_BACKEND))
+    }
+
+    fn packaged() -> Option<String> {
+        packaged_contents(&packaged_backend()?)
     }
 
     fn packaged_contents(backend: &Path) -> Option<String> {
@@ -866,6 +874,12 @@ mod platform {
     const MARKER: &str =
         "<!-- Written by `pap service enable`; `pap service disable` removes it. -->";
 
+    pub(super) fn installed_desktop() -> bool {
+        std::env::current_exe()
+            .and_then(std::fs::canonicalize)
+            .is_ok_and(|path| super::macos_desktop_bundle(&path))
+    }
+
     fn launchctl(arguments: &[&str]) -> bool {
         Command::new("launchctl")
             .args(arguments)
@@ -1181,6 +1195,10 @@ mod platform {
 mod platform {
     use super::UNSUPPORTED;
 
+    pub(super) fn installed_desktop() -> bool {
+        false
+    }
+
     pub(super) fn running_pid() -> Result<Option<u32>, String> {
         Ok(None)
     }
@@ -1195,6 +1213,37 @@ mod platform {
     }
 }
 
+#[cfg(any(test, all(target_os = "macos", not(feature = "mac-app-store"))))]
+fn macos_desktop_bundle(executable: &std::path::Path) -> bool {
+    let Some(contents) = executable
+        .parent()
+        .filter(|path| path.ends_with("Contents/MacOS"))
+        .and_then(std::path::Path::parent)
+    else {
+        return false;
+    };
+    contents
+        .parent()
+        .and_then(std::path::Path::extension)
+        .is_some_and(|extension| extension == "app")
+        && contents.join("Info.plist").is_file()
+}
+
+#[cfg(test)]
+#[test]
+fn macos_desktop_enrollment_requires_an_app_bundle() {
+    let temp = tempfile::tempdir().unwrap();
+    let contents = temp.path().join("Private AI Proxy.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    let executable = contents.join("MacOS/private-ai-proxy-desktop");
+    assert!(!macos_desktop_bundle(&executable));
+    std::fs::write(contents.join("Info.plist"), "").unwrap();
+    assert!(macos_desktop_bundle(&executable));
+    assert!(!macos_desktop_bundle(
+        &temp.path().join("target/debug/private-ai-proxy-desktop")
+    ));
+}
+
 #[cfg(all(
     test,
     any(
@@ -1204,18 +1253,15 @@ mod platform {
 ))]
 mod desktop_tests {
     use super::*;
-    use std::{fs, process::Command};
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
     #[test]
-    fn desktop_shell_and_cli_use_the_same_command_and_respect_the_enrollment_guard() {
+    fn unbundled_desktop_shell_and_cli_use_the_same_command_without_enrolling() {
         const CHILD: &str = "PAP_TEST_DESKTOP_ENROLLMENT";
-        if let Ok(case) = std::env::var(CHILD) {
+        if std::env::var_os(CHILD).is_some() {
             let cli = PathBuf::from(std::env::var_os("PAP_TEST_CANONICAL_COMMAND").unwrap());
             assert_eq!(command().unwrap(), (cli, false));
-            assert_eq!(
-                automatic(crate::paths::agent_environment::overridden()),
-                case == "default"
-            );
+            assert!(!automatic(&crate::paths::agent_environment::environment_overrides()));
             return;
         }
         let temp = tempfile::tempdir().unwrap();
@@ -1232,30 +1278,28 @@ mod desktop_tests {
             }
         }
         fs::create_dir(&links).unwrap();
+        let manager = links.join(if cfg!(target_os = "linux") {
+            "systemctl"
+        } else {
+            "launchctl"
+        });
+        fs::write(&manager, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&manager, fs::Permissions::from_mode(0o700)).unwrap();
         let alias = links.join("private-ai-proxy");
         std::os::unix::fs::symlink(&cli, &alias).unwrap();
 
-        for (program, flag) in [
-            (&shell, None),
-            (&alias, None),
-            (&shell, Some("CODEX_HOME")),
-            (&shell, Some("HTTPS_PROXY")),
-        ] {
-            let mut command = Command::new(program);
-            command
+        for program in [&shell, &alias] {
+            let output = Command::new(program)
                 .env_clear()
                 .env("HOME", &home)
                 .env("PATH", &links)
                 .env("PAP_TEST_CANONICAL_COMMAND", &cli)
-                .env(CHILD, if flag.is_some() { "override" } else { "default" })
+                .env(CHILD, "1")
                 .args([
                     "--exact",
-                    "supervisor::desktop_tests::desktop_shell_and_cli_use_the_same_command_and_respect_the_enrollment_guard",
-                ]);
-            if let Some(flag) = flag {
-                command.env(flag, &root);
-            }
-            let output = command.output().unwrap();
+                    "supervisor::desktop_tests::unbundled_desktop_shell_and_cli_use_the_same_command_without_enrolling",
+                ])
+                .output().unwrap();
             assert!(
                 output.status.success(),
                 "{}",
