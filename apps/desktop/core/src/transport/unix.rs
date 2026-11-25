@@ -220,6 +220,21 @@ pub(super) fn endpoint_path(data_dir: &Path, file: &str) -> io::Result<PathBuf> 
     ))
 }
 
+pub(super) fn endpoint_path_for(
+    data_dir: &Path,
+    file: &str,
+    runtime_dir: &Path,
+) -> io::Result<PathBuf> {
+    let endpoint = runtime_endpoint(
+        runtime_dir,
+        endpoint_hash(data_dir.as_os_str().as_bytes()),
+        file,
+    );
+    socket_path_fits(&endpoint)
+        .then_some(endpoint)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "IPC runtime path is too long"))
+}
+
 #[cfg(any(test, all(target_os = "macos", feature = "mac-app-store")))]
 fn app_container_runtime_base(data_dir: &Path) -> Option<PathBuf> {
     let application_support = data_dir.parent()?;

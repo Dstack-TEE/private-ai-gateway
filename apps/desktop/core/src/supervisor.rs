@@ -20,6 +20,19 @@ mod registration;
 use crate::updates::{installation, Installation};
 
 const UNSUPPORTED: &str = "Starting the backend at login is not available for this installation";
+const SKIP_NOTICE_MARKER: &str = "login-service-skip-notice-shown";
+const PROXY_ENVIRONMENT: &[&str] = &[
+    // Reqwest's default system proxy matcher uses these variables.
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "REQUEST_METHOD",
+];
 
 /// Records that the user turned this off, so `pap start` does not turn it on
 /// again.
@@ -39,10 +52,14 @@ fn relocated() -> bool {
 }
 
 fn supported() -> bool {
+    service_manager_platform_supported() && !relocated()
+}
+
+fn service_manager_platform_supported() -> bool {
     cfg!(any(
         target_os = "linux",
         all(target_os = "macos", not(feature = "mac-app-store"))
-    )) && !relocated()
+    ))
 }
 
 /// This command by a path that survives an upgrade: the entry on `PATH` that
@@ -67,36 +84,161 @@ fn command() -> Result<(PathBuf, bool), String> {
     })
 }
 
+fn user_service_manager_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("systemctl")
+            .args(["--user", "show-environment"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(all(target_os = "macos", not(feature = "mac-app-store")))]
+    {
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        std::process::Command::new("launchctl")
+            .args(["print", &domain])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        all(target_os = "macos", not(feature = "mac-app-store"))
+    )))]
+    {
+        false
+    }
+}
+
+fn installation_supports_automatic_supervision() -> bool {
+    match installation() {
+        Installation::Deb
+        | Installation::Rpm
+        | Installation::Pacman
+        | Installation::SystemPackage
+        | Installation::Npm => true,
+        Installation::Portable => command().is_ok_and(|(_, linked)| linked),
+        Installation::DesktopApp | Installation::DesktopPacman => false,
+    }
+}
+
+fn automatic_supervision_supported() -> bool {
+    service_manager_platform_supported()
+        && !relocated()
+        && installation_supports_automatic_supervision()
+        && user_service_manager_available()
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EnvironmentOverrides {
+    agent: Vec<&'static str>,
+    proxy: Vec<&'static str>,
+    xdg_data: bool,
+}
+
+fn process_environment(agent: Vec<&'static str>) -> EnvironmentOverrides {
+    let is_set = |name: &str| std::env::var_os(name).is_some();
+    let proxy = PROXY_ENVIRONMENT
+        .iter()
+        .copied()
+        .filter(|name| is_set(name))
+        .collect();
+    EnvironmentOverrides {
+        agent,
+        proxy,
+        xdg_data: crate::paths::xdg_home_overridden(crate::paths::XDG_DATA_HOME),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AutomaticBlockers {
+    Eligible,
+    Unsupported,
+    Declined,
+    Environment(Vec<&'static str>),
+}
+
+fn environment_blockers(environment: &EnvironmentOverrides) -> Vec<&'static str> {
+    let mut names = environment.agent.clone();
+    if environment.xdg_data {
+        names.push(crate::paths::XDG_DATA_HOME);
+    }
+    let proxy_names: Vec<_> = environment
+        .proxy
+        .iter()
+        .copied()
+        .filter(|name| !names.contains(name))
+        .collect();
+    names.extend(proxy_names);
+    names
+}
+
+fn automatic_blockers_for(
+    environment: &EnvironmentOverrides,
+    declined: bool,
+    supported: bool,
+) -> AutomaticBlockers {
+    if declined {
+        return AutomaticBlockers::Declined;
+    }
+    if !supported {
+        return AutomaticBlockers::Unsupported;
+    }
+    let names = environment_blockers(environment);
+    if names.is_empty() {
+        AutomaticBlockers::Eligible
+    } else {
+        AutomaticBlockers::Environment(names)
+    }
+}
+
+pub fn automatic_blockers(agent_environment_overrides: &[&'static str]) -> AutomaticBlockers {
+    automatic_blockers_for(
+        &process_environment(agent_environment_overrides.to_vec()),
+        declined().is_some_and(|marker| marker.exists()),
+        automatic_supervision_supported(),
+    )
+}
+
 /// Whether `pap start` turns this on by itself: installations whose command
 /// keeps a path across upgrades. A desktop app owns its backend's lifetime.
-pub fn automatic(agent_environment_overridden: bool) -> bool {
-    supported()
-        && !agent_environment_overridden
-        && !crate::paths::xdg_home_overridden(crate::paths::XDG_DATA_HOME)
-        && ![
-            // Reqwest's default system proxy matcher uses these variables.
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-            "NO_PROXY",
-            "no_proxy",
-            "REQUEST_METHOD",
-        ]
-        .into_iter()
-        .any(|name| std::env::var_os(name).is_some())
-        && !declined().is_some_and(|marker| marker.exists())
-        && match installation() {
-            Installation::Deb
-            | Installation::Rpm
-            | Installation::Pacman
-            | Installation::SystemPackage
-            | Installation::Npm => true,
-            Installation::Portable => command().is_ok_and(|(_, linked)| linked),
-            Installation::DesktopApp | Installation::DesktopPacman => false,
-        }
+pub fn automatic(agent_environment_overrides: &[&'static str]) -> bool {
+    automatic_blockers(agent_environment_overrides).is_eligible()
+}
+
+impl AutomaticBlockers {
+    pub fn is_eligible(&self) -> bool {
+        matches!(self, Self::Eligible)
+    }
+}
+
+fn record_automatic_skip_notice(marker: &std::path::Path, names: &[&str]) -> Option<String> {
+    let result = crate::private_fs::write_private(marker, "");
+    if result.is_err() {
+        return None;
+    }
+    let variables = match names {
+        [name] => format!("{name} is set"),
+        names => format!("{} are set", names.join(", ")),
+    };
+    Some(format!(
+        "Automatic supervision was skipped because {variables}. To keep protection across logins, set those variables in the service manager's environment first, then run `pap service enable`."
+    ))
+}
+
+/// Returns the one-time notice for environment overrides that prevent
+/// automatic supervision. The marker lives with the installation's data.
+pub fn automatic_skip_notice(blockers: AutomaticBlockers) -> Option<String> {
+    let AutomaticBlockers::Environment(names) = blockers else {
+        return None;
+    };
+    let marker = crate::paths::app_data_dir().ok()?.join(SKIP_NOTICE_MARKER);
+    record_automatic_skip_notice(&marker, &names)
 }
 
 /// Has the service manager start the backend at login and after a crash.
@@ -150,6 +292,81 @@ pub fn start() -> Result<bool, String> {
         return Err("Cannot start the backend through its login service. Run pap doctor.".into());
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        automatic_blockers_for, environment_blockers, record_automatic_skip_notice,
+        AutomaticBlockers, EnvironmentOverrides,
+    };
+
+    #[test]
+    fn automatic_blockers_name_agent_and_proxy_overrides() {
+        let codex = EnvironmentOverrides {
+            agent: vec!["CODEX_HOME"],
+            ..EnvironmentOverrides::default()
+        };
+        assert_eq!(environment_blockers(&codex), vec!["CODEX_HOME"]);
+        assert_eq!(
+            automatic_blockers_for(&codex, false, true),
+            AutomaticBlockers::Environment(vec!["CODEX_HOME"])
+        );
+
+        let default_xdg = EnvironmentOverrides::default();
+        assert!(environment_blockers(&default_xdg).is_empty());
+        assert_eq!(
+            automatic_blockers_for(&default_xdg, false, true),
+            AutomaticBlockers::Eligible
+        );
+
+        let proxy = EnvironmentOverrides {
+            proxy: vec!["HTTPS_PROXY"],
+            ..EnvironmentOverrides::default()
+        };
+        assert_eq!(environment_blockers(&proxy), vec!["HTTPS_PROXY"]);
+        assert_eq!(
+            automatic_blockers_for(&proxy, false, true),
+            AutomaticBlockers::Environment(vec!["HTTPS_PROXY"])
+        );
+    }
+
+    #[test]
+    fn automatic_skip_notice_is_recorded_only_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("notice-shown");
+        let notice = record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"])
+            .expect("first start should show the notice");
+        assert!(notice.contains("CODEX_HOME, HTTPS_PROXY"));
+        assert!(notice.contains("pap service enable"));
+        assert!(notice.contains("environment first, then run"));
+        assert!(record_automatic_skip_notice(&marker, &["CODEX_HOME", "HTTPS_PROXY"]).is_none());
+    }
+
+    #[test]
+    fn declined_supervision_does_not_show_a_notice() {
+        let environment = EnvironmentOverrides {
+            agent: vec!["CODEX_HOME"],
+            ..EnvironmentOverrides::default()
+        };
+        assert_eq!(
+            automatic_blockers_for(&environment, true, true),
+            AutomaticBlockers::Declined
+        );
+    }
+
+    #[test]
+    fn pap_path_relocation_is_unsupported_without_an_environment_notice() {
+        let environment = EnvironmentOverrides {
+            agent: vec!["CODEX_HOME"],
+            ..EnvironmentOverrides::default()
+        };
+        assert_eq!(
+            automatic_blockers_for(&environment, false, false),
+            AutomaticBlockers::Unsupported
+        );
+        assert!(super::automatic_skip_notice(AutomaticBlockers::Unsupported).is_none());
+    }
 }
 
 #[cfg(target_os = "linux")]

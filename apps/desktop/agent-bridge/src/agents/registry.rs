@@ -23,12 +23,25 @@ pub(super) const PROGRAM_DATA: &str = "ProgramData";
 
 /// Agent paths and validation depend on these process environment overrides.
 pub fn environment_overridden() -> bool {
-    desktop_core::paths::xdg_home_overridden(XDG_CONFIG_HOME)
-        || (cfg!(windows)
-            && [LOCALAPPDATA, PROGRAM_DATA]
+    !environment_overrides().is_empty()
+}
+
+/// Names of environment variables that move an agent's configuration away
+/// from the login service's environment.
+pub fn environment_overrides() -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if desktop_core::paths::xdg_home_overridden(XDG_CONFIG_HOME) {
+        names.push(XDG_CONFIG_HOME);
+    }
+    if cfg!(windows) {
+        names.extend(
+            [LOCALAPPDATA, PROGRAM_DATA]
                 .into_iter()
-                .any(|name| env::var_os(name).is_some()))
-        || [
+                .filter(|name| env::var_os(name).is_some()),
+        );
+    }
+    names.extend(
+        [
             CODEX_HOME,
             CLAUDE_CONFIG_DIR,
             OPENCODE_CONFIG,
@@ -49,7 +62,9 @@ pub fn environment_overridden() -> bool {
             dsh::TOKEN_REF,
         ]
         .into_iter()
-        .any(|name| env::var_os(name).is_some())
+        .filter(|name| env::var_os(name).is_some()),
+    );
+    names
 }
 
 /// How the bridge reaches and configures each agent.

@@ -109,10 +109,12 @@ and agent routing, and protection resumes after verification on the next start.
 `pap service disable` stops the backend, ends protection, restores agents, and
 turns off supervision. Run it before uninstalling a supervised CLI.
 
-Automatic registration skips shells with agent or PAP path overrides or proxy
-settings such as `HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. `pap service enable`
-uses the service manager's environment. Configure any required agent paths
-or proxies there before enabling it.
+Automatic registration skips shells with agent or proxy settings such as
+`HTTPS_PROXY`, `ALL_PROXY`, or `NO_PROXY`. The first `pap start` reports the
+variables that caused the skip. Configure those variables in the service
+manager's environment first, then run `pap service enable` to opt in. PAP path
+overrides keep automatic supervision off and require the default PAP paths for
+`pap service enable`.
 
 | Installation | Registration | Runs |
 | --- | --- | --- |
