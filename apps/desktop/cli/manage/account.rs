@@ -1,5 +1,8 @@
 //! CLI account authorization uses the same runtime session as the desktop UI.
-use super::{args::AccountLoginOptions, graphical_session, open_browser};
+use super::{
+    args::{AccountLoginOptions, FundingChoice},
+    graphical_session, open_browser,
+};
 use crate::Global;
 use desktop_core::{
     client::{CallError, Client},
@@ -96,7 +99,12 @@ pub(super) fn login(
     };
     let workspace_id = workspace(&details, options.workspace, global)?;
     let funding = if provider == ServiceProvider::Redpill {
-        choose_funding(client, global, &login.id, options.funding.map(Into::into))?
+        choose_funding(
+            client,
+            global,
+            &login.id,
+            requested_funding(options.funding, existing),
+        )?
     } else {
         None
     };
@@ -129,6 +137,16 @@ pub(super) fn login(
             }
         }
     }
+}
+
+fn requested_funding(
+    explicit: Option<FundingChoice>,
+    existing: Option<&ConfidentialProfile>,
+) -> Option<AccountFunding> {
+    explicit.map(Into::into).or_else(|| match &existing?.auth {
+        ProfileAuth::OAuth { funding, .. } => *funding,
+        ProfileAuth::ApiKey => None,
+    })
 }
 
 fn choose_funding(
@@ -229,7 +247,30 @@ fn prompt(message: &str, name: &str, selection: &str) -> Result<String, String> 
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use clap::Parser;
+
+    #[test]
+    fn relogin_keeps_saved_balance_without_a_funding_flag() {
+        let profile: ConfidentialProfile = serde_json::from_value(serde_json::json!({
+            "id": "work",
+            "name": "Work",
+            "provider": "redpill",
+            "remoteUrl": "https://tee.redpill.ai",
+            "auth": {"kind": "oauth", "accountId": "test", "funding": "credits"},
+            "credentialSaved": true
+        }))
+        .unwrap();
+        assert_eq!(
+            requested_funding(None, Some(&profile)),
+            Some(AccountFunding::Credits)
+        );
+        assert_eq!(
+            requested_funding(Some(FundingChoice::Subscription), Some(&profile)),
+            Some(AccountFunding::Subscription)
+        );
+        assert_eq!(requested_funding(None, None), None);
+    }
 
     #[test]
     fn oauth_login_supports_headless_device_code() {

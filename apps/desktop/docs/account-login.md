@@ -178,9 +178,11 @@ pap start --profile work
 
 Login prints/opens the verification URL and prints the device code. Multiple
 workspaces prompt in an interactive terminal; automation supplies --workspace.
-Active RedPill subscriptions prompt for a billing method in interactive mode.
+An existing RedPill profile reuses its saved billing method on sign-in.
 Use `--funding subscription` or `--funding balance` to select one explicitly.
-Without a choice in noninteractive mode, RedPill selects its default.
+When there is no saved or explicit choice, pap prompts users with an active
+subscription for a billing method in interactive mode. In noninteractive mode,
+RedPill selects its default.
 No-browser supports remote terminals. CLI JSON mode returns
 non-secret profile state; login links/prompts go to stderr. A lost save response
 is reconciled by operation ID. Explicit `pap profiles verify` remains available;
