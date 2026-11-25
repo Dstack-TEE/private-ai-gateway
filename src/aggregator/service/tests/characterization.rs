@@ -701,15 +701,16 @@ async fn capture_with_upstream(
             wire.extend_from_slice(&chunk.unwrap());
         }
     }
-    let mut all_reports = match checkpoint_report {
-        _ if case.direct_idle || case.direct => vec![],
-        Some(report) => vec![report],
-        None => tokio::time::timeout(Duration::from_secs(3), reports.recv())
-            .await
-            .unwrap()
-            .map(|report| vec![report])
-            .unwrap(),
-    };
+    let mut all_reports: Vec<_> = checkpoint_report.into_iter().collect();
+    if !case.direct_idle && !case.direct {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !all_reports.last().is_some_and(|r| r["terminal"] == true) {
+                all_reports.push(reports.recv().await.unwrap());
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{}: terminal report missing: {all_reports:?}", case.name));
+    }
     while let Ok(report) = reports.try_recv() {
         all_reports.push(report);
     }
@@ -720,7 +721,7 @@ async fn capture_with_upstream(
             all_reports.push(report);
         }
     }
-    if case.e2ee {
+    if case.e2ee && (200..300).contains(&status) {
         verify_e2ee_wire(std::str::from_utf8(&wire).unwrap(), &case.source);
     }
     if case.lease_handoff {
@@ -750,12 +751,18 @@ async fn capture_with_upstream(
     });
     server.abort();
     let _ = server.await;
-    // The corpus was recorded before reports carried the upstream's request
-    // id; tests/middleware_completion.rs covers that field.
-    for report in &mut all_reports {
-        if let Some(report) = report.as_object_mut() {
-            report.remove("upstreamRequestId");
-        }
+    // Project newer report fields out of the historical corpus after checking
+    // terminal ordering on the live reports.
+    let report_count = all_reports.len();
+    for (index, report) in all_reports.iter_mut().enumerate() {
+        let report = report.as_object_mut().unwrap();
+        assert_eq!(
+            report.remove("terminal"),
+            Some(json!(index + 1 == report_count)),
+            "{}: {report:?}",
+            case.name
+        );
+        report.remove("upstreamRequestId");
     }
     let mut snapshot = json!({"name":case.name,"wire":String::from_utf8(wire.clone()).unwrap(),"wire_hash":crate::aci::digest::sha256_hex(&wire),"source_hash":crate::aci::digest::sha256_hex(case.source.as_bytes()),"status":status,"before_eof":before,"receipt":receipt,"signature_valid":signature_valid,"reports":all_reports});
     if case.fail_publish || case.metrics {
@@ -1689,6 +1696,27 @@ async fn declared_non_sse_json_observes_filtered_source_usage_without_changing_b
             assert!(reports[0]["errorMessage"].is_null());
         }
     }
+}
+
+#[tokio::test]
+async fn e2ee_non_sse_refusal_produces_a_terminal_summary() {
+    let mut case = Case::new(
+        "e2ee_non_sse_refusal",
+        Endpoint::ChatComplete,
+        "{}",
+        "openai",
+    );
+    case.e2ee = true;
+    case.non_sse = true;
+    let snapshot = capture(&case).await;
+    assert_eq!(snapshot["status"], 400);
+    let reports = snapshot["reports"].as_array().unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0]["status"], 400);
+    assert_eq!(reports[0]["errorSource"], "gateway");
+    assert_eq!(reports[0]["errorMessage"], "e2ee_failed");
+    assert!(reports[0]["selectedRouteId"].is_null());
+    assert!(reports[0]["usage"].is_null());
 }
 
 #[tokio::test]

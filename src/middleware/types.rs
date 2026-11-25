@@ -428,6 +428,12 @@ pub struct PostReport {
     pub request_id: String,
     pub endpoint: String,
     pub status: u16,
+    /// Always serialized. Each allowed pre-consult has exactly one terminal
+    /// report, sent after any earlier attempt reports for the same request ID.
+    /// It may be a serving attempt, stream settlement, or request-level
+    /// failure summary. Earlier reports carry `false`. Older gateways omit
+    /// this field. Delivery is best effort and retries may replay a report.
+    pub terminal: bool,
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<u64>,

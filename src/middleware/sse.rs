@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::Stream;
 use serde_json::Value;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Sleep};
 
 use super::completion::Meter;
@@ -77,6 +78,7 @@ impl StreamFailure {
 /// Fixed fields for the post-stream usage report; `settle` fills in the rest.
 pub(crate) struct StreamReport {
     pub control: ControlClient,
+    pub attempt_delivery: Option<JoinHandle<()>>,
     pub request_id: String,
     pub endpoint: String,
     pub request_model: String,
@@ -98,7 +100,7 @@ pub(crate) struct StreamReport {
 
 impl StreamReport {
     fn settle(
-        &self,
+        &mut self,
         status: u16,
         usage: Option<Value>,
         ttft_ms: Option<u64>,
@@ -108,6 +110,7 @@ impl StreamReport {
             request_id: self.request_id.clone(),
             endpoint: self.endpoint.clone(),
             status,
+            terminal: true,
             duration_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms,
             is_streaming: Some(true),
@@ -127,15 +130,8 @@ impl StreamReport {
             prefix_hash: self.prefix_hash.clone(),
             session_kind: self.session_kind,
         };
-        let control = self.control.clone();
-        // Fire-and-forget. Guard against being called from a drop that runs
-        // outside a Tokio runtime (e.g. during shutdown teardown), where
-        // `tokio::spawn` would panic and abort the process.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                control.consult_post(&report).await;
-            });
-        }
+        self.control
+            .spawn_posts(self.attempt_delivery.take(), std::iter::once(report));
     }
 }
 
@@ -321,6 +317,7 @@ impl AccountingHandle {
         if let Some(mut meter) = state.pending.take() {
             meter.failed_attempts(attempts, true);
             meter.disarm();
+            state.report.attempt_delivery = meter.attempt_delivery.take();
         }
         state.report.selected_route_id = Some(route);
         state.report.attempt_index = attempts.len() as u32;
