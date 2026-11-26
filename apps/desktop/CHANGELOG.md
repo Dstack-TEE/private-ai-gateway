@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.11.0...desktop-v0.11.1) (2026-11-26)
+
+
+### Features
+
+* **desktop:** pin Codex's base instructions beside its model catalog ([110a688](https://github.com/Dstack-TEE/private-ai-gateway/commit/110a6887732d209da5c406d7da6bbc71b5118083))
+
+
+### Bug Fixes
+
+* **desktop:** project each model's listed parameters into agent configs ([1fe1605](https://github.com/Dstack-TEE/private-ai-gateway/commit/1fe1605e5422446f58da39f4e83fc00ba7757c31))
+
+
+### Documentation
+
+* **desktop:** note that a pull request drops an empty Release-As commit ([#651](https://github.com/Dstack-TEE/private-ai-gateway/issues/651)) ([d2f284f](https://github.com/Dstack-TEE/private-ai-gateway/commit/d2f284f5872afc51bc9e13caecbcb2d5a881c2cb))
+
 ## [0.11.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0...desktop-v0.11.0) (2026-11-26)
 
 Private AI Proxy 0.11.0 adds RedPill subscription keys: an account with a RedPill plan can choose whether a profile uses the plan's weekly usage or the credit balance.
