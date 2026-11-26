@@ -92,10 +92,14 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         catalog,
         &ModelRows {
             positive_limits: true,
+            // dsh sends a model's `maxTokens` with every request and keeps it
+            // free in the window, so compaction could never start.
+            max_tokens: false,
             any_input: false,
-            reasoning: false,
+            input: TEXT_AND_IMAGE,
             cost: Cost::Omitted,
         },
+        reasoning_efforts,
     );
     let provider = json!({
         "displayName": PRODUCT_NAME,
@@ -115,13 +119,47 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
         .in_entry(PI_AI),
         set(&["config", "provider"], PROVIDER).in_entry(DEFAULT_MODEL),
         set(model_selection_paths(Agent::Dsh)[0].path, model).in_entry(DEFAULT_MODEL),
-        // An effort chosen for another provider does not apply to these models.
-        absent(&["config", "reasoningEffort"]).in_entry(DEFAULT_MODEL),
+        // An effort chosen for another provider does not apply to these
+        // models; dsh refuses an effort the model does not offer.
+        match catalog
+            .get(model)
+            .and_then(|model| model.reasoning()?.default_effort)
+            // dsh names the effort that turns reasoning off `off`.
+            .filter(|effort| effort != "none")
+        {
+            Some(effort) => set(&["config", "reasoningEffort"], effort),
+            None => absent(&["config", "reasoningEffort"]),
+        }
+        .in_entry(DEFAULT_MODEL),
         set(&["config", "provider"], PROVIDER).in_entry(ACP),
         set(model_selection_paths(Agent::Dsh)[1].path, model).in_entry(ACP),
         boolean(&["disabled"], true).in_entry(WEB_SEARCH),
         boolean(&["disabled"], false).in_entry(CREDENTIALS),
     ])
+}
+
+/// dsh's `reasoningEfforts`, each offered level mapped to its effort. dsh
+/// reads a model without the map as not reasoning, refuses a map that names
+/// only `off`, and pins every level it leaves out to unsupported.
+pub(super) fn reasoning_efforts(model: &CatalogModel, row: &mut serde_json::Map<String, Value>) {
+    let Some(levels) = model
+        .reasoning()
+        .map(|contract| EffortLevels::of(&contract))
+    else {
+        return;
+    };
+    if levels.levels.is_empty() {
+        return;
+    }
+    let mut map: serde_json::Map<_, _> = levels
+        .levels
+        .iter()
+        .map(|level| ((*level).to_string(), json!(level)))
+        .collect();
+    if levels.off {
+        map.insert("off".into(), json!("none"));
+    }
+    row.insert("reasoningEfforts".into(), map.into());
 }
 
 pub(super) fn selected_model(doc: &ConfigDoc) -> Option<String> {

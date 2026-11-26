@@ -200,3 +200,23 @@ fn malformed_optional_metadata_is_omitted() {
     // The decimal point moves in the text; floats are not multiplied.
     assert_eq!(model.price_per_million("input_cache_write"), Some(0.05));
 }
+
+#[test]
+fn a_model_is_retired_from_its_deprecation_date() {
+    let catalog = Catalog::from_remote(
+        &json!({"data": [
+            {"id": "retiring", "deprecation_date": "2026-11-20T00:00:00Z"},
+            {"id": "undated"},
+            {"id": "malformed", "deprecation_date": "soon"}
+        ]}),
+        1,
+    )
+    .unwrap();
+    // 2026-11-20T00:00:00Z.
+    let day = 1_795_132_800;
+    let model = |id| catalog.get(id).unwrap();
+    assert!(!model("retiring").deprecated_at(day - 1));
+    assert!(model("retiring").deprecated_at(day));
+    assert!(!model("undated").deprecated_at(u64::MAX));
+    assert!(!model("malformed").deprecated_at(u64::MAX));
+}

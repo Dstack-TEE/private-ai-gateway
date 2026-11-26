@@ -1,12 +1,5 @@
 use super::*;
 
-pub(super) const CLAUDE_PROVIDER_SWITCHES: &[&str] = &[
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-    "CLAUDE_CODE_USE_MANTLE",
-];
-
 /// Everything a projection is computed from.
 pub(super) struct Inputs<'a> {
     pub(super) file_credentials: bool,
@@ -31,7 +24,7 @@ impl Inputs<'_> {
 /// The fields this app owns for the agent and the values a connection writes.
 pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, AgentError> {
     let catalog = inputs.catalog.ok_or(AgentError::InvalidState)?;
-    let catalog = catalog.for_surface(agent.surface());
+    let catalog = agent.catalog(catalog);
     if catalog.models.is_empty() {
         return Err(AgentError::NoCompatibleModels);
     }
@@ -109,9 +102,17 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                     serde_json::json!({
                         "replaceBuiltInOptions": true,
                         "options": catalog.models.iter().map(|model| {
-                            serde_json::json!({
+                            let mut option = serde_json::json!({
                                 "model": model.id(), "label": model.display_name(),
-                            })
+                            });
+                            if let Some(description) = model.string_field("description") {
+                                option["description"] = description
+                                    .split_whitespace()
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                                    .into();
+                            }
+                            option
                         }).collect::<Vec<_>>()
                     }),
                     catalog.models.len(),
@@ -131,8 +132,14 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
                     .iter()
                     .map(|key| absent(&["env", key])),
             );
+            // The service cannot review auto mode's actions; Claude Code's
+            // own classifier requests can.
+            fields.push(set(&["env", "CLAUDE_CODE_AUTO_MODE_SERVER"], "0"));
             if let Some(model) = default_model {
                 fields.push(set(model_selection_paths(Agent::ClaudeCode)[0].path, model));
+                fields.extend(claude_model_env(
+                    catalog.get(model).ok_or(AgentError::IncompatibleModel)?,
+                ));
             }
             fields
         }
@@ -166,7 +173,30 @@ pub(super) fn fields(agent: Agent, inputs: &Inputs<'_>) -> Result<Vec<Field>, Ag
         )],
         Agent::Hermes => {
             let provider = "private-ai-proxy";
+            // Hermes keeps discovering models when `models` is a mapping, and
+            // reads these before its live probe and its name-matched tables.
+            let models: serde_json::Map<_, _> = catalog
+                .models
+                .iter()
+                .map(|model| {
+                    let mut entry = serde_json::json!({
+                        "supports_vision": model
+                            .string_array("input_modalities")
+                            .iter()
+                            .any(|value| value == "image"),
+                    });
+                    if let Some(context) = model.remote.context_length.filter(|value| *value > 0) {
+                        entry["context_length"] = context.into();
+                    }
+                    (model.id().to_string(), entry)
+                })
+                .collect();
             let mut fields = vec![
+                generated_catalog(
+                    &["providers", provider, "models"],
+                    serde_json::Value::Object(models),
+                    catalog.models.len(),
+                ),
                 set(&["providers", provider, "name"], PRODUCT_NAME),
                 set(&["providers", provider, "api"], api.as_str()),
                 set(&["providers", provider, "transport"], "chat_completions"),
@@ -195,73 +225,6 @@ pub(super) fn api_url(endpoint: &str) -> Result<String, String> {
     desktop_core::endpoint(endpoint, &["v1"]).map(String::from)
 }
 
-pub(super) fn opencode_provider(
-    catalog: &Catalog,
-    api: &str,
-    token_path: &Path,
-) -> Result<serde_json::Value, String> {
-    let models = catalog
-        .models
-        .iter()
-        .map(|model| {
-            let mut config = serde_json::json!({"name": model.display_name()});
-            if let (Some(context), Some(output)) =
-                (model.remote.context_length, model.remote.max_output_length)
-            {
-                config["limit"] = serde_json::json!({"context": context, "output": output});
-            }
-            (model.id().to_string(), config)
-        })
-        .collect();
-    Ok(serde_json::json!({
-        "npm": "@ai-sdk/openai-compatible",
-        "name": PRODUCT_NAME,
-        "options": {
-            "baseURL": api,
-            "apiKey": opencode_file_reference(token_path)?,
-        },
-        "models": serde_json::Value::Object(models),
-    }))
-}
-
-pub(super) fn opencode_provider_v2(provider: &serde_json::Value) -> serde_json::Value {
-    let mut native = serde_json::Map::new();
-    if let Some(package) = provider.get("npm") {
-        native.insert("package".into(), package.clone());
-    }
-    if let Some(name) = provider.get("name") {
-        native.insert("name".into(), name.clone());
-    }
-    if let Some(options) = provider
-        .get("options")
-        .and_then(serde_json::Value::as_object)
-    {
-        let mut settings = serde_json::Map::new();
-        for key in ["baseURL", "apiKey", "headers", "body"] {
-            if let Some(value) = options.get(key) {
-                settings.insert(key.into(), value.clone());
-            }
-        }
-        native.insert("settings".into(), serde_json::Value::Object(settings));
-    }
-    if let Some(models) = provider.get("models") {
-        native.insert("models".into(), models.clone());
-    }
-    serde_json::Value::Object(native)
-}
-
-/// OpenCode's `{file:<path>}` substitution, which no library writes. It ends
-/// at the first `}`, so a path with a brace cannot be written safely.
-fn opencode_file_reference(token_path: &Path) -> Result<String, String> {
-    let path = token_path
-        .to_str()
-        .ok_or("The Agent token path is not valid Unicode")?;
-    if path.contains(['{', '}']) {
-        return Err("OpenCode cannot read an Agent token path that contains { or }".into());
-    }
-    Ok(format!("{{file:{path}}}"))
-}
-
 pub(super) fn pi_provider(
     catalog: &Catalog,
     api: &str,
@@ -270,11 +233,14 @@ pub(super) fn pi_provider(
     let models = model_rows(
         catalog,
         &ModelRows {
-            positive_limits: false,
+            // Pi refuses the whole file for a zero limit.
+            positive_limits: true,
+            max_tokens: true,
             any_input: true,
-            reasoning: true,
+            input: TEXT_AND_IMAGE,
             cost: Cost::Complete,
         },
+        pi_reasoning,
     );
     Ok(serde_json::json!({
         "baseUrl": api,
@@ -284,16 +250,48 @@ pub(super) fn pi_provider(
     }))
 }
 
+/// `reasoning` and, for a stated contract, Pi's `thinkingLevelMap` as Pi's
+/// own catalog maps efforts: every level is named, a string sends that effort
+/// and `null` hides the level.
+pub(super) fn pi_reasoning(
+    model: &CatalogModel,
+    row: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    use serde_json::{json, Map};
+    if !model.reasons() {
+        return;
+    }
+    row.insert("reasoning".into(), json!(true));
+    let Some(contract) = model.reasoning() else {
+        return;
+    };
+    let levels = EffortLevels::of(&contract);
+    let mut map = Map::new();
+    map.insert("off".into(), json!(levels.off.then_some("none")));
+    for level in EFFORT_LEVELS {
+        map.insert(
+            (*level).into(),
+            json!(levels.levels.contains(level).then_some(*level)),
+        );
+    }
+    row.insert("thinkingLevelMap".into(), map.into());
+}
+
 /// What an agent's OpenAI-completions model rows hold besides `id` and `name`.
 pub(super) struct ModelRows {
     /// Leave out a context or output limit of zero.
     pub(super) positive_limits: bool,
-    /// Write `input` whenever the model lists modalities, even when neither
-    /// is text or image.
+    /// Write `maxTokens`, the output limit within the context window.
+    pub(super) max_tokens: bool,
+    /// Write `input` whenever the model lists modalities, even when none is
+    /// one the agent takes.
     pub(super) any_input: bool,
-    pub(super) reasoning: bool,
+    /// The input modalities the agent takes.
+    pub(super) input: &'static [&'static str],
     pub(super) cost: Cost,
 }
+
+pub(super) const TEXT_AND_IMAGE: &[&str] = &["text", "image"];
 
 pub(super) enum Cost {
     Omitted,
@@ -303,37 +301,70 @@ pub(super) enum Cost {
     Complete,
 }
 
-/// One model row per catalog model, in catalog order.
-pub(super) fn model_rows(catalog: &Catalog, rows: &ModelRows) -> Vec<serde_json::Value> {
+/// The effort level names Pi, Oh My Pi, OpenClaw and dsh share, lightest
+/// first; each calls the effort that turns reasoning off `off`.
+pub(super) const EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// A reasoning contract in those level names.
+pub(super) struct EffortLevels {
+    /// The efforts offered, lightest first.
+    pub(super) levels: Vec<&'static str>,
+    /// `off` sends the effort `none`.
+    pub(super) off: bool,
+    pub(super) default: Option<&'static str>,
+}
+
+impl EffortLevels {
+    pub(super) fn of(contract: &ReasoningContract) -> Self {
+        let offered = |level: &&str| contract.efforts.iter().any(|effort| effort == level);
+        Self {
+            levels: EFFORT_LEVELS.iter().copied().filter(offered).collect(),
+            off: contract.offers_off(),
+            default: EFFORT_LEVELS
+                .iter()
+                .copied()
+                .find(|level| contract.default_effort.as_deref() == Some(level)),
+        }
+    }
+}
+
+/// One model row per catalog model, in catalog order. `reasoning` adds the
+/// agent's own reasoning fields to a row, before its prices.
+pub(super) fn model_rows(
+    catalog: &Catalog,
+    rows: &ModelRows,
+    reasoning: impl Fn(&CatalogModel, &mut serde_json::Map<String, serde_json::Value>),
+) -> Vec<serde_json::Value> {
     use serde_json::{json, Map, Value};
     let limit = |value: Option<u64>| value.filter(|value| !rows.positive_limits || *value > 0);
     catalog
         .models
         .iter()
         .map(|model| {
-            let mut row = json!({"id": model.id(), "name": model.display_name()});
-            if let Some(value) = limit(model.remote.context_length) {
-                row["contextWindow"] = json!(value);
+            let mut row = Map::new();
+            row.insert("id".into(), json!(model.id()));
+            row.insert("name".into(), json!(model.display_name()));
+            let context = limit(model.remote.context_length);
+            if let Some(value) = context {
+                row.insert("contextWindow".into(), json!(value));
             }
-            if let Some(value) = limit(model.remote.max_output_length) {
-                row["maxTokens"] = json!(value);
+            if rows.max_tokens {
+                // An output limit beyond the window could never be met.
+                let output = limit(model.remote.max_output_length)
+                    .map(|output| context.map_or(output, |context| output.min(context)));
+                if let Some(value) = output {
+                    row.insert("maxTokens".into(), json!(value));
+                }
             }
             let listed = model.string_array("input_modalities");
             let input: Vec<_> = listed
                 .iter()
-                .filter(|value| matches!(value.as_str(), "text" | "image"))
+                .filter(|value| rows.input.contains(&value.as_str()))
                 .collect();
             if !input.is_empty() || (rows.any_input && !listed.is_empty()) {
-                row["input"] = json!(input);
+                row.insert("input".into(), json!(input));
             }
-            if rows.reasoning
-                && model
-                    .string_array("supported_features")
-                    .iter()
-                    .any(|value| value == "reasoning")
-            {
-                row["reasoning"] = json!(true);
-            }
+            reasoning(model, &mut row);
             let mut cost = Map::new();
             if !matches!(rows.cost, Cost::Omitted) {
                 for (source, target) in [
@@ -356,151 +387,9 @@ pub(super) fn model_rows(catalog: &Catalog, rows: &ModelRows) -> Vec<serde_json:
                         cost.entry(key).or_insert(json!(0));
                     }
                 }
-                row["cost"] = Value::Object(cost);
+                row.insert("cost".into(), Value::Object(cost));
             }
-            row
+            Value::Object(row)
         })
         .collect()
-}
-
-pub(super) fn codex_catalog(catalog: &Catalog) -> Result<serde_json::Value, String> {
-    let mut bundled: serde_json::Value =
-        serde_json::from_str(include_str!("../../resources/codex/models.json")).map_err(|_| {
-            "The app-owned Codex model catalog is invalid. Reinstall Private AI Proxy.".to_string()
-        })?;
-    let bundled_models = bundled
-        .get("models")
-        .and_then(serde_json::Value::as_array)
-        .filter(|models| !models.is_empty())
-        .ok_or_else(|| "The app-owned Codex model catalog is empty".to_string())?;
-    let fallback = bundled_models
-        .iter()
-        .find(|model| {
-            model
-                .get("supported_in_api")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-                && model.get("visibility").and_then(serde_json::Value::as_str) == Some("list")
-        })
-        .unwrap_or(&bundled_models[0]);
-    let models = catalog
-        .models
-        .iter()
-        .filter(|model| model.supports(Surface::Responses))
-        .enumerate()
-        .map(|(index, model)| {
-            let leaf = model.id().rsplit('/').next().unwrap_or(model.id());
-            let matched_template = bundled_models
-                .iter()
-                .find(|candidate| {
-                    candidate
-                        .get("slug")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|slug| slug == model.id() || slug == leaf)
-                });
-            let template = matched_template.unwrap_or(fallback);
-            let mut value = template
-                .as_object()
-                .cloned()
-                .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
-            let capabilities = model.string_array("supported_features");
-            let reasoning = capabilities.iter().any(|value| value == "reasoning");
-            let verbosity = capabilities.iter().any(|value| value == "verbosity");
-            let image = model
-                .string_array("input_modalities")
-                .iter()
-                .any(|value| value == "image");
-            // Keep the baseline's context defaults when the provider gives no limit.
-            // Clearing them would disable Codex's derived auto-compaction threshold.
-            if let Some(context) = model.remote.context_length {
-                let context = i64::try_from(context).ok().filter(|limit| *limit > 0)
-                    .ok_or_else(|| "The provider returned an invalid Codex context limit".to_string())?;
-                value.insert("context_window".to_string(), serde_json::Value::from(context));
-                value.insert("max_context_window".to_string(), serde_json::Value::from(context));
-            }
-            let web_search = capabilities.iter().any(|value| value == "web_search");
-            value.extend(object(serde_json::json!({
-                "auto_compact_token_limit": null,
-                "slug": model.id(),
-                "display_name": model.display_name(),
-                "description": model.string_field("description"),
-                "default_reasoning_level": reasoning.then_some("medium"),
-                "supported_reasoning_levels": if reasoning {
-                    serde_json::json!([
-                        { "effort": "low", "description": "Faster responses with lighter reasoning" },
-                        { "effort": "medium", "description": "Balanced reasoning for everyday coding work" },
-                        { "effort": "high", "description": "Deeper reasoning for complex tasks" }
-                    ])
-                } else {
-                    serde_json::json!([])
-                },
-                "visibility": "list",
-                "supported_in_api": true,
-                "priority": index + 1,
-                "additional_speed_tiers": [],
-                "service_tiers": [],
-                "default_service_tier": null,
-                "upgrade": null,
-                "availability_nux": null,
-                "default_reasoning_summary": if reasoning { "auto" } else { "none" },
-                "support_verbosity": verbosity,
-                "default_verbosity": verbosity.then_some("medium"),
-                "supports_image_detail_original": image,
-                "comp_hash": null,
-                "input_modalities": if image { serde_json::json!(["text", "image"]) } else { serde_json::json!(["text"]) },
-                "supports_search_tool": web_search,
-                // PAP provides streaming HTTP Responses, not Codex-specific transports
-                // or reasoning-effort configuration_update items.
-                "use_responses_lite": false,
-                "supports_experimental_context": false,
-                "supports_reasoning_effort_updates": false,
-            })));
-            // Upstream templates still carry this, but it is not a ModelInfo field.
-            value.remove("prefer_websockets");
-            if matched_template.is_none() {
-                value.extend(object(serde_json::json!({
-                    "experimental_supported_tools": [],
-                    "multi_agent_reasoning_effort": null,
-                    "auto_review_model_override": null,
-                    "model_specialty": null,
-                    "node_repl_auto_review_required": false,
-                    "tool_mode": null,
-                    "apply_patch_tool_type": null,
-                    "multi_agent_version": null,
-                    "web_search_tool_type": "text",
-                    "shell_type": "unified_exec",
-                })));
-            }
-            Ok(serde_json::Value::Object(value))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    // model_catalog_json replaces the entire upstream catalog. Preserve every
-    // bundled entry, overlay exact slugs once, and append provider-specific IDs.
-    // Bundled entries stay for Codex internals but are hidden: the proxy cannot
-    // serve them, and Codex defaults to the first picker-visible model.
-    let entries = bundled["models"]
-        .as_array_mut()
-        .ok_or_else(|| "The app-owned Codex model catalog is malformed".to_string())?;
-    for entry in entries.iter_mut() {
-        entry["visibility"] = serde_json::Value::String("hide".to_string());
-    }
-    for model in models {
-        if let Some(existing) = entries
-            .iter_mut()
-            .find(|entry| entry["slug"] == model["slug"])
-        {
-            *existing = model;
-        } else {
-            entries.push(model);
-        }
-    }
-    Ok(bundled)
-}
-
-/// The entries of a JSON object literal, in order.
-fn object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
-    match value {
-        serde_json::Value::Object(object) => object,
-        _ => unreachable!("only JSON object literals are overlaid"),
-    }
 }

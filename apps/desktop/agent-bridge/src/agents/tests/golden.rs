@@ -538,18 +538,25 @@ fn config(agent: Agent) -> String {
         .to_string()
 }
 
-/// A model with every projected attribute, models with few or none, and a
-/// zero-limit transcription model that agents never see.
+/// A model with every projected attribute, models with few or none, models
+/// agents leave out (no tools, retired) and a zero-limit transcription model
+/// that agents never see.
 fn rich_catalog(completion: &str) -> Catalog {
     Catalog::from_remote(
         &json!({"data": [
             {"id": "openai/gpt-oss-120b", "name": "GPT OSS 120B", "is_tee": true,
              "context_length": 131072, "max_output_length": 32768,
              "input_modalities": ["text", "image", "audio"],
-             "supported_features": ["reasoning", "verbosity", "web_search"],
+             "supported_features": ["reasoning", "tools", "verbosity", "web_search"],
              "description": "Open weights",
              "pricing": {"prompt": "0.0000001", "completion": completion, "input_cache_read": "0.00000001"}},
+            {"id": "z-ai/glm-5.3", "name": "GLM 5.3", "context_length": 1048576,
+             "max_output_length": 131072, "supported_features": ["reasoning", "tools"],
+             "reasoning": {"mandatory": true, "supported_efforts": ["max", "high", "low"],
+                           "default_effort": "high", "supports_max_tokens": true}},
             {"id": "gpt-5.4", "name": "GPT 5.4", "context_length": 400000},
+            {"id": "vendor/ocr", "context_length": 16384, "supported_features": ["json_mode"]},
+            {"id": "vendor/retired", "supported_features": ["tools"], "deprecation_date": "1970-01-01T00:00:00Z"},
             {"id": "phala/qwen", "input_modalities": ["text"]},
             {"id": "vendor/audio", "context_length": 0, "max_output_length": 0,
              "input_modalities": ["audio"], "output_modalities": ["transcription"]}

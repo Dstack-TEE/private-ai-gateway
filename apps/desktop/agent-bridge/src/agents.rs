@@ -9,6 +9,8 @@
 //! custom-provider settings. Disconnecting never depends on the endpoint or
 //! the catalog, so current connections can be restored while offline.
 
+mod claude_code;
+mod codex;
 mod codex_service;
 mod discovery;
 mod dsh;
@@ -19,10 +21,13 @@ mod registry;
 mod transactions;
 mod validation;
 
+use claude_code::*;
+use codex::*;
 pub use codex_service::{CodexService, StopFailed};
 pub use desktop_core::paths::agent_environment::{environment_overridden, environment_overrides};
 use discovery::*;
 pub use error::AgentError;
+use opencode::*;
 use projection::*;
 use providers::*;
 pub(crate) use registry::AgentIntegration;
@@ -39,6 +44,7 @@ use std::process::Command;
 
 mod oh_my_pi;
 mod openclaw;
+mod opencode;
 mod selection;
 
 use serde::{Deserialize, Serialize};
@@ -53,7 +59,7 @@ use desktop_core::{
 };
 
 use crate::{
-    catalog::{Catalog, Surface},
+    catalog::{Catalog, CatalogModel, ReasoningContract, Surface},
     config_doc::{parse_jsonc, ConfigDoc, ConfigValue, EntryKey, Format},
     secrets::SecretStore,
     tokens::{TokenFiles, TokenSet},

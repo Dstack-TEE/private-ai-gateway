@@ -44,10 +44,12 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         catalog,
         &ModelRows {
             positive_limits: true,
+            max_tokens: true,
             any_input: false,
-            reasoning: true,
+            input: &["text", "image", "video", "audio"],
             cost: Cost::Listed,
         },
+        reasoning,
     );
     let (reference, provider) = if inputs.file_credentials {
         (
@@ -92,6 +94,46 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         ));
     }
     Ok(result)
+}
+
+/// `reasoning` and OpenClaw's `compat` tool and thinking profile.
+pub(super) fn reasoning(model: &CatalogModel, row: &mut serde_json::Map<String, Value>) {
+    let reasons = model.reasons();
+    if reasons {
+        row.insert("reasoning".into(), json!(true));
+    }
+    let mut compat = serde_json::Map::new();
+    if model.supports_tools() == Some(false) {
+        compat.insert("supportsTools".into(), json!(false));
+    }
+    if let Some(contract) = model.reasoning().filter(|_| reasons) {
+        let levels = EffortLevels::of(&contract);
+        if levels.levels.is_empty() {
+            // The service offers no effort choice for the model.
+            compat.insert("supportsReasoningEffort".into(), json!(false));
+        } else {
+            // OpenClaw adds its own levels unless the row names every level
+            // it offers.
+            let offered: Vec<_> = levels
+                .off
+                .then_some("off")
+                .into_iter()
+                .chain(levels.levels.iter().copied())
+                .collect();
+            compat.insert("supportedReasoningEfforts".into(), json!(levels.levels));
+            compat.insert("thinkingLevels".into(), json!(offered));
+            if levels.off {
+                // OpenClaw's `off` otherwise sends no effort.
+                compat.insert("reasoningEffortMap".into(), json!({"off": "none"}));
+            }
+            if let Some(level) = levels.default {
+                compat.insert("defaultThinkingLevel".into(), json!(level));
+            }
+        }
+    }
+    if !compat.is_empty() {
+        row.insert("compat".into(), compat.into());
+    }
 }
 
 /// Refuse existing namespaces, including nulls, without reading any secret file.

@@ -159,8 +159,21 @@ pub(super) fn is_any_model_selection_field(field: &OwnedField) -> bool {
         .any(|agent| is_model_selection_field(agent, field))
 }
 
+/// Settings a connection writes from the model list that people may tune in
+/// the agent afterwards: Claude Code's limits and model aliases. Tuning one
+/// keeps the connection, and the tuned value
+/// survives reprojection until the model list changes that setting.
+/// Disconnecting restores the original, since a tuned value belongs to the
+/// connection's models.
+fn is_tunable_field(agent: Agent, path: &[String]) -> bool {
+    match agent {
+        Agent::ClaudeCode => path.len() == 2 && path[0] == "env" && claude_env_is_tunable(&path[1]),
+        _ => false,
+    }
+}
+
 pub(super) fn holds_managed_field(agent: Agent, doc: &ConfigDoc, field: &OwnedField) -> bool {
-    if is_model_selection_field(agent, field) {
+    if is_model_selection_field(agent, field) || is_tunable_field(agent, &field.path) {
         return true;
     }
     if agent == Agent::ClaudeCode && field.path == owned(&["modelPicker"]) {
@@ -740,7 +753,13 @@ pub(super) fn project(
                 None => None,
             },
         };
-        if current != field.value {
+        let tuned = is_tunable_field(agent, &field.path)
+            && prior.iter().any(|owned| {
+                owned.path == field.path
+                    && owned.value == field.value
+                    && !owned.holds(current.as_ref())
+            });
+        if current != field.value && !tuned {
             match &field.value {
                 Some(value) => doc.set_value(&path, value)?,
                 None => doc.remove(&path)?,
@@ -1124,6 +1143,9 @@ pub(super) fn restore(
         })
         .all(|field| field.holds(owned_value(doc, field).as_ref()));
     let should_restore = |field: &OwnedField, current: Option<&ConfigValue>| {
+        if is_tunable_field(agent, &field.path) {
+            return routing_unchanged || field.holds(current);
+        }
         if !is_model_selection_field(agent, field) {
             return field.holds(current);
         }
@@ -1425,7 +1447,7 @@ pub(super) fn connection_options(
         catalog.is_some_and(|catalog| {
             catalog
                 .get(model)
-                .is_some_and(|entry| entry.supports(agent.surface()))
+                .is_some_and(|entry| agent.can_use(catalog, entry))
         })
     };
     let current = selected_model(agent, Some(doc)).filter(compatible);
@@ -1440,7 +1462,7 @@ pub(super) fn connection_options(
     let preferred_default = catalog.is_some_and(|catalog| {
         catalog
             .get(PREFERRED_DEFAULT_MODEL)
-            .is_some_and(|model| model.supports(agent.surface()))
+            .is_some_and(|model| agent.can_use(catalog, model))
     });
     ConnectOptions {
         default_model: preferred
@@ -1451,7 +1473,7 @@ pub(super) fn connection_options(
                         catalog
                             .models
                             .iter()
-                            .find(|model| model.supports(agent.surface()))
+                            .find(|model| agent.can_use(catalog, model))
                     })
                     .map(|model| model.id().to_string())
             }),

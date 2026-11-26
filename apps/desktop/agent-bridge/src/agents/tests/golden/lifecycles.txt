@@ -1,15 +1,26 @@
 # claude-code lifecycle
-connect claude-code catalog=0bf0a8e4: changes sha256:06e25c0b69b5 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, model], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; + .claude/settings.json (600) sha256:975d06f6e9dd; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4eb2749b08fc; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+connect claude-code catalog=0bf0a8e4: changes sha256:f02d89456f79 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; + .claude/settings.json (600) sha256:0866e85edd5f; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1a12060fa9d6; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["claude-code"]
-disconnect claude-code no-catalog: changes sha256:067807c86e5e [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, model], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:ca3d163bab05; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3
+disconnect claude-code no-catalog: changes sha256:5ca81b06148b [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:ca3d163bab05; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3
 write .claude/settings.json (600) sha256:5879eebbba72
-connect claude-code model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:16f20380cde2 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, model], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:07ee1c9473ae; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:81f3bdbde97b; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
+connect claude-code model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:675e73c6e370 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:afa947934340; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:5d4f49a82479; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
 show .claude/settings.json
     | {
     |   "env": {
     |     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4180",
     |     "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-    |     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    |     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    |     "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+    |     "ANTHROPIC_DEFAULT_OPUS_MODEL": "openai/gpt-oss-120b",
+    |     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "GPT OSS 120B [TEE]",
+    |     "ANTHROPIC_DEFAULT_SONNET_MODEL": "openai/gpt-oss-120b",
+    |     "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "GPT OSS 120B [TEE]",
+    |     "ANTHROPIC_DEFAULT_HAIKU_MODEL": "openai/gpt-oss-120b",
+    |     "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "GPT OSS 120B [TEE]",
+    |     "ANTHROPIC_DEFAULT_FABLE_MODEL": "openai/gpt-oss-120b",
+    |     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "GPT OSS 120B [TEE]",
+    |     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "131072",
+    |     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32768"
     |   },
     |   "apiKeyHelper": "'$HOME/Private AI Proxy.app/private-ai-proxy-helper' --agent-token claude-code",
     |   "model": "openai/gpt-oss-120b",
@@ -22,41 +33,46 @@ show .claude/settings.json
     |       },
     |       {
     |         "model": "openai/gpt-oss-120b",
-    |         "label": "GPT OSS 120B [TEE]"
+    |         "label": "GPT OSS 120B [TEE]",
+    |         "description": "Open weights"
     |       },
     |       {
     |         "model": "phala/qwen",
     |         "label": "phala/qwen"
+    |       },
+    |       {
+    |         "model": "z-ai/glm-5.3",
+    |         "label": "GLM 5.3"
     |       }
     |     ]
     |   }
     | }
-connect claude-code model="gpt-5.4" catalog=7674a52c: changes sha256:82bf02550d6e [model], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => ~ .claude/settings.json (600) sha256:505663cee9a6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:3487c53d7d92
-reconcile catalog=d4dc6aa2 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0fcee0f6be31
+connect claude-code model="gpt-5.4" catalog=64885a69: changes sha256:e7dca3db358a [model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => ~ .claude/settings.json (600) sha256:ac5bce946d7f; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c73e8a946463
+reconcile catalog=239ed8a0 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:dbdcdbcfd3b5
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .claude/settings.json (600) sha256:6d3218305fac; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:939da59b0984
-reconcile no-catalog => ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0e3f2758315b; parked secrets: []
+retarget catalog=239ed8a0 => ~ .claude/settings.json (600) sha256:3b51ddb610a0; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0db152352304
+reconcile no-catalog => ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9dc06907172d; parked secrets: []
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token claude-code: rotated; ~ .claude/settings.json (600) sha256:6d3218305fac; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:939da59b0984; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["claude-code"]
+reconcile catalog=239ed8a0 => token claude-code: rotated; ~ .claude/settings.json (600) sha256:3b51ddb610a0; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0db152352304; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["claude-code"]
 disconnect all => token claude-code: revoked; ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; parked secrets: []
 # claude-code home credentials
 use home credentials
 write .claude/settings.json (600) sha256:5879eebbba72
-connect claude-code model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:16f20380cde2 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, model], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:2f5a07ffe6cc; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:34fe601d4fe2; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
-disconnect claude-code no-catalog: changes sha256:7bc5fa634180 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, model], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; parked secrets: []
+connect claude-code model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:675e73c6e370 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:f0954f084a98; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:355ffdd4ebac; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
+disconnect claude-code no-catalog: changes sha256:ab0e004050a7 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; parked secrets: []
 # claude-code record without an endpoint
 write .claude/settings.json (600) sha256:5879eebbba72
-connect claude-code model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:16f20380cde2 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, model], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:07ee1c9473ae; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:81f3bdbde97b; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["claude-code"]
-reconcile catalog=7674a52c
-disconnect claude-code no-catalog: changes sha256:7bc5fa634180 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, model], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; parked secrets: []
+connect claude-code model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:675e73c6e370 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:8ee77eb41816; applied: installed, recorded, connected, authorized => token claude-code: issued; ~ .claude/settings.json (600) sha256:afa947934340; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:5d4f49a82479; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; parked secrets: [("restore:claude-code:b8cb082df7a4bce85613f86d7627fb807b86e4bb77ff1de07d3a00a7679c9984", "old-helper"), ("restore:claude-code:d252e6a746e5d43b08d2d45522d887b098a1acf3c2c6a5e8446bed988dca2c31", "old-secret")]
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["claude-code"]
+reconcile catalog=64885a69
+disconnect claude-code no-catalog: changes sha256:ab0e004050a7 [env.ANTHROPIC_BASE_URL, env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC, modelPicker, *apiKeyHelper, *env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_MODEL, env.CLAUDE_CODE_AUTO_MODE_SERVER, model, env.ANTHROPIC_DEFAULT_OPUS_MODEL, env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, env.ANTHROPIC_DEFAULT_SONNET_MODEL, env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, env.ANTHROPIC_DEFAULT_HAIKU_MODEL, env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME, env.ANTHROPIC_DEFAULT_FABLE_MODEL, env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME, *env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, *env.CLAUDE_CODE_MAX_OUTPUT_TOKENS], note sha256:c91bc60c4f9d; applied: installed => token claude-code: revoked; ~ .claude/settings.json (600) sha256:bd497dd9d3dc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; parked secrets: []
 # codex lifecycle
-connect codex catalog=0bf0a8e4: changes sha256:71f68726c8c4 [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; + .codex/config.toml (600) sha256:7a872c07aa31; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6d715db610ff; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; + org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:b09a5094a615
+connect codex catalog=0bf0a8e4: changes sha256:71f68726c8c4 [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; + .codex/config.toml (600) sha256:7a872c07aa31; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6d715db610ff; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; + org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:a9b1b2928f6c
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["codex"]
 disconnect codex no-catalog: changes sha256:75a49351c499 [model_provider, model_catalog_json, model], note sha256:c91bc60c4f9d; applied: installed => token codex: revoked; ~ .codex/config.toml (600) sha256:b452ed7864ca; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:89de4e24f00c
 write .codex/config.toml (600) sha256:39599c2bbebb
-connect codex model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:ad28a666bf4e [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:599feaaf78b3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2d0b92990899; ~ org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:e606bc42cd8a
+connect codex model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:ad28a666bf4e [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:599feaaf78b3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:032bb5061ff9; ~ org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:9de481ba7e73
 show .codex/config.toml
     | # user settings
     | model_provider = "private_ai_proxy" # mine
@@ -77,33 +93,33 @@ show .codex/config.toml
     | args = ["--agent-token", "codex"]
     | timeout_ms = 5000
     | refresh_interval_ms = 0
-connect codex model="gpt-5.4" catalog=7674a52c: changes sha256:82bf02550d6e [model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => ~ .codex/config.toml (600) sha256:92632c5f75cb; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2d6fca779406
-reconcile catalog=d4dc6aa2 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4d3e41bd7d61
+connect codex model="gpt-5.4" catalog=64885a69: changes sha256:82bf02550d6e [model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => ~ .codex/config.toml (600) sha256:92632c5f75cb; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:515a0ae64eeb
+reconcile catalog=239ed8a0 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ec344c355983
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .codex/config.toml (600) sha256:876baef973c3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:41543fee271d
-reconcile no-catalog => ~ .codex/config.toml (600) sha256:f46f0c9ed285; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:76f7b92fcc44
+retarget catalog=239ed8a0 => ~ .codex/config.toml (600) sha256:876baef973c3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1ade71897b91
+reconcile no-catalog => ~ .codex/config.toml (600) sha256:f46f0c9ed285; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0950cbdc9a2f
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token codex: rotated; ~ .codex/config.toml (600) sha256:876baef973c3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:41543fee271d
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["codex"]
-disconnect all => token codex: revoked; ~ .codex/config.toml (600) sha256:f46f0c9ed285; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:e65f1419d5c2
+reconcile catalog=239ed8a0 => token codex: rotated; ~ .codex/config.toml (600) sha256:876baef973c3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1ade71897b91
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["codex"]
+disconnect all => token codex: revoked; ~ .codex/config.toml (600) sha256:f46f0c9ed285; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:3bb79ed4b648
 # codex home credentials
 use home credentials
 write .codex/config.toml (600) sha256:39599c2bbebb
-connect codex model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:70c05a6c9848 [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:098ba87c7551; + .org.dstack.private-ai-proxy-agents/codex-model-catalog.json (600) sha256:e606bc42cd8a; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:09e0ef996e64; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect codex no-catalog: changes sha256:24dc3d464153 [model_provider, model_catalog_json, model], note sha256:c91bc60c4f9d; applied: installed => token codex: revoked; ~ .codex/config.toml (600) sha256:25944e8803d9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:cda31537af0d
+connect codex model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:70c05a6c9848 [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:098ba87c7551; + .org.dstack.private-ai-proxy-agents/codex-model-catalog.json (600) sha256:9de481ba7e73; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:457a398b71a2; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect codex no-catalog: changes sha256:24dc3d464153 [model_provider, model_catalog_json, model], note sha256:c91bc60c4f9d; applied: installed => token codex: revoked; ~ .codex/config.toml (600) sha256:25944e8803d9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ac1fe7b5a1f1
 # codex record without an endpoint
 write .codex/config.toml (600) sha256:39599c2bbebb
-connect codex model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:ad28a666bf4e [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:599feaaf78b3; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2d0b92990899; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; + org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:e606bc42cd8a
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["codex"]
-reconcile catalog=7674a52c
-disconnect codex no-catalog: changes sha256:d9e65decf71c [model_provider, model_catalog_json, model], note sha256:c91bc60c4f9d; applied: installed => token codex: revoked; ~ .codex/config.toml (600) sha256:ab5c6acf8b71; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4451e5c6a3b3
+connect codex model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:ad28a666bf4e [model_provider, model_providers.private_ai_proxy.name, model_providers.private_ai_proxy.base_url, model_providers.private_ai_proxy.wire_api, model_catalog_json, model_providers.private_ai_proxy.auth.command, model_providers.private_ai_proxy.auth.args, model_providers.private_ai_proxy.auth.timeout_ms, model_providers.private_ai_proxy.auth.refresh_interval_ms, model], note sha256:33c51653b2b9; applied: installed, recorded, connected, authorized => token codex: issued; ~ .codex/config.toml (600) sha256:599feaaf78b3; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:032bb5061ff9; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc; + org.dstack.private-ai-proxy/codex-model-catalog.json (600) sha256:9de481ba7e73
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["codex"]
+reconcile catalog=64885a69
+disconnect codex no-catalog: changes sha256:d9e65decf71c [model_provider, model_catalog_json, model], note sha256:c91bc60c4f9d; applied: installed => token codex: revoked; ~ .codex/config.toml (600) sha256:ab5c6acf8b71; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:8144b18a3261
 # dsh lifecycle
 connect dsh catalog=0bf0a8e4: changes sha256:204b785cd11c [llm-pi-ai.config, agent-default-model.config, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; + .dsh/.credentials.yaml (600) sha256:851ce0797b05; + .dsh/cordis.patch.yml (600) sha256:452e500b3f0e; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1c0153357437; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["dsh"]
 disconnect dsh no-catalog: changes sha256:b0e4634cdf47 [llm-pi-ai, agent-default-model, acp, web-search-deepseek, credentials, *refs.PRIVATE_AI_PROXY_DSH_TOKEN, refs], note sha256:c91bc60c4f9d; applied: installed => token dsh: revoked; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3; - .dsh/.credentials.yaml; - .dsh/cordis.patch.yml
 write .dsh/cordis.patch.yml (600) sha256:06de138161c4
 write .dsh/.credentials.yaml (600) sha256:108f89a3132a
-connect dsh model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:0a6986032e44 [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:a97013539e62; ~ .dsh/cordis.patch.yml (600) sha256:9f8508c5f245; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:3238c25aca84
+connect dsh model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:28c897af485d [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:a97013539e62; ~ .dsh/cordis.patch.yml (600) sha256:d2611ba0e611; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ca9989e5f54b
 show .dsh/cordis.patch.yml
     | # user patches
     | - id: session-telemetry-otel
@@ -112,7 +128,7 @@ show .dsh/cordis.patch.yml
     |   config:
     |     provider: private-ai-proxy
     |     model: openai/gpt-oss-120b
-    | - {"id":"llm-pi-ai","config":{"providers":{"private-ai-proxy":{"displayName":"Private AI Proxy","api":"openai-completions","baseURL":"http://127.0.0.1:4180/v1","apiKeyEnv":"PRIVATE_AI_PROXY_DSH_TOKEN","compat":{"supportsDeveloperRole":false,"maxTokensField":"max_tokens"},"models":[{"id":"gpt-5.4","name":"GPT 5.4","contextWindow":400000},{"id":"openai/gpt-oss-120b","name":"GPT OSS 120B [TEE]","contextWindow":131072,"maxTokens":32768,"input":["text","image"]},{"id":"phala/qwen","name":"phala/qwen","input":["text"]}]}}}}
+    | - {"id":"llm-pi-ai","config":{"providers":{"private-ai-proxy":{"displayName":"Private AI Proxy","api":"openai-completions","baseURL":"http://127.0.0.1:4180/v1","apiKeyEnv":"PRIVATE_AI_PROXY_DSH_TOKEN","compat":{"supportsDeveloperRole":false,"maxTokensField":"max_tokens"},"models":[{"id":"gpt-5.4","name":"GPT 5.4","contextWindow":400000},{"id":"openai/gpt-oss-120b","name":"GPT OSS 120B [TEE]","contextWindow":131072,"input":["text","image"]},{"id":"phala/qwen","name":"phala/qwen","input":["text"]},{"id":"z-ai/glm-5.3","name":"GLM 5.3","contextWindow":1048576,"reasoningEfforts":{"low":"low","high":"high","max":"max"}}]}}}}
     | - {"id":"acp","config":{"provider":"private-ai-proxy","model":"openai/gpt-oss-120b"}}
     | - {"id":"web-search-deepseek","disabled":true}
     | - {"id":"credentials","disabled":false}
@@ -122,34 +138,34 @@ show .dsh/.credentials.yaml
     | refs:
     |   DEEPSEEK_API_KEY: sk-user
     |   PRIVATE_AI_PROXY_DSH_TOKEN: <token:dsh:1>
-connect dsh model="gpt-5.4" catalog=7674a52c: changes sha256:d448d8a85eae [agent-default-model.config.model, acp.config], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => ~ .dsh/cordis.patch.yml (600) sha256:800867b5b3ce; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2f9103fe2710
-reconcile catalog=d4dc6aa2 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0dec000aa894
+connect dsh model="gpt-5.4" catalog=64885a69: changes sha256:d448d8a85eae [agent-default-model.config.model, acp.config], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => ~ .dsh/cordis.patch.yml (600) sha256:ac6a8c9bb142; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ca8992561be0
+reconcile catalog=239ed8a0 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:3173a7207789
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .dsh/cordis.patch.yml (600) sha256:5b6c6bd691d2; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c134464f591a
-reconcile no-catalog => ~ .dsh/.credentials.yaml (600) sha256:108f89a3132a; ~ .dsh/cordis.patch.yml (600) sha256:06de138161c4; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1cb474029046
+retarget catalog=239ed8a0 => ~ .dsh/cordis.patch.yml (600) sha256:a529424deffe; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ee9d312d54c8
+reconcile no-catalog => ~ .dsh/.credentials.yaml (600) sha256:108f89a3132a; ~ .dsh/cordis.patch.yml (600) sha256:06de138161c4; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:f40aac0f8eb6
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token dsh: rotated; ~ .dsh/.credentials.yaml (600) sha256:81284ae42348; ~ .dsh/cordis.patch.yml (600) sha256:f43f2296318f; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2cb6ebf55780
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["dsh"]
+reconcile catalog=239ed8a0 => token dsh: rotated; ~ .dsh/.credentials.yaml (600) sha256:81284ae42348; ~ .dsh/cordis.patch.yml (600) sha256:c52e165658b9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:aab65b8a8ced
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["dsh"]
 disconnect all => token dsh: revoked; ~ .dsh/.credentials.yaml (600) sha256:108f89a3132a; ~ .dsh/cordis.patch.yml (600) sha256:06de138161c4; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3
 # dsh home credentials
 use home credentials
 write .dsh/cordis.patch.yml (600) sha256:06de138161c4
 write .dsh/.credentials.yaml (600) sha256:108f89a3132a
-connect dsh model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:0a6986032e44 [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:7b33103ba732; ~ .dsh/cordis.patch.yml (600) sha256:9f8508c5f245; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0ca89062079c; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+connect dsh model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:28c897af485d [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:7b33103ba732; ~ .dsh/cordis.patch.yml (600) sha256:d2611ba0e611; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2f5793e55deb; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 disconnect dsh no-catalog: changes sha256:27bc87589fbe [llm-pi-ai, acp, web-search-deepseek, credentials, agent-default-model.config.provider, agent-default-model.config.model, *refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:c91bc60c4f9d; applied: installed => token dsh: revoked; ~ .dsh/.credentials.yaml (600) sha256:108f89a3132a; ~ .dsh/cordis.patch.yml (600) sha256:06de138161c4; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3
 # dsh record without an endpoint
 write .dsh/cordis.patch.yml (600) sha256:06de138161c4
 write .dsh/.credentials.yaml (600) sha256:108f89a3132a
-connect dsh model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:0a6986032e44 [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:7b33103ba732; ~ .dsh/cordis.patch.yml (600) sha256:9f8508c5f245; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0ca89062079c; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["dsh"]
-reconcile catalog=7674a52c
+connect dsh model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:28c897af485d [llm-pi-ai.config, agent-default-model.config.provider, agent-default-model.config.model, acp.config, web-search-deepseek.disabled, credentials.disabled, *.credentials.yaml refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:4b6ec7cecb00; applied: installed, recorded, connected, authorized => token dsh: issued; ~ .dsh/.credentials.yaml (600) sha256:7b33103ba732; ~ .dsh/cordis.patch.yml (600) sha256:d2611ba0e611; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2f5793e55deb; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["dsh"]
+reconcile catalog=64885a69
 disconnect dsh no-catalog: changes sha256:27bc87589fbe [llm-pi-ai, acp, web-search-deepseek, credentials, agent-default-model.config.provider, agent-default-model.config.model, *refs.PRIVATE_AI_PROXY_DSH_TOKEN], note sha256:c91bc60c4f9d; applied: installed => token dsh: revoked; ~ .dsh/.credentials.yaml (600) sha256:108f89a3132a; ~ .dsh/cordis.patch.yml (600) sha256:06de138161c4; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:44136fa355b3
 # hermes lifecycle
-connect hermes catalog=0bf0a8e4: changes sha256:c5e2ad915089 [providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; + .hermes/config.yaml (600) sha256:8ea08bf5400e; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:307cc8f17c34; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+connect hermes catalog=0bf0a8e4: changes sha256:5cb3b7610fd6 [providers.private-ai-proxy.models, providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; + .hermes/config.yaml (600) sha256:37bfc00e8f7e; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:a91d64824328; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["hermes"]
-disconnect hermes no-catalog: changes sha256:016d91948fd4 [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:af9d144f8381; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:426808fb1320
+disconnect hermes no-catalog: changes sha256:016d91948fd4 [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:960e31d3398d; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:f96b8e5acb2f
 write .hermes/config.yaml (600) sha256:098a3c226f09
-connect hermes model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:dc4204e9928a [providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:5e0c4c550f37; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c00d0115345a
+connect hermes model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:02df83abcd16 [providers.private-ai-proxy.models, providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:20214007a9bd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:09cb65c9eeb2
 show .hermes/config.yaml
     | # hermes
     | model:
@@ -159,6 +175,7 @@ show .hermes/config.yaml
     |   other:
     |     api: https://other.invalid/v1
     |   private-ai-proxy:
+    |     models: {"gpt-5.4":{"supports_vision":false,"context_length":400000},"openai/gpt-oss-120b":{"supports_vision":true,"context_length":131072},"phala/qwen":{"supports_vision":false},"z-ai/glm-5.3":{"supports_vision":false,"context_length":1048576}}
     |     name: Private AI Proxy
     |     api: http://127.0.0.1:4180/v1
     |     transport: chat_completions
@@ -166,33 +183,33 @@ show .hermes/config.yaml
     |     key_cmd: "'$HOME/Private AI Proxy.app/private-ai-proxy-helper' --agent-token hermes"
     |     default_model: openai/gpt-oss-120b
     | theme: dark
-connect hermes model="gpt-5.4" catalog=7674a52c: changes sha256:212eda8543da [providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => ~ .hermes/config.yaml (600) sha256:e107242f5774; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ab6723baf931
-reconcile catalog=d4dc6aa2 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:04ef24d32d5e
+connect hermes model="gpt-5.4" catalog=64885a69: changes sha256:212eda8543da [providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => ~ .hermes/config.yaml (600) sha256:1f990139454a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:73670910ec1b
+reconcile catalog=239ed8a0 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b10872e26c0f
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .hermes/config.yaml (600) sha256:5b09362f105a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:edbb931a6d70
-reconcile no-catalog => ~ .hermes/config.yaml (600) sha256:a1d55f08aedd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:561e929ff454
+retarget catalog=239ed8a0 => ~ .hermes/config.yaml (600) sha256:a78d896d4775; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:a60dc27176b8
+reconcile no-catalog => ~ .hermes/config.yaml (600) sha256:7c22057ed6cb; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ad1c80242b74
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token hermes: rotated; ~ .hermes/config.yaml (600) sha256:5b09362f105a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:edbb931a6d70
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["hermes"]
-disconnect all => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:a1d55f08aedd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0946621dbbbd
+reconcile catalog=239ed8a0 => token hermes: rotated; ~ .hermes/config.yaml (600) sha256:a78d896d4775; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:a60dc27176b8
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["hermes"]
+disconnect all => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:7c22057ed6cb; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:e678b248fda4
 # hermes home credentials
 use home credentials
 write .hermes/config.yaml (600) sha256:098a3c226f09
-connect hermes model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:9fd7c4625ba7 [providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:2ed2fe3f2bd6; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:228fc0607e83; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect hermes no-catalog: changes sha256:44f20a83d93f [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:042bccdcbb8a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ac5ffd443186
+connect hermes model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:587e081ca415 [providers.private-ai-proxy.models, providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:07c9286e0186; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:064e3a24a922; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect hermes no-catalog: changes sha256:44f20a83d93f [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:dba47b686fc8; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1ecbe74636e5
 # hermes record without an endpoint
 write .hermes/config.yaml (600) sha256:098a3c226f09
-connect hermes model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:dc4204e9928a [providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:5e0c4c550f37; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c00d0115345a; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["hermes"]
-reconcile catalog=7674a52c
-disconnect hermes no-catalog: changes sha256:44f20a83d93f [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:042bccdcbb8a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:7568a340e6d6
+connect hermes model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:02df83abcd16 [providers.private-ai-proxy.models, providers.private-ai-proxy.name, providers.private-ai-proxy.api, providers.private-ai-proxy.transport, providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, providers.private-ai-proxy.default_model, model.default], note sha256:eb690e2b0659; applied: installed, recorded, connected, authorized => token hermes: issued; ~ .hermes/config.yaml (600) sha256:20214007a9bd; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:09cb65c9eeb2; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["hermes"]
+reconcile catalog=64885a69
+disconnect hermes no-catalog: changes sha256:44f20a83d93f [providers.private-ai-proxy.discover_models, providers.private-ai-proxy.key_cmd, model.provider, model.default], note sha256:c91bc60c4f9d; applied: installed => token hermes: revoked; ~ .hermes/config.yaml (600) sha256:dba47b686fc8; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:30e8e5e55bfd
 # pi lifecycle
 connect pi catalog=0bf0a8e4: changes sha256:aacc03f8a888 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; + .pi/agent/models.json (600) sha256:fb3a09211d05; + .pi/agent/settings.json (600) sha256:7c622036f97e; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:bb85c12a092b; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["pi"]
 disconnect pi no-catalog: changes sha256:9e6c98c84008 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:c91bc60c4f9d; applied: installed => token pi: revoked; ~ .pi/agent/models.json (600) sha256:1cdaf9888e29; ~ .pi/agent/settings.json (600) sha256:ca3d163bab05; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:7a027ffd5d16
 write .pi/agent/models.json (600) sha256:1ab24943cef9
 write .pi/agent/settings.json (600) sha256:185e1a5554f6
-connect pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:6d88de52689b [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:fc58f27e53ff; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4f355017ee2d
+connect pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:f93e4d5056a7 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:46fbb7645af2; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:488e69510739
 show .pi/agent/models.json
     | {
     |   "providers": {
@@ -225,6 +242,22 @@ show .pi/agent/models.json
     |           "id": "phala/qwen",
     |           "name": "phala/qwen",
     |           "input": ["text"]
+    |         },
+    |         {
+    |           "id": "z-ai/glm-5.3",
+    |           "name": "GLM 5.3",
+    |           "contextWindow": 1048576,
+    |           "maxTokens": 131072,
+    |           "reasoning": true,
+    |           "thinkingLevelMap": {
+    |             "off": null,
+    |             "minimal": null,
+    |             "low": "low",
+    |             "medium": null,
+    |             "high": "high",
+    |             "xhigh": null,
+    |             "max": "max"
+    |           }
     |         }
     |       ]
     |     }
@@ -232,73 +265,73 @@ show .pi/agent/models.json
     | }
 show .pi/agent/settings.json
     | {"defaultProvider":"private-ai-proxy","defaultModel":"openai/gpt-oss-120b","theme":"dark"}
-connect pi model="gpt-5.4" catalog=7674a52c: changes sha256:92320ef17e14 [defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => ~ .pi/agent/settings.json (600) sha256:06c16f113633; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:e86953705af9
-reconcile catalog=d4dc6aa2 => ~ .pi/agent/models.json (600) sha256:7e941299c274; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1ec2c4d41549
+connect pi model="gpt-5.4" catalog=64885a69: changes sha256:92320ef17e14 [defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => ~ .pi/agent/settings.json (600) sha256:06c16f113633; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:002307478e73
+reconcile catalog=239ed8a0 => ~ .pi/agent/models.json (600) sha256:532737e9b2bd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:352e0a0da334
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .pi/agent/models.json (600) sha256:d4226df0d3de; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4e0074d32fc2
-reconcile no-catalog => ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9876d549ec6b
+retarget catalog=239ed8a0 => ~ .pi/agent/models.json (600) sha256:648e14c5499f; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:765f06687aa0
+reconcile no-catalog => ~ .pi/agent/models.json (600) sha256:7b25b1c14fcb; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6ae94aed71a0
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token pi: rotated; ~ .pi/agent/models.json (600) sha256:d4226df0d3de; ~ .pi/agent/settings.json (600) sha256:06c16f113633; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4e0074d32fc2
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["pi"]
-disconnect all => token pi: revoked; ~ .pi/agent/models.json (600) sha256:50529cf8fd57; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:57f92ebf3384
+reconcile catalog=239ed8a0 => token pi: rotated; ~ .pi/agent/models.json (600) sha256:648e14c5499f; ~ .pi/agent/settings.json (600) sha256:06c16f113633; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:765f06687aa0
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["pi"]
+disconnect all => token pi: revoked; ~ .pi/agent/models.json (600) sha256:7b25b1c14fcb; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:344a422f23b6
 # pi home credentials
 use home credentials
 write .pi/agent/models.json (600) sha256:1ab24943cef9
 write .pi/agent/settings.json (600) sha256:185e1a5554f6
-connect pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:6d88de52689b [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:7dce60049ceb; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0acb638ba5cd; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect pi no-catalog: changes sha256:1abd7311a179 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:c91bc60c4f9d; applied: installed => token pi: revoked; ~ .pi/agent/models.json (600) sha256:3b494412cad4; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b793c02dc837
+connect pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:f93e4d5056a7 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:836e370dfae5; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:78706fecb01b; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect pi no-catalog: changes sha256:1abd7311a179 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:c91bc60c4f9d; applied: installed => token pi: revoked; ~ .pi/agent/models.json (600) sha256:6cc9d2af6c1f; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9053c8205c78
 # pi record without an endpoint
 write .pi/agent/models.json (600) sha256:1ab24943cef9
 write .pi/agent/settings.json (600) sha256:185e1a5554f6
-connect pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:6d88de52689b [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:fc58f27e53ff; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:4f355017ee2d; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["pi"]
-reconcile catalog=7674a52c
-disconnect pi no-catalog: changes sha256:1abd7311a179 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:c91bc60c4f9d; applied: installed => token pi: revoked; ~ .pi/agent/models.json (600) sha256:3b494412cad4; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:db524325a662
+connect pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:f93e4d5056a7 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:5051b5d097d7; applied: installed, recorded, connected, authorized => token pi: issued; ~ .pi/agent/models.json (600) sha256:46fbb7645af2; ~ .pi/agent/settings.json (600) sha256:9192f6c3bcc9; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:488e69510739; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["pi"]
+reconcile catalog=64885a69
+disconnect pi no-catalog: changes sha256:1abd7311a179 [providers.private-ai-proxy, defaultProvider, defaultModel], note sha256:c91bc60c4f9d; applied: installed => token pi: revoked; ~ .pi/agent/models.json (600) sha256:6cc9d2af6c1f; ~ .pi/agent/settings.json (600) sha256:185e1a5554f6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:98a0e6c98019
 # oh-my-pi lifecycle
-connect oh-my-pi catalog=0bf0a8e4: changes sha256:6d38caf248a0 [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; + .omp/agent/config.yml (600) sha256:1aa09bd8212a; + .omp/agent/models.yml (600) sha256:7473de092a64; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b44380268e9f; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+connect oh-my-pi catalog=0bf0a8e4: changes sha256:6d38caf248a0 [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; + .omp/agent/config.yml (600) sha256:1aa09bd8212a; + .omp/agent/models.yml (600) sha256:8a7351d31fb5; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2e30f832c3c3; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
-disconnect oh-my-pi no-catalog: changes sha256:e1f396cc9831 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:ca3d163bab05; ~ .omp/agent/models.yml (600) sha256:ae139590650f; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b5739e159801
+disconnect oh-my-pi no-catalog: changes sha256:e1f396cc9831 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:ca3d163bab05; ~ .omp/agent/models.yml (600) sha256:bac66c2a1a87; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:54edb55893c1
 write .omp/agent/models.yml (600) sha256:2aabed80a4fc
 write .omp/agent/config.yml (600) sha256:17c568ce8399
-connect oh-my-pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:eebfe7f9f075 [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:9a61644e3a27; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:205299bf3597
+connect oh-my-pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:de0f13686a9d [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:ec84f2154bec; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2736486bb6cb
 show .omp/agent/models.yml
     | # omp models
     | providers:
     |   other: {apiKey: 'user-owned', models: []} # keep
-    |   private-ai-proxy: {"baseUrl":"http://127.0.0.1:4180/v1","api":"openai-completions","auth":"apiKey","apiKey":"!'$HOME/Private AI Proxy.app/private-ai-proxy-helper' --agent-token oh-my-pi","models":[{"id":"gpt-5.4","name":"GPT 5.4","contextWindow":400000},{"id":"openai/gpt-oss-120b","name":"GPT OSS 120B [TEE]","contextWindow":131072,"maxTokens":32768,"input":["text","image"],"reasoning":true,"cost":{"input":0.1,"output":0.5,"cacheRead":0.01,"cacheWrite":0}},{"id":"phala/qwen","name":"phala/qwen","input":["text"]}]}
+    |   private-ai-proxy: {"baseUrl":"http://127.0.0.1:4180/v1","api":"openai-completions","auth":"apiKey","apiKey":"!'$HOME/Private AI Proxy.app/private-ai-proxy-helper' --agent-token oh-my-pi","models":[{"id":"gpt-5.4","name":"GPT 5.4","contextWindow":400000,"reasoning":false},{"id":"openai/gpt-oss-120b","name":"GPT OSS 120B [TEE]","contextWindow":131072,"maxTokens":32768,"input":["text","image"],"reasoning":true,"supportsTools":true,"compat":{"stripImageInput":false,"thinkingFormat":"openrouter"},"cost":{"input":0.1,"output":0.5,"cacheRead":0.01,"cacheWrite":0}},{"id":"phala/qwen","name":"phala/qwen","input":["text"],"reasoning":false},{"id":"z-ai/glm-5.3","name":"GLM 5.3","contextWindow":1048576,"maxTokens":131072,"reasoning":true,"supportsTools":true,"compat":{"thinkingFormat":"openrouter"},"thinking":{"mode":"effort","efforts":["low","high","max"],"defaultLevel":"high","requiresEffort":true}}]}
 show .omp/agent/config.yml
     | modelRoles:
     |   default: private-ai-proxy/openai/gpt-oss-120b # mine
     |   smol: original/small
     | theme: dark
-connect oh-my-pi model="gpt-5.4" catalog=7674a52c: changes sha256:c8661c743632 [modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => ~ .omp/agent/config.yml (600) sha256:6bbf7cb89755; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d85d70014ab2
-reconcile catalog=d4dc6aa2 => ~ .omp/agent/models.yml (600) sha256:77fee51bf058; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:fcff3fc4c337
+connect oh-my-pi model="gpt-5.4" catalog=64885a69: changes sha256:c8661c743632 [modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => ~ .omp/agent/config.yml (600) sha256:6bbf7cb89755; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2c1ba32b733e
+reconcile catalog=239ed8a0 => ~ .omp/agent/models.yml (600) sha256:a02b4954d8e9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0b8c6972512d
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .omp/agent/models.yml (600) sha256:edb1a97d3503; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:13e1d4cc51bd
-reconcile no-catalog => ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ff06fabd5830
+retarget catalog=239ed8a0 => ~ .omp/agent/models.yml (600) sha256:b791cd8bc8d3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d00e10eec926
+reconcile no-catalog => ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:547256a85c81; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6e9c76af8668
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token oh-my-pi: rotated; ~ .omp/agent/config.yml (600) sha256:6bbf7cb89755; ~ .omp/agent/models.yml (600) sha256:edb1a97d3503; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:13e1d4cc51bd
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
-disconnect all => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:fbeba1f1186c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d24afc76294b
+reconcile catalog=239ed8a0 => token oh-my-pi: rotated; ~ .omp/agent/config.yml (600) sha256:6bbf7cb89755; ~ .omp/agent/models.yml (600) sha256:b791cd8bc8d3; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d00e10eec926
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
+disconnect all => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:547256a85c81; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:a2f125a60209
 # oh-my-pi home credentials
 use home credentials
 write .omp/agent/models.yml (600) sha256:2aabed80a4fc
 write .omp/agent/config.yml (600) sha256:17c568ce8399
-connect oh-my-pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:eebfe7f9f075 [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:cd0e27fc470d; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:39d00859b138; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect oh-my-pi no-catalog: changes sha256:483765ba1920 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:ff33e7b1af9c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:f089022a3c01
+connect oh-my-pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:de0f13686a9d [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:07b71609f835; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:7fa05493074a; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect oh-my-pi no-catalog: changes sha256:483765ba1920 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:03d447e41530; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9add1d774f4a
 # oh-my-pi record without an endpoint
 write .omp/agent/models.yml (600) sha256:2aabed80a4fc
 write .omp/agent/config.yml (600) sha256:17c568ce8399
-connect oh-my-pi model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:eebfe7f9f075 [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:9a61644e3a27; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:205299bf3597; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
-reconcile catalog=7674a52c
-disconnect oh-my-pi no-catalog: changes sha256:483765ba1920 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:ff33e7b1af9c; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:8c2194512339
+connect oh-my-pi model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:de0f13686a9d [providers.private-ai-proxy, modelRoles.default], note sha256:3751441ce30e; applied: installed, recorded, connected, authorized => token oh-my-pi: issued; ~ .omp/agent/config.yml (600) sha256:c40deba6fa95; ~ .omp/agent/models.yml (600) sha256:ec84f2154bec; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2736486bb6cb; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["oh-my-pi"]
+reconcile catalog=64885a69
+disconnect oh-my-pi no-catalog: changes sha256:483765ba1920 [providers.private-ai-proxy, modelRoles.default], note sha256:c91bc60c4f9d; applied: installed => token oh-my-pi: revoked; ~ .omp/agent/config.yml (600) sha256:17c568ce8399; ~ .omp/agent/models.yml (600) sha256:03d447e41530; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6e661ca7720a
 # opencode lifecycle
 connect opencode catalog=0bf0a8e4: changes sha256:7328d54e866e [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; + .config/opencode/opencode.json (600) sha256:e03779b4a0d4; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:6b15a80ea657; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["opencode"]
 disconnect opencode no-catalog: changes sha256:a5cafa939dd2 [provider.private-ai-proxy, model], note sha256:c91bc60c4f9d; applied: installed => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:1b8b92fd2527; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ca67ed96837c
 write .config/opencode/opencode.json (600) sha256:76a9b71a669e
-connect opencode model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:12b125ab19b4 [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:f03440964ab0; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:da8fab1f8918
+connect opencode model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:7a568980d05d [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:2925d8cb5627; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:cae3dd674e7b
 show .config/opencode/opencode.json
     | {
     |   "$schema": "https://opencode.ai/config.json",
@@ -318,44 +351,77 @@ show .config/opencode/opencode.json
     |         },
     |         "openai/gpt-oss-120b": {
     |           "name": "GPT OSS 120B [TEE]",
+    |           "tool_call": true,
+    |           "modalities": {
+    |             "input": ["text", "image", "audio"],
+    |             "output": ["text"]
+    |           },
     |           "limit": {
     |             "context": 131072,
     |             "output": 32768
+    |           },
+    |           "cost": {
+    |             "input": 0.1,
+    |             "output": 0.5,
+    |             "cache_read": 0.01
     |           }
     |         },
     |         "phala/qwen": {
-    |           "name": "phala/qwen"
+    |           "name": "phala/qwen",
+    |           "modalities": {
+    |             "input": ["text"],
+    |             "output": ["text"]
+    |           }
+    |         },
+    |         "z-ai/glm-5.3": {
+    |           "name": "GLM 5.3",
+    |           "variants": {
+    |             "max": {
+    |               "reasoningEffort": "max"
+    |             },
+    |             "high": {
+    |               "reasoningEffort": "high"
+    |             },
+    |             "low": {
+    |               "reasoningEffort": "low"
+    |             }
+    |           },
+    |           "tool_call": true,
+    |           "limit": {
+    |             "context": 1048576,
+    |             "output": 131072
+    |           }
     |         }
     |       }
     |     }
     |   }
     | }
-connect opencode model="gpt-5.4" catalog=7674a52c: changes sha256:ed90e77e40d7 [model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => ~ .config/opencode/opencode.json (600) sha256:9dab6e905d8a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b04a84d5d704
-reconcile catalog=d4dc6aa2 => ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9a89e0e4fae2
+connect opencode model="gpt-5.4" catalog=64885a69: changes sha256:ed90e77e40d7 [model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => ~ .config/opencode/opencode.json (600) sha256:a23b8c7883b9; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:975129615bc0
+reconcile catalog=239ed8a0 => ~ .config/opencode/opencode.json (600) sha256:f54bd13d590b; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:3e3b94131ace
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .config/opencode/opencode.json (600) sha256:42e34dfdca80; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:fd3426cee196
-reconcile no-catalog => ~ .config/opencode/opencode.json (600) sha256:a0be5f269e12; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:a233087dd77e
+retarget catalog=239ed8a0 => ~ .config/opencode/opencode.json (600) sha256:a42084f7d2ce; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:924982180e69
+reconcile no-catalog => ~ .config/opencode/opencode.json (600) sha256:30b5e3e3428e; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:90624de7abad
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token opencode: rotated; ~ .config/opencode/opencode.json (600) sha256:42e34dfdca80; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:fd3426cee196
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["opencode"]
-disconnect all => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:a0be5f269e12; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:70489dff04a1
+reconcile catalog=239ed8a0 => token opencode: rotated; ~ .config/opencode/opencode.json (600) sha256:a42084f7d2ce; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:924982180e69
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["opencode"]
+disconnect all => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:30b5e3e3428e; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:490f67ad319a
 # opencode home credentials
 use home credentials
 write .config/opencode/opencode.json (600) sha256:76a9b71a669e
-connect opencode model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:12b125ab19b4 [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:e2fd23697271; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:771d307d64b1; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect opencode no-catalog: changes sha256:c81af9a55317 [provider.private-ai-proxy, model], note sha256:c91bc60c4f9d; applied: installed => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:c565c59a2dbc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:e0d401b66825
+connect opencode model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:7a568980d05d [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:6a3b6ff0a068; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:e283dd511adf; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect opencode no-catalog: changes sha256:c81af9a55317 [provider.private-ai-proxy, model], note sha256:c91bc60c4f9d; applied: installed => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:3a9d1eddee57; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:9ee3799ecaaf
 # opencode record without an endpoint
 write .config/opencode/opencode.json (600) sha256:76a9b71a669e
-connect opencode model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:12b125ab19b4 [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:f03440964ab0; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:da8fab1f8918; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["opencode"]
-reconcile catalog=7674a52c
-disconnect opencode no-catalog: changes sha256:c81af9a55317 [provider.private-ai-proxy, model], note sha256:c91bc60c4f9d; applied: installed => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:c565c59a2dbc; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:c6dd6c5352ac
+connect opencode model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:7a568980d05d [provider.private-ai-proxy, model], note sha256:226ab026c4b9; applied: installed, recorded, connected, authorized => token opencode: issued; ~ .config/opencode/opencode.json (600) sha256:2925d8cb5627; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:cae3dd674e7b; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["opencode"]
+reconcile catalog=64885a69
+disconnect opencode no-catalog: changes sha256:c81af9a55317 [provider.private-ai-proxy, model], note sha256:c91bc60c4f9d; applied: installed => token opencode: revoked; ~ .config/opencode/opencode.json (600) sha256:3a9d1eddee57; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ee81e12756c7
 # openclaw lifecycle
 connect openclaw catalog=0bf0a8e4: changes sha256:cbb0ecb218da [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; + .openclaw/openclaw.json (600) sha256:54936e26464b; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d912c3743dfe; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
 scan catalog=0bf0a8e4: installed, recorded, connected, authorized | proxy accepts ["openclaw"]
 disconnect openclaw no-catalog: changes sha256:cce3a37f2ef3 [models.providers.private-ai-proxy, agents.defaults.model.primary, agents.defaults.model, agents.defaults, agents], note sha256:c91bc60c4f9d; applied: installed => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:db1005f165b0; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:618d474be369
 write .openclaw/openclaw.json (600) sha256:5acc8c13c3ec
-connect openclaw model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:7b8350456eae [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:5a28920b69d6; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:969d992a15c1
+connect openclaw model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:0fbe4612ccb5 [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:76e801c56384; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:38e2dc0c8576
 show .openclaw/openclaw.json
     | {
     |   // user routing
@@ -381,7 +447,7 @@ show .openclaw/openclaw.json
     |             "name": "GPT OSS 120B [TEE]",
     |             "contextWindow": 131072,
     |             "maxTokens": 32768,
-    |             "input": ["text", "image"],
+    |             "input": ["text", "image", "audio"],
     |             "reasoning": true,
     |             "cost": {
     |               "input": 0.1,
@@ -393,6 +459,18 @@ show .openclaw/openclaw.json
     |             "id": "phala/qwen",
     |             "name": "phala/qwen",
     |             "input": ["text"]
+    |           },
+    |           {
+    |             "id": "z-ai/glm-5.3",
+    |             "name": "GLM 5.3",
+    |             "contextWindow": 1048576,
+    |             "maxTokens": 131072,
+    |             "reasoning": true,
+    |             "compat": {
+    |               "supportedReasoningEfforts": ["low", "high", "max"],
+    |               "thinkingLevels": ["low", "high", "max"],
+    |               "defaultThinkingLevel": "high"
+    |             }
     |           }
     |         ]
     |       }
@@ -411,23 +489,23 @@ show .openclaw/openclaw.json
     |     }
     |   },
     | }
-connect openclaw model="gpt-5.4" catalog=7674a52c: changes sha256:dc48dcb4a069 [agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => ~ .openclaw/openclaw.json (600) sha256:3b10fc8d5d24; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:d7adac06adef
-reconcile catalog=d4dc6aa2 => ~ .openclaw/openclaw.json (600) sha256:f41c108416a2; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:0d93aea49fdc
+connect openclaw model="gpt-5.4" catalog=64885a69: changes sha256:dc48dcb4a069 [agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => ~ .openclaw/openclaw.json (600) sha256:56b21056e617; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:896c1e81dbc0
+reconcile catalog=239ed8a0 => ~ .openclaw/openclaw.json (600) sha256:d348961146c1; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:ab429f28c94a
 move the Local API to http://127.0.0.1:5190
-retarget catalog=d4dc6aa2 => ~ .openclaw/openclaw.json (600) sha256:36e27c53a664; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b8d3781570a6
-reconcile no-catalog => ~ .openclaw/openclaw.json (600) sha256:e1f88ad6a4dd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:30a28abe6320
+retarget catalog=239ed8a0 => ~ .openclaw/openclaw.json (600) sha256:13ed1eaa342d; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:485779025a18
+reconcile no-catalog => ~ .openclaw/openclaw.json (600) sha256:b7b97793cd6b; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:bf096ca47412
 scan no-catalog: installed, recorded | proxy accepts []
-reconcile catalog=d4dc6aa2 => token openclaw: rotated; ~ .openclaw/openclaw.json (600) sha256:36e27c53a664; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b8d3781570a6
-scan catalog=d4dc6aa2: installed, recorded, connected, authorized | proxy accepts ["openclaw"]
-disconnect all => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:e1f88ad6a4dd; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:83817ebff080
+reconcile catalog=239ed8a0 => token openclaw: rotated; ~ .openclaw/openclaw.json (600) sha256:13ed1eaa342d; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:485779025a18
+scan catalog=239ed8a0: installed, recorded, connected, authorized | proxy accepts ["openclaw"]
+disconnect all => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:b7b97793cd6b; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:49f96f35902d
 # openclaw home credentials
 use home credentials
 write .openclaw/openclaw.json (600) sha256:5acc8c13c3ec
-connect openclaw model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:7b8350456eae [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:60c917a05680; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:50470a86f454; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-disconnect openclaw no-catalog: changes sha256:e4f1c84ac8eb [models.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:c91bc60c4f9d; applied: installed => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:b8be80ac179d; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b307684283ff
+connect openclaw model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:0fbe4612ccb5 [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:04cbbc042f35; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b66860f5d2d3; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+disconnect openclaw no-catalog: changes sha256:e4f1c84ac8eb [models.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:c91bc60c4f9d; applied: installed => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:6803574bcc9a; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:b1516ad42f2d
 # openclaw record without an endpoint
 write .openclaw/openclaw.json (600) sha256:5acc8c13c3ec
-connect openclaw model="openai/gpt-oss-120b" catalog=7674a52c: changes sha256:7b8350456eae [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:5a28920b69d6; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:969d992a15c1; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
-scan catalog=7674a52c: installed, recorded, connected, authorized | proxy accepts ["openclaw"]
-reconcile catalog=7674a52c
-disconnect openclaw no-catalog: changes sha256:e4f1c84ac8eb [models.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:c91bc60c4f9d; applied: installed => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:a0691556f602; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:1a76df62b438
+connect openclaw model="openai/gpt-oss-120b" catalog=64885a69: changes sha256:0fbe4612ccb5 [models.providers.private-ai-proxy, secrets.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:ce917b9a775d; applied: installed, recorded, connected, authorized => token openclaw: issued; ~ .openclaw/openclaw.json (600) sha256:76e801c56384; + org.dstack.private-ai-proxy/agent-connections.json (600) sha256:38e2dc0c8576; + org.dstack.private-ai-proxy/apply.lock sha256:e3b0c44298fc
+scan catalog=64885a69: installed, recorded, connected, authorized | proxy accepts ["openclaw"]
+reconcile catalog=64885a69
+disconnect openclaw no-catalog: changes sha256:e4f1c84ac8eb [models.providers.private-ai-proxy, agents.defaults.model.primary], note sha256:c91bc60c4f9d; applied: installed => token openclaw: revoked; ~ .openclaw/openclaw.json (600) sha256:8955a3dcee14; ~ org.dstack.private-ai-proxy/agent-connections.json (600) sha256:2e022083d909

@@ -39,7 +39,7 @@ pub(super) async fn models(State(state): State<Arc<ProxyState>>, headers: Header
     match (session.verified, session.catalog) {
         (true, Some(catalog)) => {
             let catalog = Agent::from_id(&auth.agent)
-                .map(|agent| catalog.for_surface(agent.surface()))
+                .map(|agent| agent.catalog(&catalog))
                 .unwrap_or(catalog);
             Json(catalog.openai_list()).into_response()
         }

@@ -33,13 +33,23 @@ user-authorized Home, so Codex does not need access to the app container.
 
 The file replaces Codex's catalog, so every bundled entry is retained for Codex
 internals but hidden from the model picker, because the proxy cannot serve it.
-Verified Responses-compatible provider models are appended and listed; an exact
+Verified Responses-compatible provider models that take tools and are not
+past their `deprecation_date` are appended and listed; an exact
 slug match overlays that entry without duplicates. Codex defaults to the first
 listed model, so no bundled OpenAI model becomes the default. Provider context
 limits replace baseline limits; when absent, baseline limits remain. Codex
 derives automatic compaction at 90% of the context window. Custom entries use
 streaming HTTP Responses and ordinary tools without inheriting code-mode-only
-or experimental tool requirements.
+or experimental tool requirements. They get Codex's freeform `apply_patch`
+tool and the instructions Codex gives a model it does not know
+(`codex-rs/models-manager/prompt.md` at the same tag, bundled as
+[`agent-bridge/resources/codex/prompt.md`](../agent-bridge/resources/codex/prompt.md)), not the template's GPT-specific
+messages. Tool search is on for models that take tools. Reasoning levels are
+the model's `reasoning.supported_efforts` (every service effort when it is
+`null`), lightest first as Codex expects, with the descriptions Codex's own
+catalog gives them and `default_effort` as the default. A model without
+listed efforts offers none, so Codex sends no effort and the service's
+default applies.
 
 The catalog contains public model metadata, not credentials. Direct uses the
 bundled credential helper. MAS uses `/bin/cat` with a separate absolute-path
@@ -52,8 +62,9 @@ for file permissions, rotation and revocation.
 ## Explicit refresh
 
 `agent-bridge/resources/codex/manifest.json` is the single machine-readable pin:
-release version, upstream SHA-256, and model count. The input is OpenAI's
-`rust-v<version>/codex-rs/models-manager/models.json`, licensed under
+release version, upstream SHA-256, model count, and the SHA-256 of
+`prompt.md`. The inputs are OpenAI's
+`rust-v<version>/codex-rs/models-manager/models.json` and `prompt.md`, licensed under
 [Apache-2.0](https://github.com/openai/codex/blob/rust-v0.157.1/LICENSE).
 
 From `apps/desktop`, reproduce the asset with:
