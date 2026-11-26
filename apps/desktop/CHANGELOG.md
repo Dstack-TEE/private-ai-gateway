@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0...desktop-v0.11.0) (2026-11-26)
+
+
+### Features
+
+* **desktop:** support RedPill subscription keys in pap ([#630](https://github.com/Dstack-TEE/private-ai-gateway/issues/630)) ([4f652df](https://github.com/Dstack-TEE/private-ai-gateway/commit/4f652dfa2085996bd3acd0a965b9337e0c24ab2a))
+
 ## [0.10.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0...desktop-v0.10.0) (2026-11-25)
 
 Private AI Proxy 0.10.0 keeps protection on across logins, reboots and crashes, and keeps coding agents connected while you change their settings.
