@@ -58,9 +58,11 @@ Most router-scoped upstreams and ACI-service upstreams refresh one
 representative model. NEAR AI and other providers refresh each distinct
 upstream model.
 
-Never-attempted targets run first in stable order, then due warm entries by
-earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
-after waiting for a background permit, since caches and deadlines can change.
+Never-attempted targets run first in stable order. Due targets with a valid cache
+entry and a successful last attempt run next, ordered by earliest expiry. Due
+cold targets and targets whose last attempt failed run by oldest attempt. Targets
+are re-selected after waiting for a background permit, since caches and deadlines
+can change.
 The period p is a positive `verification_refresh_seconds`, or
 `max(verifier_cache_seconds - verifier_request_timeout_seconds,
 verifier_cache_seconds / 2, 1)` by default (240 seconds with defaults). The

@@ -680,6 +680,7 @@ struct FakeVerifier {
     latency: Duration,
     service_cache: bool,
     failed_model: Option<(String, Duration)>,
+    fail_model_from: Option<Instant>,
     fail: std::sync::atomic::AtomicBool,
     cache: Mutex<HashMap<String, Instant>>,
     observations: Arc<Mutex<RefreshObservations>>,
@@ -692,6 +693,7 @@ impl FakeVerifier {
             latency: Duration::from_secs(latency),
             service_cache: false,
             failed_model: None,
+            fail_model_from: None,
             fail: std::sync::atomic::AtomicBool::new(false),
             cache: Mutex::new(HashMap::new()),
             observations: Arc::new(Mutex::new(RefreshObservations::default())),
@@ -783,10 +785,9 @@ impl UpstreamVerifier for FakeVerifier {
                 .max(observations.active.values().sum());
         }
         let _active = ActiveRefresh(self, request.upstream_name.clone());
-        let failed_model = self
-            .failed_model
-            .as_ref()
-            .filter(|(model, _)| *model == request.model_id);
+        let failed_model = self.failed_model.as_ref().filter(|(model, _)| {
+            *model == request.model_id && self.fail_model_from.is_none_or(|from| started >= from)
+        });
         tokio::time::sleep(failed_model.map_or(self.latency, |(_, latency)| *latency)).await;
         let result = if self.fail.load(Ordering::SeqCst) || failed_model.is_some() {
             VerificationResult::Failed
@@ -1112,6 +1113,40 @@ async fn slow_failed_target_does_not_starve_a_healthy_sibling() {
             .map(|(time, cold)| ((*time - epoch).as_secs(), *cold))
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn early_retry_yields_to_due_healthy_siblings() {
+    let mut cfg = test_upstream_config("provider", UpstreamProvider::PhalaDirect, "a", "a");
+    let healthy_models = ["b", "c", "d", "e", "f"];
+    cfg.models
+        .extend(healthy_models.map(|model| (model.to_string(), model.to_string())));
+    let epoch = Instant::now();
+    let mut verifier = FakeVerifier::new(300, 4);
+    verifier.failed_model = Some(("a".to_string(), Duration::from_secs(32)));
+    verifier.fail_model_from = Some(epoch + Duration::from_secs(240));
+    let verifier = Arc::new(verifier);
+    let task = start_refresh_with_retry_delay(
+        cfg,
+        verifier.clone(),
+        Arc::new(Semaphore::new(4)),
+        |min, _| min,
+    );
+    tokio::task::yield_now().await;
+    advance(850).await;
+    stop_refresh(task).await;
+
+    let observations = verifier.observations.lock().unwrap();
+    for model in healthy_models {
+        let starts = starts(&observations, "provider", model);
+        assert!(starts.len() >= 3);
+        assert!(
+            starts[1..].iter().all(|(_, cold)| !cold),
+            "{model} went cold"
+        );
+    }
+    let a = starts(&observations, "provider", "a");
+    assert_eq!(a[2], (epoch + Duration::from_secs(292), false));
 }
 
 #[tokio::test(start_paused = true)]
