@@ -77,9 +77,8 @@ pub(super) fn verification_refresh_seconds(
             Some(
                 cache_seconds
                     .saturating_sub(timeout_seconds)
-                    // Never below half the TTL: at most two refreshes per TTL, so a timeout at or
-                    // above the TTL cannot make refresh continuous; half the TTL still remains
-                    // for the replacement to finish. `.max(1)` keeps it positive (0 disables refresh).
+                    // A half-TTL floor limits the regular cadence when timeouts are long.
+                    // `.max(1)` keeps the derived period positive (0 disables refresh).
                     .max(cache_seconds / 2)
                     .max(1),
             )
