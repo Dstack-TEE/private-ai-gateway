@@ -56,6 +56,9 @@ GitHub release with that changelog section as its notes.
   An empty commit, as in the release-please README example, pushes nothing
   under `apps/desktop/`, so run `Desktop release PR` from the Actions tab
   (`workflow_dispatch`) afterwards. The next release PR then proposes `<version>`.
+  A pull request cannot carry an empty commit: GitHub's rebase merge drops it
+  and marks the pull request merged with `main` unchanged. Through a pull
+  request, put the footer in the squash commit message of a real change.
   Afterwards, betas continue from the next version. The
   [Release runbook](#release-runbook) lists every step.
 - **Correcting the changelog**: edit the merged PR's body with a
