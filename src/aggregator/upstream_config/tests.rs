@@ -1034,13 +1034,6 @@ async fn failed_refresh_retries_once_while_warm_then_at_expiry() {
 async fn simultaneous_failures_retry_separately_and_stay_apart_after_recovery() {
     let epoch = Instant::now();
     let verifier = Arc::new(FakeVerifier::new(300, 4));
-    let expiry = epoch + Duration::from_secs(300);
-    verifier
-        .cache
-        .lock()
-        .unwrap()
-        .extend([("a".to_string(), expiry), ("b".to_string(), expiry)]);
-    verifier.fail.store(true, Ordering::SeqCst);
     let permits = Arc::new(Semaphore::new(4));
     let tasks = ["a", "b"].map(|name| {
         start_refresh_with_retry_delay(
@@ -1056,17 +1049,20 @@ async fn simultaneous_failures_retry_separately_and_stay_apart_after_recovery() 
     });
     tokio::task::yield_now().await;
     advance(5).await;
+    verifier.fail.store(true, Ordering::SeqCst);
+    advance(240).await;
     verifier.fail.store(false, Ordering::SeqCst);
-    advance(635).await;
+    advance(510).await;
     for task in tasks {
         stop_refresh(task).await;
     }
     let observations = verifier.observations.lock().unwrap();
-    for (name, retry_second) in [("a", 78), ("b", 152)] {
+    for (name, retry_second) in [("a", 258), ("b", 272)] {
         let starts = starts(&observations, name, name);
+        assert_eq!(starts[0], (epoch, true));
         assert_eq!(
-            starts,
-            [0, retry_second, retry_second + 240, retry_second + 480]
+            starts[1..],
+            [240, retry_second, retry_second + 240, retry_second + 480]
                 .map(|seconds| (epoch + Duration::from_secs(seconds), false))
         );
     }

@@ -78,10 +78,11 @@ again before its previous start plus p, including cacheless verifiers.
 
 After a failure with a valid cache entry, the task can retry once before
 expiry. It samples a delay uniformly between one-quarter and one-half of the
-validity remaining when the failure completes. A sampled delay below one
-second or a second failure moves the next attempt to expiry. A successful
-refresh resets the early retry allowance. When no valid entry remains after a
-failure, the target retries at start plus p. NEAR AI preserves a current
+validity remaining when the failure completes. The retry also waits until the
+entry reaches its normal refresh lead. A sampled delay below one second or a
+second failure moves the next attempt to expiry. A successful refresh resets
+the early retry allowance. When no valid entry remains after a failure, the
+target retries at start plus p. NEAR AI preserves a current
 verification when evidence is unavailable. An explicit model name mismatch
 replaces it immediately because the upstream returned a different model identity.
 On Unix, cancellation or timeout kills an external verifier's process group,
