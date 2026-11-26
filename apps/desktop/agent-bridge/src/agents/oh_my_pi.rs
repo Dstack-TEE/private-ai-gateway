@@ -284,10 +284,12 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         catalog,
         &ModelRows {
             positive_limits: true,
+            max_tokens: true,
             any_input: false,
-            reasoning: true,
+            input: TEXT_AND_IMAGE,
             cost: Cost::Complete,
         },
+        reasoning,
     );
     let models: Vec<_> = models
         .into_iter()
@@ -305,6 +307,48 @@ pub(super) fn fields(inputs: &Inputs<'_>) -> Result<Vec<Field>, String> {
         }),
         count,
     )])
+}
+
+/// Oh My Pi fills a capability a row leaves out from a bundled model with a
+/// similar id, so each one the service states is written.
+pub(super) fn reasoning(model: &CatalogModel, row: &mut serde_json::Map<String, Value>) {
+    let reasons = model.reasons();
+    row.insert("reasoning".into(), json!(reasons));
+    if let Some(tools) = model.supports_tools() {
+        row.insert("supportsTools".into(), json!(tools));
+    }
+    let mut compat = serde_json::Map::new();
+    if row
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| input.iter().any(|value| value == "image"))
+    {
+        compat.insert("stripImageInput".into(), json!(false));
+    }
+    if reasons {
+        // Oh My Pi otherwise picks a request dialect by model id. This one
+        // sends `reasoning.effort` and turns `off` into
+        // `reasoning.enabled: false`, the controls the service documents.
+        compat.insert("thinkingFormat".into(), json!("openrouter"));
+    }
+    if !compat.is_empty() {
+        row.insert("compat".into(), compat.into());
+    }
+    let Some(contract) = model.reasoning() else {
+        return;
+    };
+    let levels = EffortLevels::of(&contract);
+    if levels.levels.is_empty() {
+        return;
+    }
+    let mut thinking = json!({"mode": "effort", "efforts": levels.levels});
+    if let Some(level) = levels.default {
+        thinking["defaultLevel"] = json!(level);
+    }
+    if contract.mandatory {
+        thinking["requiresEffort"] = json!(true);
+    }
+    row.insert("thinking".into(), thinking);
 }
 
 #[cfg(test)]

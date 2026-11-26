@@ -9,8 +9,12 @@ fn catalog_model_ids(agent: Agent, catalog: Option<&Catalog>) -> Vec<String> {
     }
     catalog
         .into_iter()
-        .flat_map(|catalog| &catalog.models)
-        .filter(|model| model.supports(agent.surface()))
+        .flat_map(|catalog| {
+            catalog
+                .models
+                .iter()
+                .filter(|model| agent.can_use(catalog, model))
+        })
         .map(|model| model.id().to_owned())
         .collect()
 }

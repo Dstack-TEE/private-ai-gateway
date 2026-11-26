@@ -120,6 +120,48 @@ impl CatalogModel {
             .collect()
     }
 
+    /// The reasoning contract the service states for the model, if any.
+    pub fn reasoning(&self) -> Option<ReasoningContract> {
+        self.remote
+            .extra
+            .get("reasoning")?
+            .as_object()
+            .map(ReasoningContract::from_metadata)
+    }
+
+    /// Whether the service lists the feature or request parameter for the
+    /// model.
+    fn lists(&self, name: &str) -> bool {
+        ["supported_features", "supported_parameters"]
+            .iter()
+            .any(|field| self.string_array(field).iter().any(|value| value == name))
+    }
+
+    /// Whether the model takes tool definitions, when the service lists the
+    /// model's features or parameters.
+    pub fn supports_tools(&self) -> Option<bool> {
+        ["supported_features", "supported_parameters"]
+            .iter()
+            .any(|field| self.remote.extra.contains_key(*field))
+            .then(|| self.lists("tools"))
+    }
+
+    /// Whether the model reasons: it lists reasoning or reasoning efforts.
+    pub fn reasons(&self) -> bool {
+        self.reasoning()
+            .is_some_and(|reasoning| !reasoning.efforts.is_empty())
+            || self.lists("reasoning")
+    }
+
+    /// Whether the service retires the model by the given Unix time: from
+    /// its `deprecation_date`, an RFC 3339 timestamp.
+    pub fn deprecated_at(&self, at: u64) -> bool {
+        use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+        self.string_field("deprecation_date")
+            .and_then(|date| OffsetDateTime::parse(&date, &Rfc3339).ok())
+            .is_some_and(|date| date.unix_timestamp() <= i64::try_from(at).unwrap_or(i64::MAX))
+    }
+
     /// Remote pricing is per token. The UI presents the same validated value
     /// per one million tokens and omits malformed or negative fields. The
     /// decimal point is shifted in the price text instead of multiplying
@@ -164,6 +206,60 @@ fn display_name(remote: &RemoteModel) -> String {
         format!("{name} [TEE]")
     } else {
         name.to_string()
+    }
+}
+
+/// The efforts the service's gateway accepts, highest first.
+const GATEWAY_EFFORTS: &[&str] = &["max", "xhigh", "high", "medium", "low", "minimal", "none"];
+
+/// A model's reasoning controls as the service states them (redpill-api's
+/// `ReasoningMetadata`). A model without this metadata has no stated
+/// contract, and agents keep their own controls for it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReasoningContract {
+    /// The model always reasons, so no request turns reasoning off.
+    pub mandatory: bool,
+    /// The efforts an effort selector offers, highest first as the service
+    /// orders them for selectors; `none` turns reasoning off. Listed
+    /// `supported_efforts` are those efforts, `null` is every gateway effort,
+    /// and an omitted list, empty here, means no effort choice.
+    pub efforts: Vec<String>,
+    /// The effort the service applies when a request names none; one of
+    /// `efforts`.
+    pub default_effort: Option<String>,
+}
+
+impl ReasoningContract {
+    fn from_metadata(metadata: &Map<String, Value>) -> Self {
+        let mandatory = metadata.get("mandatory").and_then(Value::as_bool) == Some(true);
+        let efforts: Vec<String> = match metadata.get("supported_efforts") {
+            Some(Value::Null) => GATEWAY_EFFORTS
+                .iter()
+                .filter(|effort| **effort != "none" || !mandatory)
+                .map(|effort| effort.to_string())
+                .collect(),
+            Some(Value::Array(listed)) => GATEWAY_EFFORTS
+                .iter()
+                .filter(|effort| listed.iter().any(|value| value.as_str() == Some(effort)))
+                .map(|effort| effort.to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let default_effort = metadata
+            .get("default_effort")
+            .and_then(Value::as_str)
+            .filter(|effort| efforts.iter().any(|listed| listed == effort))
+            .map(str::to_string);
+        Self {
+            mandatory,
+            efforts,
+            default_effort,
+        }
+    }
+
+    /// Whether the agent's reasoning off has an effort to send.
+    pub fn offers_off(&self) -> bool {
+        self.efforts.iter().any(|effort| effort == "none")
     }
 }
 

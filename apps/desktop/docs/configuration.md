@@ -274,6 +274,34 @@ unlocked OS keychain for a process running as you.
   the connection stays authorized.
   Adding a Claude Code provider switch pauses access. Reconnect to restore
   Private AI Proxy routing.
+- **Model settings follow the model list.** Each agent gets the facts the
+  service lists for every model, in the agent's own fields: context and output
+  limits, input modalities, tool support, prices and reasoning.
+  - Agents list only models they can work with. Coding agents send tool
+    definitions with every request, so a model listed without tools, such as
+    an OCR model, is left out, as is one past its `deprecation_date`.
+  - Reasoning efforts follow the service's contract for each model's
+    `reasoning`: listed `supported_efforts` are the efforts Codex, OpenCode,
+    Pi, Oh My Pi, OpenClaw and dsh offer, `null` offers every effort the
+    service knows, and an omitted list offers no effort choice. `none` is the
+    agent's reasoning off. The service's `default_effort` becomes the default in
+    Codex, Oh My Pi, OpenClaw and dsh. A model without reasoning metadata keeps
+    each agent's own controls for a model it does not know (none in Codex);
+    the service accepts every effort name and ignores reasoning settings for
+    models that do not reason.
+  - Claude Code's Opus, Sonnet, Haiku and Fable aliases, which its helper
+    subagents and background tasks use, are the default model, and its context
+    window and output limit are the default model's. Claude Code applies those
+    limits to every model, so after switching models in Claude Code they stay
+    the default model's until the next connection. A limit the model does not
+    list is removed. Auto mode uses Claude Code's own classifier requests.
+    Changing these settings in Claude Code keeps the connection; the changed
+    value stays until the model list changes that setting, and disconnecting
+    restores the value from before the connection.
+  - dsh gets no output limit, which it would reserve from the context window
+    and send with every request.
+  - Hermes takes no per-model effort setting and sends its own
+    `agent.reasoning_effort`, `medium` unless you set one.
 - **Agent integration limits.** Claude Code project `.claude/settings.json` and
   `.claude/settings.local.json` can override `ANTHROPIC_BASE_URL`. Codex's
   `managed_config.toml` is outside this integration. Oh My Pi project config

@@ -12,6 +12,12 @@ pub(super) use desktop_core::paths::agent_environment::{
 /// How the bridge reaches and configures each agent.
 pub(crate) trait AgentIntegration {
     fn surface(self) -> Surface;
+    /// Whether the agent can work with the model: the surface serves it, it
+    /// takes the tool definitions every coding agent sends, and the service
+    /// has not retired it.
+    fn can_use(self, catalog: &Catalog, model: &CatalogModel) -> bool;
+    /// The catalog's models the agent can work with.
+    fn catalog(self, catalog: &Catalog) -> Catalog;
     fn format(self) -> Format;
     /// The live user-level config file. With `tool_env` each tool's own
     /// location override is honored.
@@ -32,6 +38,18 @@ impl AgentIntegration for Agent {
             | Self::OhMyPi
             | Self::Dsh => Surface::ChatCompletions,
         }
+    }
+
+    fn can_use(self, catalog: &Catalog, model: &CatalogModel) -> bool {
+        model.supports(self.surface())
+            && model.supports_tools() != Some(false)
+            && !model.deprecated_at(catalog.fetched_at)
+    }
+
+    fn catalog(self, catalog: &Catalog) -> Catalog {
+        let mut usable = catalog.clone();
+        usable.models.retain(|model| self.can_use(catalog, model));
+        usable
     }
 
     fn format(self) -> Format {

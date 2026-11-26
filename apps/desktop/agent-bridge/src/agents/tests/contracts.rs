@@ -689,3 +689,262 @@ async fn a_scan_after_config_drift_revokes_the_old_token_at_the_proxy() {
         "nothing reached the verified upstream"
     );
 }
+
+/// Each agent offers what the service's contract states: listed efforts are
+/// those efforts, `null` accepts every gateway effort, and an omitted list
+/// means no effort selector.
+#[test]
+fn model_parameters_come_from_the_catalog() {
+    let catalog = Catalog::from_remote(
+        &json!({"data":[
+            {"id":"glm","context_length":1000,"max_output_length":2000,
+             "input_modalities":["text"],"supported_parameters":["tools","reasoning"],
+             "pricing":{"prompt":"0.000001","completion":"0.000002","input_cache_read":"0.0000001"},
+             "reasoning":{"mandatory":true,"supported_efforts":["max","high","low"],"default_effort":"high"}},
+            {"id":"glm-no-default","reasoning":{"mandatory":true,"supported_efforts":["max","low"]}},
+            {"id":"any","supported_parameters":["tools","reasoning"],
+             "reasoning":{"mandatory":false,"supported_efforts":null}},
+            {"id":"optional","input_modalities":["text","image","video"],
+             "supported_parameters":["tools","reasoning"],
+             "reasoning":{"mandatory":false,"default_enabled":true}},
+            {"id":"ocr","input_modalities":["image"],"supported_parameters":["max_tokens"]},
+            {"id":"plain"}
+        ]}),
+        1,
+    )
+    .unwrap();
+    let api = api_url(ENDPOINT).unwrap();
+
+    // OpenCode 1 reads efforts from `variants` and drops `capabilities`;
+    // OpenCode 2 builds variants from `capabilities.reasoning`. Either one
+    // otherwise offers low, medium and high for every model.
+    let provider = opencode_provider(&catalog, &api, Path::new("/data/token")).unwrap();
+    assert_eq!(
+        provider["models"]["glm"],
+        json!({"name":"glm",
+               "variants":{"max":{"reasoningEffort":"max"},"high":{"reasoningEffort":"high"},
+                           "low":{"reasoningEffort":"low"}},
+               "tool_call":true,"modalities":{"input":["text"],"output":["text"]},
+               "limit":{"context":1000,"output":1000},
+               "cost":{"input":1.0,"output":2.0,"cache_read":0.1}})
+    );
+    assert_eq!(provider["models"]["ocr"]["tool_call"], false);
+    assert_eq!(provider["models"]["optional"]["variants"], json!({}));
+    // Without reasoning metadata OpenCode keeps its own controls.
+    assert_eq!(provider["models"]["plain"], json!({"name":"plain"}));
+    let native = opencode_provider_v2(&provider, &catalog);
+    assert_eq!(
+        native["models"]["glm"]["capabilities"],
+        json!({"reasoning":{"supported":true,"effort":["max","high","low"]},
+               "tools":true,"input":["text"],"output":["text"]})
+    );
+    assert_eq!(
+        native["models"]["any"]["capabilities"]["reasoning"]["effort"],
+        json!(["max", "xhigh", "high", "medium", "low", "minimal", "none"])
+    );
+    assert_eq!(
+        native["models"]["glm"]["cost"],
+        json!([{"input":1.0,"output":2.0,"cache":{"read":0.1}}])
+    );
+    assert_eq!(
+        native["models"]["plain"],
+        json!({"name":"plain","capabilities":{"reasoning":{"supported":false}}})
+    );
+
+    let codex = codex_catalog(&catalog).unwrap();
+    let entry = |slug: &str| {
+        codex["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == slug)
+            .unwrap()
+            .clone()
+    };
+    let efforts = |slug: &str| -> Vec<_> {
+        entry(slug)["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // Codex reads the last level as the deepest.
+    assert_eq!(efforts("glm"), ["low", "high", "max"]);
+    assert_eq!(entry("glm")["default_reasoning_level"], "high");
+    // Codex's own catalog describes the efforts.
+    assert_eq!(
+        entry("glm")["supported_reasoning_levels"][2]["description"],
+        "Maximum reasoning depth for the hardest problems"
+    );
+    assert_eq!(efforts("glm-no-default"), ["low", "max"]);
+    assert_eq!(
+        entry("glm-no-default")["default_reasoning_level"],
+        json!(null)
+    );
+    assert_eq!(
+        efforts("any"),
+        ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    );
+    assert!(efforts("optional").is_empty());
+    assert_eq!(entry("optional")["default_reasoning_level"], json!(null));
+    assert_eq!(entry("optional")["default_reasoning_summary"], "auto");
+    // Without reasoning metadata Codex offers none, as for a model it does
+    // not know, rather than the template's GPT levels.
+    assert!(efforts("plain").is_empty());
+    assert_eq!(entry("plain")["default_reasoning_level"], json!(null));
+    assert_eq!(entry("glm")["apply_patch_tool_type"], "freeform");
+    assert_eq!(entry("glm")["supports_search_tool"], true);
+    // Codex sends tools with every request, so a model without them is left out.
+    assert!(codex["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|model| model["slug"] != "ocr"));
+    assert_eq!(entry("optional")["supports_image_detail_original"], false);
+    let instructions = entry("glm")["model_messages"]["instructions_template"].clone();
+    assert!(instructions
+        .as_str()
+        .unwrap()
+        .starts_with("You are a coding agent running in the Codex CLI"));
+
+    let rows = |reasoning: fn(&CatalogModel, &mut serde_json::Map<String, serde_json::Value>)| {
+        let rows = model_rows(
+            &catalog,
+            &ModelRows {
+                positive_limits: true,
+                max_tokens: true,
+                any_input: false,
+                input: &["text", "image", "video"],
+                cost: Cost::Omitted,
+            },
+            reasoning,
+        );
+        move |id: &str| rows.iter().find(|row| row["id"] == id).unwrap().clone()
+    };
+    let pi = rows(pi_reasoning);
+    assert_eq!(pi("glm")["maxTokens"], 1000);
+    assert_eq!(
+        pi("glm")["thinkingLevelMap"],
+        json!({"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"})
+    );
+    assert_eq!(
+        pi("any")["thinkingLevelMap"],
+        json!({"off":"none","minimal":"minimal","low":"low","medium":"medium","high":"high","xhigh":"xhigh","max":"max"})
+    );
+    // No effort selector: Pi offers none of its own levels.
+    assert_eq!(
+        pi("optional")["thinkingLevelMap"],
+        json!({"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":null})
+    );
+    assert!(pi("plain").get("reasoning").is_none());
+    let omp = rows(oh_my_pi::reasoning);
+    assert_eq!(omp("glm")["compat"], json!({"thinkingFormat":"openrouter"}));
+    assert_eq!(
+        omp("glm")["thinking"],
+        json!({"mode":"effort","efforts":["low","high","max"],"defaultLevel":"high","requiresEffort":true})
+    );
+    assert_eq!(omp("optional")["compat"]["stripImageInput"], false);
+    assert_eq!(omp("ocr")["reasoning"], false);
+    assert_eq!(omp("ocr")["supportsTools"], false);
+    assert!(omp("plain").get("supportsTools").is_none());
+    let openclaw = rows(openclaw::reasoning);
+    assert_eq!(
+        openclaw("any")["compat"],
+        json!({"supportedReasoningEfforts":["minimal","low","medium","high","xhigh","max"],
+               "thinkingLevels":["off","minimal","low","medium","high","xhigh","max"],
+               "reasoningEffortMap":{"off":"none"}})
+    );
+    assert_eq!(
+        openclaw("optional")["input"],
+        json!(["text", "image", "video"])
+    );
+    assert_eq!(
+        openclaw("optional")["compat"],
+        json!({"supportsReasoningEffort":false})
+    );
+    assert_eq!(openclaw("ocr")["compat"], json!({"supportsTools":false}));
+    assert!(openclaw("plain").get("compat").is_none());
+    let dsh = rows(dsh::reasoning_efforts);
+    assert_eq!(
+        dsh("glm")["reasoningEfforts"],
+        json!({"low":"low","high":"high","max":"max"})
+    );
+    assert_eq!(dsh("any")["reasoningEfforts"]["off"], "none");
+    assert!(dsh("optional").get("reasoningEfforts").is_none());
+}
+
+#[test]
+fn tuning_claude_code_model_settings_keeps_the_connection() {
+    let sandbox = sandbox("claude-tunables");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let original = json!({"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "50000"}});
+    write(&path, &original.to_string());
+    assert!(connect(&sandbox).authorized);
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
+    };
+    let mut settings = read();
+    assert_eq!(
+        settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "openai/gpt-oss-20b"
+    );
+    assert_eq!(settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "131072");
+    // A window and an alias the user chose in Claude Code.
+    settings["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = json!("100000");
+    settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = json!("phala/qwen");
+    write(&path, &serde_json::to_string_pretty(&settings).unwrap());
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog())).unwrap();
+    let status = statuses
+        .iter()
+        .find(|status| status.id == Agent::ClaudeCode.id())
+        .unwrap();
+    assert!(status.authorized, "{status:?}");
+    // A model list change that leaves these settings alone keeps them.
+    let grown = Catalog::from_remote(
+        &json!({"data": [
+            { "id": "openai/gpt-oss-20b", "name": "GPT OSS 20B", "context_length": 131072 },
+            { "id": "phala/qwen" },
+            { "id": "vendor/new" }
+        ]}),
+        1,
+    )
+    .unwrap();
+    assert!(sandbox
+        .projector
+        .reconcile(Some(&grown))
+        .unwrap()
+        .is_empty());
+    let tuned = read();
+    assert_eq!(tuned["env"]["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "100000");
+    assert_eq!(tuned["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "phala/qwen");
+    // Disconnecting puts back the user's own settings, not the tuned ones.
+    assert!(!disconnect(&sandbox, Agent::ClaudeCode).authorized);
+    assert_eq!(read(), original);
+}
+
+#[test]
+fn a_claude_code_model_without_limits_drops_the_previous_models_limits() {
+    let sandbox = sandbox("claude-limitless");
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let original = json!({"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "50000"}});
+    write(&path, &original.to_string());
+    assert!(connect(&sandbox).authorized);
+    let qwen = ConnectOptions {
+        default_model: Some("phala/qwen".to_string()),
+    };
+    assert!(apply_connect(&sandbox, Agent::ClaudeCode, &catalog(), &qwen).authorized);
+    let settings: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        settings["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "phala/qwen"
+    );
+    assert!(settings["env"]
+        .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+        .is_none());
+    assert!(!disconnect(&sandbox, Agent::ClaudeCode).authorized);
+    let restored: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(restored, original);
+}
