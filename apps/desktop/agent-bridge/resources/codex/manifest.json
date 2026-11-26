@@ -1,5 +1,6 @@
 {
   "version": "0.157.1",
   "sha256": "0178d235c589a31abd6ed0ea1e870935dc5819240eb0e813e178d3ebedf534f4",
-  "modelCount": 11
+  "modelCount": 11,
+  "promptSha256": "ac8ae107a0d72fe3476b430afb161ea4e67da2e446d778aefc44828160559807"
 }
