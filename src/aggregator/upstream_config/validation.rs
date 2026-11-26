@@ -11,11 +11,6 @@ use super::{
 };
 
 const DEFAULT_UPSTREAM_SESSION_REFRESH_SECONDS: u64 = 45;
-/// A derived period never drops below cache TTL / 2: background refresh then
-/// runs at most twice per TTL, so a verifier_request_timeout at or above the
-/// TTL cannot make refresh continuous, while half the TTL remains for a
-/// replacement verification to finish before the old entry expires.
-const VERIFICATION_REFRESH_CACHE_FLOOR_DIVISOR: u64 = 2;
 
 /// One configured model-endpoint to verify: the upstream's config `name`, the
 /// configured upstream `model_id`, and the endpoint origin. Drives both the
@@ -82,8 +77,10 @@ pub(super) fn verification_refresh_seconds(
             Some(
                 cache_seconds
                     .saturating_sub(timeout_seconds)
-                    .max(cache_seconds / VERIFICATION_REFRESH_CACHE_FLOOR_DIVISOR)
-                    // A derived period must stay positive because zero disables refresh.
+                    // Never below half the TTL: at most two refreshes per TTL, so a timeout at or
+                    // above the TTL cannot make refresh continuous; half the TTL still remains
+                    // for the replacement to finish. `.max(1)` keeps it positive (0 disables refresh).
+                    .max(cache_seconds / 2)
                     .max(1),
             )
         }
