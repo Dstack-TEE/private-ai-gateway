@@ -840,8 +840,7 @@ async fn refresh_upstream(
             state.not_before = if let Some(remaining) = verifier.cache_remaining(&request) {
                 let mut delay = remaining;
                 if !state.failing {
-                    // Wait at least a quarter of the remaining validity to spread retries,
-                    // while leaving at least half for verification to complete.
+                    // Sample within the first half of the remaining validity to stagger retries.
                     let retry_delay = sample_retry_delay(remaining / 4, remaining / 2);
                     // Fall back to expiry when the sampled delay would be subsecond.
                     if retry_delay >= Duration::from_secs(1) {

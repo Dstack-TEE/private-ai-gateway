@@ -58,34 +58,33 @@ Most router-scoped upstreams and ACI-service upstreams refresh one
 representative model. NEAR AI and other providers refresh each distinct
 upstream model.
 
-Never-attempted targets run first in stable order. Due targets with a valid cache
-entry and a successful last attempt run next, ordered by earliest expiry. Due
-cold targets and targets whose last attempt failed run by oldest attempt. Targets
-are re-selected after waiting for a background permit, since caches and deadlines
-can change.
+Never-attempted targets run first in stable order. Due warm targets whose last
+attempt succeeded run next, ordered by earliest expiry. Due cold or failing
+targets run last, ordered by oldest attempt. Targets are re-selected after
+waiting for a background permit, since caches and deadlines can change.
 The period p is a positive `verification_refresh_seconds`, or
 `max(verifier_cache_seconds - verifier_request_timeout_seconds,
 verifier_cache_seconds / 2, 1)` by default (240 seconds with defaults). The
-half-TTL floor limits the regular refresh cadence when verifier timeouts are
-long. Zero disables refresh. The lead is `max(TTL - p, 0)`, and normal warm
-refreshes become eligible at expiry minus lead. Successful external and
+half-TTL floor limits background verification to at most two starts per cache
+TTL, so a long verifier timeout cannot make refresh continuous while leaving
+half the TTL for a replacement verification to finish before expiry. Zero
+disables refresh. The lead is `max(TTL - p, 0)`,
+and warm entries become due at expiry minus lead. Successful external and
 ACI-service cache TTLs begin at verification start. The NEAR AI failure TTL
 begins when verification reports the failure. ACI-service caps expiry at keyset `not_after`,
 rechecked when verification completes; appraisal uses the wall clock after the
 response. Cold requests and background refresh share its single-flight lock.
 
-All tasks share `upstream_verification_concurrency` permits (default 4).
-Request-time verification is independent. After success, a target cannot start
+All tasks share `upstream_verification_concurrency` permits (default 4);
+request-time verification is independent. After success, a target cannot start
 again before its previous start plus p, including cacheless verifiers.
 
-After a failure with a valid cache entry, the task can retry once before
-expiry. It samples a delay uniformly between one-quarter and one-half of the
-validity remaining when the failure completes. The retry also waits until the
-entry reaches its normal refresh lead. A sampled delay below one second or a
-second failure moves the next attempt to expiry. A successful refresh resets
-the early retry allowance. When no valid entry remains after a failure, the
-target retries at start plus p. NEAR AI preserves a current
-verification when evidence is unavailable. An explicit model name mismatch
+A failed refresh with a valid cache entry can retry once before expiry. It samples
+a delay uniformly from one-quarter to one-half of the remaining validity, subject
+to the normal refresh lead. A delay under one second or another failure defers
+the retry to expiry while the entry is valid. Success resets the allowance.
+If there is no valid entry, it retries at start plus p. NEAR AI preserves a
+current verification when evidence is unavailable. An explicit model name mismatch
 replaces it immediately because the upstream returned a different model identity.
 On Unix, cancellation or timeout kills an external verifier's process group,
 including bridge subprocesses, and reaps the child.
