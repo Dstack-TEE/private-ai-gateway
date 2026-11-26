@@ -62,8 +62,12 @@ Never-attempted targets run first in stable order, then due warm entries by
 earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
 after waiting for a background permit, since caches and deadlines can change.
 The period p is a positive `verification_refresh_seconds`, or
-`max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` by default
-(240 seconds); zero disables refresh. The lead is `max(TTL - p, 0)`,
+`max(verifier_cache_seconds - verifier_request_timeout_seconds,
+verifier_cache_seconds / 2, 1)` by default (240 seconds with defaults). The
+half-TTL floor limits background verification to at most two starts per cache
+TTL, so a long verifier timeout cannot make refresh continuous while leaving
+half the TTL for a replacement verification to finish before expiry. Zero
+disables refresh. The lead is `max(TTL - p, 0)`,
 and warm entries become due at expiry minus lead. Successful external and
 ACI-service cache TTLs begin at verification start. The NEAR AI failure TTL
 begins when verification reports the failure. ACI-service caps expiry at keyset `not_after`,

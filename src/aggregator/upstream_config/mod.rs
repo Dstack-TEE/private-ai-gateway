@@ -562,6 +562,20 @@ impl UpstreamConfigManager {
                     let cache_seconds = cfg
                         .verifier_cache_seconds
                         .unwrap_or(self.options.verifier_cache_seconds);
+                    let timeout_seconds = cfg
+                        .verifier_request_timeout_seconds
+                        .unwrap_or(self.options.verifier_request_timeout_seconds);
+                    if cfg.verification_refresh_seconds.is_none()
+                        && cache_seconds.saturating_sub(timeout_seconds) < period
+                    {
+                        tracing::warn!(
+                            upstream = %cfg.name,
+                            cache_seconds,
+                            timeout_seconds,
+                            period,
+                            "derived upstream verification refresh period uses the cache-TTL floor"
+                        );
+                    }
                     let mut targets = verification_targets(std::slice::from_ref(cfg));
                     if cfg.provider == UpstreamProvider::AciService
                         || (matches!(

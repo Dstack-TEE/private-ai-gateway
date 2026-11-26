@@ -11,6 +11,8 @@ use super::{
 };
 
 const DEFAULT_UPSTREAM_SESSION_REFRESH_SECONDS: u64 = 45;
+/// Keep at least half the cache TTL for each background verification cycle.
+const VERIFICATION_REFRESH_CACHE_FLOOR_DIVISOR: u64 = 2;
 
 /// One configured model-endpoint to verify: the upstream's config `name`, the
 /// configured upstream `model_id`, and the endpoint origin. Drives both the
@@ -67,15 +69,21 @@ pub(super) fn verification_refresh_seconds(
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
-        None => Some(
-            cfg.verifier_cache_seconds
-                .unwrap_or(options.verifier_cache_seconds)
-                .saturating_sub(
-                    cfg.verifier_request_timeout_seconds
-                        .unwrap_or(options.verifier_request_timeout_seconds),
-                )
-                .max(1),
-        ),
+        None => {
+            let cache_seconds = cfg
+                .verifier_cache_seconds
+                .unwrap_or(options.verifier_cache_seconds);
+            let timeout_seconds = cfg
+                .verifier_request_timeout_seconds
+                .unwrap_or(options.verifier_request_timeout_seconds);
+            Some(
+                cache_seconds
+                    .saturating_sub(timeout_seconds)
+                    .max(cache_seconds / VERIFICATION_REFRESH_CACHE_FLOOR_DIVISOR)
+                    // A derived period must stay positive because zero disables refresh.
+                    .max(1),
+            )
+        }
     }
 }
 

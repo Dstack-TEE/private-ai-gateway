@@ -348,7 +348,7 @@ for privacy, provider limitations, and anonymous/direct-mode behavior.
 | `connect_timeout_seconds` | positive integer | `10` | Upstream HTTP connect timeout. Zero is rejected. |
 | `read_timeout_seconds` | positive integer | `600` | Upstream HTTP read timeout. Zero is rejected. |
 | `verifier_request_timeout_seconds` | positive integer | `60` | Provider verification timeout. Zero is rejected. |
-| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, 1)` | Background refresh period p, measured from verification start. Default max(verifier_cache_seconds - verifier_request_timeout_seconds, 1) (240 with defaults). Zero disables background verification for this entry. |
+| `verification_refresh_seconds` | integer | `max(verifier_cache_seconds - verifier_request_timeout_seconds, verifier_cache_seconds / 2, 1)` | Background refresh period p, measured from verification start. The default leaves at least half the cache TTL between starts, so a long verifier timeout cannot make refresh continuous while still leaving half the TTL for replacement verification to finish before expiry. It is 240 seconds with defaults and 150 seconds when the cache is 300 seconds and the timeout is 600 seconds. Zero disables background verification for this entry. |
 | `session_refresh_seconds` | integer | `45` for Chutes; disabled otherwise | Chutes nonce-session refresh cadence. Zero disables it. |
 | `chutes_e2ee_api_base` | string | `https://api.chutes.ai` | Chutes discovery, evidence, and E2EE API base. Chutes only. |
 | `chutes_chute_ids` | object | unset | Map of provider model ID to chute UUID. Keys must appear in `models` values. Chutes only. |
