@@ -1089,8 +1089,12 @@ async fn minimum_start_interval_survives_slow_or_short_lived_verification() {
 
 #[tokio::test(start_paused = true)]
 async fn refresh_configuration_controls_actual_start_times() {
-    for (timeout, refresh, period) in [(None, None, 240), (Some(90), None, 210), (None, Some(0), 0)]
-    {
+    for (timeout, refresh, period) in [
+        (None, None, 240),
+        (Some(90), None, 210),
+        (Some(600), None, 150),
+        (None, Some(0), 0),
+    ] {
         let mut cfg =
             test_upstream_config("provider", UpstreamProvider::PhalaDirect, "public", "model");
         cfg.verifier_request_timeout_seconds = timeout;

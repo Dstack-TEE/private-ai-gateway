@@ -67,15 +67,23 @@ pub(super) fn verification_refresh_seconds(
     match cfg.verification_refresh_seconds {
         Some(0) => None,
         Some(seconds) => Some(seconds),
-        None => Some(
-            cfg.verifier_cache_seconds
-                .unwrap_or(options.verifier_cache_seconds)
-                .saturating_sub(
-                    cfg.verifier_request_timeout_seconds
-                        .unwrap_or(options.verifier_request_timeout_seconds),
-                )
-                .max(1),
-        ),
+        None => {
+            let cache_seconds = cfg
+                .verifier_cache_seconds
+                .unwrap_or(options.verifier_cache_seconds);
+            let timeout_seconds = cfg
+                .verifier_request_timeout_seconds
+                .unwrap_or(options.verifier_request_timeout_seconds);
+            Some(
+                cache_seconds
+                    .saturating_sub(timeout_seconds)
+                    // Never below half the TTL: at most two refreshes per TTL, so a timeout at or
+                    // above the TTL cannot make refresh continuous; half the TTL still remains
+                    // for the replacement to finish. `.max(1)` keeps it positive (0 disables refresh).
+                    .max(cache_seconds / 2)
+                    .max(1),
+            )
+        }
     }
 }
 
