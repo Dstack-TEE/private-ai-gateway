@@ -2,20 +2,19 @@
 
 ## [0.11.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.11.0...desktop-v0.11.1) (2026-11-26)
 
-
-### Features
-
-* **desktop:** pin Codex's base instructions beside its model catalog ([110a688](https://github.com/Dstack-TEE/private-ai-gateway/commit/110a6887732d209da5c406d7da6bbc71b5118083))
-
+Private AI Proxy 0.11.1 configures each coding agent with the reasoning efforts, limits and capabilities RedPill lists for every model.
 
 ### Bug Fixes
 
-* **desktop:** project each model's listed parameters into agent configs ([1fe1605](https://github.com/Dstack-TEE/private-ai-gateway/commit/1fe1605e5422446f58da39f4e83fc00ba7757c31))
+* **Reasoning efforts follow each model.** Codex, OpenCode 1 and 2, Pi, Oh My Pi, OpenClaw and DeepSeek Harness offer exactly the efforts RedPill lists for a model, with its default effort. GLM-5.3 can now use `max`, and Codex no longer offers only low, medium and high. A model without reasoning metadata keeps each agent's own controls ([#646](https://github.com/Dstack-TEE/private-ai-gateway/pull/646)).
+* **Model limits, inputs, tool support and prices come from the model list.** Every agent gets each model's context and output limits, input types and prices in its own fields. Claude Code's Opus, Sonnet, Haiku and Fable aliases, context window and output limit follow the default model; Hermes gets each model's context length and image support ([#646](https://github.com/Dstack-TEE/private-ai-gateway/pull/646)).
+* **Agents list only models they can use.** Models without tool support, such as OCR models, and models past their deprecation date are left out of agent pickers and each agent's model list ([#646](https://github.com/Dstack-TEE/private-ai-gateway/pull/646)).
+* **Codex works with RedPill models as with a model it does not know.** It gets Codex's own base instructions instead of a GPT model's, its freeform `apply_patch` tool, and tool search for models that take tools ([#646](https://github.com/Dstack-TEE/private-ai-gateway/pull/646)).
+* **Tuning Claude Code's model settings keeps the connection.** A changed alias or limit stays until the model list changes it, and disconnecting restores the value from before the connection ([#646](https://github.com/Dstack-TEE/private-ai-gateway/pull/646)).
 
+### Verification
 
-### Documentation
-
-* **desktop:** note that a pull request drops an empty Release-As commit ([#651](https://github.com/Dstack-TEE/private-ai-gateway/issues/651)) ([d2f284f](https://github.com/Dstack-TEE/private-ai-gateway/commit/d2f284f5872afc51bc9e13caecbcb2d5a881c2cb))
+The live end-to-end test passed against RedPill with a Linux package built from #646: Claude Code, Codex, DeepSeek Harness, OpenCode 1 and 2, Pi, Oh My Pi, OpenClaw and Hermes. Choosing efforts was checked live in OpenCode and Codex. The fixes made in review after that run are covered by unit and golden tests; the live test runs again on the published package.
 
 ## [0.11.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0...desktop-v0.11.0) (2026-11-26)
 
