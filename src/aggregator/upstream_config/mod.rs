@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use rand::Rng;
 use tokio::sync::{watch, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -581,6 +582,7 @@ impl UpstreamConfigManager {
                         Duration::from_secs(cache_seconds.saturating_sub(period)),
                         Duration::from_secs(period),
                         permits.clone(),
+                        |min, max| rand::thread_rng().gen_range(min..=max),
                     ));
                 }
             }
@@ -748,6 +750,7 @@ struct VerificationTargetState {
     not_before: Instant,
     last_start: Option<Instant>,
     succeeded: bool,
+    failing: bool,
 }
 
 async fn refresh_upstream(
@@ -756,6 +759,7 @@ async fn refresh_upstream(
     lead: Duration,
     period: Duration,
     permits: Arc<Semaphore>,
+    sample_retry_delay: fn(Duration, Duration) -> Duration,
 ) {
     let started = Instant::now();
     let mut targets: Vec<_> = targets
@@ -765,6 +769,7 @@ async fn refresh_upstream(
             not_before: started,
             last_start: None,
             succeeded: false,
+            failing: false,
         })
         .collect();
     let select = |targets: &[VerificationTargetState]| {
@@ -775,16 +780,22 @@ async fn refresh_upstream(
             let expiry = verifier
                 .cache_remaining(&state.target.request())
                 .map(|remaining| now + remaining);
-            // 0: never attempted; 1: warm, earliest expiry first; 2: cold, oldest attempt first.
+            // Never-attempted targets come first, followed by healthy warm targets by
+            // earliest expiry, then cold or failing targets by oldest attempt.
             let (priority, due) = match (state.last_start, expiry) {
                 (None, _) => ((0, None), state.not_before),
-                (Some(_), Some(expiry)) => (
-                    (1, Some(expiry)),
-                    expiry
+                (Some(last_start), Some(expiry)) => {
+                    let priority = if state.failing {
+                        (2, Some(last_start))
+                    } else {
+                        (1, Some(expiry))
+                    };
+                    let due = expiry
                         .checked_sub(lead)
                         .unwrap_or(expiry)
-                        .max(state.not_before),
-                ),
+                        .max(state.not_before);
+                    (priority, due)
+                }
                 (Some(last_start), None) => ((2, Some(last_start)), state.not_before),
             };
             earliest_start =
@@ -821,13 +832,26 @@ async fn refresh_upstream(
         let event = verifier.refresh(request.clone()).await;
         drop(permit);
         let completed = Instant::now();
-        let remaining = verifier.cache_remaining(&request);
         if event.result == VerificationResult::Verified {
             state.succeeded = true;
+            state.failing = false;
             state.not_before = refresh_started + period;
         } else {
-            state.not_before =
-                remaining.map_or(refresh_started + period, |remaining| completed + remaining);
+            state.not_before = if let Some(remaining) = verifier.cache_remaining(&request) {
+                let mut delay = remaining;
+                if !state.failing {
+                    // Sample within the first half of the remaining validity to stagger retries.
+                    let retry_delay = sample_retry_delay(remaining / 4, remaining / 2);
+                    // Fall back to expiry when the sampled delay would be subsecond.
+                    if retry_delay >= Duration::from_secs(1) {
+                        delay = retry_delay;
+                    }
+                }
+                completed + delay
+            } else {
+                refresh_started + period
+            };
+            state.failing = true;
         }
         if let Some(reason) = &event.diagnostic {
             tracing::warn!(upstream = %request.upstream_name, model = %request.model_id, verifier = %event.verifier_id, result = %event.result.as_str(), reason = %reason, "upstream verification refresh finished");

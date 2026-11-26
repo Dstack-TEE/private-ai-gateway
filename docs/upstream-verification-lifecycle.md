@@ -58,9 +58,10 @@ Most router-scoped upstreams and ACI-service upstreams refresh one
 representative model. NEAR AI and other providers refresh each distinct
 upstream model.
 
-Never-attempted targets run first in stable order, then due warm entries by
-earliest expiry, then due cold retries by oldest attempt. Targets are re-selected
-after waiting for a background permit, since caches and deadlines can change.
+Never-attempted targets run first in stable order. Due warm targets whose last
+attempt succeeded run next, ordered by earliest expiry. Due cold or failing
+targets run last, ordered by oldest attempt. Targets are re-selected after
+waiting for a background permit, since caches and deadlines can change.
 The period p is a positive `verification_refresh_seconds`, or
 `max(verifier_cache_seconds - verifier_request_timeout_seconds,
 verifier_cache_seconds / 2, 1)` by default (240 seconds with defaults). The
@@ -76,11 +77,15 @@ response. Cold requests and background refresh share its single-flight lock.
 
 All tasks share `upstream_verification_concurrency` permits (default 4);
 request-time verification is independent. After success, a target cannot start
-again before its previous start plus p, including cacheless verifiers. A failed
-refresh normally keeps a valid entry and retries at expiry, or at start plus p
-if there is no valid entry. NEAR AI preserves a current verification when
-evidence is unavailable. An explicit model name mismatch replaces it
-immediately because the upstream returned a different model identity.
+again before its previous start plus p, including cacheless verifiers.
+
+A failed refresh with a valid cache entry can retry once before expiry. It samples
+a delay uniformly from one-quarter to one-half of the remaining validity, subject
+to the normal refresh lead. A delay under one second or another failure defers
+the retry to expiry while the entry is valid. Success resets the allowance.
+If there is no valid entry, it retries at start plus p. NEAR AI preserves a
+current verification when evidence is unavailable. An explicit model name mismatch
+replaces it immediately because the upstream returned a different model identity.
 On Unix, cancellation or timeout kills an external verifier's process group,
 including bridge subprocesses, and reaps the child.
 
