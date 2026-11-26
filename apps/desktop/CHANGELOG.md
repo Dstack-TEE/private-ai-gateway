@@ -2,10 +2,20 @@
 
 ## [0.11.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.10.0...desktop-v0.11.0) (2026-11-26)
 
+Private AI Proxy 0.11.0 adds RedPill subscription keys: an account with a RedPill plan can choose whether a profile uses the plan's weekly usage or the credit balance.
 
 ### Features
 
-* **desktop:** support RedPill subscription keys in pap ([#630](https://github.com/Dstack-TEE/private-ai-gateway/issues/630)) ([4f652df](https://github.com/Dstack-TEE/private-ai-gateway/commit/4f652dfa2085996bd3acd0a965b9337e0c24ab2a))
+* **Choose Subscription or Balance when connecting RedPill.** When the RedPill account has an active plan, sign-in asks which billing method the profile uses (`pap profiles login --funding subscription|balance` on the CLI) and shows the plan's weekly usage and reset time. Accounts without a plan see no change and get a balance key as before ([#630](https://github.com/Dstack-TEE/private-ai-gateway/pull/630)).
+* **Re-login keeps the saved billing method.** Reconnecting a profile without `--funding` keeps its current choice; changing it requires reconnecting RedPill ([#630](https://github.com/Dstack-TEE/private-ai-gateway/pull/630)).
+
+### Compatibility
+
+* Works with RedPill servers that do not offer plans yet: no billing prompt is shown, `--funding balance` retries without the field, and `--funding subscription` fails without saving a profile. Phala sign-in is unchanged; billing method selection is RedPill only.
+
+### Verification
+
+Checked with the CLI and the Linux desktop app (Xvfb) against both a RedPill backend with plans and the current backend without them: interactive and `--no-browser --yes` sign-in, both funding flags, re-login of a 0.10.0 profile after upgrade, and billed requests through the gateway. Not exercised: a signed macOS package and hardware-attested proxy inference.
 
 ## [0.10.0](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.9.0...desktop-v0.10.0) (2026-11-25)
 
