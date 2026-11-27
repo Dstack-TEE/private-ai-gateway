@@ -292,6 +292,47 @@ V21_MAC_KEY = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
                    info=b"aci.e2ee.v2.1.response-mac").derive(V21_REQUEST_SECRET)
 V21_RESPONSE_MAC = hmac.new(V21_MAC_KEY, jcs(V21_RESPONSE_OBJECT), hashlib.sha256).hexdigest()
 
+# A two-event stream: one encrypted delta, one readable-only finish event.
+V21_STREAM_AAD = jcs({
+    "purpose": "aci.e2ee.response.v2.1",
+    "algo": V21_ALGO,
+    "model": "demo-model",
+    "id": "chatcmpl-123",
+    "field": "choices.0.delta.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+V21_STREAM_CIPHERTEXT = x25519_seal(
+    x25519_from_seed(bytes([0x0C]) * 32)[0], V21_CLIENT_PUB, b"Hello", V21_STREAM_AAD,
+    V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", bytes([0x0D]) * 12)
+
+
+def v21_mac(obj):
+    return hmac.new(V21_MAC_KEY, jcs(obj), hashlib.sha256).hexdigest()
+
+
+def v21_event(obj):
+    """One SSE `data:` line carrying `obj` plus its MAC, as JCS."""
+    return "data: " + jcs({**obj, "e2ee_mac": v21_mac(obj)}).decode() + "\n\n"
+
+
+V21_EVENT_1 = {"id": "chatcmpl-123",
+               "choices": [{"index": 0, "delta": {"content": V21_STREAM_CIPHERTEXT}}]}
+V21_EVENT_2 = {"id": "chatcmpl-123",
+               "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+V21_STREAM = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2) + "data: [DONE]\n\n"
+# Rejected: a readable member edited after the MAC.
+V21_REJECT_EDITED = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2).replace(
+    '"finish_reason":"stop"', '"finish_reason":"length"') + "data: [DONE]\n\n"
+# Rejected: a validly MAC'd event from another response under the same secret.
+V21_REJECT_SPLICED = v21_event(V21_EVENT_1) + v21_event(
+    {**V21_EVENT_2, "id": "chatcmpl-124"}) + "data: [DONE]\n\n"
+# Rejected: an event without a MAC.
+V21_REJECT_NO_MAC = ("data: " + jcs(V21_EVENT_1).decode() + "\n\n"
+                     + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
+# Rejected: an SSE line other than `data:` or a comment.
+V21_REJECT_FOREIGN_LINE = "id: 1\n" + V21_STREAM
+
 # ---- Published constants (must match the spec vector documents) -------------
 PINNED = {
     "receipt-1 public key": (RECEIPT_PUB,
@@ -334,6 +375,16 @@ PINNED = {
         "54dbbe44006ff09d098c5f212ff666088c3724c5c51b43e51576c633"),
     "v2.1 response MAC": (V21_RESPONSE_MAC,
         "139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e"),
+    "v2.1 stream delta ciphertext": (V21_STREAM_CIPHERTEXT,
+        "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333"
+        "0d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa47809834"
+        "33"),
+    "v2.1 stream event 1 MAC": (v21_mac(V21_EVENT_1),
+        "902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b"),
+    "v2.1 stream event 2 MAC": (v21_mac(V21_EVENT_2),
+        "c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e"),
+    "v2.1 spliced event MAC": (v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}),
+        "f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328"),
     "v2.1 response field ciphertext": (V21_RESPONSE_CIPHERTEXT,
         "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421"
         "0b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28"
@@ -400,6 +451,11 @@ def main():
     print("response field ciphertext =", V21_RESPONSE_CIPHERTEXT)
     print("response object JCS =", jcs(V21_RESPONSE_OBJECT).decode())
     print("response MAC =", V21_RESPONSE_MAC)
+    print("stream delta ciphertext =", V21_STREAM_CIPHERTEXT)
+    print("stream event 1 MAC =", v21_mac(V21_EVENT_1))
+    print("stream event 2 MAC =", v21_mac(V21_EVENT_2))
+    print("spliced event MAC =", v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}))
+    print("stream =", repr(V21_STREAM))
     return 0 if ok else 1
 
 

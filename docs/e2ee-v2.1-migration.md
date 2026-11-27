@@ -52,6 +52,8 @@ take it from an attestation report it verified itself:
 - Fetching the report through your own API is fine once it is pinned: a relay
   can neither forge the quote nor remove the v2.1 key from it.
 
+To build this check yourself, see [Verifier: write your own](#verifier-write-your-own).
+
 ## Client: use the TypeScript SDK
 
 `@phala/aci-verifier` verifies the gateway and encrypts at the transport
@@ -110,9 +112,99 @@ The client:
 - builds a new request, with a new nonce, every time it is called, so SDK
   retries are safe.
 
-Without the SDK, implement [§10 of the spec](../spec/e2ee-v2.md#10-version-21)
-and check your code against the
-[v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21).
+## Client: write your own
+
+You can copy our client instead of depending on it. It is Apache-2.0:
+`clients/verifier-ts/src/e2ee.ts` plus `fromHex`, `toHex`, and `sha256` from
+`crypto.ts`, about 600 lines with no dependencies beyond Web Crypto. Keep the
+license notice and mark your changes.
+
+To write your own, implement [§10 of the spec](../spec/e2ee-v2.md#10-version-21).
+You need X25519, SHA-256, HKDF-SHA256, AES-256-GCM, HMAC-SHA256, and RFC 8785
+canonical JSON (JCS).
+
+For each request:
+
+1. Generate a fresh X25519 key pair, a 32-byte request secret, and a 32-byte
+   nonce, written as 64 lowercase hex characters. Take the current Unix time.
+2. Encrypt each field §5 and §10.5 list. Each field gets a fresh ephemeral key
+   and AES-GCM nonce; its key mixes in the request secret, and its AAD is the
+   field's JCS object (§10.4, §10.5). A whole message `content` is encrypted as
+   its JSON encoding: the text `hello` is sealed as `"hello"`.
+3. Hash the final body: `SHA-256(JCS(body))`, with the ciphertexts in place.
+4. Seal the request secret followed by that hash into `X-E2EE-Request-Key`
+   (§10.3).
+5. Send the six headers and that body.
+
+For each response:
+
+1. An error status goes back to the caller unchanged. Never retry it in
+   another mode.
+2. Require an SSE stream if the request had `"stream": true`, and a JSON body
+   otherwise.
+3. For the JSON body, or each SSE `data:` event: check `e2ee_mac` (§10.6), then
+   remove it. A missing or wrong MAC fails the response.
+4. In a stream, drop comment lines, pass `data: [DONE]` through, and fail on
+   any other line. Every event must carry the first event's `id`.
+5. Decrypt each §5 and §10.5 location with your private key and the request
+   secret. A field that does not decrypt fails the response.
+
+Where implementations go wrong:
+
+- **Canonical JSON in JavaScript.** Objects list integer-like keys first, for
+  example `logit_bias` token ids, so sorting keys and rebuilding an object
+  gives the wrong order. Write the members out directly.
+- **Hashing too early.** Hash the body after your SDK or framework has added
+  everything it adds.
+- **Resending.** Every attempt is a new request with a new secret and nonce.
+- **Fields v2.1 does not encrypt.** Never send `prediction`, `functions`, or
+  `function_call`.
+
+To test it, fix your random inputs to the values in the
+[v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21) and reproduce
+every ciphertext, digest, and MAC byte for byte. Then feed the published
+stream to your response code, which must yield `Hello`, and feed each stream
+from [Streams a client must reject](../spec/e2ee-v2-test-vectors.md#streams-a-client-must-reject),
+each of which must fail.
+
+## Verifier: write your own
+
+The verifier decides which key the client encrypts to, so a mistake here
+undoes everything else. For the reference gateway, which runs on dstack with
+Intel TDX, implement [ACI §9.1](../spec/aci.md#91-verify-the-workload-identity):
+
+1. **Fetch.** `GET <gateway>/v1/aci/attestation?nonce=<nonce>`, with a fresh
+   nonce of 64 lowercase hex characters.
+2. **Quote.** Verify `attestation.evidence.quote` to Intel's root, with
+   collateral from a PCCS or Intel's PCS, and apply your TCB policy. Use an
+   existing DCAP quote verifier, such as Intel's QVL or `dcap-qvl`. Do not
+   write this part yourself.
+3. **Binding.** Recompute the chain:
+   - `"sha256:" + hex(SHA-256(JCS(attestation.workload_keyset)))` equals
+     `workload_keyset_digest`;
+   - the statement bytes are exactly
+     `{"keyset_digest":"<digest>","nonce":"<your nonce>","purpose":"aci.report_data.v1"}`;
+   - `SHA-256(statement)` equals `attestation.report_data` and the first 32
+     bytes of the quote's report data, with the other 32 bytes zero.
+4. **Expiry.** The current time is before the keyset's `not_after`.
+5. **Release.** Replay `evidence.event_log` to RTMR3 and compare it with the
+   quote's RTMR3. Check that `SHA-256(evidence.app_compose)` equals the
+   measured `compose-hash` event, and that this hash is on your list of
+   reviewed releases. The replay follows dstack's `cc-eventlog`; our port is in
+   [`clients/verifier-ts/src/dstack-event-log.ts`](../clients/verifier-ts/src/dstack-event-log.ts).
+6. **Key.** Take the `x25519-aes-256-gcm-hkdf-sha256-v2.1` entry from this
+   keyset. It is the only key the client encrypts to.
+
+Missing evidence fails the check, and the client sends nothing until it
+passes. Verify again once `not_after` passes, or when a response carries a
+different `X-ACI-Keyset-Digest` (ACI §5.2). Your policy may also require the
+key-custody check (ACI §9.1 check 5).
+
+To detect a stream that lost events, also check receipts
+([ACI §9.3](../spec/aci.md#93-verify-the-response)): fetch
+`/v1/aci/receipts/<X-Receipt-Id>`, verify its Ed25519 signature under the
+keyset's receipt key, and compare `response.returned.body_hash` with the
+SHA-256 of the raw bytes you received.
 
 ## Your API in front of the gateway
 

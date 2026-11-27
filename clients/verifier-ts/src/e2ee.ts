@@ -56,7 +56,7 @@ export interface E2eeFetchOptions {
 type Endpoint = 'chat' | 'completions' | 'embeddings';
 
 /** Per-request state, kept until the response is fully decrypted. */
-interface RequestContext {
+export interface RequestContext {
   model: string;
   nonce: string;
   ts: number;
@@ -234,7 +234,12 @@ async function sealRequestFields(
 
 // ---- Responses (§5, §10.5) --------------------------------------------------
 
-async function openResponse(response: Response, endpoint: Endpoint, ctx: RequestContext): Promise<Response> {
+/** Check and decrypt one response (§10.6). Not part of the package API. */
+export async function openResponse(
+  response: Response,
+  endpoint: Endpoint,
+  ctx: RequestContext,
+): Promise<Response> {
   // Errors are unauthenticated hints (§9): hand them back as they are, never retry
   // in another mode.
   if (!response.ok) return response;

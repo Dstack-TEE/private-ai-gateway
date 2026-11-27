@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createE2eeFetch, E2eeError, E2EE_V2_1_X25519, fromHex, sha256Hex, toHex } from '../src/index.js';
 import type { WorkloadKeyset } from '../src/index.js';
-import { canonicalJson, openBytes, seal } from '../src/e2ee.js';
+import { canonicalJson, openBytes, openResponse, seal } from '../src/e2ee.js';
+import type { RequestContext } from '../src/e2ee.js';
 
 // Constants from spec/e2ee-v2-test-vectors.md, "Version 2.1".
 const SERVICE_PUB = '5dfedd3b6bd47f6fa28ee15d969d5bb0ea53774d488bdaf9df1c6e0124b3ef22';
@@ -23,6 +24,9 @@ const RESPONSE_AAD =
   '{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2.1","ts":1750000000}';
 const RESPONSE_CIPHERTEXT =
   '57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e';
+
+const RESPONSE_OBJECT = '{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}';
+const RESPONSE_MAC = '139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e';
 
 // Labels written out independently of the implementation (spec §10.4).
 const FIELD_INFO = new TextEncoder().encode('aci.e2ee.v2.1.x25519');
@@ -99,8 +103,7 @@ test('the client opens the published v2.1 response field', async () => {
 });
 
 test('the published v2.1 response MAC reproduces', async () => {
-  const object = JSON.parse('{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}');
-  assert.equal(JSON.parse(await withMac(object, SECRET)).e2ee_mac, '139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e');
+  assert.equal(JSON.parse(await withMac(JSON.parse(RESPONSE_OBJECT), SECRET)).e2ee_mac, RESPONSE_MAC);
 });
 
 test('no v2.1 key in the keyset means no client at all', () => {
@@ -376,4 +379,59 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
     ),
   });
   await assert.rejects((await ask(spliced, { stream: true })).text(), /another response/);
+});
+
+// ---- Published streamed vector and the streams a client must reject ----------
+
+const EVENT_1 = '{"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b","id":"chatcmpl-123"}';
+const EVENT_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e","id":"chatcmpl-123"}';
+const SPLICED_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328","id":"chatcmpl-124"}';
+const stream = (...events: string[]) => events.map((event) => `data: ${event}\n\n`).join('') + 'data: [DONE]\n\n';
+
+/** The request context of the published vectors (fixed secret, nonce, and client key). */
+async function vectorContext(streamed: boolean): Promise<RequestContext> {
+  const client = await x25519FromSeed(0x04);
+  const ikm = await subtle.importKey('raw', SECRET as BufferSource, 'HKDF', false, ['deriveKey']);
+  const macKey = await subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: MAC_INFO },
+    ikm,
+    { name: 'HMAC', hash: 'SHA-256', length: 256 },
+    false,
+    ['verify'],
+  );
+  return {
+    model: 'demo-model',
+    nonce: NONCE,
+    ts: 1_750_000_000,
+    secret: SECRET,
+    clientPrivateKey: client.privateKey,
+    clientPublicKeyHex: CLIENT_PUB,
+    macKey,
+    stream: streamed,
+  };
+}
+
+const served = (body: string, contentType: string) => new Response(body, { headers: { 'content-type': contentType } });
+
+test('the published v2.1 stream opens, and each must-reject variant is refused', async () => {
+  const opened = await openResponse(served(stream(EVENT_1, EVENT_2), 'text/event-stream'), 'chat', await vectorContext(true));
+  const events = (await opened.text()).split('\n\n').filter(Boolean);
+  assert.deepEqual(JSON.parse(events[0]!.slice(6)), { id: 'chatcmpl-123', choices: [{ index: 0, delta: { content: 'Hello' } }] });
+  assert.equal(JSON.parse(events[1]!.slice(6)).choices[0].finish_reason, 'stop');
+  assert.equal(events[2], 'data: [DONE]');
+
+  const rejects = async (body: string, contentType: string, why: RegExp) => {
+    const ctx = await vectorContext(true);
+    await assert.rejects(async () => (await openResponse(served(body, contentType), 'chat', ctx)).text(), why);
+  };
+  await rejects(stream(EVENT_1, EVENT_2.replace('"finish_reason":"stop"', '"finish_reason":"length"')), 'text/event-stream', /MAC/);
+  await rejects(stream(EVENT_1, SPLICED_2), 'text/event-stream', /another response/);
+  await rejects(stream(EVENT_1.replace(/,"e2ee_mac":"[0-9a-f]+"/, ''), EVENT_2), 'text/event-stream', /e2ee_mac/);
+  await rejects('id: 1\n' + stream(EVENT_1, EVENT_2), 'text/event-stream', /unexpected line/);
+  const buffered = JSON.stringify({ ...JSON.parse(RESPONSE_OBJECT), e2ee_mac: RESPONSE_MAC });
+  await rejects(buffered, 'application/json', /expected an SSE stream/);
+
+  // The same buffered object opens when the request did not ask for a stream.
+  const body = await (await openResponse(served(buffered, 'application/json'), 'chat', await vectorContext(false))).json() as any;
+  assert.equal(body.choices[0].message.content, 'plain-answer');
 });

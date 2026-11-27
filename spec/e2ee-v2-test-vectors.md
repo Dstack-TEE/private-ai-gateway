@@ -125,3 +125,35 @@ The response object carrying that field, in JCS form without `e2ee_mac`:
 ```
 
 `e2ee_mac` = `139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e`
+
+### Streamed response
+
+A `"stream": true` request to the inputs above. The delta `Hello` is sealed to
+the client key with ephemeral seed 32 × `0x0c` and AES-GCM nonce 12 × `0x0d`,
+field `choices.0.delta.content`, response id `chatcmpl-123`. Each event carries
+its MAC. The exact stream bytes, with `\n` line endings:
+
+```text
+data: {"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b","id":"chatcmpl-123"}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e","id":"chatcmpl-123"}
+
+data: [DONE]
+
+```
+
+A client accepts this stream and yields `Hello`, then a finish event with
+`"finish_reason":"stop"`, then `[DONE]`, with no `e2ee_mac` members.
+
+### Streams a client must reject
+
+Each stream below differs from the one above in one way. A conforming client
+fails it (§10.6).
+
+| Change | Why it fails |
+| --- | --- |
+| In event 2, `"finish_reason":"stop"` becomes `"finish_reason":"length"`; the MAC is unchanged. | The MAC no longer matches the object. |
+| Event 2's `id` becomes `chatcmpl-124`, with its own valid MAC `f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328`. | Every event of a stream must carry the first event's `id`. |
+| Event 1 has no `e2ee_mac` member. | Every response object must carry a MAC. |
+| The stream starts with the line `id: 1`. | Only `data:` lines and comments are allowed. |
+| The buffered response object from "Response MAC" above, served as `application/json`. | The request asked for a stream. |
