@@ -269,7 +269,7 @@ function checkRequestMembers(payload: Record<string, unknown>, endpoint: Endpoin
       if (!isObject(call)) refuseMember(callPath);
       only(call, REQUEST_MEMBERS.tool_call, callPath);
       const fn = call.function;
-      if (fn === undefined) continue;
+      if (fn === undefined || fn === null) continue;
       if (!isObject(fn)) refuseMember(`${callPath}.function`);
       only(fn, REQUEST_MEMBERS.tool_call_function, `${callPath}.function`);
       stringOrNull(fn, 'arguments', `${callPath}.function`);

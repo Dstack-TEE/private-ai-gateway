@@ -128,7 +128,7 @@ fn check_message(message: &Value, path: &str) -> Result<(), E2eeError> {
         let path = format!("{path}.tool_calls.{t}");
         let call = call.as_object().ok_or_else(|| unsupported(&path))?;
         only(call, TOOL_CALL, &path)?;
-        if let Some(function) = call.get("function") {
+        if let Some(function) = call.get("function").filter(|function| !function.is_null()) {
             let path = format!("{path}.function");
             let function = function.as_object().ok_or_else(|| unsupported(&path))?;
             only(function, TOOL_CALL_FUNCTION, &path)?;
@@ -209,6 +209,15 @@ mod tests {
             {"role": "user", "content": "q2"},
         ]});
         check_v2_1_request_members(CHAT_COMPLETIONS_PATH, &body).unwrap();
+    }
+
+    #[test]
+    fn a_null_tool_call_function_counts_as_absent() {
+        for call in [json!({"id": "c"}), json!({"id": "c", "function": null})] {
+            let body =
+                json!({"model": "m", "messages": [{"role": "assistant", "tool_calls": [call]}]});
+            check_v2_1_request_members(CHAT_COMPLETIONS_PATH, &body).unwrap();
+        }
     }
 
     #[test]

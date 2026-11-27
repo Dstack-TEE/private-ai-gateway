@@ -415,6 +415,16 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
   ]) {
     await assert.rejects(ask(passthrough, extra), /does not protect request member/);
   }
+  // A null `function` counts as absent, like an omitted one (§10.5): both are sent.
+  const sent = createE2eeFetch({
+    transcript: transcript(),
+    fetch: async () => {
+      throw new Error('sent');
+    },
+  });
+  for (const call of [{ id: 'c' }, { id: 'c', function: null }]) {
+    await assert.rejects(ask(sent, { messages: [{ role: 'assistant', tool_calls: [call] }] }), /^Error: sent$/);
+  }
   const post = (path: string, body: Record<string, unknown>) =>
     passthrough(`https://relay.example${path}`, { method: 'POST', body: JSON.stringify({ model: 'm', ...body }) });
   await assert.rejects(post('/v1/completions', { prompt: 'def f(', suffix: 'return x' }), /"suffix"/);
