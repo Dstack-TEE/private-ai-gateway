@@ -9,7 +9,7 @@
 
 import { fromHex, sha256, toHex } from './crypto.js';
 import { AciError } from './errors.js';
-import type { WorkloadKeyset } from './types.js';
+import type { ReportTranscript } from './transcript.js';
 
 /** The v2.1 X25519 keyset `algo` (§10.1). */
 export const E2EE_V2_1_X25519 = 'x25519-aes-256-gcm-hkdf-sha256-v2.1';
@@ -47,8 +47,12 @@ export class E2eeError extends AciError {
 export type E2eeFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface E2eeFetchOptions {
-  /** The keyset of a report you verified, e.g. `verifyService(url)).verification.keyset`. */
-  keyset: WorkloadKeyset;
+  /**
+   * A VERIFIED transcript whose id-4 and id-6 passed with `channel: { e2ee:
+   * E2EE_V2_1_X25519 }`, e.g. from `verifyService(url, {
+   * acceptedComposeHashes, channel: { e2ee: E2EE_V2_1_X25519 } })`.
+   */
+  transcript: ReportTranscript;
   /** The underlying `fetch`. Defaults to `globalThis.fetch`. */
   fetch?: E2eeFetch;
 }
@@ -64,7 +68,7 @@ export interface RequestContext {
   clientPrivateKey: CryptoKey;
   clientPublicKeyHex: string;
   macKey: CryptoKey;
-  /** The request asked for an SSE stream; the response must be one. */
+  /** The request asked for an SSE stream (never for embeddings); the response must be one. */
   stream: boolean;
 }
 
@@ -74,11 +78,22 @@ export interface RequestContext {
  * requests are refused rather than sent in plaintext; other methods pass
  * through unchanged.
  *
- * Throws {@link E2eeError} at creation when the keyset offers no v2.1 X25519
- * key. There is no fallback to v2, the legacy scheme, or plaintext (§10.1).
+ * Throws {@link E2eeError} at creation unless the transcript is VERIFIED with
+ * id-4 and id-6 passed under the E2EE v2.1 channel binding and its keyset
+ * offers a v2.1 X25519 key. There is no fallback to v2, the legacy scheme, or
+ * plaintext (§10.1).
  */
 export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
-  const serviceKey = options.keyset.e2ee_public_keys.find((key) => key.algo === E2EE_V2_1_X25519);
+  const { transcript } = options;
+  const passed = (id: string) => transcript.lines.some((entry) => entry.id === id && entry.status === 'pass');
+  const channel = transcript.channel;
+  const bound = channel !== undefined && 'e2ee' in channel && channel.e2ee === E2EE_V2_1_X25519;
+  if (!transcript.verdict.verified || !passed('id-4') || !passed('id-6') || !bound) {
+    throw new E2eeError(
+      `the transcript must be VERIFIED with id-4 and id-6 passed under channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
+    );
+  }
+  const serviceKey = transcript.verification.keyset?.e2ee_public_keys.find((key) => key.algo === E2EE_V2_1_X25519);
   if (serviceKey === undefined) {
     throw new E2eeError(`the verified keyset lists no ${E2EE_V2_1_X25519} key`);
   }
@@ -98,7 +113,7 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     for (const key of UNENCRYPTED_REQUEST_MEMBERS) {
       if (key in payload) throw new E2eeError(`E2EE v2.1 does not encrypt "${key}"; remove it`);
     }
-    const ctx = await newContext(payload);
+    const ctx = await newContext(payload, endpoint);
     await sealRequestFields(payload, endpoint, ctx, await servicePublicKey);
     const digest = await sha256(canonicalJson(payload));
     const requestKey = await seal(
@@ -127,17 +142,14 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     headers.set('x-e2ee-timestamp', String(ctx.ts));
     headers.set('x-e2ee-request-key', requestKey);
 
-    const response = await baseFetch(request.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: request.signal,
-    });
+    // Keep every other option of the caller's request (credentials, redirect,
+    // signal, ...); only the body and the E2EE headers change.
+    const response = await baseFetch(new Request(request, { headers, body: JSON.stringify(payload) }));
     return openResponse(response, endpoint, ctx);
   };
 }
 
-async function newContext(payload: Record<string, unknown>): Promise<RequestContext> {
+async function newContext(payload: Record<string, unknown>, endpoint: Endpoint): Promise<RequestContext> {
   if (typeof payload.model !== 'string') {
     throw new E2eeError('request body has no string "model"');
   }
@@ -159,7 +171,8 @@ async function newContext(payload: Record<string, unknown>): Promise<RequestCont
       false,
       ['verify'],
     ),
-    stream: payload.stream === true,
+    // The gateway answers embeddings with buffered JSON whatever `stream` says.
+    stream: endpoint !== 'embeddings' && payload.stream === true,
   };
 }
 
@@ -540,7 +553,7 @@ function indexed(value: unknown, name: string): Array<[number, Record<string, un
   return value.flatMap((entry, position): Array<[number, Record<string, unknown>]> => {
     if (!isObject(entry)) return [];
     const index = entry.index;
-    return [[typeof index === 'number' && Number.isInteger(index) && index >= 0 ? index : position, entry]];
+    return [[typeof index === 'number' && Number.isSafeInteger(index) && index >= 0 ? index : position, entry]];
   });
 }
 

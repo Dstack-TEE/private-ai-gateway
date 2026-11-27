@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createE2eeFetch, E2eeError, E2EE_V2_1_X25519, fromHex, sha256Hex, toHex } from '../src/index.js';
-import type { WorkloadKeyset } from '../src/index.js';
+import type { ReportTranscript, WorkloadKeyset } from '../src/index.js';
 import { canonicalJson, openBytes, openResponse, seal } from '../src/e2ee.js';
 import type { RequestContext } from '../src/e2ee.js';
 
@@ -59,6 +59,17 @@ function keyset(algo = E2EE_V2_1_X25519): WorkloadKeyset {
   };
 }
 
+/** A transcript as `verifyService` returns it for a pinned release and the E2EE v2.1 binding. */
+function verified(ks = keyset(), overrides: Partial<ReportTranscript> = {}): ReportTranscript {
+  return {
+    lines: ['id-1', 'id-2', 'id-3', 'id-4', 'id-6'].map((id) => ({ id, section: '', title: '', status: 'pass' as const })),
+    verdict: { verified: true, line: 'VERIFIED (5 pass)' },
+    verification: { ok: true, checks: [], keyset: ks },
+    channel: { e2ee: E2EE_V2_1_X25519 },
+    ...overrides,
+  };
+}
+
 test('canonical JSON matches the published v2.1 body and handles integer-like keys', async () => {
   const body = {
     model: 'demo-model',
@@ -106,8 +117,15 @@ test('the published v2.1 response MAC reproduces', async () => {
   assert.equal(JSON.parse(await withMac(JSON.parse(RESPONSE_OBJECT), SECRET)).e2ee_mac, RESPONSE_MAC);
 });
 
-test('no v2.1 key in the keyset means no client at all', () => {
-  assert.throws(() => createE2eeFetch({ keyset: keyset('x25519-aes-256-gcm-hkdf-sha256') }), E2eeError);
+test('only a VERIFIED transcript with id-4 and id-6 under the v2.1 binding makes a client', () => {
+  assert.doesNotThrow(() => createE2eeFetch({ transcript: verified() }));
+  const refused = (transcript: ReportTranscript) => assert.throws(() => createE2eeFetch({ transcript }), E2eeError);
+  refused(verified(keyset('x25519-aes-256-gcm-hkdf-sha256')));
+  refused(verified(keyset(), { verdict: { verified: false, line: 'NOT VERIFIED' } }));
+  refused(verified(keyset(), { channel: { observedSpkiSha256: 'ab'.repeat(32) } }));
+  const without = (id: string) => verified().lines.filter((entry) => entry.id !== id);
+  refused(verified(keyset(), { lines: without('id-4') }));
+  refused(verified(keyset(), { lines: without('id-6') }));
 });
 
 // ---- A test-only service: just enough of spec §10.6 to drive the client ------
@@ -145,8 +163,9 @@ function fakeService(
 ) {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const service = await x25519FromSeed(0x03);
-    const headers = new Headers(init?.headers);
-    const body = JSON.parse(String(init?.body)) as Record<string, any>;
+    const request = new Request(input, init);
+    const headers = request.headers;
+    const body = JSON.parse(await request.text()) as Record<string, any>;
     const nonce = headers.get('x-e2ee-nonce')!;
     const ts = Number(headers.get('x-e2ee-timestamp'));
     const client = headers.get('x-client-pub-key')!;
@@ -221,7 +240,7 @@ async function sealSse(
 test('chat round trip: the service sees plaintext, the caller gets it back, nothing in between does', async () => {
   const seen: Seen[] = [];
   const e2eeFetch = createE2eeFetch({
-    keyset: keyset(),
+    transcript: verified(),
     fetch: fakeService(
       () => ({
         contentType: 'application/json',
@@ -291,7 +310,7 @@ test('streamed chat is decrypted event by event across chunk boundaries', async 
     });
     return new Response(body, { headers: response.headers });
   };
-  const e2eeFetch = createE2eeFetch({ keyset: keyset(), fetch: chunked });
+  const e2eeFetch = createE2eeFetch({ transcript: verified(), fetch: chunked });
   const response = await e2eeFetch('https://relay.example/v1/chat/completions', {
     method: 'POST',
     body: JSON.stringify({ model: 'demo-model', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
@@ -300,6 +319,47 @@ test('streamed chat is decrypted event by event across chunk boundaries', async 
   assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, { content: 'Hel' });
   assert.equal(JSON.parse(events[1]!.slice(6)).choices[0].delta.tool_calls[0].function.arguments, '{"x"');
   assert.equal(events[2], 'data: [DONE]');
+});
+
+test('the caller\'s request options reach the underlying fetch', async () => {
+  let sent: Request | undefined;
+  const e2eeFetch = createE2eeFetch({
+    transcript: verified(),
+    fetch: async (input, init) => {
+      sent = new Request(input, init);
+      return new Response('refused', { status: 503 });
+    },
+  });
+  const controller = new AbortController();
+  const response = await e2eeFetch('https://relay.example/v1/chat/completions', {
+    method: 'POST',
+    credentials: 'include',
+    redirect: 'error',
+    cache: 'no-store',
+    signal: controller.signal,
+    headers: { 'x-custom': '1' },
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.equal(response.status, 503);
+  assert.equal(sent?.credentials, 'include');
+  assert.equal(sent?.redirect, 'error');
+  assert.equal(sent?.cache, 'no-store');
+  assert.equal(sent?.headers.get('x-custom'), '1');
+  assert.equal(sent?.headers.get('x-e2ee-version'), '2.1');
+  controller.abort();
+  assert.equal(sent?.signal.aborted, true);
+});
+
+test('embeddings expect buffered JSON even when the request sets stream', async () => {
+  const e2eeFetch = createE2eeFetch({
+    transcript: verified(),
+    fetch: fakeService(() => ({ contentType: 'application/json', body: JSON.stringify({ id: 'e', data: [{ index: 0 }] }) }), []),
+  });
+  const response = await e2eeFetch('https://relay.example/v1/embeddings', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'demo-model', input: 'hi', stream: true }),
+  });
+  assert.deepEqual(((await response.json()) as any).data, [{ index: 0 }]);
 });
 
 const chatReply = () => ({
@@ -322,10 +382,10 @@ const ask = (f: ReturnType<typeof createE2eeFetch>, extra: Record<string, unknow
   });
 
 test('the MAC covers readable members: a relay cannot rename a tool call', async () => {
-  const honest = createE2eeFetch({ keyset: keyset(), fetch: fakeService(chatReply, []) });
+  const honest = createE2eeFetch({ transcript: verified(), fetch: fakeService(chatReply, []) });
   assert.equal((await (await ask(honest)).json() as any).choices[0].message.tool_calls[0].function.name, 'lookup');
   const renamed = createE2eeFetch({
-    keyset: keyset(),
+    transcript: verified(),
     fetch: fakeService(chatReply, [], (wire) => wire.replace('"lookup"', '"delete_account"')),
   });
   await assert.rejects(ask(renamed), /MAC/);
@@ -333,7 +393,7 @@ test('the MAC covers readable members: a relay cannot rename a tool call', async
 
 test('fails closed on uncovered endpoints, unencrypted members, and anything not v2.1', async () => {
   const passthrough = createE2eeFetch({
-    keyset: keyset(),
+    transcript: verified(),
     fetch: async (input, init) => new Response(`${init?.method ?? new Request(input).method}`),
   });
   assert.equal(await (await passthrough('https://relay.example/v1/models')).text(), 'GET');
@@ -346,7 +406,7 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
 
   const forged = JSON.stringify({ id: 'x', choices: [{ index: 0, message: { content: 'FORGED' } }] });
   const reply = (body: string, headers: Record<string, string>) =>
-    createE2eeFetch({ keyset: keyset(), fetch: async () => new Response(body, { headers }) });
+    createE2eeFetch({ transcript: verified(), fetch: async () => new Response(body, { headers }) });
   await assert.rejects(ask(reply(forged, { 'x-e2ee-applied': 'false' })), E2eeError);
   await assert.rejects(ask(reply(forged, { 'content-type': 'application/json' })), /e2ee_mac/);
   // A JSON body labelled as a stream for a buffered request.
@@ -357,7 +417,7 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
 
   // In a stream, a line that is not `data:` or a comment fails the stream.
   const streamed = createE2eeFetch({
-    keyset: keyset(),
+    transcript: verified(),
     fetch: fakeService(
       () => ({ contentType: 'text/event-stream', body: `data: ${JSON.stringify({ id: 's', choices: [{ index: 0, delta: { content: 'a' } }] })}\n\ndata: [DONE]\n\n` }),
       [],
@@ -369,7 +429,7 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
 
   // Events of one stream must share one response id.
   const spliced = createE2eeFetch({
-    keyset: keyset(),
+    transcript: verified(),
     fetch: fakeService(
       () => ({
         contentType: 'text/event-stream',

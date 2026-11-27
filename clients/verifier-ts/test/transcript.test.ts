@@ -117,6 +117,33 @@ test('transcript: a runtime-observed TLS peer satisfies id-6', async () => {
   assert.equal(bound.lines.find((line) => line.id === 'id-6')?.status, 'pass');
 });
 
+test('transcript: an E2EE v2.1 channel satisfies id-6 only with a pinned release', async () => {
+  const channelReport = structuredClone(report);
+  const v21 = 'x25519-aes-256-gcm-hkdf-sha256-v2.1';
+  const workloadKeyset: WorkloadKeyset = {
+    not_after: FIXED_NOW + 300,
+    receipt_signing_keys: [],
+    e2ee_public_keys: [{ key_id: 'e2ee-1', algo: v21, public_key: '11'.repeat(32) }],
+  };
+  channelReport.attestation.workload_keyset = workloadKeyset;
+  const digest = await computeKeysetDigest(workloadKeyset);
+  channelReport.workload_keyset_digest = digest;
+  channelReport.attestation.report_data = await computeReportData(digest, FIXTURE_NONCE);
+  const id6 = async (channel: { e2ee: string }, acceptedComposeHashes?: string[]) => {
+    const transcript = await reportTranscript(channelReport, FIXTURE_NONCE, {
+      now: FIXED_NOW,
+      online: true,
+      channel,
+      ...(acceptedComposeHashes === undefined ? {} : { acceptedComposeHashes }),
+    });
+    assert.deepEqual(transcript.channel, channel);
+    return transcript.lines.find((line) => line.id === 'id-6')?.status;
+  };
+  assert.equal(await id6({ e2ee: v21 }, ['00'.repeat(32)]), 'pass');
+  assert.equal(await id6({ e2ee: v21 }), 'fail');
+  assert.equal(await id6({ e2ee: 'x25519-aes-256-gcm-hkdf-sha256' }, ['00'.repeat(32)]), 'fail');
+});
+
 test('transcript: compose policy accepts reviewed releases and rejects other measurements', async () => {
   const measured = await makeMeasuredComposeReport();
   const accepted = await reportTranscript(measured.report, FIXTURE_NONCE, {

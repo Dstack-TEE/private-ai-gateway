@@ -17,6 +17,7 @@ import { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 import { verifyReceipt, checkRequestBodyHash, checkResponseBodyHash, findEvent } from './receipt.js';
 import { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 import { AciError } from './errors.js';
+import { E2EE_V2_1_X25519 } from './e2ee.js';
 import { DEFAULT_ARTIFACT_TIMEOUT_MS, readAciJson, timedFetch } from './attestation-http.js';
 import type {
   AttestationReport,
@@ -55,7 +56,12 @@ export interface ReportTranscript {
   verification: ReportVerification;
   /** RTMR3-bound sha256(app_compose), present only when id-4 measured successfully. */
   composeHash?: string;
+  /** The channel binding id-6 appraised, when one was supplied. */
+  channel?: ChannelBinding;
 }
+
+/** How this client's channel is bound to the attested keyset (§9.1(6)). */
+export type ChannelBinding = { observedSpkiSha256: string; host?: string } | { e2ee: string };
 
 export interface TranscriptOptions {
   /**
@@ -77,11 +83,12 @@ export interface TranscriptOptions {
   online?: boolean;
   /**
    * How this client's channel is bound to the attested keyset (§9.1(6)):
-   * the TLS leaf SPKI the caller's own stack observed. A browser cannot
-   * observe TLS, so its channel is unbound — use the `aci` CLI or the
-   * `aci serve` proxy for a pinned channel.
+   * the TLS leaf SPKI the caller's own stack observed, or E2EE v2.1
+   * (`{ e2ee: E2EE_V2_1_X25519 }`) for a client that cannot observe TLS, such
+   * as one behind a relay. The E2EE binding needs `acceptedComposeHashes` and
+   * holds only for requests sent through `createE2eeFetch`.
    */
-  channel?: { observedSpkiSha256: string; host?: string };
+  channel?: ChannelBinding;
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this verifier (§1.3).
    * An empty or omitted list verifies and reports the measurement without
@@ -172,7 +179,7 @@ export interface VerifyServiceOptions extends TranscriptOptions {
  * transcript — one call for any web or node project. Verifies the quote (id-1,
  * via @phala/dcap-qvl and the default Phala PCCS), the binding chain (id-2/id-3),
  * and the compose measurement (id-4) when the service publishes `app_compose`.
- * Custody (id-5) and the TLS pin (id-6) stay out of a plain browser's reach.
+ * Custody (id-5) is skipped. Set `channel` to check the TLS or E2EE binding (id-6).
  */
 export async function verifyService(
   baseUrl: string,
@@ -356,22 +363,24 @@ export async function reportTranscript(
     verdict: computeVerdict(lines),
     verification,
     ...(composeHash === undefined ? {} : { composeHash }),
+    ...(options.channel === undefined ? {} : { channel: options.channel }),
   };
 }
 
 /** @internal Re-appraise id-6 after a runtime transport observes the TLS peer. */
 export function bindReportTranscriptChannel(
   transcript: ReportTranscript,
-  channel: NonNullable<TranscriptOptions['channel']>,
+  channel: { observedSpkiSha256: string; host?: string },
 ): ReportTranscript {
   const channelCheck = channelLine(transcript.verification.keyset, { online: true, channel });
   const lines = transcript.lines.map((entry) => (entry.id === 'id-6' ? channelCheck : entry));
-  return { ...transcript, lines, verdict: computeVerdict(lines) };
+  return { ...transcript, lines, verdict: computeVerdict(lines), channel };
 }
 
 /**
  * id-6 — the channel actually used (§9.1(6)): a TLS SPKI the caller's own
- * stack observed, matched against the attested keyset. Online with none,
+ * stack observed, or the E2EE v2.1 key the caller encrypts to, matched
+ * against the attested keyset. Online with none,
  * the channel is unbound (§1.1) and the check fails; offline it is a skip.
  */
 function channelLine(
@@ -382,6 +391,31 @@ function channelLine(
   if (channel !== undefined) {
     if (!keyset) {
       return line(ID_TITLES, 'id-6', 'fail', 'no decoded keyset to match the channel against (see id-2)');
+    }
+    if ('e2ee' in channel) {
+      // Only v2.1 binds the request to the key it is encrypted to, and only a
+      // pinned release makes that key one the caller chose (§1.1).
+      if (channel.e2ee !== E2EE_V2_1_X25519) {
+        return line(ID_TITLES, 'id-6', 'fail', `channel.e2ee must be ${E2EE_V2_1_X25519} (§1.1)`);
+      }
+      if ((options.acceptedComposeHashes ?? []).length === 0) {
+        return line(
+          ID_TITLES,
+          'id-6',
+          'fail',
+          'an E2EE binding needs acceptedComposeHashes: without a pinned release any dstack workload can present a key (§1.1)',
+        );
+      }
+      const entries = Array.isArray(keyset.e2ee_public_keys) ? keyset.e2ee_public_keys : [];
+      const key = entries.find((entry) => entry?.algo === channel.e2ee);
+      return key
+        ? line(
+            ID_TITLES,
+            'id-6',
+            'pass',
+            `E2EE key ${key.key_id} (${channel.e2ee}) is in the attested keyset; the binding holds only for requests sent through createE2eeFetch`,
+          )
+        : line(ID_TITLES, 'id-6', 'fail', `the attested keyset lists no ${channel.e2ee} key (§1.1)`);
     }
     const host = channel.host?.toLowerCase().replace(/\.$/, '');
     const observed = channel.observedSpkiSha256.toLowerCase();
@@ -408,7 +442,7 @@ function channelLine(
       ID_TITLES,
       'id-6',
       'fail',
-      'the channel used is not bound to the attested keyset: browsers cannot observe the TLS certificate — supply the SPKI your own stack observed, or use the `aci` CLI / `aci serve` proxy (§1.1, §9.1(6))',
+      'the channel used is not bound to the attested keyset: browsers cannot observe the TLS certificate — supply the SPKI your own stack observed, set channel.e2ee for E2EE v2.1, or use the `aci` CLI / `aci serve` proxy (§1.1, §9.1(6))',
     );
   }
   return line(

@@ -49,6 +49,10 @@ take it from an attestation report it verified itself:
 - Pin the gateway releases you accept with `acceptedComposeHashes`. Without the
   pin, any genuine dstack workload passes, including one run by whoever sits
   between the client and the gateway.
+- Bind the channel to the attested v2.1 key with
+  `channel: { e2ee: E2EE_V2_1_X25519 }` (ACI §9.1(6)). A client behind a relay
+  cannot observe the gateway's TLS certificate; this binding needs the compose
+  pin and holds only for requests sent through `createE2eeFetch`.
 - Fetching the report through your own API is fine once it is pinned: a relay
   can neither forge the quote nor remove the v2.1 key from it.
 
@@ -65,22 +69,20 @@ npm install @phala/aci-verifier openai
 
 ```ts
 import OpenAI from 'openai';
-import { createE2eeFetch, verifyService } from '@phala/aci-verifier';
+import { createE2eeFetch, E2EE_V2_1_X25519, verifyService } from '@phala/aci-verifier';
 
-// 1. Verify the gateway against the releases you reviewed.
+// 1. Verify the gateway against the releases you reviewed, bound to its E2EE key.
 const transcript = await verifyService('https://gateway.example', {
   acceptedComposeHashes: ['<reviewed sha256(app_compose)>'],
+  channel: { e2ee: E2EE_V2_1_X25519 },
 });
-const { keyset } = transcript.verification;
-if (!transcript.verdict.verified || keyset === undefined) {
-  throw new Error(transcript.verdict.line);
-}
+if (!transcript.verdict.verified) throw new Error(transcript.verdict.line);
 
 // 2. Encrypt every request and decrypt every reply.
 const client = new OpenAI({
   baseURL: 'https://api.your-service.example/v1', // your API in front of the gateway
   apiKey: process.env.API_KEY,
-  fetch: createE2eeFetch({ keyset }),
+  fetch: createE2eeFetch({ transcript }),
 });
 
 // 3. Use the SDK as usual, buffered or streamed.
@@ -102,8 +104,11 @@ be added before the request reaches it.
 
 The client:
 
-- uses v2.1 whenever the verified keyset lists a v2.1 key, and throws if it
-  lists none;
+- takes the keyset from a VERIFIED transcript whose id-4 and id-6 passed with
+  `channel: { e2ee: E2EE_V2_1_X25519 }`, and throws otherwise or if the keyset
+  lists no v2.1 key;
+- keeps the caller's request options (credentials, redirect, signal, and so
+  on) and replaces only the body and the E2EE headers;
 - never retries in another mode. An error reply is handed back unchanged; a
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
