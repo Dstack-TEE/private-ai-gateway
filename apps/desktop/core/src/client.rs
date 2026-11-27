@@ -171,25 +171,30 @@ impl Client {
     }
 
     pub fn ensure_service() -> Result<(), String> {
+        Self::start_service_if_needed().map(|_| ())
+    }
+
+    /// Ensures the backend is available. True when startup was needed.
+    pub fn start_service_if_needed() -> Result<bool, String> {
         Self::ensure_service_in_mode(StartMode::Normal)
     }
 
-    fn ensure_service_in_mode(mode: StartMode) -> Result<(), String> {
+    fn ensure_service_in_mode(mode: StartMode) -> Result<bool, String> {
         let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         if block_on(open())?.is_ok_and(|connection| current(&connection.version)) {
-            return Ok(());
+            return Ok(false);
         }
         let data = crate::paths::app_data_dir()?;
         let _startup = acquire_startup(&data, STARTUP_GATE_WAIT, crate::lock::startup_shared)?;
-        Self::ensure_service_locked(mode).map(|_| ())
+        Self::ensure_service_locked(mode).map(|(_, started)| started)
     }
 
-    /// Starts the backend and returns the instance ID from its readiness handshake.
-    fn ensure_service_locked(mode: StartMode) -> Result<String, String> {
+    /// Returns the backend instance ID and whether it needed to start.
+    fn ensure_service_locked(mode: StartMode) -> Result<(String, bool), String> {
         let current = |version: &Version| version.version == protocol::BUILD_VERSION;
         match block_on(open())? {
             Ok(connection) if current(&connection.version) => {
-                return Ok(connection.version.instance_id);
+                return Ok((connection.version.instance_id, false));
             }
             Ok(connection) => {
                 let expected = installed_backend()?;
@@ -227,7 +232,7 @@ impl Client {
                 Err(error) => return Err(error),
             },
         };
-        Self::wait_for_service(child)
+        Self::wait_for_service(child).map(|instance| (instance, true))
     }
 
     fn wait_for_service(
@@ -320,7 +325,7 @@ impl Client {
             };
             before_start(&client);
             match Self::ensure_service_in_mode(StartMode::AppStartup)
-                .and_then(|()| client.state().map_err(String::from))
+                .and_then(|_| client.state().map_err(String::from))
             {
                 Ok(state) => {
                     client.states.send_replace(state);
@@ -436,7 +441,8 @@ impl Client {
             return Ok(());
         }
         attempts.push_back(now);
-        *recovering = Some(Self::ensure_service_locked(StartMode::Normal)?);
+        let (instance, _) = Self::ensure_service_locked(StartMode::Normal)?;
+        *recovering = Some(instance);
         Ok(())
     }
 

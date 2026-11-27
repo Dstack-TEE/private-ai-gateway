@@ -157,7 +157,10 @@ impl Agent {
         Self::ALL
             .into_iter()
             .find(|agent| agent.id() == id)
-            .ok_or_else(|| "Unknown agent".to_string())
+            .ok_or_else(|| {
+                let ids = Self::ALL.map(Self::id).join(", ");
+                format!("Unknown agent ID. Supported IDs: {ids}.")
+            })
     }
 
     pub fn id(self) -> &'static str {

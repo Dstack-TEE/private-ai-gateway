@@ -19,8 +19,8 @@ fn sandbox_teardown_watchdog() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn start_reports_skipped_supervision_once_in_human_and_json_output() {
-    for json in [false, true] {
+fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
+    for (json, environment_override) in [(false, true), (true, true), (true, false)] {
         let sandbox = support::Sandbox::new();
         let root = sandbox.path();
         let home = root.join("home");
@@ -60,21 +60,28 @@ fn start_reports_skipped_supervision_once_in_human_and_json_output() {
                 .env_clear()
                 .env("HOME", &home)
                 .env("XDG_RUNTIME_DIR", &runtime)
-                .env("CODEX_HOME", "/custom")
-                .env("PATH", &bin)
-                .output()
-                .unwrap()
+                .env("PATH", &bin);
+            if environment_override {
+                command.env("CODEX_HOME", "/custom");
+            }
+            command.output().unwrap()
         };
-        let first_args = if json { vec!["--json"] } else { Vec::new() };
-        let first = run(&first_args);
+        let args: &[&str] = if json { &["--json"] } else { &[] };
+        let first = run(args);
         assert_eq!(first.status.code(), Some(0), "{first:?}");
         let first_stderr = String::from_utf8_lossy(&first.stderr);
         if json {
             let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-            assert!(value["supervisionNotice"]
-                .as_str()
-                .unwrap()
-                .contains("CODEX_HOME"));
+            assert_eq!(value["status"], "verified");
+            let notice = value["supervisionNotice"].as_str().unwrap();
+            if environment_override {
+                assert!(notice.contains("CODEX_HOME"), "{notice}");
+            } else {
+                assert!(
+                    notice.contains("Could not enable the login service"),
+                    "{notice}"
+                );
+            }
             assert!(first_stderr.is_empty(), "{first_stderr}");
         } else {
             assert!(first_stderr.contains("CODEX_HOME"), "{first_stderr}");
@@ -83,12 +90,14 @@ fn start_reports_skipped_supervision_once_in_human_and_json_output() {
                 "{first_stderr}"
             );
         }
-        let second_args = if json { vec!["--json"] } else { Vec::new() };
-        let second = run(&second_args);
+        let second = run(args);
         assert_eq!(second.status.code(), Some(0), "{second:?}");
         if json {
             let value: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
-            assert!(value.get("supervisionNotice").is_none());
+            assert_eq!(
+                value.get("supervisionNotice").is_none(),
+                environment_override
+            );
         } else {
             assert!(!String::from_utf8_lossy(&second.stderr).contains("CODEX_HOME"));
         }
@@ -294,7 +303,7 @@ fn service_disable_succeeds_without_a_windows_backend_login_service() {
     let backend = Backend::start();
     assert_eq!(
         backend.run(&["service", "disable", "--yes"]),
-        json!({"startAtLogin": false})
+        json!({"startAtLogin": false, "supported": false})
     );
     assert!(backend.run(&["service", "status"])["backend"].is_object());
 }
@@ -328,7 +337,7 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
     assert!(error["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("has no API key"));
+        .contains("Run pap profiles verify "));
     assert!(backend
         .run(&["agents", "list"])
         .as_array()
@@ -818,6 +827,7 @@ set -eu
 unit="$HOME/.config/systemd/user/private-ai-proxy.service"
 shift
 case "$1" in
+  show-environment) ;;
   show)
     if [ -f "$unit" ]; then
       unit_state=disabled
@@ -885,9 +895,22 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
         }
     };
 
+    // Enabling starts the backend under the service manager, which resumes the
+    // saved session. Stop it and save the session again so a detached backend
+    // can start with it while the manager is unavailable.
     run(&["service", "enable"]);
+    assert!(home.join("managed-pid").exists());
+    assert_eq!(run(&["status"])["loginService"], "Enabled (active)");
+    drop(wait_for_verification());
+    run(&["service", "stop", "--yes"]);
+    fs::remove_file(home.join("managed-pid")).unwrap();
+    usage.save_active_session("handoff-session", 1).unwrap();
     fs::write(home.join("no-bus"), "").unwrap();
     let detached = run(&["service", "start"])["processId"].clone();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        "Unavailable because no user service manager is running"
+    );
     let verifying = wait_for_verification();
     fs::remove_file(home.join("no-bus")).unwrap();
 

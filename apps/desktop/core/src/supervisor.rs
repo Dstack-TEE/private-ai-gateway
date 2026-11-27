@@ -289,6 +289,44 @@ pub fn enabled() -> bool {
     running_pid().is_ok_and(|pid| pid.is_some())
 }
 
+/// Read-only diagnosis of this installation's login service.
+pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> String {
+    if relocated() {
+        return "Unavailable with PAP path overrides".into();
+    }
+    if !supported() {
+        return "Unavailable for this installation".into();
+    }
+    if !user_service_manager_available() {
+        return "Unavailable because no user service manager is running".into();
+    }
+    #[cfg(target_os = "linux")]
+    let pid = platform::inspect_running_pid();
+    #[cfg(not(target_os = "linux"))]
+    let pid = platform::running_pid();
+    match pid {
+        Ok(Some(0)) => return "Enabled (inactive)".into(),
+        Ok(Some(_)) => return "Enabled (active)".into(),
+        Err(error) => return format!("Cannot inspect login service: {error}"),
+        Ok(None) => {}
+    }
+    match automatic_blockers_for(
+        &process_environment(agent_environment_overrides.to_vec()),
+        declined().is_some_and(|marker| marker.exists()),
+        installation_supports_automatic_supervision(),
+    ) {
+        AutomaticBlockers::Eligible => "Disabled".into(),
+        AutomaticBlockers::Declined => "Disabled by pap service disable".into(),
+        AutomaticBlockers::Unsupported => {
+            "Automatic registration is unavailable for this installation".into()
+        }
+        AutomaticBlockers::Environment(names) => format!(
+            "Automatic registration skipped because of environment overrides: {}",
+            names.join(", ")
+        ),
+    }
+}
+
 /// PID of the enabled, owned login service. Zero means it is idle.
 pub(crate) fn running_pid() -> Result<Option<u32>, String> {
     if supported() {
@@ -727,10 +765,19 @@ mod platform {
     pub(super) fn running_pid() -> Result<Option<u32>, String> {
         Ok(Registration::for_installation()?
             .state()?
-            .and_then(|loaded| {
-                matches!(loaded.file_state.as_str(), "enabled" | "enabled-runtime")
-                    .then_some(loaded.pid)
-            }))
+            .and_then(enabled_pid))
+    }
+
+    pub(super) fn inspect_running_pid() -> Result<Option<u32>, String> {
+        match Registration::for_installation()?.loaded_state()? {
+            State::Missing => Ok(None),
+            State::Loaded(loaded) => Ok(enabled_pid(loaded)),
+            State::Reload => Err(format!("The systemd user unit {UNIT} has pending changes")),
+        }
+    }
+
+    fn enabled_pid(loaded: Loaded) -> Option<u32> {
+        matches!(loaded.file_state.as_str(), "enabled" | "enabled-runtime").then_some(loaded.pid)
     }
 
     pub(super) fn enable() -> Result<bool, String> {
