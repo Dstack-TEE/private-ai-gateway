@@ -421,12 +421,23 @@ fn decrypt_tool_call_arguments(
     Ok(decrypted_count)
 }
 
-/// An array entry's path index: its `index` member when present, its array
-/// position otherwise (§5).
+/// An array entry's path index: its `index` member when it is a non-negative
+/// integer, its array position otherwise (§10.5). An integral float such as
+/// `1.0` up to 2^53 - 1 counts as that integer, as it does for a JavaScript
+/// client, whose `JSON.parse` cannot tell `1` from `1.0`.
 fn entry_index(entry: &Value, position: usize) -> u64 {
-    entry
-        .get("index")
-        .and_then(Value::as_u64)
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let Some(index) = entry.get("index") else {
+        return position as u64;
+    };
+    index
+        .as_u64()
+        .or_else(|| {
+            index
+                .as_f64()
+                .filter(|value| value.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER).contains(value))
+                .map(|value| value as u64)
+        })
         .unwrap_or(position as u64)
 }
 
@@ -1015,8 +1026,29 @@ pub(super) fn encrypt_response_plaintext(
 
 #[cfg(test)]
 mod tests {
-    use super::{aci_request_aad, aci_response_aad, optional_response_string};
+    use super::{aci_request_aad, aci_response_aad, entry_index, optional_response_string};
     use serde_json::json;
+
+    #[test]
+    fn entry_index_reads_an_integral_index_as_a_javascript_client_does() {
+        let index = |entry: serde_json::Value| entry_index(&entry, 7);
+        assert_eq!(index(json!({"index": 1})), 1);
+        assert_eq!(index(json!({"index": 1.0})), 1);
+        assert_eq!(
+            index(json!({"index": 9_007_199_254_740_991.0_f64})),
+            9_007_199_254_740_991
+        );
+        assert_eq!(index(json!({})), 7);
+        for not_an_index in [
+            json!(1.5),
+            json!(-1),
+            json!(-1.0),
+            json!(9_007_199_254_740_992.0_f64),
+            json!("1"),
+        ] {
+            assert_eq!(index(json!({"index": not_an_index})), 7);
+        }
+    }
 
     // Byte-exact expected AAD from spec/test-vectors.md §5 (X25519 suite).
     const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";

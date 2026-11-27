@@ -404,10 +404,12 @@ encrypts whole (below), plus:
 | streaming response | `choices.{i}.delta.tool_calls.{t}.function.arguments` | the string |
 | any response | `choices.{i}.logprobs` | its compact JSON |
 
-`{t}` is the tool call's `index` member when present and its array position
-otherwise. The client MUST encrypt every request string at these locations.
-The service decrypts every string at them, so a plaintext one fails with
-`e2ee_decryption_failed`.
+`{t}` is the tool call's `index` member when it is a non-negative integer and
+its array position otherwise. A number with a zero fraction, such as `1.0`,
+is that integer up to 2^53 − 1, the range a JavaScript `JSON.parse` keeps
+exact; the path is written in integer form (`…tool_calls.1…`). The client
+MUST encrypt every request string at these locations. The service decrypts
+every string at them, so a plaintext one fails with `e2ee_decryption_failed`.
 
 A whole-content `messages.{m}.content` plaintext is the JSON encoding of the
 content value: a JSON string for text, a JSON array for structured content. The
@@ -467,7 +469,10 @@ which ask for audio output whose `transcript` v2.1 does not encrypt.
 The service adds a member `e2ee_mac` to every response object it encrypts: the
 buffered JSON body, and the JSON of each SSE `data:` event. Its value is the
 lowercase-hex HMAC-SHA256, under the MAC key (§10.4), of the JCS form of the
-object without `e2ee_mac`, computed after the fields are encrypted.
+object without `e2ee_mac`, computed after the fields are encrypted. JCS
+writes numbers in ECMAScript form, so a client outside JavaScript must too:
+`usage.cost` 4.5e-06 is written `0.0000045`, and a MAC over a plain JSON dump
+of the parsed object fails.
 
 In a stream, the service first adds `e2ee_seq` to every event object: the
 event's position among the stream's JSON events, the integer 0 for the first
