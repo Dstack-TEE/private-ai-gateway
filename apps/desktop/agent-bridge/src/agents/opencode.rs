@@ -4,6 +4,7 @@
 use super::*;
 use std::{
     io::{Read, Seek},
+    iter,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -16,16 +17,20 @@ pub(super) enum OpenCodeVersion {
 }
 
 impl OpenCodeVersion {
-    pub(super) fn detect() -> Option<Self> {
-        let path = env::var_os("PATH")?;
+    fn detect(user_home: &Path) -> Option<Self> {
+        let path = env::var_os("PATH").unwrap_or_default();
+        let path_dirs = || env::split_paths(&path).filter(|dir| dir.is_absolute());
         #[cfg(not(windows))]
         let names = ["opencode"];
         #[cfg(windows)]
         let names = ["opencode.exe", "opencode.cmd"];
-        let executable = env::split_paths(&path)
-            .filter(|dir| dir.is_absolute())
+        let executable = path_dirs()
+            .chain(opencode_install_dirs(user_home))
             .flat_map(|dir| names.map(|name| dir.join(name)))
             .find(|candidate| executable_metadata(candidate).is_some())?;
+        let child_path =
+            env::join_paths(iter::once(executable.parent()?.to_path_buf()).chain(path_dirs()))
+                .ok()?;
 
         // Both releases initialize OpenCode directories even for --version.
         let home = tempfile::Builder::new()
@@ -38,7 +43,7 @@ impl OpenCodeVersion {
             .arg("--version")
             .current_dir(home.path())
             .env_clear()
-            .env("PATH", path)
+            .env("PATH", child_path)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("XDG_CONFIG_HOME", home.path().join("config"))
@@ -51,8 +56,10 @@ impl OpenCodeVersion {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            if let Some(system_root) = env::var_os("SystemRoot") {
-                command.env("SystemRoot", system_root);
+            for key in ["SystemRoot", "PATHEXT", "ComSpec"] {
+                if let Some(value) = env::var_os(key) {
+                    command.env(key, value);
+                }
             }
             command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
         }
@@ -85,6 +92,57 @@ impl OpenCodeVersion {
     }
 }
 
+fn opencode_install_dirs(home: &Path) -> Vec<PathBuf> {
+    let configured = |key| env_path(key).map(|dir| home.join(dir));
+    // Both current curl installers use ~/.opencode/bin. The v1 README and
+    // older v2 README also document OPENCODE_INSTALL_DIR, XDG_BIN_DIR and ~/bin.
+    let mut dirs: Vec<_> = ["OPENCODE_INSTALL_DIR", "XDG_BIN_DIR", "XDG_BIN_HOME"]
+        .into_iter()
+        .filter_map(configured)
+        .collect();
+    dirs.extend(["bin", ".opencode/bin", ".local/bin"].map(|dir| home.join(dir)));
+
+    // npm links global commands into its prefix on Windows and prefix/bin on Unix.
+    if let Some(prefix) =
+        configured("npm_config_prefix").or_else(|| configured("NPM_CONFIG_PREFIX"))
+    {
+        dirs.push(if cfg!(windows) {
+            prefix
+        } else {
+            prefix.join("bin")
+        });
+    }
+    dirs.extend(configured("BUN_INSTALL").map(|dir| dir.join("bin")));
+    dirs.push(home.join(".bun/bin"));
+
+    #[cfg(target_os = "macos")]
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    #[cfg(not(windows))]
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    #[cfg(target_os = "linux")]
+    dirs.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
+    #[cfg(windows)]
+    {
+        let app_data = configured("APPDATA").unwrap_or_else(|| home.join("AppData/Roaming"));
+        let local_app_data =
+            configured("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData/Local"));
+        dirs.push(app_data.join("npm"));
+        dirs.push(local_app_data.join("Microsoft/WinGet/Links"));
+        dirs.extend(configured("ProgramFiles").map(|dir| dir.join("WinGet/Links")));
+        dirs.push(
+            configured("SCOOP")
+                .unwrap_or_else(|| home.join("scoop"))
+                .join("shims"),
+        );
+        dirs.extend(
+            configured("ChocolateyInstall")
+                .or_else(|| configured("ProgramData").map(|dir| dir.join("chocolatey")))
+                .map(|dir| dir.join("bin")),
+        );
+    }
+    dirs
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct ConnectionCatalog<'a> {
     pub(super) catalog: &'a Catalog,
@@ -101,7 +159,7 @@ impl Projector {
         catalog.map(|catalog| ConnectionCatalog {
             catalog,
             opencode_version: (agent == Agent::OpenCode && connect && self.tool_env)
-                .then(OpenCodeVersion::detect)
+                .then(|| OpenCodeVersion::detect(&self.home))
                 .flatten(),
         })
     }

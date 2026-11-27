@@ -266,9 +266,10 @@ unlocked OS keychain for a process running as you.
   while keeping a default model you selected from another provider.
   PAP accepts JSON with comments and trailing commas in both OpenCode
   `opencode.json` and `opencode.jsonc` files.
-  PAP uses `providers` for OpenCode 2 and `provider` for OpenCode 1. It
-  reads the OpenCode version from the executable on the backend's PATH.
-  If the version is unavailable, or PAP runs with an explicitly scoped
+  PAP uses `providers` for OpenCode 2 and `provider` for OpenCode 1. It searches
+  the backend's PATH first, then standard installer and package-manager
+  locations such as `~/.opencode/bin` and `~/.local/bin`, and reads the
+  executable's version. If the version is unavailable or PAP runs with a scoped
   Agent Home, file keys `providers` and `policies` select the OpenCode 2
   shape. Otherwise PAP uses `provider`. Reconnecting moves the PAP provider
   entry when the shape changes and preserves other providers.

@@ -499,16 +499,22 @@ impl Projector {
             }
             Err(error) => return Err(error),
         };
+        let mut note = restore_problem.map_or_else(
+            || agent.note(connect).to_string(),
+            |reason| format!("Access will be revoked before restoration is attempted. {reason}"),
+        );
+        if agent == Agent::OpenCode
+            && connect
+            && self.tool_env
+            && connection.is_some_and(|connection| connection.opencode_version.is_none())
+        {
+            note.push_str(" PAP could not read the installed OpenCode version and chose the provider shape from the config file.");
+        }
         Ok(AgentPreview {
             agent: self.status(agent, &store, catalog),
             connect,
             changes: edit.changes,
-            note: restore_problem.map_or_else(
-                || agent.note(connect).to_string(),
-                |reason| {
-                    format!("Access will be revoked before restoration is attempted. {reason}")
-                },
-            ),
+            note,
             revision: revision(
                 agent,
                 connect,

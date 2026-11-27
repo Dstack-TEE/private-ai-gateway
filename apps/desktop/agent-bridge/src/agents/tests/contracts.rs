@@ -407,41 +407,54 @@ fn audit_opencode_v2_projection_uses_native_provider_keys() {
 #[test]
 fn opencode_installed_major_moves_only_the_journaled_provider() {
     const CASE: &str = "PAP_TEST_OPENCODE_VERSION";
-    let Some(bin) = env_path(CASE) else {
-        let bin = tempfile::tempdir().unwrap();
-        let output = Command::new(env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "agents::tests::contracts::opencode_installed_major_moves_only_the_journaled_provider",
-            ])
-            .env(CASE, bin.path())
-            .env("PATH", bin.path())
-            .env("XDG_CONFIG_HOME", bin.path().join("config"))
-            .env_remove("OPENCODE_CONFIG")
-            .env_remove("OPENCODE_CONFIG_DIR")
-            .env_remove("OPENCODE_CONFIG_CONTENT")
-            .output()
-            .unwrap();
-        assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
-        assert!(
-            output.status.success(),
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let Ok(location) = env::var(CASE) else {
+        let root = tempfile::tempdir().unwrap();
+        for location in ["path", "local-bin", "opencode-bin"] {
+            let case = root.path().join(location);
+            let output = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agents::tests::contracts::opencode_installed_major_moves_only_the_journaled_provider",
+                ])
+                .env_clear()
+                .env(CASE, location)
+                .env("PATH", case.join("bin"))
+                .env("XDG_CONFIG_HOME", case.join("config"))
+                .output()
+                .unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            assert!(
+                output.status.success(),
+                "{location}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         return;
     };
 
     let mut sandbox = sandbox("opencode-installed-major");
     sandbox.projector.tool_env = true;
+    let bin = match location.as_str() {
+        "path" => env_path("PATH").unwrap(),
+        "local-bin" => sandbox.home.join(".local/bin"),
+        "opencode-bin" => sandbox.home.join(".opencode/bin"),
+        _ => panic!("unexpected OpenCode install location"),
+    };
     let agent = Agent::OpenCode;
     let config = agent.config_path(&sandbox.home, true);
     let read = || parse_jsonc(&fs::read_to_string(&config).unwrap()).unwrap();
     let install = |version| {
+        // A package-manager shim needs to resolve its runtime even when its
+        // directory is missing from the backend's PATH.
         write_executable(
             &bin.join("opencode"),
+            "#!/usr/bin/env pap-opencode-version\n",
+        );
+        write_executable(
+            &bin.join("pap-opencode-version"),
             &format!(
-                "#!/bin/sh\n[ \"$1\" = --version ] && [ \"$XDG_CONFIG_HOME\" = \"$HOME/config\" ] || exit 64\nprintf '%s\\n' '{version}'\n"
+                "#!/bin/sh\n[ \"$2\" = --version ] && [ \"$XDG_CONFIG_HOME\" = \"$HOME/config\" ] || exit 64\nprintf '%s\\n' '{version}'\n"
             ),
         );
     };
@@ -514,6 +527,12 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
         .unwrap();
     assert_eq!(read()["provider"], original["provider"]);
     assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+
+    install("unknown");
+    assert!(preview()
+        .unwrap()
+        .note
+        .contains("chose the provider shape from the config file"));
 }
 
 #[cfg(unix)]
