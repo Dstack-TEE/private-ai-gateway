@@ -23,7 +23,9 @@ aci-protocol = { path = "crates/aci-protocol" }
 aci-verify = { path = "crates/aci-verify" }
 # Canonical-JSON, types, and serialization.
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+# float_roundtrip parses every number to its exact double, which the E2EE v2.1
+# body digest (RFC 8785 JCS) depends on.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Full RFC 8785 JCS (ES6 number formatting, UTF-16 key order) for the 0G
 # Private Computer AAD, which binds arbitrary cleartext JSON.
 serde_json_canonicalizer = "0.4"

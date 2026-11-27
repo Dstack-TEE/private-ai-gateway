@@ -193,57 +193,12 @@ pub(super) fn request_key_aad(
     .map_err(|_| E2eeError::DecryptionFailed)
 }
 
-/// E2EE v2.1 body digest (§10.3): SHA-256 of the request body as received,
-/// ciphertext fields in place, in RFC 8785 JCS form except that an integer is
-/// written as its exact decimal digits. Inside ±2^53 that is what JCS writes;
-/// beyond it JCS rounds to a double, so two bodies whose forwarded integers
-/// differ could hash alike.
+/// E2EE v2.1 body digest (§10.3): SHA-256 of the RFC 8785 JCS form of the
+/// request body as received, ciphertext fields in place.
 pub(super) fn request_body_digest(payload: &Value) -> Result<[u8; 32], E2eeError> {
     use sha2::{Digest, Sha256};
-    let mut bytes = Vec::new();
-    write_digest_json(payload, &mut bytes)?;
+    let bytes = serde_json_canonicalizer::to_vec(payload).map_err(|_| E2eeError::BodyMismatch)?;
     Ok(Sha256::digest(bytes).into())
-}
-
-fn write_digest_json(value: &Value, out: &mut Vec<u8>) -> Result<(), E2eeError> {
-    match value {
-        Value::Number(number) if number.is_u64() || number.is_i64() => {
-            out.extend_from_slice(number.to_string().as_bytes());
-        }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (position, item) in items.iter().enumerate() {
-                if position > 0 {
-                    out.push(b',');
-                }
-                write_digest_json(item, out)?;
-            }
-            out.push(b']');
-        }
-        Value::Object(members) => {
-            // JCS orders member names by their UTF-16 code units.
-            let mut members: Vec<_> = members.iter().collect();
-            members.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
-            out.push(b'{');
-            for (position, (name, member)) in members.into_iter().enumerate() {
-                if position > 0 {
-                    out.push(b',');
-                }
-                write_jcs(name, out)?;
-                out.push(b':');
-                write_digest_json(member, out)?;
-            }
-            out.push(b'}');
-        }
-        leaf => write_jcs(leaf, out)?,
-    }
-    Ok(())
-}
-
-fn write_jcs<T: serde::Serialize>(value: &T, out: &mut Vec<u8>) -> Result<(), E2eeError> {
-    let bytes = serde_json_canonicalizer::to_vec(value).map_err(|_| E2eeError::BodyMismatch)?;
-    out.extend_from_slice(&bytes);
-    Ok(())
 }
 
 pub(super) struct E2eeFieldCrypto<'a> {
@@ -1146,22 +1101,8 @@ pub(super) fn encrypt_response_plaintext(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        aci_request_aad, aci_response_aad, entry_index, optional_response_string,
-        request_body_digest,
-    };
+    use super::{aci_request_aad, aci_response_aad, entry_index, optional_response_string};
     use serde_json::json;
-
-    #[test]
-    fn body_digest_is_jcs_inside_the_safe_integer_range() {
-        use sha2::{Digest, Sha256};
-        let body = json!({
-            "\u{e9}": 1, "b": [-9_007_199_254_740_991_i64, 9_007_199_254_740_991_u64, 0.1, 1e21, 4.5e-6],
-            "a": {"10": "x\u{2028}\"", "9": null, "\u{1f600}": true, "\u{ff61}": false},
-        });
-        let jcs: [u8; 32] = Sha256::digest(serde_json_canonicalizer::to_vec(&body).unwrap()).into();
-        assert_eq!(request_body_digest(&body).unwrap(), jcs);
-    }
 
     #[test]
     fn entry_index_reads_an_integral_index_as_a_javascript_client_does() {

@@ -5440,27 +5440,6 @@ async fn e2ee_v2_1_rejects_an_injected_message_and_edited_parameters() {
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&resp), "e2ee_body_mismatch");
 
-    // An integer beyond ±2^53 would hash like its neighbours, so it is refused.
-    let nonce = hex_nonce("nonce-v2.1-big-int");
-    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
-    let mut text = serde_json::to_string(&body).unwrap();
-    text.insert_str(1, r#""seed":9007199254740993,"#);
-    let big: Value = serde_json::from_str(&text).unwrap();
-    let request_key = v2_1_request_key(
-        &model_key.public_key_hex,
-        &x25519_public_key_hex(&client_secret),
-        &nonce,
-        &V2_1_SECRET,
-        &big,
-    );
-    let mut headers = headers;
-    set_header(&mut headers, "x-e2ee-request-key", request_key);
-    let resp = h
-        .requester
-        .post_owned_headers("/v1/chat/completions", text.as_bytes(), &headers)
-        .await;
-    assert_eq!(error_type(&resp), "e2ee_body_mismatch");
-
     // Editing a readable parameter is caught the same way.
     let nonce = hex_nonce("nonce-v2.1-edit");
     let (mut body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
@@ -6129,50 +6108,46 @@ async fn e2ee_v2_1_forwards_every_member_a_plaintext_request_can_carry() {
 }
 
 #[tokio::test]
-async fn e2ee_v2_1_binds_integers_beyond_2_pow_53_by_their_exact_digits() {
+async fn e2ee_v2_1_digest_writes_integers_beyond_2_pow_53_as_jcs_doubles() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client = V2_1Client::new(&h, 0x93, "nonce-v2.1-seed");
-    let content = client.seal("messages.0.content", serde_json::json!("hi"));
-    let seed: u64 = 12_345_678_901_234_567_890;
-    let body = serde_json::json!({
-        "model": "aci-model",
-        "seed": seed,
-        "messages": [{"role": "user", "content": content}],
-    });
-    // Written out by hand: JCS, with the integer's own digits.
-    let canonical = format!(
-        r#"{{"messages":[{{"content":"{content}","role":"user"}}],"model":"aci-model","seed":12345678901234567890}}"#
-    );
-    let digest: [u8; 32] = {
-        use sha2::Digest;
-        sha2::Sha256::digest(canonical.as_bytes()).into()
-    };
-    let requester = &h.requester;
-    let send = |body: Value| {
-        let headers = client.headers_for_digest(&digest);
-        async move {
-            requester
-                .post_owned_headers(
-                    "/v1/chat/completions",
-                    &serde_json::to_vec(&body).unwrap(),
-                    &headers,
-                )
-                .await
-        }
-    };
-    // A neighbour that rounds to the same double is a different body.
-    let mut edited = body.clone();
-    edited["seed"] = serde_json::json!(seed + 1);
-    assert_eq!(error_type(&send(edited).await), "e2ee_body_mismatch");
-
-    let resp = send(body).await;
-    assert_eq!(
-        resp.status,
-        StatusCode::OK,
-        "{}",
-        String::from_utf8_lossy(&resp.body)
-    );
-    assert_eq!(last_upstream_body(&h)["seed"], serde_json::json!(seed));
+    // RFC 8785 writes every number as an ECMAScript double, so the exact
+    // digits a non-JavaScript client sends and the digits of the double a
+    // JavaScript client sends canonicalize alike.
+    for (nonce, seed) in [
+        ("nonce-v2.1-seed-exact", 12_345_678_901_234_567_891_u64),
+        ("nonce-v2.1-seed-js", 12_345_678_901_234_567_000_u64),
+    ] {
+        let client = V2_1Client::new(&h, 0x93, nonce);
+        let content = client.seal("messages.0.content", serde_json::json!("hi"));
+        let canonical = format!(
+            r#"{{"messages":[{{"content":"{content}","role":"user"}}],"model":"aci-model","seed":12345678901234567000}}"#
+        );
+        let digest: [u8; 32] = {
+            use sha2::Digest;
+            sha2::Sha256::digest(canonical.as_bytes()).into()
+        };
+        let body = serde_json::json!({
+            "model": "aci-model",
+            "seed": seed,
+            "messages": [{"role": "user", "content": content}],
+        });
+        let resp = h
+            .requester
+            .post_owned_headers(
+                "/v1/chat/completions",
+                &serde_json::to_vec(&body).unwrap(),
+                &client.headers_for_digest(&digest),
+            )
+            .await;
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        // The upstream gets the integer as sent.
+        assert_eq!(last_upstream_body(&h)["seed"], serde_json::json!(seed));
+    }
 }
 
 #[tokio::test]

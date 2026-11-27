@@ -345,12 +345,8 @@ The client:
 2. Encrypts every request field (§10.5) with the v2.1 field key (§10.4).
 3. Computes `body_digest = SHA-256(JCS(body))` over the final JSON request
    body, with the ciphertext fields in place. JCS is RFC 8785, including its
-   number formatting, with one difference: a number written without fraction
-   or exponent from −2^63 to 2^64 − 1 is written as its exact decimal digits.
-   Inside ±2^53 that is what JCS writes; beyond it JCS rounds to a double, so
-   a changed integer such as a large `seed` could keep the digest. A
-   JavaScript client holds no larger integer exactly and sends the digits of
-   its double, so plain JCS gives it the same digest.
+   number formatting: every number is written as the ECMAScript form of its
+   IEEE 754 double.
 4. Seals the 64 bytes `request_secret || body_digest` to the service key with
    the §4 construction, the request-key HKDF info (§10.4), and this AAD:
 
@@ -369,7 +365,13 @@ A replaced `X-Client-Pub-Key` therefore fails to open the request key.
 
 The digest covers the parsed JSON, not its bytes. An intermediary may
 re-serialize the body, changing whitespace or member order, without breaking
-it. Any change to a value, member, or array entry breaks it.
+it. Adding, removing, or changing a member, an array entry, a string, a
+literal, or a number's double value breaks it. JCS normalizes number forms, so
+re-encoding a number as another form of the same double is not detected:
+`1`, `1.0`, and `1e0` hash alike, and an integer beyond ±2^53, such as a large
+`seed`, hashes as its double, like any integer that rounds to the same double.
+A JavaScript client sends the digits of that double; other clients may send
+the exact integer, and the service forwards the integer as received.
 
 ### 10.4 Key derivation
 
@@ -448,7 +450,7 @@ parts of history a reply echoes back, such as a tool call's `id` and `name` or
 
 Readable members are visible to every intermediary, but the body digest
 (§10.3) binds them: none can be added, removed, or changed without
-`e2ee_body_mismatch`. Applications MUST NOT put private text in a readable
+`e2ee_body_mismatch`, apart from the number re-encodings JCS normalizes. Applications MUST NOT put private text in a readable
 member, for example in `metadata`, `user`, a tool description, or a vendor
 extension. A future version should encrypt the whole body instead, for
 example with HPKE or OHTTP.

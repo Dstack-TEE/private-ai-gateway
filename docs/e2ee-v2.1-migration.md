@@ -30,7 +30,7 @@ rejects a tampered request before it reaches any model.
 | Gateway key | `signing_address` / legacy report | `x25519-aes-256-gcm-hkdf-sha256-v2.1` entry in the attested keyset |
 | Client key | long-lived, often secp256k1 | fresh X25519 key per request, made by the client library |
 | Request headers | `X-Signing-Algo`, `X-Client-Pub-Key`, `X-Model-Pub-Key` | `X-E2EE-Version: 2.1`, `X-Client-Pub-Key`, `X-Model-Pub-Key`, `X-E2EE-Nonce`, `X-E2EE-Timestamp`, `X-E2EE-Request-Key` |
-| Request body | messages can be added or edited | any change to a value is rejected (`e2ee_body_mismatch`) |
+| Request body | messages can be added or edited | any change to the JCS form is rejected (`e2ee_body_mismatch`); JCS normalizes number forms (§10.3) |
 | Response | fields encrypted, everything else editable | fields encrypted, every JSON object and SSE event MAC'd (`e2ee_mac`), stream events numbered (`e2ee_seq`) |
 | Request members | anything | anything; [readable members](../spec/e2ee-v2.md#readable-members) are bound by the body digest |
 | Encrypted fields | message content, reasoning | also, both ways, tool-call and function-call arguments, custom tool input, `refusal`, `annotations`, `reasoning_details`, `thinking_blocks`, `reasoning_items`, `images`, and the audio transcript; in requests `prediction.content`, `suffix`, multimodal embeddings input and embeddings `messages`; in replies `logprobs` and vLLM token echoes |
@@ -143,8 +143,9 @@ For each request:
    encoding of the value: the text `hello` is sealed as `"hello"`, an object
    or array as itself. Token ids in `prompt` and `input` stay as they are.
 3. Hash the final body: `SHA-256(JCS(body))`, with the ciphertexts in place.
-   An integer beyond ±2^53, such as a large `seed`, is hashed as its exact
-   digits rather than as JCS's double (§10.3).
+   JCS writes every number as its double in ECMAScript form, so `1`, `1.0`,
+   and `1e0` hash alike, and an integer beyond ±2^53, such as a large `seed`,
+   hashes as its double. Such re-encodings are not detected (§10.3).
 4. Seal the request secret followed by that hash into `X-E2EE-Request-Key`
    (§10.3).
 5. Send the six headers and that body.
