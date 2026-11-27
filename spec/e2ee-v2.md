@@ -133,8 +133,9 @@ OpenAI-compatible. Each encrypted location has a **field path**: member names
 and array indexes from the body root joined with `.`, such as
 `messages.3.content`, `messages.1.content.0.image_url.url`,
 `choices.0.message.content`, or `data.4.embedding`. For `choices` and `data`,
-the index is the entry's `index` member when present and its array position
-otherwise. The field path is part of the AAD (§6), so ciphertext cannot be
+the index is the entry's `index` member when it is a non-negative integer and
+its array position otherwise. V2 reads `index` as an integer only; v2.1 reads
+it by JSON number value (§10.5). The field path is part of the AAD (§6), so ciphertext cannot be
 moved to another location.
 
 Request locations:
@@ -407,8 +408,10 @@ V2.1 encrypts all §5 locations, plus:
 | streaming response | `choices.{i}.delta.tool_calls.{t}.function.arguments` | the string |
 | any response | `choices.{i}.logprobs` | its compact JSON |
 
-`{t}` is the tool call's `index` member when present and its array position
-otherwise. The client MUST encrypt every request string at these locations.
+`{t}` is the tool call's `index` member, and the `choices` and `data` index
+(§5) is the entry's `index` member, when it is a non-negative safe integer
+(at most 2^53 − 1) by JSON number value, so `1.0` is `1`; otherwise it is the
+array position. The client MUST encrypt every request string at these locations.
 
 A whole-content `messages.{m}.content` plaintext is the JSON encoding of the
 content value: a JSON string for text, a JSON array for structured content. The
@@ -430,7 +433,8 @@ object without `e2ee_mac`, computed after the fields are encrypted.
 The client MUST, for each response object:
 
 1. require the response kind to match the request: an SSE stream for
-   `"stream": true`, a JSON body otherwise;
+   `"stream": true`, a JSON body otherwise. Embeddings are always a JSON
+   body, whatever `stream` says;
 2. require `e2ee_mac` and check it, then remove it;
 3. require `choices` and `data`, when present, to be arrays;
 4. in a stream, require every event's `id` to equal the first event's;
@@ -486,6 +490,14 @@ design:
   the raw bytes received.
 - Ciphertext is hex, so each encrypted field roughly doubles in size, plus a
   fixed overhead per field.
+- The receipt's `request.received.body_hash` (§8) is an unkeyed hash of the
+  restored plaintext body. Anyone who can read a receipt and knows the rest of
+  the request can confirm a guess of a short encrypted input. The receipt
+  format is unchanged.
+- Two requests plaintext accepts are refused: a request with nothing to
+  encrypt, such as token-id-only `input` or `prompt`, gets
+  `e2ee_decryption_failed` (§5); and a response whose `content` or tool-call
+  `arguments` is neither a string nor null fails with HTTP 500.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still

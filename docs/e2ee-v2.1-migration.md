@@ -145,7 +145,8 @@ For each response:
 1. An error status goes back to the caller unchanged. Never retry it in
    another mode.
 2. Require an SSE stream if the request had `"stream": true`, and a JSON body
-   otherwise.
+   otherwise. Embeddings always answer with a JSON body, even with
+   `"stream": true`.
 3. For the JSON body, or each SSE `data:` event: check `e2ee_mac` (§10.6), then
    remove it. A missing or wrong MAC fails the response.
 4. In a stream, drop comment lines, pass `data: [DONE]` through, and fail on
@@ -310,6 +311,13 @@ V2.1 encrypts listed fields; it does not encrypt the whole HTTP message. See
   `response.returned.body_hash` covers the exact stream, but the SDK does not
   check receipts, so on its own it does not detect this.
 - Ciphertext is hex, so encrypted fields roughly double the request size.
+- The receipt's `request.received.body_hash` is an unkeyed hash of the
+  plaintext body, so anyone with receipt access who knows the rest of the
+  request can confirm a guess of a short encrypted input.
+- A request with nothing to encrypt, such as token-id-only `input` or
+  `prompt`, is refused with `e2ee_decryption_failed`, and a response whose
+  `content` or tool-call `arguments` is not a string fails with HTTP 500.
+  Plaintext accepts both.
 - The SDK checks the transcript once, when you create the client. It does not
   re-check the keyset's `not_after` or a changed `X-ACI-Keyset-Digest` later:
   run `verifyService` again and create a new client before the keyset expires
