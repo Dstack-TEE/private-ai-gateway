@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 #[cfg(any(
     target_os = "linux",
     all(target_os = "macos", not(feature = "mac-app-store"))
@@ -289,25 +291,62 @@ pub fn enabled() -> bool {
     running_pid().is_ok_and(|pid| pid.is_some())
 }
 
+#[derive(Serialize)]
+pub struct LoginServiceStatus {
+    state: LoginServiceState,
+    detail: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LoginServiceState {
+    Enabled,
+    Active,
+    Disabled,
+    Skipped,
+    Unsupported,
+    Unavailable,
+    Error,
+}
+
+impl LoginServiceStatus {
+    fn new(state: LoginServiceState, detail: impl Into<String>) -> Self {
+        Self {
+            state,
+            detail: detail.into(),
+        }
+    }
+}
+
 /// Read-only diagnosis of this installation's login service.
-pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> String {
+pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> LoginServiceStatus {
+    use LoginServiceState as State;
+
     if relocated() {
-        return "Unavailable with PAP path overrides".into();
+        return LoginServiceStatus::new(State::Unsupported, "Unavailable with PAP path overrides");
     }
     if !supported() {
-        return "Unavailable for this installation".into();
+        return LoginServiceStatus::new(State::Unsupported, "Unavailable for this installation");
     }
     if !user_service_manager_available() {
-        return "Unavailable because no user service manager is running".into();
+        return LoginServiceStatus::new(
+            State::Unavailable,
+            "Unavailable because no user service manager is running",
+        );
     }
     #[cfg(target_os = "linux")]
     let pid = platform::inspect_running_pid();
     #[cfg(not(target_os = "linux"))]
     let pid = platform::running_pid();
     match pid {
-        Ok(Some(0)) => return "Enabled (inactive)".into(),
-        Ok(Some(_)) => return "Enabled (active)".into(),
-        Err(error) => return format!("Cannot inspect login service: {error}"),
+        Ok(Some(0)) => return LoginServiceStatus::new(State::Enabled, "Enabled (inactive)"),
+        Ok(Some(_)) => return LoginServiceStatus::new(State::Active, "Enabled (active)"),
+        Err(error) => {
+            return LoginServiceStatus::new(
+                State::Error,
+                format!("Cannot inspect login service: {error}"),
+            )
+        }
         Ok(None) => {}
     }
     match automatic_blockers_for(
@@ -315,14 +354,20 @@ pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> Str
         declined().is_some_and(|marker| marker.exists()),
         installation_supports_automatic_supervision(),
     ) {
-        AutomaticBlockers::Eligible => "Disabled".into(),
-        AutomaticBlockers::Declined => "Disabled by pap service disable".into(),
-        AutomaticBlockers::Unsupported => {
-            "Automatic registration is unavailable for this installation".into()
+        AutomaticBlockers::Eligible => LoginServiceStatus::new(State::Disabled, "Disabled"),
+        AutomaticBlockers::Declined => {
+            LoginServiceStatus::new(State::Disabled, "Disabled by pap service disable")
         }
-        AutomaticBlockers::Environment(names) => format!(
-            "Automatic registration skipped because of environment overrides: {}",
-            names.join(", ")
+        AutomaticBlockers::Unsupported => LoginServiceStatus::new(
+            State::Skipped,
+            "Automatic registration is unavailable for this installation",
+        ),
+        AutomaticBlockers::Environment(names) => LoginServiceStatus::new(
+            State::Skipped,
+            format!(
+                "Automatic registration skipped because of environment overrides: {}",
+                names.join(", ")
+            ),
         ),
     }
 }

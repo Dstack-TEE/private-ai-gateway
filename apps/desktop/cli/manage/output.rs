@@ -145,12 +145,13 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             ),
             None => format!("Up to date ({}).", text(&value["currentVersion"])),
         },
-        Action::Doctor => field_details(value.as_object().into_iter().flatten().filter(
-            |(key, value)| {
-                !matches!(key.as_str(), "errors" | "warnings")
-                    || !value.as_object().is_some_and(|fields| fields.is_empty())
-            },
-        )),
+        Action::Doctor => field_details(
+            value.as_object().into_iter().flatten().filter_map(|(key, value)| match key.as_str() {
+                "loginService" => Some((key, &value["detail"])),
+                "errors" | "warnings" if value.as_object().is_some_and(|fields| fields.is_empty()) => None,
+                _ => Some((key, value)),
+            }),
+        ),
         Action::Cli { .. } | Action::Completions { .. } => details(value),
     }
 }
@@ -205,7 +206,7 @@ fn agents(value: &Value) -> String {
 }
 
 fn status(value: &Value) -> String {
-    let login_service = value["loginService"].as_str().map(safe);
+    let login_service = value["loginService"]["detail"].as_str().map(safe);
     if value["status"] == "not_running" {
         let mut result =
             "Backend not running. Agents connected through it cannot reach the Local API."
@@ -526,6 +527,19 @@ fn label(key: &str) -> String {
 mod tests {
     use super::*;
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn doctor_omits_empty_errors_and_warnings() {
+        let value = serde_json::json!({
+            "loginService": {"state": "active", "detail": "Enabled (active)"},
+            "errors": {},
+            "warnings": {},
+        });
+        assert_eq!(
+            render(&Action::Doctor, &value),
+            "Login service: Enabled (active)"
+        );
+    }
 
     #[test]
     fn management_fields_cannot_inject_output_lines() {

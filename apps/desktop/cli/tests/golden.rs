@@ -568,7 +568,7 @@ fn management_without_a_backend() {
         .assert()
         .success()
         .stdout_eq(str![[r#"
-{"backend":null,"status":"not_running","loginService":"Unavailable with PAP path overrides"}
+{"backend":null,"status":"not_running","loginService":{"state":"unsupported","detail":"Unavailable with PAP path overrides"}}
 
 "#]]);
     fails(1, &["status", "--watch"]).stderr_eq(str![[r#"
@@ -886,7 +886,7 @@ Backend is already running.
 
 "#]]);
     json(&["service", "status"]).stdout_eq(str![[r#"
-{"backend":null,"status":"not_running","loginService":"Unavailable with PAP path overrides"}
+{"backend":null,"status":"not_running","loginService":{"state":"unsupported","detail":"Unavailable with PAP path overrides"}}
 
 "#]]);
     pap(&["service", "stop", "--yes"])

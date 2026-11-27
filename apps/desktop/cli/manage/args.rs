@@ -211,7 +211,7 @@ impl From<Provider> for desktop_core::contracts::ServiceProvider {
     }
 }
 
-fn preset_url_help() -> String {
+fn add_url_help() -> String {
     use desktop_core::contracts::ServiceProvider;
     let preset = |provider: ServiceProvider| provider.preset_url().unwrap_or_default();
     format!(
@@ -288,7 +288,7 @@ pub enum Profiles {
         id: String,
         #[arg(long, help = "Display name")]
         name: String,
-        #[arg(long, help = preset_url_help())]
+        #[arg(long, help = add_url_help())]
         url: Option<String>,
         /// Service provider. Defaults to custom with --url, or redpill without it.
         #[arg(long, value_enum)]
@@ -321,7 +321,9 @@ pub enum Profiles {
         /// New display name.
         #[arg(long)]
         name: Option<String>,
-        #[arg(long, help = preset_url_help())]
+        /// New service endpoint URL. Omit to use the selected preset URL or keep
+        /// the saved custom URL. Required when switching from a preset to custom.
+        #[arg(long)]
         url: Option<String>,
         /// New service provider type.
         #[arg(long, value_enum)]

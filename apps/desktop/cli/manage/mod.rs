@@ -307,7 +307,7 @@ fn status(client: &Client) -> Result<Value, CallError> {
     Ok(status)
 }
 
-fn login_service_status() -> String {
+fn login_service_status() -> supervisor::LoginServiceStatus {
     supervisor::login_service_status(&agent_bridge::agents::environment_overrides())
 }
 

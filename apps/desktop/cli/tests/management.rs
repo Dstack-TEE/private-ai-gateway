@@ -900,7 +900,10 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
     // can start with it while the manager is unavailable.
     run(&["service", "enable"]);
     assert!(home.join("managed-pid").exists());
-    assert_eq!(run(&["status"])["loginService"], "Enabled (active)");
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"state": "active", "detail": "Enabled (active)"})
+    );
     drop(wait_for_verification());
     run(&["service", "stop", "--yes"]);
     fs::remove_file(home.join("managed-pid")).unwrap();
@@ -909,7 +912,10 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
     let detached = run(&["service", "start"])["processId"].clone();
     assert_eq!(
         run(&["status"])["loginService"],
-        "Unavailable because no user service manager is running"
+        json!({
+            "state": "unavailable",
+            "detail": "Unavailable because no user service manager is running",
+        })
     );
     let verifying = wait_for_verification();
     fs::remove_file(home.join("no-bus")).unwrap();

@@ -730,7 +730,13 @@ not a parsing contract.
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). The `pap status --json` and `pap doctor --json`
-reports include a `loginService` description. `pap start --json` and
+reports include a `loginService` object with a stable `state` and a
+human-readable `detail`. The state is `active` when the enabled service is
+running, `enabled` when it is idle, `disabled` when registration is off, or
+`skipped` when automatic registration does not apply. It is `unsupported`
+when the installation or PAP path overrides prevent use of a login service,
+`unavailable` when no user service manager is running, and `error` when
+inspection fails. `pap start --json` and
 `pap agents connect --json` include `supervisionNotice` when they produce an
 automatic registration warning. A command that fails prints
 `{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is
