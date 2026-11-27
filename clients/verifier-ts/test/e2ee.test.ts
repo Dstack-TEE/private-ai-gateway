@@ -125,6 +125,9 @@ test('only a VERIFIED transcript with id-4 and id-6 under the v2.1 binding makes
   refused(verified(keyset(), { channel: { observedSpkiSha256: 'ab'.repeat(32) } }));
   const without = (id: string) => verified().lines.filter((entry) => entry.id !== id);
   refused(verified(keyset(), { lines: without('id-4') }));
+  // `reportTranscript(report, null, ...)` skips id-2: no fresh-nonce binding.
+  const skipped = verified().lines.map((entry) => (entry.id === 'id-2' ? { ...entry, status: 'skip' as const } : entry));
+  refused(verified(keyset(), { lines: skipped }));
   refused(verified(keyset(), { lines: without('id-6') }));
 });
 
@@ -319,6 +322,37 @@ test('streamed chat is decrypted event by event across chunk boundaries', async 
   assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, { content: 'Hel' });
   assert.equal(JSON.parse(events[1]!.slice(6)).choices[0].delta.tool_calls[0].function.arguments, '{"x"');
   assert.equal(events[2], 'data: [DONE]');
+});
+
+test('the caller\'s own fetch arguments reach the underlying fetch', async () => {
+  // Runtime-specific options (Node's `dispatcher`, Bun's `proxy`) are not
+  // Request members, so they survive only if the caller's init is passed on.
+  const dispatcher = { marker: 'dispatcher' };
+  const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const e2eeFetch = createE2eeFetch({
+    transcript: verified(),
+    fetch: async (input, init) => {
+      calls.push({ input, ...(init === undefined ? {} : { init }) });
+      return new Response('refused', { status: 503 });
+    },
+  });
+  const extra = { proxy: 'http://proxy.example:8080', dispatcher } as RequestInit;
+  await e2eeFetch('https://relay.example/v1/models', extra);
+  await e2eeFetch('https://relay.example/v1/chat/completions', {
+    ...extra,
+    method: 'POST',
+    body: JSON.stringify({ model: 'demo-model', messages: [{ role: 'user', content: 'hi' }] }),
+  });
+  assert.deepEqual(
+    calls.map((call) => call.input),
+    ['https://relay.example/v1/models', 'https://relay.example/v1/chat/completions'],
+  );
+  for (const { init } of calls) {
+    assert.equal(Reflect.get(init ?? {}, 'proxy'), 'http://proxy.example:8080');
+    assert.equal(Reflect.get(init ?? {}, 'dispatcher'), dispatcher);
+  }
+  assert.equal(calls[0]!.init, extra);
+  assert.equal(new Headers(calls[1]!.init?.headers).get('x-e2ee-version'), '2.1');
 });
 
 test('the caller\'s request options reach the underlying fetch', async () => {

@@ -94,8 +94,8 @@ const reply = await client.chat.completions.create({
 
 A runnable version is in
 [`clients/verifier-ts/examples/e2ee-chat.mjs`](../clients/verifier-ts/examples/e2ee-chat.mjs).
-If you use only the client and not the verifier, import
-`@phala/aci-verifier/e2ee`.
+`@phala/aci-verifier/e2ee` exports the client alone, but `createE2eeFetch`
+needs a transcript from `verifyService`, which is in the main entry.
 
 `createE2eeFetch` uses Web Crypto with X25519: Node 20.18+, Bun 1.4+, or a
 browser with X25519 in Web Crypto (current Chrome, Firefox, and Safari). It
@@ -104,7 +104,7 @@ be added before the request reaches it.
 
 The client:
 
-- takes the keyset from a VERIFIED transcript whose id-4 and id-6 passed with
+- takes the keyset from a VERIFIED transcript whose id-2, id-4, and id-6 passed with
   `channel: { e2ee: E2EE_V2_1_X25519 }`, and throws otherwise or if the keyset
   lists no v2.1 key;
 - keeps the caller's request options (credentials, redirect, signal, and so

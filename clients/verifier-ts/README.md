@@ -61,10 +61,11 @@ evidence) exactly as observed.
   [E2EE v2.1](../../spec/e2ee-v2.md#10-version-21) (X25519, Web Crypto only)
   and decrypts their responses, buffered or streamed. Give it a VERIFIED
   `verifyService` transcript with `acceptedComposeHashes` and
-  `channel: { e2ee: E2EE_V2_1_X25519 }` (id-4 and id-6 must pass), and pass it
-  as the `fetch` of an OpenAI-compatible SDK.
-  It refuses other POST endpoints and never falls back to v2, the legacy
-  scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
+  `channel: { e2ee: E2EE_V2_1_X25519 }` (id-2, id-4, and id-6 must pass), and
+  pass it as the `fetch` of an OpenAI-compatible SDK. It refuses other POST
+  endpoints and never falls back to v2, the legacy scheme, or plaintext. The
+  `@phala/aci-verifier/e2ee` entry exports the client, but the transcript it
+  needs comes from `verifyService` in the main entry.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
 
 A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.

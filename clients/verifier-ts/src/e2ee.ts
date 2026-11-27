@@ -48,7 +48,7 @@ export type E2eeFetch = (input: RequestInfo | URL, init?: RequestInit) => Promis
 
 export interface E2eeFetchOptions {
   /**
-   * A VERIFIED transcript whose id-4 and id-6 passed with `channel: { e2ee:
+   * A VERIFIED transcript whose id-2, id-4, and id-6 passed with `channel: { e2ee:
    * E2EE_V2_1_X25519 }`, e.g. from `verifyService(url, {
    * acceptedComposeHashes, channel: { e2ee: E2EE_V2_1_X25519 } })`.
    */
@@ -79,7 +79,7 @@ export interface RequestContext {
  * through unchanged.
  *
  * Throws {@link E2eeError} at creation unless the transcript is VERIFIED with
- * id-4 and id-6 passed under the E2EE v2.1 channel binding and its keyset
+ * id-2, id-4, and id-6 passed under the E2EE v2.1 channel binding and its keyset
  * offers a v2.1 X25519 key. There is no fallback to v2, the legacy scheme, or
  * plaintext (§10.1).
  */
@@ -88,9 +88,9 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
   const passed = (id: string) => transcript.lines.some((entry) => entry.id === id && entry.status === 'pass');
   const channel = transcript.channel;
   const bound = channel !== undefined && 'e2ee' in channel && channel.e2ee === E2EE_V2_1_X25519;
-  if (!transcript.verdict.verified || !passed('id-4') || !passed('id-6') || !bound) {
+  if (!transcript.verdict.verified || !['id-2', 'id-4', 'id-6'].every(passed) || !bound) {
     throw new E2eeError(
-      `the transcript must be VERIFIED with id-4 and id-6 passed under channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
+      `the transcript must be VERIFIED with id-2, id-4, and id-6 passed under channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
     );
   }
   const serviceKey = transcript.verification.keyset?.e2ee_public_keys.find((key) => key.algo === E2EE_V2_1_X25519);
@@ -103,7 +103,7 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
-    if (request.method !== 'POST') return baseFetch(request);
+    if (request.method !== 'POST') return baseFetch(input, init);
     const endpoint = endpointOf(new URL(request.url).pathname);
     if (endpoint === undefined) {
       throw new E2eeError(`E2EE v2.1 does not cover POST ${new URL(request.url).pathname}`);
@@ -139,9 +139,10 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     headers.set('x-e2ee-timestamp', String(ctx.ts));
     headers.set('x-e2ee-request-key', requestKey);
 
-    // Keep every other option of the caller's request (credentials, redirect,
-    // signal, ...); only the body and the E2EE headers change.
-    const response = await baseFetch(new Request(request, { headers, body: JSON.stringify(payload) }));
+    // Hand the caller's own arguments on, so every option survives, including
+    // runtime-specific ones such as Node's `dispatcher` or Bun's `proxy`; only
+    // the body and the E2EE headers change.
+    const response = await baseFetch(input, { ...init, headers, body: JSON.stringify(payload) });
     return openResponse(response, endpoint, ctx);
   };
 }
