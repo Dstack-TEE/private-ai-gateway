@@ -7,7 +7,7 @@
 // carry the payload Tauri bundled into its DEB; Tauri itself writes the SemVer
 // string verbatim. Names and descriptions come from tauri.conf.json, as Tauri's do.
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
@@ -33,6 +33,7 @@ export const aliases = ["pap", "aci"];
 export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst: `/usr/bin/${alias}`, type: "symlink" }));
 const linuxPreremove = path.join(appRoot, "src-tauri/installer/linux-preremove.sh");
 const userUnit = "private-ai-proxy.service";
+const desktopBinary = "/usr/bin/private-ai-proxy-desktop";
 
 // Tauri names the desktop package after the product and describes it with the
 // bundle metadata; the CLI and Arch packages use the same values.
@@ -203,14 +204,18 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
   return packages;
 }
 
-// Repackages the Tauri DEB in `bundleDir/deb` in every Linux format under
-// `output`. When Tauri signed its DEB for the updater, the DEB and RPM the
-// updater installs are signed, so every signature covers the bytes that ship.
+async function tauriPackage(bundleDir, format) {
+  const directory = path.join(bundleDir, format);
+  const built = (await readdir(directory)).filter((name) => name.endsWith(`.${format}`));
+  if (built.length !== 1) throw new Error(`Expected one Tauri ${format.toUpperCase()} in ${directory}; found ${built.length}`);
+  return path.join(directory, built[0]);
+}
+
+// Repackages Tauri's Linux payload in every format under `output`. When
+// Tauri signed its DEB for the updater, sign the final DEB and RPM bytes.
 export async function packageDesktop({ bundleDir, version, arch, output }) {
-  const debDirectory = path.join(bundleDir, "deb");
-  const built = (await readdir(debDirectory)).filter((name) => name.endsWith(".deb"));
-  if (built.length !== 1) throw new Error(`Expected one Tauri DEB in ${debDirectory}; found ${built.length}`);
-  const tauriDeb = path.join(debDirectory, built[0]);
+  const tauriDeb = await tauriPackage(bundleDir, "deb");
+  const tauriRpm = await tauriPackage(bundleDir, "rpm");
   const name = execFileSync("dpkg-deb", ["-f", tauriDeb, "Package"], { encoding: "utf8" }).trim();
   if (name !== linuxPackages.desktop.name) throw new Error(`Tauri built package ${JSON.stringify(name)}, expected ${linuxPackages.desktop.name}`);
   const signed = Boolean(await stat(`${tauriDeb}.sig`).catch(() => undefined));
@@ -222,12 +227,25 @@ export async function packageDesktop({ bundleDir, version, arch, output }) {
   try {
     const root = path.join(scratch, "root");
     execFileSync("dpkg-deb", ["-x", tauriDeb, root], { stdio: "inherit" });
+    // Tauri tags its executable in each native bundle. The tag selects both
+    // the updater manifest target and the package manager used to install it.
+    const debBinary = path.join(scratch, "desktop-deb");
+    await rename(path.join(root, desktopBinary), debBinary);
+    const rpmRoot = path.join(scratch, "rpm");
+    await mkdir(rpmRoot);
+    execFileSync("bsdtar", ["-xf", tauriRpm, "-C", rpmRoot, `.${desktopBinary}`], { stdio: "inherit" });
+    const rpmBinary = path.join(rpmRoot, desktopBinary);
     const unit = (await readFile(path.join(appRoot, "src-tauri/installer", userUnit), "utf8"))
       .replace("ExecStart=/usr/libexec/private-ai-proxy/", "ExecStart=/usr/bin/");
     const unitPath = path.join(scratch, userUnit);
     await writeFile(unitPath, unit);
     const contents = [
       { src: path.join(root, "usr"), dst: "/usr" },
+      ...Object.keys(packagers).map((packager) => ({
+        src: packager === "rpm" ? rpmBinary : debBinary,
+        dst: desktopBinary,
+        packager,
+      })),
       ...aliasLinks,
       { src: unitPath, dst: `/usr/lib/systemd/user/${userUnit}`, file_info: { mode: 0o644 } },
     ];

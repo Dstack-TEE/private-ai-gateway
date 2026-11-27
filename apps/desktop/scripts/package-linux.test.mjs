@@ -66,6 +66,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     await mkdir(path.join(payload, "usr/bin"), { recursive: true });
     await mkdir(path.join(payload, "usr/share/applications"), { recursive: true });
     await writeFile(path.join(payload, "usr/bin/private-ai-proxy"), "binary", { mode: 0o755 });
+    await writeFile(path.join(payload, "usr/bin/private-ai-proxy-desktop"), "__TAURI_BUNDLE_TYPE_VAR_DEB", { mode: 0o755 });
     await writeFile(path.join(payload, "usr/share/applications/Private AI Proxy.desktop"), "entry", { mode: 0o644 });
     await writeFile(path.join(payload, "DEBIAN/control"), "Package: private-ai-proxy\nVersion: 1.2.3-beta.4\nArchitecture: amd64\nMaintainer: Test\nDescription: Test\n");
     const bundle = path.join(root, "bundle");
@@ -73,6 +74,19 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     const tauriDeb = path.join(bundle, "deb/Private AI Proxy_1.2.3-beta.4_amd64.deb");
     execFileSync("dpkg-deb", ["--build", "--root-owner-group", payload, tauriDeb], { stdio: "ignore" });
     await writeFile(`${tauriDeb}.sig`, "stale");
+    await mkdir(path.join(bundle, "rpm"), { recursive: true });
+    const rpmBinary = path.join(root, "rpm-desktop");
+    const rpmConfig = path.join(root, "tauri-rpm.json");
+    const desktopExecutable = "/usr/bin/private-ai-proxy-desktop";
+    await writeFile(rpmBinary, "__TAURI_BUNDLE_TYPE_VAR_RPM", { mode: 0o755 });
+    await writeFile(rpmConfig, JSON.stringify({
+      name: "private-ai-proxy",
+      arch: "amd64",
+      platform: "linux",
+      version: "1.2.3-beta.4",
+      contents: [{ src: rpmBinary, dst: desktopExecutable }],
+    }));
+    execFileSync("nfpm", ["package", "--config", rpmConfig, "--packager", "rpm", "--target", path.join(bundle, "rpm/tauri.rpm")], { stdio: "ignore" });
     execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "signer", "generate", "--ci", "-p", "", "-w", path.join(root, "key")], { stdio: "ignore" });
 
     const environment = { ...process.env };
@@ -97,6 +111,9 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /-rw-r--r-- root\/root .* \.\/usr\/lib\/systemd\/user\/private-ai-proxy\.service$/m);
     const expectedStart = /^ExecStart=\/usr\/bin\/private-ai-proxy-service --supervised$/m;
     const payloadTar = execFileSync("dpkg-deb", ["--fsys-tarfile", deb]);
+    assert.equal(execFileSync("bsdtar", ["-xOf", "-", `.${desktopExecutable}`], { input: payloadTar, encoding: "utf8" }), "__TAURI_BUNDLE_TYPE_VAR_DEB");
+    assert.equal(member(rpm, `.${desktopExecutable}`), "__TAURI_BUNDLE_TYPE_VAR_RPM");
+    assert.equal(member(arch, desktopExecutable.slice(1)), "__TAURI_BUNDLE_TYPE_VAR_DEB");
     assert.match(execFileSync("bsdtar", ["-xOf", "-", `./${unit}`], { input: payloadTar, encoding: "utf8" }), expectedStart);
     assert.match(member(rpm, `./${unit}`), expectedStart);
     assert.match(member(arch, unit), expectedStart);
@@ -125,7 +142,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.equal(query("%{PACKAGER}"), maintainer);
       assert.equal(
         query("[%{FILENAMES}|%{FILEMODES:perms}|%{FILELINKTOS}\n]").replace(/\|l[-rwx]{9}\|/g, "|link|"),
-        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
+        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/bin/private-ai-proxy-desktop|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
       );
       assert.match(output("rpm", ["-qp", "--requires", rpm]), /^libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)$/m);
       assert.match(output("rpm", ["-qp", "--provides", rpm]), /^private-ai-proxy-cli = 1\.2\.3~beta\.4-1$/m);

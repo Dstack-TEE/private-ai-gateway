@@ -21,7 +21,9 @@ pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 
 const INVALID_FEED: &str = "Updates are not configured correctly for this build";
 const PACKAGE_MANAGER_MARKER: &str = "/usr/share/private-ai-proxy/package-manager";
-const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
+
+/// Public certificate URL used by installed RPM updaters.
+pub const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
 
 pub fn channel_name(channel: UpdateChannel) -> &'static str {
     match channel {

@@ -265,8 +265,8 @@ jobs:
           - { platform: macos-x64, os: xcode-27, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
           - { platform: windows-x64, os: windows-2025, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: x64 }
           - { platform: windows-arm64, os: windows-11-arm, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: arm64 }
-          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: deb, cli_platform: linux, cli_arch: x64 }
-          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: deb, cli_platform: linux, cli_arch: arm64 }
+          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: x64 }
+          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
@@ -408,8 +408,8 @@ jobs:
           bash apps/desktop/scripts/prepare-linux-signing.sh apps/desktop/packaging/linux-signing-key.asc >> "$GITHUB_ENV"
 
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
-      # the stable release. nfpm packages its payload as DEB, RPM and Arch
-      # packages with native versions and signs the RPM before the updater does.
+      # the stable release. nfpm uses Tauri's Linux payload and RPM-specific
+      # executable, then signs the RPM before the updater does.
       - name: Package Linux desktop
         if: runner.os == 'Linux'
         working-directory: apps/desktop
@@ -505,6 +505,7 @@ jobs:
             --target-triple "$target_triple" \
             --output release "${source_args[@]}"
 
+      # nfpm needs the unprotected key file for both the desktop and CLI RPMs.
       - name: Remove Linux signing material
         if: always() && runner.os == 'Linux' && env.RELEASE_CHANNEL != ''
         shell: bash

@@ -103,6 +103,8 @@ Once every package and App Store build processing have succeeded, the run:
    `SHA256SUMS.asc` to the draft.
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`).
+   `SHA256SUMS.asc` is the OpenPGP signature on the checksum list and has no
+   provenance attestation of its own.
    Each package also gets CycloneDX SBOM attestations (add
    `--predicate-type https://cyclonedx.org/bom`): every package for the CLI
    crates and the web UI renderer's runtime npm dependencies, which the CLI
@@ -343,7 +345,7 @@ publishing stable releases to the beta feed.
 | macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first. The relaunched app starts the new backend using the same LaunchAgent when enabled |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
 | Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
-| Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks. On systems that require RPM signatures, [import the release key](../../../docs/private-ai-proxy-install.md#verify-linux-packages) first | As DEB |
+| Linux desktop RPM | `linux-<arch>-rpm` | In-app: import the release key with `rpm --import`, then run `rpm -U`. Both use `pkexec` with the same fallbacks as DEB. Key import and installation may prompt separately | As DEB |
 | Arch desktop package | Version from `latest.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
 | CLI-only RPM | Same | Import the [Linux release key](https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc) with `sudo rpm --import <key URL>`, then run `sudo rpm -U <package URL>` | As above |
@@ -364,11 +366,14 @@ system package without commands.
 
 Native package versions keep prereleases ordered before their stable release:
 DEB and RPM `x.y.z~beta.n` (RPM release `1`, no epoch) and Arch `x.y.zbeta.n`.
-Tauri writes the SemVer string verbatim, so the package job builds the desktop
-DEB, RPM and Arch packages from the payload of Tauri's DEB with
-[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager, as it builds the
-CLI packages (`scripts/package-linux.mjs`). nfpm writes a SemVer prerelease
-with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
+Tauri writes the SemVer string verbatim, so the package job repackages the
+Tauri DEB payload as DEB, RPM and Arch packages with
+[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager. It uses the
+executable from Tauri's RPM in the RPM package so Tauri selects the right
+update format. Older desktop RPMs that shipped the DEB executable need a
+one-time [manual RPM upgrade](../../../docs/private-ai-proxy-install.md#verify-linux-packages).
+nfpm also builds the CLI packages (`scripts/package-linux.mjs`). It writes a
+SemVer prerelease with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
 rpm (Fedora versioning guidelines). Its archlinux packager drops the
 prerelease from `pkgver`, so Arch packages get the pacman form instead, which
 sorts a trailing letter segment before the release (`vercmp`). Every earlier package sorts before
@@ -396,13 +401,20 @@ for recovery steps when a user service is unavailable.
 
 Stable and beta releases use the same OpenPGP v4 RSA-4096 signing subkey.
 Use SHA-512 for key self-signatures. Keep the certify-only primary key offline
-with an offline backup and revocation certificate. Before enabling signing,
-commit the armored public certificate as `apps/desktop/packaging/linux-signing-key.asc` and set
-`LINUX_SIGNING_KEY` in the GitHub `desktop-release` environment to the
-unprotected armored export of just the signing subkey. Keep the primary secret
-key out of CI. The Linux package and release jobs require both inputs, verify
-the subkey against the public certificate, and clean up their temporary
+with an offline backup and revocation certificate. Release workflows triggered
+by tags fail until the armored public certificate is committed as
+`apps/desktop/packaging/linux-signing-key.asc` and `LINUX_SIGNING_KEY` is set in
+the GitHub `desktop-release` environment to the unprotected armored export of
+just the signing subkey. Keep the primary secret key out of CI. The Linux jobs
+verify the subkey against the public certificate and clean up their temporary
 signing files. Test packages from `desktop-build` remain unsigned.
+
+Installed RPM updaters use the [public certificate on GitHub `raw/main`](https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc).
+This URL is a permanent contract. Keep the file at its current path when
+rotating the key and never move or rename it.
+
+**Primary key fingerprint** — pending key ceremony. Publish the fingerprint
+here, in the install guide, and in release notes after the ceremony.
 
 1. nfpm signs each RPM while building it. The desktop repackager then
    generates Tauri updater signatures over the final desktop DEB and RPM.
