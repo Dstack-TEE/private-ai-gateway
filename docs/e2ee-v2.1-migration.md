@@ -112,8 +112,7 @@ The client:
 - never retries in another mode. An error reply is handed back unchanged; a
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
-  `/v1/responses`, and requests with `prediction`, `functions`, or
-  `function_call`, which v2.1 does not encrypt;
+  `/v1/responses`;
 - builds a new request, with a new nonce, every time it is called, so SDK
   retries are safe.
 
@@ -162,8 +161,8 @@ Where implementations go wrong:
 - **Hashing too early.** Hash the body after your SDK or framework has added
   everything it adds.
 - **Resending.** Every attempt is a new request with a new secret and nonce.
-- **Fields v2.1 does not encrypt.** Never send `prediction`, `functions`, or
-  `function_call`.
+- **Fields v2.1 does not encrypt.** Send `prediction`, `functions`, and
+  `function_call` unchanged: they travel readable, bound by the body digest.
 
 To test it, fix your random inputs to the values in the
 [v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21) and reproduce
@@ -300,7 +299,8 @@ V2.1 encrypts listed fields; it does not encrypt the whole HTTP message. See
 - Only the listed content fields are encrypted. Roles, message count, model,
   sampling parameters, tool definitions, usage counts, ciphertext lengths, and
   every other member stay readable, for example `suffix`, `metadata`,
-  `content_blocks`, provider error text, and response members such as
+  `content_blocks`, `prediction`, `functions`, `function_call`, provider
+  error text, and response members such as
   `reasoning_details`, `images`, or `audio.transcript`. V2.1 stops changes to
   them, not reading them; do not put private text in them.
 - The authority and path, the HTTP status, and headers are not authenticated.

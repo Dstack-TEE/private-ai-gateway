@@ -417,7 +417,8 @@ service restores it by parsing that JSON and rejects anything else with
 stays text, unlike v2's restoration rule (§5).
 
 V2.1 does not encrypt `prediction` or the deprecated `functions` and
-`function_call` members. A client MUST NOT send them under v2.1.
+`function_call` members. A client sends them readable, bound by the body
+digest (§10.8).
 
 ### 10.6 Response MAC
 
@@ -470,7 +471,8 @@ design:
 - Only the §5 and §10.5 locations are encrypted. Every other member stays
   readable: roles, message count, model, sampling parameters, tool
   definitions, usage counts, ciphertext lengths, and members such as
-  `suffix`, `metadata`, `content_blocks`, `prediction`, provider error text,
+  `suffix`, `metadata`, `content_blocks`, `prediction`, `functions`,
+  `function_call`, provider error text,
   and response members such as `reasoning_details`, `images`, or
   `audio.transcript`. The body digest and the response MAC stop changes to
   them, not reading them. Do not put private text in them.

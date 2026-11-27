@@ -110,9 +110,6 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     }
 
     const payload = parseJsonObject(await request.text(), 'request body');
-    for (const key of UNENCRYPTED_REQUEST_MEMBERS) {
-      if (key in payload) throw new E2eeError(`E2EE v2.1 does not encrypt "${key}"; remove it`);
-    }
     const ctx = await newContext(payload, endpoint);
     await sealRequestFields(payload, endpoint, ctx, await servicePublicKey);
     const digest = await sha256(canonicalJson(payload));
@@ -176,9 +173,6 @@ async function newContext(payload: Record<string, unknown>, endpoint: Endpoint):
   };
 }
 
-/** Request members v2.1 leaves readable that can carry user content (§10.5). */
-const UNENCRYPTED_REQUEST_MEMBERS = ['prediction', 'functions', 'function_call'];
-
 function endpointOf(pathname: string): Endpoint | undefined {
   if (pathname.endsWith('/chat/completions')) return 'chat';
   if (pathname.endsWith('/completions')) return 'completions';
@@ -208,9 +202,6 @@ async function sealRequestFields(
     if (!Array.isArray(messages)) throw new E2eeError('chat request has no "messages" array');
     for (const [m, message] of messages.entries()) {
       if (!isObject(message)) continue;
-      if ('function_call' in message) {
-        throw new E2eeError('E2EE v2.1 does not encrypt "function_call"; use tool_calls');
-      }
       // Whole content is the JSON encoding of the content value (§10.5).
       if (typeof message.content === 'string' || Array.isArray(message.content)) {
         message.content = await sealField(`messages.${m}.content`, JSON.stringify(message.content));

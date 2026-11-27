@@ -350,6 +350,25 @@ test('the caller\'s request options reach the underlying fetch', async () => {
   assert.equal(sent?.signal.aborted, true);
 });
 
+test('members v2.1 does not encrypt are sent readable, not refused', async () => {
+  const seen: Seen[] = [];
+  const e2eeFetch = createE2eeFetch({ transcript: verified(), fetch: fakeService(chatReply, seen) });
+  const extra = {
+    prediction: { type: 'content', content: 'draft' },
+    functions: [{ name: 'lookup', parameters: {} }],
+    function_call: 'auto',
+  };
+  const message = { role: 'assistant', content: null, function_call: { name: 'lookup', arguments: '{}' } };
+  const response = await e2eeFetch('https://relay.example/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({ model: 'demo-model', messages: [message], ...extra }),
+  });
+  assert.equal(response.status, 200);
+  const [{ plaintext }] = seen as [Seen];
+  assert.deepEqual({ prediction: plaintext.prediction, functions: plaintext.functions, function_call: plaintext.function_call }, extra);
+  assert.deepEqual((plaintext.messages as unknown[])[0], message);
+});
+
 test('embeddings expect buffered JSON even when the request sets stream', async () => {
   const e2eeFetch = createE2eeFetch({
     transcript: verified(),
@@ -391,7 +410,7 @@ test('the MAC covers readable members: a relay cannot rename a tool call', async
   await assert.rejects(ask(renamed), /MAC/);
 });
 
-test('fails closed on uncovered endpoints, unencrypted members, and anything not v2.1', async () => {
+test('fails closed on uncovered endpoints and anything not v2.1', async () => {
   const passthrough = createE2eeFetch({
     transcript: verified(),
     fetch: async (input, init) => new Response(`${init?.method ?? new Request(input).method}`),
@@ -401,8 +420,6 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
     passthrough('https://relay.example/v1/responses', { method: 'POST', body: '{"model":"m"}' }),
     E2eeError,
   );
-  await assert.rejects(ask(passthrough, { prediction: { type: 'content', content: 'secret' } }), E2eeError);
-  await assert.rejects(ask(passthrough, { functions: [] }), E2eeError);
 
   const forged = JSON.stringify({ id: 'x', choices: [{ index: 0, message: { content: 'FORGED' } }] });
   const reply = (body: string, headers: Record<string, string>) =>
