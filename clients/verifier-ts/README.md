@@ -62,7 +62,9 @@ evidence) exactly as observed.
   and decrypts their responses, buffered or streamed. Give it a VERIFIED
   `verifyService` transcript made with `acceptedComposeHashes` and
   `channel: { e2ee: E2EE_V2_1_X25519 }`, and pass it as the `fetch` of an
-  OpenAI-compatible SDK.
+  OpenAI-compatible SDK. Sends throw `E2eeReverifyError` once the keyset
+  expires or a response names another `X-ACI-Keyset-Digest`; verify again and
+  create a new fetch.
   It refuses other POST endpoints and never falls back to v2, the legacy
   scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).

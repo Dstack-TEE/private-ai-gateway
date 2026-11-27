@@ -52,10 +52,10 @@ take it from an attestation report it verified itself:
   between the client and the gateway.
 - Fetching the report through your own API is fine once it is pinned: a relay
   can neither forge the quote nor remove the v2.1 key from it.
-
 - Pass `channel: { e2ee: E2EE_V2_1_X25519 }`. Encrypting to the attested key
   binds the channel for check 6, so relay and browser clients need not observe
-  the gateway's TLS certificate. The binding holds only for requests sent
+  the gateway's TLS certificate. Check 6 passes this way only with
+  `acceptedComposeHashes` set. The binding holds only for requests sent
   through `createE2eeFetch`, which refuses any other transcript.
 
 To build this check yourself, see [Verifier: write your own](#verifier-write-your-own).
@@ -166,6 +166,10 @@ Where implementations go wrong:
 - **Canonical JSON in JavaScript.** Objects list integer-like keys first, for
   example `logit_bias` token ids, so sorting keys and rebuilding an object
   gives the wrong order. Write the members out directly.
+- **Canonical JSON outside JavaScript.** JCS writes numbers the way
+  ECMAScript does, and the response MAC is over JCS. A gateway `usage.cost` of
+  4.5e-06 must be written `0.0000045`; a plain JSON dump fails the MAC. Use an
+  RFC 8785 library.
 - **Hashing too early.** Hash the body after your SDK or framework has added
   everything it adds.
 - **Resending.** Every attempt is a new request with a new secret and nonce.
@@ -274,6 +278,19 @@ and `usage`.
 3. Ship clients that use v2.1.
 4. When no client sends `X-Signing-Algo` any more, stop accepting it at your
    API.
+
+### Behavior changes for existing requests
+
+Well-formed plaintext, v2, and legacy requests behave as before. Two malformed
+cases now fail differently:
+
+- An `X-Signing-Algo` that is not visible ASCII counts as absent, as before,
+  so the request goes through the `X-E2EE-Version` gate. With a version the
+  gateway does not advertise it gets the gate's `e2ee_invalid_version`
+  message (same status and type), and a gateway with E2EE disabled refuses
+  it instead of running it as v2.
+- A request whose only E2EE header is `X-E2EE-Request-Key` is refused with
+  `e2ee_header_missing` instead of being forwarded as plaintext.
 
 ## Errors you may see
 

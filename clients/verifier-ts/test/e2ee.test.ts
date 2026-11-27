@@ -466,6 +466,25 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
     ),
   });
   await assert.rejects((await ask(spliced, { stream: true })).text(), /another response/);
+
+  // A mid-stream error event without an id still fails, with its error.
+  const failed = createE2eeFetch({
+    transcript: transcript(),
+    fetch: fakeService(
+      () => ({
+        contentType: 'text/event-stream',
+        body: [
+          { id: 's', choices: [{ index: 0, delta: { content: 'a' } }] },
+          { error: { type: 'upstream_error', message: 'upstream failed' } },
+        ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      }),
+      [],
+    ),
+  });
+  await assert.rejects(
+    (await ask(failed, { stream: true })).text(),
+    (err: unknown) => err instanceof E2eeError && /error event: upstream_error: upstream failed/.test(err.message),
+  );
 });
 
 // ---- Published streamed vector and the streams a client must reject ----------
@@ -526,6 +545,25 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   // The same buffered object opens when the request did not ask for a stream.
   const body = await (await openResponse(served(buffered, 'application/json'), 'chat', await vectorContext(false))).json() as any;
   assert.equal(body.choices[0].message.content, 'plain-answer');
+});
+
+test('a client that ignores e2ee_seq still verifies and opens the published stream', async () => {
+  // The pre-hardening v2.1 client: remove only e2ee_mac, check it over the rest
+  // (e2ee_seq included), then decrypt. The current gateway's stream must pass.
+  const client = await x25519FromSeed(0x04);
+  const contents = [];
+  for (const event of [EVENT_1, EVENT_2]) {
+    const { e2ee_mac: mac, ...rest } = JSON.parse(event);
+    assert.equal(JSON.parse(await withMac(rest, SECRET)).e2ee_mac, mac);
+    const content = rest.choices[0].delta.content;
+    if (content === undefined) continue;
+    const aad = canonicalJson({
+      algo: E2EE_V2_1_X25519, field: 'choices.0.delta.content', id: rest.id, model: 'demo-model',
+      nonce: NONCE, purpose: 'aci.e2ee.response.v2.1', ts: 1_750_000_000,
+    });
+    contents.push(dec.decode(await openBytes(client.privateKey, content, aad, SECRET, FIELD_INFO)));
+  }
+  assert.deepEqual(contents, ['Hello']);
 });
 
 test('the request allowlist is the one the spec publishes', () => {

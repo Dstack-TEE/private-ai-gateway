@@ -502,7 +502,15 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
         delete payload[SEQ_MEMBER];
         nextSeq += 1;
         streamId ??= payload.id;
-        if (payload.id !== streamId) throw new E2eeError('stream event belongs to another response');
+        if (payload.id !== streamId) {
+          // An in-band error event (the gateway's MAC'd failure report) ends
+          // the stream; surface its error instead of the id mismatch.
+          if (isObject(payload.error)) {
+            const { type, message } = payload.error;
+            throw new E2eeError(`stream ended with an error event: ${String(type ?? 'error')}: ${String(message ?? '')}`);
+          }
+          throw new E2eeError('stream event belongs to another response');
+        }
         rendered = JSON.stringify(payload);
       }
       controller.enqueue(encoder.encode(`data: ${rendered}\n\n`));
