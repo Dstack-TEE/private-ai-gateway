@@ -274,7 +274,8 @@ a different status.
 | Type | Status | Meaning |
 | --- | --- | --- |
 | `e2ee_header_missing` | 400 | Some but not all required headers are present: five for v2, six for v2.1. |
-| `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, the service does not terminate that version, or a v2 request carries `X-E2EE-Request-Key`. |
+| `e2ee_invalid_header` | 400 | v2.1: an E2EE request header is repeated or not visible ASCII. |
+| `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, the service does not terminate that version, or a v2 or legacy request carries `X-E2EE-Request-Key`. |
 | `e2ee_invalid_public_key` | 400 | A supplied public key is not valid for the selected suite. |
 | `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
 | `e2ee_invalid_nonce` | 400 | `X-E2EE-Nonce` is not exactly 64 hexadecimal characters. |
@@ -301,8 +302,8 @@ carries a MAC keyed from it. Without the secret, an intermediary cannot:
 - downgrade the request to v2, because fields sealed under v2.1 do not open
   under the v2 key derivation.
 
-It can still drop, repeat, or reorder whole SSE events, or end a stream early.
-The receipt detects these (§8, §10.7).
+V2.1 protects listed fields and the integrity of the JSON body, not the whole
+HTTP message. §10.8 lists what it leaves readable or unauthenticated.
 
 ### 10.1 Keys and selection
 
@@ -334,7 +335,12 @@ A v2.1 request sends the five §3.1 headers, with `X-E2EE-Version: 2.1` and
 | --- | --- |
 | `X-E2EE-Request-Key` | The sealed request secret and body digest (§10.3), in the §4 field encoding. |
 
-A v2 request MUST NOT send `X-E2EE-Request-Key`.
+A v2 request MUST NOT send `X-E2EE-Request-Key`; the service refuses a v2 or
+legacy request that carries it, whatever its value, with
+`e2ee_invalid_version`. For a v2.1 request (no `X-Signing-Algo`,
+`X-E2EE-Version: 2.1`) the service refuses a repeated or non-visible-ASCII
+E2EE header with `e2ee_invalid_header`, so a malformed header cannot change
+the request's mode. V2 and legacy requests read headers as before v2.1.
 
 ### 10.3 Request key
 
@@ -457,18 +463,38 @@ Receipts follow §8 unchanged.
 
 ### 10.8 Limits
 
-- Structure and metadata stay readable: roles, message count, model, sampling
-  parameters, tool definitions, usage counts, and ciphertext lengths. The body
-  digest and the response MAC stop changes to them, not reading them.
-- A stream can still lose, repeat, or reorder whole events, or end early. The
-  receipt's `response.returned.body_hash` covers the exact stream (§8), so
-  detecting this takes a receipt check over the raw bytes received.
+V2.1 is field-level encryption with a body digest and a response MAC. It
+does not protect the whole HTTP message, and these limits are inherent to that
+design:
+
+- Only the §5 and §10.5 locations are encrypted. Every other member stays
+  readable: roles, message count, model, sampling parameters, tool
+  definitions, usage counts, ciphertext lengths, and members such as
+  `suffix`, `metadata`, `content_blocks`, `prediction`, provider error text,
+  and response members such as `reasoning_details`, `images`, or
+  `audio.transcript`. The body digest and the response MAC stop changes to
+  them, not reading them. Do not put private text in them.
+- The authority and path, the HTTP status, and all headers are not
+  authenticated. Error responses carry no MAC (§10.6).
+- The body digest covers JCS, which normalizes numbers: `1`, `1.0`, and `1e0`
+  hash alike, so an intermediary can rewrite one as another undetected.
+- A stream can still lose, repeat, or reorder whole events, or end early;
+  events carry no sequence number. The receipt's `response.returned.body_hash`
+  covers the exact stream (§8), so detecting this takes a receipt check over
+  the raw bytes received.
+- Ciphertext is hex, so each encrypted field roughly doubles in size, plus a
+  fixed overhead per field.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still
   cannot read the new reply.
 - The service key is long-lived. Anyone who later obtains it can open recorded
   request keys and requests. Replies also need the client's private key.
+
+A future version is expected to encrypt the whole request and response body
+instead, with HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180)) or
+Oblivious HTTP ([RFC 9458](https://www.rfc-editor.org/rfc/rfc9458)), which
+removes the field-level limits above.
 
 ## 11. Protocol constants
 

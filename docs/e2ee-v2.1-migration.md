@@ -275,21 +275,51 @@ and `usage`.
 | `e2ee_decryption_failed` | `X-Client-Pub-Key` or `X-E2EE-Request-Key` changed in transit, or a field was not encrypted. |
 | `e2ee_header_missing` | A header was dropped in transit. |
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
-| `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
+| `e2ee_invalid_header` | A v2.1 request repeated an E2EE header or sent one that is not visible ASCII. |
+| `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 or legacy request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |
 
 On the client side, `E2eeError` from the SDK means a successful response did
 not verify: something between the client and the gateway changed it.
 
+## Behavior changes
+
+Plaintext, v2, and legacy requests behave as before, except:
+
+- A v2 or legacy request that carries `X-E2EE-Request-Key`, whatever its
+  value, is refused with `e2ee_invalid_version`, and so is a request whose
+  only E2EE header is `X-E2EE-Request-Key`.
+- A v2.1 request (no `X-Signing-Algo`, `X-E2EE-Version: 2.1`) with a repeated
+  or non-visible-ASCII E2EE header is refused with `e2ee_invalid_header`.
+
 ## Limits
 
-- Roles, message count, model, sampling parameters, tool definitions, usage
-  counts, and ciphertext lengths stay readable. V2.1 stops changes to them, not
-  reading them.
+V2.1 encrypts listed fields; it does not encrypt the whole HTTP message. See
+[spec §10.8](../spec/e2ee-v2.md#108-limits). In short:
+
+- Only the listed content fields are encrypted. Roles, message count, model,
+  sampling parameters, tool definitions, usage counts, ciphertext lengths, and
+  every other member stay readable, for example `suffix`, `metadata`,
+  `content_blocks`, provider error text, and response members such as
+  `reasoning_details`, `images`, or `audio.transcript`. V2.1 stops changes to
+  them, not reading them; do not put private text in them.
+- The authority and path, the HTTP status, and headers are not authenticated.
+- JCS normalizes numbers, so rewriting `1` as `1.0` is not detected.
 - A stream can still lose, repeat, or reorder whole events, or end early, for
   example dropping the event that carries " not". The signed receipt's
   `response.returned.body_hash` covers the exact stream, but the SDK does not
   check receipts, so on its own it does not detect this.
+- Ciphertext is hex, so encrypted fields roughly double the request size.
+- The SDK checks the transcript once, when you create the client. It does not
+  re-check the keyset's `not_after` or a changed `X-ACI-Keyset-Digest` later:
+  run `verifyService` again and create a new client before the keyset expires
+  or when the gateway rotates it.
+- The decrypted `Response` keeps the served `content-type`; the SDK only
+  checks that it matches the request kind (SSE for `stream: true`, JSON
+  otherwise; always JSON for embeddings).
 - Replay protection lives in the gateway process. A gateway restart inside the
   5-minute window lets an earlier request run again, though its reply stays
   unreadable to the intermediary.
+- A future version is expected to encrypt the whole body with HPKE
+  (RFC 9180) or Oblivious HTTP (RFC 9458), which removes these field-level
+  limits.
