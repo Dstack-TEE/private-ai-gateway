@@ -141,7 +141,6 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     }
 
     const payload = parseJsonObject(await request.text(), 'request body');
-    checkRequestMembers(payload, endpoint);
     const ctx = await newContext(payload);
     await sealRequestFields(payload, endpoint, ctx, await servicePublicKey);
     const digest = await sha256(canonicalJson(payload));
@@ -213,85 +212,6 @@ async function newContext(payload: Record<string, unknown>): Promise<RequestCont
   };
 }
 
-/**
- * The v2.1 request allowlist (§10.5, `spec/e2ee-v2.1-request-members.json`):
- * the members v2.1 encrypts plus readable parameters the body digest binds.
- * Not part of the package API.
- */
-export const REQUEST_MEMBERS = {
-  chat: [
-    'messages', 'model', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
-    'temperature', 'top_p', 'top_k', 'min_p', 'frequency_penalty', 'presence_penalty',
-    'repetition_penalty', 'logit_bias', 'logprobs', 'top_logprobs', 'seed', 'stop', 'n',
-    'response_format', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort',
-    'reasoning', 'user', 'provider',
-  ],
-  completions: [
-    'prompt', 'model', 'stream', 'stream_options', 'max_tokens', 'temperature', 'top_p', 'top_k',
-    'min_p', 'frequency_penalty', 'presence_penalty', 'repetition_penalty', 'logit_bias',
-    'logprobs', 'seed', 'stop', 'n', 'user', 'provider',
-  ],
-  embeddings: ['input', 'model', 'encoding_format', 'dimensions', 'user', 'provider'],
-  message: ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'reasoning', 'reasoning_content'],
-  tool_call: ['id', 'type', 'function', 'index'],
-  tool_call_function: ['name', 'arguments'],
-} as const;
-
-/**
- * Throw before sending anything v2.1 would leave unprotected: a member off the
- * allowlist, a non-string reasoning or arguments value, or a token-id prompt.
- */
-function checkRequestMembers(payload: Record<string, unknown>, endpoint: Endpoint): void {
-  only(payload, REQUEST_MEMBERS[endpoint], '');
-  if (endpoint !== 'chat') {
-    const key = endpoint === 'completions' ? 'prompt' : 'input';
-    const value = payload[key];
-    if (typeof value === 'string') return;
-    if (!Array.isArray(value)) refuseMember(key);
-    const i = value.findIndex((item) => typeof item !== 'string');
-    if (i >= 0) refuseMember(`${key}.${i}`);
-    return;
-  }
-  const messages = payload.messages;
-  if (!Array.isArray(messages)) refuseMember('messages');
-  for (const [m, message] of messages.entries()) {
-    const path = `messages.${m}`;
-    if (!isObject(message)) refuseMember(path);
-    only(message, REQUEST_MEMBERS.message, path);
-    // Content is sealed whole, as its JSON: a string, an array, or null.
-    if (!Array.isArray(message.content)) stringOrNull(message, 'content', path);
-    stringOrNull(message, 'reasoning', path);
-    stringOrNull(message, 'reasoning_content', path);
-    if (message.tool_calls === undefined || message.tool_calls === null) continue;
-    if (!Array.isArray(message.tool_calls)) refuseMember(`${path}.tool_calls`);
-    for (const [t, call] of message.tool_calls.entries()) {
-      const callPath = `${path}.tool_calls.${t}`;
-      if (!isObject(call)) refuseMember(callPath);
-      only(call, REQUEST_MEMBERS.tool_call, callPath);
-      const fn = call.function;
-      if (fn === undefined || fn === null) continue;
-      if (!isObject(fn)) refuseMember(`${callPath}.function`);
-      only(fn, REQUEST_MEMBERS.tool_call_function, `${callPath}.function`);
-      stringOrNull(fn, 'arguments', `${callPath}.function`);
-    }
-  }
-}
-
-function refuseMember(path: string): never {
-  throw new E2eeError(`E2EE v2.1 does not protect request member "${path}"; remove it`);
-}
-
-/** A member whose value is null is absent (§10.5), as in a reply sent back as history. */
-function only(object: Record<string, unknown>, allowed: readonly string[], path: string): void {
-  const extra = Object.keys(object).find((key) => object[key] !== null && !allowed.includes(key));
-  if (extra !== undefined) refuseMember(path === '' ? extra : `${path}.${extra}`);
-}
-
-function stringOrNull(object: Record<string, unknown>, key: string, path: string): void {
-  const value = object[key];
-  if (value !== undefined && value !== null && typeof value !== 'string') refuseMember(`${path}.${key}`);
-}
-
 function endpointOf(pathname: string): Endpoint | undefined {
   if (pathname.endsWith('/chat/completions')) return 'chat';
   if (pathname.endsWith('/completions')) return 'completions';
@@ -301,6 +221,11 @@ function endpointOf(pathname: string): Endpoint | undefined {
 
 // ---- Request fields (§5, §10.5) ---------------------------------------------
 
+/**
+ * Encrypt every request content location in place. Every other member is sent
+ * as it is: readable, but bound by the body digest (§10.3). Non-string items at
+ * a string location, such as token ids in `prompt`, pass through as in v2 (§5).
+ */
 async function sealRequestFields(
   payload: Record<string, unknown>,
   endpoint: Endpoint,
@@ -315,28 +240,32 @@ async function sealRequestFields(
       ctx.secret,
       FIELD_INFO,
     );
+  const sealString = async (container: Record<string, unknown>, key: string, field: string) => {
+    const value = container[key];
+    if (typeof value === 'string') container[key] = await sealField(field, value);
+  };
+  // Whole content is the JSON encoding of its value, whatever its form (§10.5).
+  const sealWhole = async (container: Record<string, unknown>, field: string) => {
+    const value = container.content;
+    if (value !== undefined && value !== null) container.content = await sealField(field, JSON.stringify(value));
+  };
 
   if (endpoint === 'chat') {
-    const messages = payload.messages;
-    if (!Array.isArray(messages)) throw new E2eeError('chat request has no "messages" array');
+    if (isObject(payload.prediction)) await sealWhole(payload.prediction, 'prediction.content');
+    const messages = Array.isArray(payload.messages) ? payload.messages : [];
     for (const [m, message] of messages.entries()) {
       if (!isObject(message)) continue;
-      // Whole content is the JSON encoding of the content value (§10.5).
-      if (typeof message.content === 'string' || Array.isArray(message.content)) {
-        message.content = await sealField(`messages.${m}.content`, JSON.stringify(message.content));
+      await sealWhole(message, `messages.${m}.content`);
+      // Members a client echoes back from an earlier reply (§10.5).
+      for (const key of ['reasoning', 'reasoning_content', 'refusal']) {
+        await sealString(message, key, `messages.${m}.${key}`);
       }
-      // Reasoning a client echoes back from an earlier reply (§10.5).
-      for (const key of ['reasoning', 'reasoning_content']) {
-        const value = message[key];
-        if (typeof value === 'string') message[key] = await sealField(`messages.${m}.${key}`, value);
+      if (isObject(message.function_call)) {
+        await sealString(message.function_call, 'arguments', `messages.${m}.function_call.arguments`);
       }
       for (const [t, call] of toolCalls(message)) {
-        const fn = call.function;
-        if (isObject(fn) && typeof fn.arguments === 'string') {
-          fn.arguments = await sealField(
-            `messages.${m}.tool_calls.${t}.function.arguments`,
-            fn.arguments,
-          );
+        if (isObject(call.function)) {
+          await sealString(call.function, 'arguments', `messages.${m}.tool_calls.${t}.function.arguments`);
         }
       }
     }
@@ -348,9 +277,11 @@ async function sealRequestFields(
   if (typeof value === 'string') {
     payload[key] = await sealField(key, value);
   } else if (Array.isArray(value)) {
-    // Every item is a string (checkRequestMembers).
-    for (const [i, item] of value.entries()) value[i] = await sealField(`${key}.${i}`, item as string);
+    for (const [i, item] of value.entries()) {
+      if (typeof item === 'string') value[i] = await sealField(`${key}.${i}`, item);
+    }
   }
+  if (endpoint === 'completions') await sealString(payload, 'suffix', 'suffix');
 }
 
 // ---- Responses (§5, §10.5) --------------------------------------------------
@@ -436,8 +367,12 @@ async function openResponseFields(
     }
     return;
   }
+  // vLLM token echoes repeat the prompt or the output (§10.5).
+  for (const key of ['prompt_token_ids', 'prompt_logprobs']) await openJson(payload, key, key);
   for (const [i, choice] of indexed(payload.choices, 'choices')) {
-    await openJson(choice, 'logprobs', `choices.${i}.logprobs`);
+    for (const key of ['logprobs', 'token_ids', 'prompt_token_ids', 'prompt_logprobs']) {
+      await openJson(choice, key, `choices.${i}.${key}`);
+    }
     if (endpoint === 'completions') {
       await open(choice, 'text', `choices.${i}.text`);
       continue;
@@ -449,8 +384,12 @@ async function openResponseFields(
     for (const key of ['content', 'reasoning', 'reasoning_content', 'refusal']) {
       await open(message, key, `${prefix}.${key}`);
     }
-    if (!ctx.stream && isObject(message.audio)) {
-      await open(message.audio, 'data', `${prefix}.audio.data`);
+    await openJson(message, 'annotations', `${prefix}.annotations`);
+    if (isObject(message.audio)) {
+      for (const key of ['data', 'transcript']) await open(message.audio, key, `${prefix}.audio.${key}`);
+    }
+    if (isObject(message.function_call)) {
+      await open(message.function_call, 'arguments', `${prefix}.function_call.arguments`);
     }
     for (const [t, call] of toolCalls(message)) {
       if (isObject(call.function)) {

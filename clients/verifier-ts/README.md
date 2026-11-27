@@ -65,8 +65,10 @@ evidence) exactly as observed.
   OpenAI-compatible SDK. Sends throw `E2eeReverifyError` once the keyset
   expires or a response names another `X-ACI-Keyset-Digest`; verify again and
   create a new fetch.
-  It refuses other POST endpoints and never falls back to v2, the legacy
-  scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
+  It encrypts every content location and sends every other request member
+  as written, readable but bound by the body digest, so keep private text out
+  of members such as `metadata` and `user`. It refuses other POST endpoints
+  and never falls back to v2, the legacy scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
 
 A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.

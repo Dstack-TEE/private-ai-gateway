@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createE2eeFetch, E2eeError, E2eeReverifyError, E2EE_V2_1_X25519, fromHex, sha256Hex, toHex } from '../src/index.js';
 import type { ReportTranscript, WorkloadKeyset } from '../src/index.js';
-import { readFileSync } from 'node:fs';
-import { canonicalJson, openBytes, openResponse, REQUEST_MEMBERS, seal } from '../src/e2ee.js';
+import { canonicalJson, openBytes, openResponse, seal } from '../src/e2ee.js';
 import type { RequestContext } from '../src/e2ee.js';
 
 // Constants from spec/e2ee-v2-test-vectors.md, "Version 2.1".
@@ -197,15 +196,28 @@ function fakeService(
       dec.decode(
         await openBytes(service.privateKey, ciphertext, aad({ purpose: 'aci.e2ee.request.v2.1', model: body.model, field, nonce, ts }), secret, FIELD_INFO),
       );
+    const openString = async (container: Record<string, any> | undefined, key: string, field: string) => {
+      if (typeof container?.[key] === 'string') container[key] = await open(field, container[key]);
+    };
+    if (typeof body.prediction?.content === 'string') {
+      body.prediction.content = JSON.parse(await open('prediction.content', body.prediction.content));
+    }
     for (const [m, message] of (body.messages ?? []).entries()) {
       if (typeof message.content === 'string') message.content = JSON.parse(await open(`messages.${m}.content`, message.content));
-      if (typeof message.reasoning_content === 'string') {
-        message.reasoning_content = await open(`messages.${m}.reasoning_content`, message.reasoning_content);
-      }
+      for (const key of ['reasoning', 'reasoning_content', 'refusal']) await openString(message, key, `messages.${m}.${key}`);
+      await openString(message.function_call, 'arguments', `messages.${m}.function_call.arguments`);
       for (const [t, call] of (message.tool_calls ?? []).entries()) {
-        call.function.arguments = await open(`messages.${m}.tool_calls.${t}.function.arguments`, call.function.arguments);
+        await openString(call.function, 'arguments', `messages.${m}.tool_calls.${t}.function.arguments`);
       }
     }
+    for (const key of ['prompt', 'input']) {
+      if (Array.isArray(body[key])) {
+        for (const [i, item] of body[key].entries()) await openString(body[key], String(i), `${key}.${i}`);
+      } else {
+        await openString(body, key, key);
+      }
+    }
+    await openString(body, 'suffix', 'suffix');
     seen.push({ headers, plaintext: body });
 
     const clientKey = await subtle.importKey('raw', fromHex(client) as BufferSource, { name: 'X25519' }, true, []);
@@ -231,6 +243,18 @@ async function sealSse(
       const target = choice[part];
       if (typeof target?.content === 'string') {
         target.content = await sealResponse(payload.id, `choices.${choice.index}.${part}.content`, target.content);
+      }
+      const prefix = `choices.${choice.index}.${part}`;
+      for (const key of ['refusal', 'audio.data', 'audio.transcript']) {
+        const [outer, inner] = key.includes('.') ? [target?.audio, key.split('.')[1]!] : [target, key];
+        if (typeof outer?.[inner] === 'string') outer[inner] = await sealResponse(payload.id, `${prefix}.${key}`, outer[inner]);
+      }
+      if (target?.annotations !== undefined) {
+        target.annotations = await sealResponse(payload.id, `${prefix}.annotations`, JSON.stringify(target.annotations));
+      }
+      if (typeof choice.text === 'string') choice.text = await sealResponse(payload.id, `choices.${choice.index}.text`, choice.text);
+      if (choice.token_ids !== undefined) {
+        choice.token_ids = await sealResponse(payload.id, `choices.${choice.index}.token_ids`, JSON.stringify(choice.token_ids));
       }
       for (const [t, call] of (target?.tool_calls ?? []).entries()) {
         const index = call.index ?? t;
@@ -395,7 +419,7 @@ test('sends stop once the keyset expires or the service names another keyset', a
   assert.deepEqual(sends, [DIGEST, DIGEST, renewed]);
 });
 
-test('fails closed on uncovered endpoints, unencrypted members, and anything not v2.1', async () => {
+test('fails closed on uncovered endpoints and anything not v2.1', async () => {
   const passthrough = createE2eeFetch({
     transcript: transcript(),
     fetch: async (input, init) => new Response(`${init?.method ?? new Request(input).method}`),
@@ -405,32 +429,6 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
     passthrough('https://relay.example/v1/responses', { method: 'POST', body: '{"model":"m"}' }),
     E2eeError,
   );
-  // Only what v2.1 protects is sent (§10.5).
-  for (const extra of [
-    { prediction: { type: 'content', content: 'secret' } },
-    { functions: [] },
-    { modalities: ['text', 'audio'], audio: { voice: 'alloy', format: 'wav' } },
-    { messages: [{ role: 'user', content: 'hi', audio: { id: 'a' } }] },
-    { messages: [{ role: 'assistant', tool_calls: [{ id: 'c', function: { name: 'f', arguments: '{}', strict: true } }] }] },
-  ]) {
-    await assert.rejects(ask(passthrough, extra), /does not protect request member/);
-  }
-  // A null `function` counts as absent, like an omitted one (§10.5): both are sent.
-  const sent = createE2eeFetch({
-    transcript: transcript(),
-    fetch: async () => {
-      throw new Error('sent');
-    },
-  });
-  for (const call of [{ id: 'c' }, { id: 'c', function: null }]) {
-    await assert.rejects(ask(sent, { messages: [{ role: 'assistant', tool_calls: [call] }] }), /^Error: sent$/);
-  }
-  const post = (path: string, body: Record<string, unknown>) =>
-    passthrough(`https://relay.example${path}`, { method: 'POST', body: JSON.stringify({ model: 'm', ...body }) });
-  await assert.rejects(post('/v1/completions', { prompt: 'def f(', suffix: 'return x' }), /"suffix"/);
-  await assert.rejects(post('/v1/completions', { prompt: [[1, 2]] }), /"prompt.0"/);
-  await assert.rejects(post('/v1/embeddings', { input: ['a', 3] }), /"input.1"/);
-
   const forged = JSON.stringify({ id: 'x', choices: [{ index: 0, message: { content: 'FORGED' } }] });
   const reply = (body: string, headers: Record<string, string>) =>
     createE2eeFetch({ transcript: transcript(), fetch: async () => new Response(body, { headers }) });
@@ -566,7 +564,74 @@ test('a client that ignores e2ee_seq still verifies and opens the published stre
   assert.deepEqual(contents, ['Hello']);
 });
 
-test('the request allowlist is the one the spec publishes', () => {
-  const spec = JSON.parse(readFileSync(new URL('../../../../spec/e2ee-v2.1-request-members.json', import.meta.url), 'utf8'));
-  assert.deepEqual(spec, REQUEST_MEMBERS);
+/** A fake service that also records the exact bodies sent on the wire. */
+function recorded(reply: Parameters<typeof fakeService>[0]) {
+  const seen: Seen[] = [];
+  const wire: string[] = [];
+  const service = fakeService(reply, seen);
+  const fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    wire.push(String(init?.body));
+    return service(input, init);
+  };
+  return { e2eeFetch: createE2eeFetch({ transcript: transcript(), fetch }), seen, wire };
+}
+
+test('every member a plaintext request can carry is sent, its content encrypted', async () => {
+  const { e2eeFetch, seen, wire } = recorded(chatReply);
+  const request = {
+    model: 'demo-model',
+    thinking: { type: 'enabled', budget_tokens: 512 },
+    chat_template_kwargs: { enable_thinking: false },
+    include_reasoning: true,
+    prompt_cache_key: 'conversation-7',
+    metadata: { tenant: 't-1' },
+    x_vendor_unknown: [1, { a: null }],
+    functions: [{ name: 'lookup', parameters: {} }],
+    prediction: { type: 'content', content: 'private draft' },
+    messages: [
+      { role: 'user', content: 'private question' },
+      // A reply echoed back as history by the OpenAI SDK.
+      {
+        role: 'assistant', content: null, annotations: [], audio: null,
+        refusal: 'private refusal', function_call: { name: 'lookup', arguments: '{"private":1}' },
+      },
+    ],
+  };
+  const response = await e2eeFetch('https://relay.example/v1/chat/completions', { method: 'POST', body: JSON.stringify(request) });
+  assert.equal(response.status, 200);
+  assert.deepEqual(seen[0]!.plaintext, request);
+  assert.ok(!wire[0]!.includes('private'));
+  assert.ok(wire[0]!.includes('"prompt_cache_key":"conversation-7"'));
+});
+
+test('completions encrypt the suffix and pass a token-id prompt through', async () => {
+  const { e2eeFetch, seen, wire } = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ id: 'cmpl-1', choices: [{ index: 0, text: 'x', token_ids: [7, 8] }] }),
+  }));
+  const post = (body: Record<string, unknown>) =>
+    e2eeFetch('https://relay.example/v1/completions', { method: 'POST', body: JSON.stringify({ model: 'demo-model', ...body }) });
+  const reply = (await (await post({ prompt: 'def private(', suffix: 'return secret' })).json()) as any;
+  assert.deepEqual(reply.choices[0], { index: 0, text: 'x', token_ids: [7, 8] });
+  assert.deepEqual(seen[0]!.plaintext, { model: 'demo-model', prompt: 'def private(', suffix: 'return secret' });
+  assert.ok(!wire[0]!.includes('private') && !wire[0]!.includes('secret'));
+
+  await post({ prompt: [[1, 2, 3], [4]] });
+  assert.deepEqual(seen[1]!.plaintext.prompt, [[1, 2, 3], [4]]);
+});
+
+test('audio, annotations, and refusals in a reply open, buffered and streamed', async () => {
+  const annotations = [{ type: 'url_citation', url_citation: { start_index: 0, end_index: 2, url: 'https://example.com/p', title: 'P' } }];
+  const generated = { refusal: 'no', annotations, audio: { id: 'a1', data: 'UklGRg==', transcript: 'spoken' } };
+  const buffered = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ id: 'chat-a', choices: [{ index: 0, message: { role: 'assistant', content: 'hi', ...generated } }] }),
+  }));
+  const message = ((await (await ask(buffered.e2eeFetch)).json()) as any).choices[0].message;
+  assert.deepEqual(message, { role: 'assistant', content: 'hi', ...generated });
+
+  const sse = `data: ${JSON.stringify({ id: 's-a', choices: [{ index: 0, delta: generated }] })}\n\ndata: [DONE]\n\n`;
+  const streamed = recorded(() => ({ contentType: 'text/event-stream', body: sse }));
+  const events = (await (await ask(streamed.e2eeFetch, { stream: true })).text()).split('\n\n').filter(Boolean);
+  assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, generated);
 });
