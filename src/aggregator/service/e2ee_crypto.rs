@@ -421,13 +421,16 @@ fn decrypt_tool_call_arguments(
     Ok(decrypted_count)
 }
 
-/// An array entry's path index: its `index` member when present, its array
-/// position otherwise (§5).
+/// An array entry's path index: its `index` member when it is a
+/// non-negative safe integer by JSON number value (so `1.0` is `1`, as a
+/// JavaScript client reads it), its array position otherwise (§5).
 fn entry_index(entry: &Value, position: usize) -> u64 {
+    const MAX_SAFE: f64 = ((1u64 << 53) - 1) as f64;
     entry
         .get("index")
-        .and_then(Value::as_u64)
-        .unwrap_or(position as u64)
+        .and_then(Value::as_f64)
+        .filter(|index| index.fract() == 0.0 && (0.0..=MAX_SAFE).contains(index))
+        .map_or(position as u64, |index| index as u64)
 }
 
 /// v2.1: encrypt `{prefix}.tool_calls.{t}.function.arguments` in place.
@@ -999,8 +1002,23 @@ pub(super) fn encrypt_response_plaintext(
 
 #[cfg(test)]
 mod tests {
-    use super::{aci_request_aad, aci_response_aad, optional_response_string};
+    use super::{aci_request_aad, aci_response_aad, entry_index, optional_response_string};
     use serde_json::json;
+
+    #[test]
+    fn entry_index_reads_json_number_value() {
+        assert_eq!(entry_index(&json!({"index": 1}), 7), 1);
+        assert_eq!(entry_index(&json!({"index": 1.0}), 7), 1);
+        for index in [
+            json!(1.5),
+            json!(-1),
+            json!(9_007_199_254_740_992u64),
+            json!("1"),
+        ] {
+            assert_eq!(entry_index(&json!({ "index": index }), 7), 7);
+        }
+        assert_eq!(entry_index(&json!({}), 7), 7);
+    }
 
     // Byte-exact expected AAD from spec/test-vectors.md §5 (X25519 suite).
     const NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";

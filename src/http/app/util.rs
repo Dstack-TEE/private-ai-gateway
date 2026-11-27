@@ -6,7 +6,8 @@ use axum::{
     response::Response,
 };
 
-use crate::aggregator::service::ReceiptOwner;
+use crate::aci::e2ee::E2EE_VERSION_V2_1;
+use crate::aggregator::service::{E2eeError, E2eeRequestParts, ReceiptOwner};
 
 use super::error_responses::{admin_not_found_response, error_response};
 use super::AppState;
@@ -84,6 +85,60 @@ pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
     ]
     .into_iter()
     .any(|name| headers.contains_key(name))
+}
+
+/// Read the E2EE request headers once, into the value both the
+/// `supported_e2ee_versions` gate and the dispatch use. `None` when the
+/// request carries none of them.
+///
+/// v2 and legacy requests read headers as before: the first value, and a
+/// value that is not visible ASCII counts as absent. A v2.1 request (no
+/// `X-Signing-Algo`, `X-E2EE-Version: 2.1`) is re-read strictly, so a
+/// repeated or malformed header cannot change its mode. Any other request
+/// carrying `X-E2EE-Request-Key` expects v2.1 protection it would not get.
+pub(super) fn e2ee_request_parts(
+    headers: &HeaderMap,
+) -> Result<Option<E2eeRequestParts<'_>>, E2eeError> {
+    if !has_e2ee_headers(headers) {
+        return Ok(None);
+    }
+    let parts = read_e2ee_headers(|name| Ok(header_str(headers, name)))?;
+    if parts.signing_algo.is_none() && parts.version == Some(E2EE_VERSION_V2_1) {
+        return read_e2ee_headers(|name| single_header(headers, name)).map(Some);
+    }
+    if headers.contains_key("x-e2ee-request-key") {
+        return Err(E2eeError::InvalidVersion);
+    }
+    Ok(Some(parts))
+}
+
+fn read_e2ee_headers<'a>(
+    read: impl Fn(&str) -> Result<Option<&'a str>, E2eeError>,
+) -> Result<E2eeRequestParts<'a>, E2eeError> {
+    Ok(E2eeRequestParts {
+        signing_algo: read("x-signing-algo")?,
+        client_public_key: read("x-client-pub-key")?,
+        model_public_key: read("x-model-pub-key")?,
+        version: read("x-e2ee-version")?,
+        nonce: read("x-e2ee-nonce")?,
+        timestamp: read("x-e2ee-timestamp")?,
+        request_key: read("x-e2ee-request-key")?,
+    })
+}
+
+/// One header value: refused when repeated or not visible ASCII.
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, E2eeError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(E2eeError::InvalidHeader);
+    }
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_| E2eeError::InvalidHeader)
 }
 
 /// Returns `Some(response)` when the caller MUST be rejected; returns

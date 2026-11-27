@@ -16,7 +16,7 @@ mod common;
 
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::Router;
 use bytes::Bytes;
 use futures_util::{stream, StreamExt};
@@ -5520,39 +5520,135 @@ async fn e2ee_v2_1_replay_is_refused() {
     assert_eq!(error_type(&replay), "e2ee_replay_detected");
 }
 
+/// A service that advertises only E2EE v2.
+fn v2_only_requester() -> Requester {
+    let keys = Arc::new(StaticKeyProvider::default());
+    let mut cfg = AciServiceConfig::for_test();
+    cfg.service_capabilities.supported_e2ee_versions = vec!["2".to_string()];
+    let service = Arc::new(
+        AciService::new(
+            keys,
+            Arc::new(StubQuoter::default()),
+            Arc::new(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE)),
+            Arc::new(InMemoryReceiptStore::default()),
+            cfg,
+            Arc::new(FixedClock(V2_1_TS)),
+        )
+        .unwrap(),
+    );
+    Requester {
+        app: build_router(service),
+    }
+}
+
 #[tokio::test]
 async fn e2ee_v2_1_is_refused_by_a_service_that_only_terminates_v2() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = X25519SecretKey::from([0x8au8; 32]);
     let nonce = hex_nonce("nonce-v2.1-unsupported");
     let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
-    let v2_only = {
-        let keys = Arc::new(StaticKeyProvider::default());
-        let mut cfg = AciServiceConfig::for_test();
-        cfg.service_capabilities.supported_e2ee_versions = vec!["2".to_string()];
-        let service = Arc::new(
-            AciService::new(
-                keys,
-                Arc::new(StubQuoter::default()),
-                Arc::new(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE)),
-                Arc::new(InMemoryReceiptStore::default()),
-                cfg,
-                Arc::new(FixedClock(V2_1_TS)),
-            )
-            .unwrap(),
-        );
-        Requester {
-            app: build_router(service),
-        }
-    };
-
-    let resp = v2_only
+    let resp = v2_only_requester()
         .post_owned_headers(
             "/v1/chat/completions",
             &serde_json::to_vec(&body).unwrap(),
             &headers,
         )
         .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_version");
+}
+
+/// POST `body` with `headers` plus raw `extra` headers appended.
+async fn post_with_raw_headers(
+    requester: &Requester,
+    body: Vec<u8>,
+    headers: &[(&'static str, String)],
+    extra: &[(&'static str, HeaderValue)],
+) -> HttpResult {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        req = req.header(*name, value);
+    }
+    for (name, value) in extra {
+        req = req.header(*name, value.clone());
+    }
+    requester.call(req.body(Body::from(body)).unwrap()).await
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_headers_that_are_repeated_or_not_ascii_are_refused_before_the_version_gate() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x8cu8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-malformed-header");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let body = serde_json::to_vec(&body).unwrap();
+
+    // A malformed `X-Signing-Algo` skips the version gate, so it must not then
+    // read as absent and let a v2-only service run the request as v2.1.
+    let not_ascii = HeaderValue::from_bytes(b"ecdsa\xff").unwrap();
+    let resp = post_with_raw_headers(
+        &v2_only_requester(),
+        body.clone(),
+        &headers,
+        &[("x-signing-algo", not_ascii)],
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_header");
+
+    let resp = post_with_raw_headers(
+        &h.requester,
+        body,
+        &headers,
+        &[("x-e2ee-version", HeaderValue::from_static("2"))],
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_header");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v2_reads_headers_as_before_but_refuses_any_request_key() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x8du8; 32]);
+
+    // A non-visible-ASCII value counts as absent and a repeated header yields
+    // its first value, as before v2.1.
+    let nonce = hex_nonce("nonce-v2-lenient-header");
+    let (body, headers) = e2ee_x25519_chat_request(&h, &client_secret, &nonce);
+    let resp = post_with_raw_headers(
+        &h.requester,
+        body,
+        &headers,
+        &[
+            (
+                "x-signing-algo",
+                HeaderValue::from_bytes(b"ecdsa\xff").unwrap(),
+            ),
+            ("x-e2ee-version", HeaderValue::from_static("2.1")),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
+
+    // A request key the header reader cannot even decode still refuses v2.
+    let nonce = hex_nonce("nonce-v2-unreadable-request-key");
+    let (body, headers) = e2ee_x25519_chat_request(&h, &client_secret, &nonce);
+    let resp = post_with_raw_headers(
+        &h.requester,
+        body,
+        &headers,
+        &[(
+            "x-e2ee-request-key",
+            HeaderValue::from_bytes(b"\xff").unwrap(),
+        )],
+    )
+    .await;
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&resp), "e2ee_invalid_version");
 }
