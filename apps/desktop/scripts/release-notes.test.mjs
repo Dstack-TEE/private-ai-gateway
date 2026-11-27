@@ -13,7 +13,7 @@ const changelog = "## [0.3.0](https://example.test/compare) (2026-09-29)\n\n### 
 async function withRelease(version, channel, run) {
   const directory = await mkdtemp(path.join(os.tmpdir(), "pap-release-notes-"));
   try {
-    for (const name of [...releaseAssetNames(version), "SHA256SUMS"]) await writeFile(path.join(directory, name), name);
+    for (const name of releaseAssetNames(version)) await writeFile(path.join(directory, name), name);
     await writeFile(path.join(directory, "latest.json"), JSON.stringify({ version, channel }));
     await run(directory);
   } finally {
@@ -37,6 +37,8 @@ test("download links lead the notes and integrity details close them", async () 
     assert.match(notes, /\| Windows x64 \| \[ZIP\]\([^)]+private-ai-proxy-cli-0\.3\.0-windows-x64\.zip\) \|/);
     assert.match(notes, /\| Linux ARM64 \| \[TAR\.GZ\].*\[DEB\].*\[RPM\].*\[ARCH\]/);
     assert.match(notes, /\[SHA-256 checksums\]\([^)]+\/desktop-v0\.3\.0\/SHA256SUMS\)/);
+    assert.match(notes, /\[OpenPGP signature\]\([^)]+\/desktop-v0\.3\.0\/SHA256SUMS\.asc\)/);
+    assert.match(notes, /\[Linux release public key\]\([^)]+\/blob\/a{40}\/apps\/desktop\/packaging\/linux-signing-key\.asc\)/);
     assert.match(notes, /Developer ID signed and notarized/);
     assert.match(notes, /Build commit: \[`aaaaaaa`\]/);
     // Updater packages are not offered as installers.

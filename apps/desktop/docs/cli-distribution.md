@@ -216,8 +216,9 @@ release; `package_only` skips the full verification.
   job places with `scripts/release-notes.mjs` between the download links
   (installers and CLI archives per platform, and the Mac App Store for stable
   versions) and the integrity details below. GitHub also lists the
-  assets, including `SHA256SUMS`. In a directory of downloaded assets,
-  `sha256sum --ignore-missing -c SHA256SUMS` checks them, and
+  assets, including `SHA256SUMS` and its OpenPGP signature `SHA256SUMS.asc`.
+  Follow the [Linux verification steps](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
+  to verify the checksum list and downloaded assets.
   `gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway` checks
   their build provenance. With `--predicate-type https://cyclonedx.org/bom` it
   checks a package's CycloneDX SBOM attestations instead.
@@ -236,6 +237,11 @@ Unsigned Windows builds are valid release artifacts but may trigger stronger
 SmartScreen warnings. macOS direct-download builds are signed with a
 Developer ID certificate and notarized.
 
+Linux release RPMs carry embedded signatures. Arch packages ship detached
+`.pkg.tar.zst.sig` files, and DEBs install the archive keyring for APT.
+See [Linux release signing](distribution.md#linux-release-signing) for the
+release order and key rotation procedure.
+
 ## Updates
 
 [Updates by installation](distribution.md#updates-by-installation) describes
@@ -247,7 +253,9 @@ AppImage installations cannot automatically change bundle type and require a
 manual migration to a native package.
 
 Arch packages use the standard `.pkg.tar.zst` format for x86_64 and aarch64.
-Install or upgrade a downloaded desktop app package with:
+Download the package and its matching `.pkg.tar.zst.sig` to the same directory
+and [trust the release key](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
+before installing or upgrading a desktop app package.
 
 ```bash
 sudo pacman -U ./private-ai-proxy-<version>-linux-<arch>.pkg.tar.zst

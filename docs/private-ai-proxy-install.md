@@ -143,6 +143,46 @@ Arch packages are published on the
 [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases)
 page. Native package managers own upgrades and removal for their installations.
 
+### Verify Linux packages
+
+Download `SHA256SUMS` and `SHA256SUMS.asc` alongside the packages. Download the
+Linux public key as `linux-signing-key.asc` from the build commit linked in
+the release notes. Check the fingerprint against your trusted copy of the
+release key before using it.
+
+```bash
+gpg --show-keys --with-fingerprint linux-signing-key.asc
+gpg --dearmor --output private-ai-proxy-archive-keyring.gpg linux-signing-key.asc
+gpgv --keyring "$PWD/private-ai-proxy-archive-keyring.gpg" SHA256SUMS.asc SHA256SUMS &&
+  sha256sum --ignore-missing --check SHA256SUMS
+```
+
+For an RPM, import the trusted key and verify the embedded package signature.
+Set `rpm_file` to the desktop or CLI filename you downloaded.
+
+```bash
+sudo rpm --import linux-signing-key.asc
+rpmkeys -Kv "$rpm_file"
+```
+
+Confirm that the signature reports `OK`, then run `sudo rpm -U "$rpm_file"`.
+
+For an Arch package, download the matching `.pkg.tar.zst.sig` into the same
+directory. Set `arch_file` to the package filename and `key_fingerprint` to
+the verified primary fingerprint. Verify the signature and add the key to
+pacman's local trust store before installing.
+
+```bash
+gpgv --keyring "$PWD/private-ai-proxy-archive-keyring.gpg" "$arch_file.sig" "$arch_file" &&
+  sudo pacman-key --add linux-signing-key.asc &&
+  sudo pacman-key --lsign-key "$key_fingerprint" &&
+  sudo pacman -U "$arch_file"
+```
+
+Use the signed checksum list to verify downloaded DEBs. The DEBs install the
+Linux release keyring at `/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg`
+for APT repository metadata verification.
+
 ## Update
 
 | Installation | How to update |

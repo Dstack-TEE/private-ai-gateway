@@ -71,10 +71,21 @@ export async function releaseSections(directory, repository, commit) {
   const integrity = [
     "## Integrity and updates",
     "",
-    `- [SHA-256 checksums](${link("SHA256SUMS")}): run \`sha256sum --ignore-missing -c SHA256SUMS\` in the download directory.`,
+  ];
+  const checksums = `[SHA-256 checksums](${link("SHA256SUMS")})`;
+  if (files.has("SHA256SUMS.asc")) {
+    const key = `https://github.com/${repository}/blob/${commit}/apps/desktop/packaging/linux-signing-key.asc`;
+    integrity.push(
+      `- Verify the [OpenPGP signature](${link("SHA256SUMS.asc")}) on ${checksums} with the [Linux release public key](${key}), then run \`sha256sum --ignore-missing -c SHA256SUMS\` in the download directory.`,
+      "- RPMs have embedded signatures. Arch packages have matching `.pkg.tar.zst.sig` assets. Both use the Linux release key.",
+    );
+  } else {
+    integrity.push(`- Run \`sha256sum --ignore-missing -c SHA256SUMS\` in the download directory to verify files against the ${checksums}.`);
+  }
+  integrity.push(
     `- Build provenance and SBOMs: \`gh attestation verify <file> --repo ${repository}\`.`,
     "- Automatic updates verify Tauri signatures before installation.",
-  ];
+  );
   if (dmg) integrity.push("- macOS desktop packages are Developer ID signed and notarized.");
   integrity.push(`- Build commit: [\`${commit.slice(0, 7)}\`](https://github.com/${repository}/commit/${commit})`);
 

@@ -92,8 +92,7 @@ export function releaseVersionParts(version) {
 // nfpm otherwise stamps entries with the time it writes each one, so an Arch
 // package's .MTREE and tar headers disagree and `pacman -Qkk` reports altered
 // files. Like GoReleaser's `mtime: "{{ .CommitDate }}"`, every entry gets
-// SOURCE_DATE_EPOCH (reproducible-builds.org) or the commit time, which also
-// makes the packages reproducible.
+// SOURCE_DATE_EPOCH (reproducible-builds.org) or the commit time.
 function packageTime() {
   const epoch = process.env.SOURCE_DATE_EPOCH?.trim()
     || execFileSync("git", ["log", "-1", "--format=%ct"], { cwd: appRoot, encoding: "utf8" }).trim();
@@ -104,7 +103,7 @@ function packageTime() {
 
 // `contents` is the package's payload in nfpm terms; `marker` a file holding
 // the owning package manager, when this format carries one.
-function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) {
+function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, signing }) {
   const definition = linuxPackages[kind];
   if (!definition) throw new Error(`Unsupported Linux package kind ${JSON.stringify(kind)}`);
   if (!packagers[packager]) throw new Error(`Unsupported Linux packager ${JSON.stringify(packager)}`);
@@ -140,6 +139,11 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     replaces: packager === "deb" ? [definition.other] : [],
     contents: [
       ...contents,
+      ...(packager === "deb" && signing ? [{
+        src: signing.keyring,
+        dst: "/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg",
+        file_info: { mode: 0o644 },
+      }] : []),
       ...(marker ? [
         { dst: markerDirectory, type: "dir" },
         { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
@@ -151,16 +155,35 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
       archlinux: { scripts: { preremove: linuxPreremove } },
     },
     deb: { compression: "xz" },
+    ...(packager === "rpm" && signing ? { rpm: { signature: { key_file: signing.keyFile, key_id: signing.keyId } } } : {}),
     archlinux: { packager: maintainer },
   };
 }
 
+async function releaseSigning() {
+  if (!process.env.RELEASE_CHANNEL) return undefined;
+  const {
+    PAP_LINUX_SIGNING_KEY_FILE: keyFile,
+    PAP_LINUX_SIGNING_KEYRING: keyring,
+    PAP_LINUX_SIGNING_FINGERPRINT: fingerprint,
+  } = process.env;
+  if (!keyFile || !(await stat(keyFile).catch(() => undefined))?.isFile() || !/^[0-9A-F]{40}$/.test(fingerprint ?? "")) {
+    throw new Error("Missing prepared Linux release signing key. Set LINUX_SIGNING_KEY in desktop-release.");
+  }
+  if (!keyring || !(await stat(keyring).catch(() => undefined))?.isFile()) {
+    throw new Error("Missing Linux release keyring. Prepare it from packaging/linux-signing-key.asc.");
+  }
+  // nfpm accepts a 64-bit OpenPGP key ID, the last 16 digits of a v4 fingerprint.
+  return { keyFile, keyring, keyId: fingerprint.slice(-16) };
+}
+
 // Writes `<output>/<artifact name>` in every Linux format and returns the paths.
 export async function buildLinuxPackages({ kind, version, arch, contents, output }) {
+  const signing = await releaseSigning();
+  const mtime = packageTime();
   await mkdir(output, { recursive: true });
   const scratch = await mkdtemp(path.join(output, ".pap-nfpm-"));
   const packages = [];
-  const mtime = packageTime();
   try {
     for (const [packager, { suffix, manager }] of Object.entries(packagers)) {
       let marker;
@@ -169,7 +192,7 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
         await writeFile(marker, `${manager}\n`);
       }
       const config = path.join(scratch, `${packager}.json`);
-      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime })));
+      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, signing })));
       const target = path.join(output, artifactName({ version, platform: "linux", arch, suffix, cli: kind === "cli" }));
       execFileSync(process.env.NFPM ?? "nfpm", ["package", "--config", config, "--packager", packager, "--target", target], { stdio: "inherit" });
       packages.push(target);

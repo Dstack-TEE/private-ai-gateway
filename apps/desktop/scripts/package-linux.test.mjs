@@ -98,7 +98,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     const expectedStart = /^ExecStart=\/usr\/bin\/private-ai-proxy-service --supervised$/m;
     const payloadTar = execFileSync("dpkg-deb", ["--fsys-tarfile", deb]);
     assert.match(execFileSync("bsdtar", ["-xOf", "-", `./${unit}`], { input: payloadTar, encoding: "utf8" }), expectedStart);
-    assert.match(member(rpm, `/${unit}`), expectedStart);
+    assert.match(member(rpm, `./${unit}`), expectedStart);
     assert.match(member(arch, unit), expectedStart);
     assert.equal(output("dpkg-deb", ["-f", deb, "Replaces"]), "private-ai-proxy-cli");
     assert.match(debListing(deb), /-rwxr-xr-x root\/root +6 .* \.\/usr\/bin\/private-ai-proxy$/m);
@@ -169,6 +169,7 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
     assert.equal(output("dpkg-deb", ["-f", deb, "Replaces"]), "private-ai-proxy");
     assert.equal(output("dpkg-deb", ["-f", deb, "Provides"]), "");
     const listing = debListing(deb);
+    assert.doesNotMatch(listing, /private-ai-proxy-archive-keyring\.gpg/);
     assert.match(listing, /\.\/usr\/bin\/private-ai-proxy -> \.\.\/libexec\/private-ai-proxy\/private-ai-proxy$/m);
     assert.match(listing, /\.\/usr\/bin\/pap -> private-ai-proxy$/m);
     assert.match(listing, /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
@@ -183,12 +184,30 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
       const files = output("rpm", ["-qp", "--qf", "[%{FILENAMES}|%{FILEMODES:perms}\n]", rpm]);
       assert.match(files, /^\/usr\/libexec\/private-ai-proxy\|drwxr-xr-x$/m);
       assert.match(files, /^\/usr\/share\/private-ai-proxy\|drwxr-xr-x$/m);
-      assert.equal(member(rpm, "/usr/share/private-ai-proxy/package-manager"), "rpm\n");
+      assert.equal(member(rpm, "./usr/share/private-ai-proxy/package-manager"), "rpm\n");
     }
+    if (available("rpmkeys")) assert.doesNotMatch(output("rpmkeys", ["-Kv", rpm]), /Signature, key ID/);
     assert.match(pkginfo(arch), /^depend = glibc$/m);
     assert.match(pkginfo(arch), /^arch = aarch64$/m);
     assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Linux release packaging requires signing material before writing packages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pap-package-cli-linux-"));
+  const environment = { ...process.env };
+  try {
+    process.env.RELEASE_CHANNEL = "beta";
+    delete process.env.PAP_LINUX_SIGNING_KEY_FILE;
+    await assert.rejects(
+      buildLinuxPackages({ kind: "cli", version: "1.2.3-beta.1", arch: "x64", contents: [], output: root }),
+      /Missing prepared Linux release signing key/,
+    );
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    process.env = environment;
     await rm(root, { recursive: true, force: true });
   }
 });
