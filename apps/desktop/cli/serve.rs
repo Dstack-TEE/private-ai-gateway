@@ -59,7 +59,7 @@ use report::{
     write_json_event,
 };
 
-/// Headers that select either E2EE v2 or the legacy encrypted transport.
+/// Headers that select E2EE v2, v2.1, or the legacy encrypted transport.
 /// `private-ai-proxy serve` exposes a plaintext local API, so even a partial encrypted
 /// request is rejected instead of being forwarded or silently downgraded.
 const E2EE_REQUEST_HEADERS: &[&str] = &[
@@ -69,6 +69,7 @@ const E2EE_REQUEST_HEADERS: &[&str] = &[
     "x-e2ee-version",
     "x-e2ee-nonce",
     "x-e2ee-timestamp",
+    "x-e2ee-request-key",
 ];
 
 fn has_e2ee_request_headers(headers: &HeaderMap) -> bool {

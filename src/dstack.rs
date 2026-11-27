@@ -18,10 +18,10 @@ use x25519_dalek::StaticSecret as X25519SecretKey;
 
 use crate::aci::e2ee::{
     decrypt_legacy_ecdsa_with_secret_key, decrypt_legacy_ed25519_with_secret_key,
-    decrypt_with_secret_key, decrypt_x25519_with_secret_key, ed25519_public_key_hex,
-    legacy_ecdsa_public_key_from_secret, public_key_from_secret, secret_key_from_bytes,
-    x25519_public_key_hex, x25519_secret_key_from_bytes, E2EE_ALGO_LEGACY_ECDSA,
-    E2EE_ALGO_LEGACY_ED25519, E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
+    decrypt_secp256k1, decrypt_x25519, ed25519_public_key_hex, legacy_ecdsa_public_key_from_secret,
+    public_key_from_secret, secret_key_from_bytes, x25519_public_key_hex,
+    x25519_secret_key_from_bytes, E2eeKdf, E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519,
+    E2EE_ALGO_SECP256K1_AESGCM, E2EE_ALGO_X25519_AESGCM,
 };
 use crate::aci::identity::report_data_slot;
 use crate::aci::keys::{
@@ -420,12 +420,13 @@ impl KeyProvider for DstackAciProvider {
         key_id: &str,
         ciphertext_hex: &str,
         aad: &[u8],
+        kdf: E2eeKdf<'_>,
     ) -> Result<Vec<u8>, KeyError> {
         if key_id == self.legacy_e2ee_key_id {
-            return decrypt_with_secret_key(&self.legacy_e2ee, ciphertext_hex, aad);
+            return decrypt_secp256k1(&self.legacy_e2ee, ciphertext_hex, aad, kdf);
         }
         if key_id == self.x25519_e2ee_key_id {
-            return decrypt_x25519_with_secret_key(&self.x25519_e2ee, ciphertext_hex, aad);
+            return decrypt_x25519(&self.x25519_e2ee, ciphertext_hex, aad, kdf);
         }
         Err(KeyError::UnknownE2eeKeyId(key_id.to_string()))
     }

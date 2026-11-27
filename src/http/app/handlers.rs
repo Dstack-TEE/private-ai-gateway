@@ -886,6 +886,7 @@ pub(super) async fn openai_completion_endpoint(
                 version: header_str(&headers, "x-e2ee-version"),
                 nonce: header_str(&headers, "x-e2ee-nonce"),
                 timestamp: header_str(&headers, "x-e2ee-timestamp"),
+                request_key: header_str(&headers, "x-e2ee-request-key"),
             },
             body.as_ref(),
             endpoint_path,

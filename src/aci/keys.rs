@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use ed25519_dalek::VerifyingKey;
 use sha3::{Digest, Keccak256};
 
+use super::e2ee::E2eeKdf;
 use super::types::{KeyedPublicKey, TlsSpki};
 
 /// The baseline signature algorithm every verifier implements; a keyset
@@ -93,15 +94,16 @@ pub trait KeyProvider: Send + Sync {
     /// Attested E2EE keys (§3.1) — spec-shaped suite entries only.
     fn e2ee_keys(&self) -> Vec<KeyedPublicKey>;
 
-    /// Decrypt an E2EE v2 field using a key listed in
-    /// [`KeyProvider::e2ee_keys`].
+    /// Decrypt an E2EE v2 or v2.1 ciphertext using a key listed in
+    /// [`KeyProvider::e2ee_keys`], with the key derivation `kdf` names.
     fn decrypt_e2ee(
         &self,
         key_id: &str,
         ciphertext_hex: &str,
         aad: &[u8],
+        kdf: E2eeKdf<'_>,
     ) -> Result<Vec<u8>, KeyError> {
-        let _ = (ciphertext_hex, aad);
+        let _ = (ciphertext_hex, aad, kdf);
         Err(KeyError::UnknownE2eeKeyId(key_id.to_string()))
     }
 

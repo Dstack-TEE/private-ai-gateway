@@ -325,6 +325,7 @@ async fn response_owner_settles_once_on_cancellation_completion_and_e2ee_failure
                 client_public_key_hex: "11".repeat(32),
                 nonce: None,
                 timestamp: None,
+                request_secret: None,
             });
             assert!(stream.next().await.unwrap().is_ok());
             assert!(
@@ -863,6 +864,7 @@ async fn owner_e2ee_failure_observes_later_usage_until_eof_or_disconnect() {
             client_public_key_hex: "11".repeat(32),
             nonce: None,
             timestamp: None,
+            request_secret: None,
         });
         send.send(Ok(Bytes::from_static(b"data: invalid JSON\n\n")))
             .unwrap();

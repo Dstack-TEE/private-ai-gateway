@@ -56,11 +56,14 @@ evidence) exactly as observed.
   evidence, and is one you pinned with `provider.aci_session_ids`). Pass
   `{ session, pinnedSessions, requiresVerified }`; anything absent is a skip
   with its reason, never a pass.
-- **E2EE key verification, not an E2EE request builder.** Report verification
-  establishes the quote-bound `e2ee_public_keys`, including the suites in the
-  [E2EE v2 compatibility protocol](../../spec/e2ee-v2.md). This package does
-  not encrypt or decrypt content fields. Callers can implement that
-  field-level wire contract or use a v2-capable client.
+- **E2EE v2.1 client.** `createE2eeFetch({ keyset })` returns a `fetch` that
+  encrypts chat completions, completions, and embeddings under
+  [E2EE v2.1](../../spec/e2ee-v2.md#10-version-21) (X25519, Web Crypto only)
+  and decrypts their responses, buffered or streamed. Give it the keyset of a
+  report you verified, and pass it as the `fetch` of an OpenAI-compatible SDK.
+  It refuses other POST endpoints and never falls back to v2, the legacy
+  scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
+  See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
 
 A session contains an establishing-evidence snapshot. A reused session does not supply evidence from every later verification round. Session and evidence hashes prove integrity; they do not perform provider-specific deep audit. Fixed session pins require explicit replacement after expiry or material migration.
 

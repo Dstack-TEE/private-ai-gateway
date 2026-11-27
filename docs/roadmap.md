@@ -13,7 +13,7 @@ Last reviewed: 2026-11-16.
 - Fail-closed request constraints and session allowlists.
 - Signed receipts, attestation reports, and immutable attested sessions.
 - Multi-domain downstream TLS identities and TEE-only hostnames.
-- E2EE v2 for chat, completions, and embeddings.
+- E2EE v2 and v2.1 for chat, completions, and embeddings. V2.1 resists an intermediary that rewrites requests.
 - Private AI Proxy: the desktop app, per-user backend, and `pap` CLI (`verify`, `audit`, `sessions`, `curl`, `send`, `serve`), with coding-agent setup.
 - TypeScript package: `@phala/aci-verifier` (browser verification, and pinned Node and Bun transports that audit receipts and sessions). Use `pap` for coding agents and provider access; see [Retired packages](../clients/README.md#retired-packages).
 - Unit and integration tests, ACI test vectors, and a live provider suite.

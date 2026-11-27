@@ -83,8 +83,24 @@ pub(super) fn validate_aci_payload_model(payload: &Value) -> Result<String, E2ee
         .ok_or(E2eeError::InvalidPayloadModel)
 }
 
+const REQUEST_PURPOSE_V2: &str = "aci.e2ee.request.v2";
+const RESPONSE_PURPOSE_V2: &str = "aci.e2ee.response.v2";
+const REQUEST_PURPOSE_V2_1: &str = "aci.e2ee.request.v2.1";
+const RESPONSE_PURPOSE_V2_1: &str = "aci.e2ee.response.v2.1";
+const REQUEST_KEY_PURPOSE_V2_1: &str = "aci.e2ee.request-key.v2.1";
+
+/// The request and response AAD purposes for an ACI mode.
+fn aci_purposes(mode: E2eeAadMode) -> Result<(&'static str, &'static str), E2eeError> {
+    match mode {
+        E2eeAadMode::AciV2 => Ok((REQUEST_PURPOSE_V2, RESPONSE_PURPOSE_V2)),
+        E2eeAadMode::AciV2_1 => Ok((REQUEST_PURPOSE_V2_1, RESPONSE_PURPOSE_V2_1)),
+        E2eeAadMode::LegacyV1 => Err(E2eeError::DecryptionFailed),
+    }
+}
+
 /// E2EE v2 request AAD (§6): the JCS canonicalization of the purpose-tagged
 /// object. `field` is the encrypted location's field path (§5).
+#[cfg(test)]
 fn aci_request_aad(
     algo: &str,
     model: &str,
@@ -92,8 +108,19 @@ fn aci_request_aad(
     nonce: &str,
     timestamp: u64,
 ) -> Result<Vec<u8>, E2eeError> {
+    request_aad(REQUEST_PURPOSE_V2, algo, model, field, nonce, timestamp)
+}
+
+fn request_aad(
+    purpose: &str,
+    algo: &str,
+    model: &str,
+    field: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<Vec<u8>, E2eeError> {
     canonicalize(&json!({
-        "purpose": "aci.e2ee.request.v2",
+        "purpose": purpose,
         "algo": algo,
         "model": model,
         "field": field,
@@ -105,6 +132,7 @@ fn aci_request_aad(
 
 /// E2EE v2 response AAD (§6): like the request AAD but tagged
 /// `aci.e2ee.response.v2` and additionally binding the response `id`.
+#[cfg(test)]
 fn aci_response_aad(
     algo: &str,
     model: &str,
@@ -113,8 +141,28 @@ fn aci_response_aad(
     nonce: &str,
     timestamp: u64,
 ) -> Result<Vec<u8>, E2eeError> {
+    response_aad(
+        RESPONSE_PURPOSE_V2,
+        algo,
+        model,
+        response_id,
+        field,
+        nonce,
+        timestamp,
+    )
+}
+
+fn response_aad(
+    purpose: &str,
+    algo: &str,
+    model: &str,
+    response_id: &str,
+    field: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<Vec<u8>, E2eeError> {
     canonicalize(&json!({
-        "purpose": "aci.e2ee.response.v2",
+        "purpose": purpose,
         "algo": algo,
         "model": model,
         "id": response_id,
@@ -123,6 +171,52 @@ fn aci_response_aad(
         "ts": timestamp,
     }))
     .map_err(|_| E2eeError::EncryptionFailed)
+}
+
+/// E2EE v2.1 `X-E2EE-Request-Key` AAD: binds the request secret to the
+/// suite, model, client reply key, nonce, and timestamp.
+pub(super) fn request_key_aad(
+    algo: &str,
+    model: &str,
+    client_public_key_hex: &str,
+    nonce: &str,
+    timestamp: u64,
+) -> Result<Vec<u8>, E2eeError> {
+    canonicalize(&json!({
+        "purpose": REQUEST_KEY_PURPOSE_V2_1,
+        "algo": algo,
+        "model": model,
+        "client_pub_key": client_public_key_hex,
+        "nonce": nonce,
+        "ts": timestamp,
+    }))
+    .map_err(|_| E2eeError::DecryptionFailed)
+}
+
+/// E2EE v2.1 body digest: SHA-256 of the RFC 8785 JCS form of the request
+/// body as received, ciphertext fields in place. The body must be I-JSON:
+/// JCS writes numbers as doubles, so an integer beyond ±2^53 would hash like
+/// its neighbours while its exact digits are forwarded.
+pub(super) fn request_body_digest(payload: &Value) -> Result<[u8; 32], E2eeError> {
+    use sha2::{Digest, Sha256};
+    if !is_i_json_numbers(payload) {
+        return Err(E2eeError::BodyMismatch);
+    }
+    let bytes = serde_json_canonicalizer::to_vec(payload).map_err(|_| E2eeError::BodyMismatch)?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn is_i_json_numbers(value: &Value) -> bool {
+    const MAX_SAFE: u64 = (1 << 53) - 1;
+    match value {
+        Value::Number(n) => {
+            n.as_u64().is_none_or(|v| v <= MAX_SAFE)
+                && n.as_i64().is_none_or(|v| v.unsigned_abs() <= MAX_SAFE)
+        }
+        Value::Array(items) => items.iter().all(is_i_json_numbers),
+        Value::Object(map) => map.values().all(is_i_json_numbers),
+        _ => true,
+    }
 }
 
 pub(super) struct E2eeFieldCrypto<'a> {
@@ -164,6 +258,13 @@ pub(super) fn decrypt_request_payload(
         let Some(message) = message.as_object_mut() else {
             continue;
         };
+        if crypto.aad_mode == E2eeAadMode::AciV2_1 {
+            for key in ["reasoning", "reasoning_content"] {
+                let field = format!("messages.{message_index}.{key}");
+                decrypted_count += decrypt_content_part_field(crypto, message, key, &field)?;
+            }
+            decrypted_count += decrypt_tool_call_arguments(crypto, message_index, message)?;
+        }
         let Some(content) = message.get_mut("content") else {
             continue;
         };
@@ -272,7 +373,10 @@ pub(super) fn decrypt_content_value(
             let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
             let plaintext =
                 String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
-            *content = decrypted_chat_content_value(plaintext);
+            *content = match crypto.aad_mode {
+                E2eeAadMode::AciV2_1 => v2_1_content_value(&plaintext)?,
+                _ => decrypted_chat_content_value(plaintext),
+            };
             Ok(1)
         }
         Value::Array(items) => {
@@ -288,6 +392,71 @@ pub(super) fn decrypt_content_value(
         }
         _ => Ok(0),
     }
+}
+
+/// v2.1: decrypt `messages.{m}.tool_calls.{t}.function.arguments` in place.
+fn decrypt_tool_call_arguments(
+    crypto: &E2eeFieldCrypto<'_>,
+    message_index: usize,
+    message: &mut serde_json::Map<String, Value>,
+) -> Result<usize, E2eeError> {
+    let Some(Value::Array(calls)) = message.get_mut("tool_calls") else {
+        return Ok(0);
+    };
+    let mut decrypted_count = 0usize;
+    for (position, call) in calls.iter_mut().enumerate() {
+        let call_index = entry_index(call, position);
+        let Some(Value::String(ciphertext_hex)) = call
+            .get_mut("function")
+            .and_then(|function| function.get_mut("arguments"))
+        else {
+            continue;
+        };
+        let field = format!("messages.{message_index}.tool_calls.{call_index}.function.arguments");
+        let aad = request_field_aad(crypto, &field)?;
+        let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
+        *ciphertext_hex = String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
+        decrypted_count += 1;
+    }
+    Ok(decrypted_count)
+}
+
+/// An array entry's path index: its `index` member when present, its array
+/// position otherwise (§5).
+fn entry_index(entry: &Value, position: usize) -> u64 {
+    entry
+        .get("index")
+        .and_then(Value::as_u64)
+        .unwrap_or(position as u64)
+}
+
+/// v2.1: encrypt `{prefix}.tool_calls.{t}.function.arguments` in place.
+fn encrypt_tool_call_arguments(
+    container: &mut serde_json::Map<String, Value>,
+    prefix: &str,
+    ctx: &E2eeRequestContext,
+    response_id: &str,
+) -> Result<(), E2eeError> {
+    if ctx.aad_mode != E2eeAadMode::AciV2_1 {
+        return Ok(());
+    }
+    let Some(Value::Array(calls)) = container.get_mut("tool_calls") else {
+        return Ok(());
+    };
+    for (position, call) in calls.iter_mut().enumerate() {
+        let call_index = entry_index(call, position);
+        let Some(Value::Object(function)) = call.get_mut("function") else {
+            continue;
+        };
+        encrypt_response_field(
+            function,
+            "arguments",
+            &format!("{prefix}.tool_calls.{call_index}.function.arguments"),
+            ctx,
+            response_id,
+        )?;
+    }
+    Ok(())
 }
 
 /// Decrypt one structured content part in place. `text` parts are decrypted in
@@ -362,9 +531,11 @@ fn request_field_aad(
     field: &str,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
     match crypto.aad_mode {
-        E2eeAadMode::AciV2 => {
+        E2eeAadMode::AciV2 | E2eeAadMode::AciV2_1 => {
+            let (purpose, _) = aci_purposes(crypto.aad_mode)?;
             let (nonce, timestamp) = crypto.nonce_ts()?;
-            Ok(Some(aci_request_aad(
+            Ok(Some(request_aad(
+                purpose,
                 crypto.algo,
                 crypto.model,
                 field,
@@ -382,17 +553,26 @@ pub(super) fn decrypt_e2ee_field(
     aad: Option<&[u8]>,
 ) -> Result<Vec<u8>, E2eeError> {
     match crypto.decryptor {
-        E2eeDecryptor::AciV2 { key_id } => {
+        E2eeDecryptor::Aci { key_id, kdf } => {
             let aad = aad.ok_or(E2eeError::DecryptionFailed)?;
             crypto
                 .keys
-                .decrypt_e2ee(key_id, ciphertext_hex, aad)
+                .decrypt_e2ee(key_id, ciphertext_hex, aad, kdf)
                 .map_err(|_| E2eeError::DecryptionFailed)
         }
         E2eeDecryptor::Legacy { signing_algo } => crypto
             .keys
             .decrypt_legacy_e2ee(signing_algo, ciphertext_hex, aad)
             .map_err(|_| E2eeError::DecryptionFailed),
+    }
+}
+
+/// v2.1 whole content: the plaintext is the JSON encoding of the content
+/// value, a string or a structured array, so text is never mistaken for parts.
+fn v2_1_content_value(plaintext: &str) -> Result<Value, E2eeError> {
+    match serde_json::from_str::<Value>(plaintext) {
+        Ok(value @ (Value::String(_) | Value::Array(_))) => Ok(value),
+        _ => Err(E2eeError::DecryptionFailed),
     }
 }
 
@@ -418,14 +598,15 @@ pub(super) fn encrypt_e2ee_response_body(
 
     if endpoint_path == EMBEDDINGS_PATH {
         encrypt_embedding_data(&mut payload, ctx, &response_id)?;
+        seal_response_object(&mut payload, ctx)?;
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     }
 
-    let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
-        return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
+    let choices = match payload.get_mut("choices").and_then(Value::as_array_mut) {
+        Some(choices) => choices.iter_mut(),
+        None => [].iter_mut(),
     };
-
-    for (position, choice) in choices.iter_mut().enumerate() {
+    for (position, choice) in choices.enumerate() {
         let choice_index = choice
             .get("index")
             .and_then(Value::as_u64)
@@ -467,10 +648,68 @@ pub(super) fn encrypt_e2ee_response_body(
             if ctx.aad_mode.is_aci() {
                 encrypt_message_audio_data(message, ctx, &response_id, choice_index)?;
             }
+            encrypt_tool_call_arguments(
+                message,
+                &format!("choices.{choice_index}.message"),
+                ctx,
+                &response_id,
+            )?;
         }
+        let part = (endpoint_path != COMPLETIONS_PATH).then_some("message");
+        encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
 
+    seal_response_object(&mut payload, ctx)?;
     serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
+}
+
+/// v2.1 encrypts two members v2 leaves readable: `refusal` and the whole
+/// `logprobs` value (as its compact JSON), which repeats the generated tokens.
+fn encrypt_v2_1_choice_extras(
+    choice: &mut serde_json::Map<String, Value>,
+    part: Option<&str>,
+    choice_index: u64,
+    ctx: &E2eeRequestContext,
+    response_id: &str,
+) -> Result<(), E2eeError> {
+    if ctx.aad_mode != E2eeAadMode::AciV2_1 {
+        return Ok(());
+    }
+    if let Some(part) = part {
+        if let Some(Value::Object(container)) = choice.get_mut(part) {
+            let field = format!("choices.{choice_index}.{part}.refusal");
+            encrypt_response_field(container, "refusal", &field, ctx, response_id)?;
+        }
+    }
+    if let Some(logprobs) = choice.get_mut("logprobs").filter(|value| !value.is_null()) {
+        let plaintext = serde_json::to_vec(logprobs).map_err(|_| E2eeError::EncryptionFailed)?;
+        let field = format!("choices.{choice_index}.logprobs");
+        let aad = response_aad_for_context(ctx, response_id, &field)?;
+        *logprobs = Value::String(encrypt_response_plaintext(ctx, &plaintext, aad.as_deref())?);
+    }
+    Ok(())
+}
+
+/// The member carrying the v2.1 response MAC.
+pub(super) const RESPONSE_MAC_MEMBER: &str = "e2ee_mac";
+
+/// v2.1: add an HMAC over the JCS form of a response object (a buffered body
+/// or one SSE event), keyed from the request secret, so its readable members
+/// cannot be changed either.
+fn seal_response_object(payload: &mut Value, ctx: &E2eeRequestContext) -> Result<(), E2eeError> {
+    let Some(secret) = &ctx.request_secret else {
+        return Ok(());
+    };
+    let object = payload.as_object_mut().ok_or(E2eeError::EncryptionFailed)?;
+    object.remove(RESPONSE_MAC_MEMBER);
+    let bytes =
+        serde_json_canonicalizer::to_vec(&*object).map_err(|_| E2eeError::EncryptionFailed)?;
+    let mac = crate::aci::e2ee::v2_1_response_mac(&secret.0, &bytes);
+    object.insert(
+        RESPONSE_MAC_MEMBER.to_string(),
+        Value::String(hex::encode(mac)),
+    );
+    Ok(())
 }
 
 pub(super) fn encrypt_embedding_data(
@@ -512,10 +751,12 @@ fn embedding_response_aad_for_context(
     data_index: u64,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
     match ctx.aad_mode {
-        E2eeAadMode::AciV2 => {
+        E2eeAadMode::AciV2 | E2eeAadMode::AciV2_1 => {
+            let (_, purpose) = aci_purposes(ctx.aad_mode)?;
             let (nonce, timestamp) = response_nonce_ts(ctx)?;
             let field = format!("data.{data_index}.embedding");
-            Ok(Some(aci_response_aad(
+            Ok(Some(response_aad(
+                purpose,
                 &ctx.algo,
                 &ctx.request_model,
                 response_id,
@@ -584,11 +825,11 @@ pub(super) fn encrypt_e2ee_stream_value(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
-        return Ok(payload);
+    let choices = match payload.get_mut("choices").and_then(Value::as_array_mut) {
+        Some(choices) => choices.iter_mut(),
+        None => [].iter_mut(),
     };
-
-    for (position, choice) in choices.iter_mut().enumerate() {
+    for (position, choice) in choices.enumerate() {
         let choice_index = choice
             .get("index")
             .and_then(Value::as_u64)
@@ -629,9 +870,18 @@ pub(super) fn encrypt_e2ee_stream_value(
                 ctx,
                 &response_id,
             )?;
+            encrypt_tool_call_arguments(
+                delta,
+                &format!("choices.{choice_index}.delta"),
+                ctx,
+                &response_id,
+            )?;
         }
+        let part = (endpoint_path != COMPLETIONS_PATH).then_some("delta");
+        encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
 
+    seal_response_object(&mut payload, ctx)?;
     Ok(payload)
 }
 
@@ -675,9 +925,11 @@ fn encrypt_message_audio_data(
     let Some(Value::String(plaintext)) = audio.get_mut("data") else {
         return Ok(());
     };
+    let (_, purpose) = aci_purposes(ctx.aad_mode)?;
     let (nonce, timestamp) = response_nonce_ts(ctx)?;
     let field = format!("choices.{choice_index}.message.audio.data");
-    let aad = aci_response_aad(
+    let aad = response_aad(
+        purpose,
         &ctx.algo,
         &ctx.request_model,
         response_id,
@@ -695,9 +947,11 @@ fn response_aad_for_context(
     aci_field: &str,
 ) -> Result<Option<Vec<u8>>, E2eeError> {
     match ctx.aad_mode {
-        E2eeAadMode::AciV2 => {
+        E2eeAadMode::AciV2 | E2eeAadMode::AciV2_1 => {
+            let (_, purpose) = aci_purposes(ctx.aad_mode)?;
             let (nonce, timestamp) = response_nonce_ts(ctx)?;
-            Ok(Some(aci_response_aad(
+            Ok(Some(response_aad(
+                purpose,
                 &ctx.algo,
                 &ctx.request_model,
                 response_id,
@@ -723,12 +977,18 @@ pub(super) fn encrypt_response_plaintext(
     aad: Option<&[u8]>,
 ) -> Result<String, E2eeError> {
     match ctx.aad_mode {
-        E2eeAadMode::AciV2 => {
+        E2eeAadMode::AciV2 | E2eeAadMode::AciV2_1 => {
             // The response suite is the request's selected service E2EE key
             // algo; `client_public_key_hex` is already normalized for it.
             let aad = aad.ok_or(E2eeError::EncryptionFailed)?;
-            encrypt_aci_e2ee_for_public_key(&ctx.algo, &ctx.client_public_key_hex, plaintext, aad)
-                .map_err(|_| E2eeError::EncryptionFailed)
+            encrypt_aci_e2ee_for_public_key(
+                &ctx.algo,
+                &ctx.client_public_key_hex,
+                plaintext,
+                aad,
+                ctx.response_kdf()?,
+            )
+            .map_err(|_| E2eeError::EncryptionFailed)
         }
         E2eeAadMode::LegacyV1 => {
             encrypt_legacy_for_public_key(&ctx.algo, &ctx.client_public_key_hex, plaintext, aad)

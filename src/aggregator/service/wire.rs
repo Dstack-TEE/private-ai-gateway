@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures_util::Stream;
 
 use super::{ReceiptOwner, ServiceError};
+use crate::aci::e2ee::{E2eeKdf, E2EE_REQUEST_SECRET_LEN};
 use crate::aci::identity::SealedWorkloadKeyset;
 use crate::aci::receipt::{ReceiptBuilder, SignedReceipt, UpstreamVerifiedEvent};
 use crate::aggregator::metrics::RequestMode;
@@ -18,6 +19,8 @@ pub struct E2eeRequestParts<'a> {
     pub version: Option<&'a str>,
     pub nonce: Option<&'a str>,
     pub timestamp: Option<&'a str>,
+    /// `X-E2EE-Request-Key` (v2.1 only).
+    pub request_key: Option<&'a str>,
 }
 
 pub struct E2eePreparedRequest {
@@ -34,6 +37,8 @@ pub struct E2eeRequestContext {
     pub(super) client_public_key_hex: String,
     pub(super) nonce: Option<String>,
     pub(super) timestamp: Option<u64>,
+    /// The v2.1 request secret; response field keys mix it in.
+    pub(super) request_secret: Option<RequestSecret>,
 }
 
 impl E2eeRequestContext {
@@ -42,27 +47,51 @@ impl E2eeRequestContext {
     pub fn request_model(&self) -> &str {
         &self.request_model
     }
+
+    /// The key derivation for this request's ACI response fields.
+    pub(super) fn response_kdf(&self) -> Result<E2eeKdf<'_>, super::E2eeError> {
+        match (self.aad_mode, &self.request_secret) {
+            (E2eeAadMode::AciV2, None) => Ok(E2eeKdf::V2),
+            (E2eeAadMode::AciV2_1, Some(secret)) => Ok(E2eeKdf::V2_1Field {
+                request_secret: &secret.0,
+            }),
+            _ => Err(super::E2eeError::EncryptionFailed),
+        }
+    }
+}
+
+/// The client's v2.1 request secret. `Debug` never prints it.
+#[derive(Clone)]
+pub(super) struct RequestSecret(pub(super) [u8; E2EE_REQUEST_SECRET_LEN]);
+
+impl std::fmt::Debug for RequestSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RequestSecret(..)")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum E2eeAadMode {
     /// The E2EE v2 path: JCS AAD.
     AciV2,
+    /// The E2EE v2.1 path: JCS AAD under the v2.1 purposes, request-secret
+    /// keys.
+    AciV2_1,
     /// The inherited dstack-vllm-proxy path (`X-Signing-Algo`): no AAD.
     LegacyV1,
 }
 
 impl E2eeAadMode {
-    /// The E2EE v2 path (JCS AAD), as opposed to the no-AAD legacy
+    /// The E2EE v2 or v2.1 path (JCS AAD), as opposed to the no-AAD legacy
     /// X-Signing-Algo compatibility mode. Per-part multimodal field paths
     /// exist only here.
     pub(super) fn is_aci(self) -> bool {
-        matches!(self, Self::AciV2)
+        matches!(self, Self::AciV2 | Self::AciV2_1)
     }
 }
 
 pub(super) enum E2eeDecryptor<'a> {
-    AciV2 { key_id: &'a str },
+    Aci { key_id: &'a str, kdf: E2eeKdf<'a> },
     Legacy { signing_algo: &'a str },
 }
 

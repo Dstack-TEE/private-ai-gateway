@@ -33,7 +33,7 @@ error behavior below.
 
 ## Inference endpoints
 
-| Method and path | Surface | Streaming | ACI E2EE v2 | Notes |
+| Method and path | Surface | Streaming | ACI E2EE v2 and v2.1 | Notes |
 | --- | --- | --- | --- | --- |
 | `POST /v1/chat/completions` | OpenAI Chat Completions | Yes | Yes | Primary chat endpoint. |
 | `POST /v1/completions` | OpenAI legacy Completions | Yes | Yes | Encrypts `prompt` in E2EE mode. |

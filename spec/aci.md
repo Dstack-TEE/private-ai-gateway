@@ -397,7 +397,7 @@ other freshness metadata.
     "evidence": { "...": "TEE-type-specific evidence" }
   },
   "service_capabilities": {
-    "supported_e2ee_versions": ["2"],
+    "supported_e2ee_versions": ["2", "2.1"],
     "supported_multipart_constraint_endpoints": ["/v1/audio/transcriptions", "/v1/images/edits"],
     "serving": "direct"
   }
@@ -579,9 +579,11 @@ versions, but the core `aci/1` specification does not define an E2EE wire
 protocol or require one for conformance. Each version is specified separately.
 
 The currently implemented compatibility extension is
-[E2EE v2](e2ee-v2.md). Its headers, algorithms, encrypted fields, replay
-rules, errors, receipt integration, and migration policy are defined only in
-the E2EE v2 document.
+[E2EE v2](e2ee-v2.md), in versions `2` and `2.1`. Its headers, algorithms,
+encrypted fields, replay rules, errors, receipt integration, and migration
+policy are defined only in the E2EE v2 document. A v2.1 key is listed in the
+keyset under its own `algo`, so the quote covers the fact that a service
+offers v2.1.
 
 ## 7. Inference Receipts
 

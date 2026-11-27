@@ -22,6 +22,7 @@ npm install --ignore-scripts --no-audit --no-fund "$packs"/*.tgz
 node --input-type=module <<'NODE'
 await import('@phala/aci-verifier');
 await import('@phala/aci-verifier/browser');
+await import('@phala/aci-verifier/e2ee');
 await import('@phala/aci-verifier/node');
 await import('@phala/aci-verifier/bun');
 await import('@phala/aci-verifier/runtime');

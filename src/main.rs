@@ -593,7 +593,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 private_ai_gateway::aggregator::service::IMAGES_EDITS_PATH.into(),
             ],
             supported_e2ee_versions: if gateway_config.enable_e2ee {
-                vec!["2".to_string()]
+                vec!["2".to_string(), "2.1".to_string()]
             } else {
                 Vec::new()
             },

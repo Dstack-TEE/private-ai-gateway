@@ -170,10 +170,13 @@ The gateway fills `source_provenance` from its launcher config:
 
 This field is the gateway's own statement. Check it against the commit in the
 measured compose, as shown in [Choose what you accept](#choose-what-you-accept).
-The E2EE v2 extension suite is
-`x25519-aes-256-gcm-hkdf-sha256`; keyset entries with any other `algo` are
-ignored ([ACI §3.1](../spec/aci.md#31-workload-keyset),
-[E2EE v2 §4](../spec/e2ee-v2.md#4-algorithms)).
+The E2EE suites are `x25519-aes-256-gcm-hkdf-sha256` and
+`secp256k1-aes-256-gcm-hkdf-sha256` for v2, and
+`x25519-aes-256-gcm-hkdf-sha256-v2.1` for v2.1. A client that sees the v2.1
+entry uses v2.1 only. Keyset entries with any other
+`algo` are ignored ([ACI §3.1](../spec/aci.md#31-workload-keyset),
+[E2EE v2 §4](../spec/e2ee-v2.md#4-algorithms),
+[§10.1](../spec/e2ee-v2.md#101-keys-and-selection)).
 
 To recompute any digest by hand, add `--explain` to `pap verify`. Each check
 then prints the exact material it computed: the decoded keyset bytes, the §3.2

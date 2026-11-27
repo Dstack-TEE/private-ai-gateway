@@ -14,6 +14,11 @@
 //! X25519 and the 65-byte uncompressed SEC1 point for secp256k1. The AAD
 //! strings are built by the caller from the E2EE v2 protocol §6.
 //!
+//! E2EE v2.1 reuses the X25519 suite and the wire format under its own keyset
+//! `algo`. Every field key mixes the client's request secret into HKDF as the
+//! salt, and every response object carries an HMAC keyed from that secret, so
+//! only the client and the TEE can produce or read them.
+//!
 //! The inherited dstack-vllm-proxy profile uses the legacy `ecdsa`
 //! and `ed25519` labels, different HKDF context strings, and v1
 //! payloads with no AAD.
@@ -32,21 +37,101 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519SecretKey
 
 use super::keys::KeyError;
 
+pub const E2EE_VERSION_V2_1: &str = "2.1";
 pub const E2EE_VERSION_V2: &str = "2";
 pub const E2EE_VERSION_V1: &str = "1";
 pub const E2EE_ALGO_X25519_AESGCM: &str = "x25519-aes-256-gcm-hkdf-sha256";
 pub const E2EE_ALGO_SECP256K1_AESGCM: &str = "secp256k1-aes-256-gcm-hkdf-sha256";
+pub const E2EE_ALGO_X25519_AESGCM_V2_1: &str = "x25519-aes-256-gcm-hkdf-sha256-v2.1";
+/// Length of the v2.1 request secret, and of the request-key plaintext's
+/// body digest that follows it.
+pub const E2EE_REQUEST_SECRET_LEN: usize = 32;
 pub const E2EE_ALGO_LEGACY_ECDSA: &str = "ecdsa";
 pub const E2EE_ALGO_LEGACY_ED25519: &str = "ed25519";
 
 const SECP256K1_HKDF_INFO: &[u8] = b"aci.e2ee.v2.secp256k1";
 const X25519_HKDF_INFO: &[u8] = b"aci.e2ee.v2.x25519";
+const X25519_V2_1_HKDF_INFO: &[u8] = b"aci.e2ee.v2.1.x25519";
+const V2_1_RESPONSE_MAC_HKDF_INFO: &[u8] = b"aci.e2ee.v2.1.response-mac";
+const X25519_V2_1_REQUEST_KEY_HKDF_INFO: &[u8] = b"aci.e2ee.v2.1.x25519.request-key";
 const LEGACY_ECDSA_HKDF_INFO: &[u8] = b"ecdsa_encryption";
 const LEGACY_ED25519_HKDF_INFO: &[u8] = b"ed25519_encryption";
 const PUBLIC_KEY_LEN: usize = 65;
 const X25519_PUBLIC_KEY_LEN: usize = 32;
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
+
+/// The HKDF step an E2EE ciphertext uses (v2 §4, v2.1).
+#[derive(Clone, Copy)]
+pub enum E2eeKdf<'a> {
+    /// v2 field: no salt, the suite's v2 label.
+    V2,
+    /// v2.1 `X-E2EE-Request-Key` header: no salt, the suite's request-key label.
+    V2_1RequestKey,
+    /// v2.1 request or response field: the request secret is the salt.
+    V2_1Field {
+        request_secret: &'a [u8; E2EE_REQUEST_SECRET_LEN],
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Curve {
+    X25519,
+    Secp256k1,
+}
+
+fn curve_of(algo: &str) -> Option<Curve> {
+    match algo {
+        E2EE_ALGO_X25519_AESGCM | E2EE_ALGO_X25519_AESGCM_V2_1 => Some(Curve::X25519),
+        E2EE_ALGO_SECP256K1_AESGCM => Some(Curve::Secp256k1),
+        _ => None,
+    }
+}
+
+/// HKDF salt and info for a curve and derivation. v2.1 is X25519 only.
+fn hkdf_params(curve: Curve, kdf: E2eeKdf<'_>) -> Result<(Option<&[u8]>, &'static [u8]), KeyError> {
+    match (curve, kdf) {
+        (Curve::X25519, E2eeKdf::V2) => Ok((None, X25519_HKDF_INFO)),
+        (Curve::Secp256k1, E2eeKdf::V2) => Ok((None, SECP256K1_HKDF_INFO)),
+        (Curve::X25519, E2eeKdf::V2_1RequestKey) => Ok((None, X25519_V2_1_REQUEST_KEY_HKDF_INFO)),
+        (Curve::X25519, E2eeKdf::V2_1Field { request_secret }) => {
+            Ok((Some(request_secret.as_slice()), X25519_V2_1_HKDF_INFO))
+        }
+        (Curve::Secp256k1, _) => Err(KeyError::UnsupportedAlgo(
+            "E2EE v2.1 has no secp256k1 suite".to_string(),
+        )),
+    }
+}
+
+/// E2EE v2.1 response MAC: HMAC-SHA256 under
+/// `HKDF-SHA256(ikm = request_secret, info = "aci.e2ee.v2.1.response-mac")`.
+pub fn v2_1_response_mac(
+    request_secret: &[u8; E2EE_REQUEST_SECRET_LEN],
+    message: &[u8],
+) -> [u8; 32] {
+    use hmac::Mac;
+    let mut key = [0u8; 32];
+    Hkdf::<Sha256>::new(None, request_secret)
+        .expand(V2_1_RESPONSE_MAC_HKDF_INFO, &mut key)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    let mut mac =
+        <hmac::Hmac<Sha256> as Mac>::new_from_slice(&key).expect("HMAC accepts any key length");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
+
+fn aes_gcm_from_shared_secret(
+    shared: &[u8],
+    curve: Curve,
+    kdf: E2eeKdf<'_>,
+) -> Result<Aes256Gcm, KeyError> {
+    let (salt, info) = hkdf_params(curve, kdf)?;
+    let hk = Hkdf::<Sha256>::new(salt, shared);
+    let mut key = [0u8; 32];
+    hk.expand(info, &mut key)
+        .map_err(|e| KeyError::Crypto(format!("HKDF expand failed: {e}")))?;
+    Ok(Aes256Gcm::new_from_slice(&key).expect("AES-256 key length is fixed"))
+}
 
 pub fn normalize_secp256k1_public_key_hex(value: &str) -> Result<String, KeyError> {
     let bytes = hex::decode(value.strip_prefix("0x").unwrap_or(value))
@@ -81,38 +166,46 @@ pub fn ed25519_public_key_hex(secret: &Ed25519SigningKey) -> String {
 }
 
 /// True for the two E2EE v2 §4 cipher suites. Other keyset `algo`
-/// values (legacy labels, unknown suites) are ignored for E2EE selection.
+/// values (legacy labels, v2.1 entries, unknown suites) are ignored for v2
+/// key selection.
 pub fn is_aci_e2ee_suite(algo: &str) -> bool {
     matches!(algo, E2EE_ALGO_X25519_AESGCM | E2EE_ALGO_SECP256K1_AESGCM)
 }
 
-/// Normalize an E2EE v2 §4 public key to canonical lowercase hex for the suite's
-/// `algo`: 32-byte raw for X25519, 65-byte uncompressed SEC1 for secp256k1.
+/// True for the E2EE v2.1 keyset `algo`.
+pub fn is_aci_e2ee_v2_1_suite(algo: &str) -> bool {
+    algo == E2EE_ALGO_X25519_AESGCM_V2_1
+}
+
+/// The v2.1 `algo` that publishes the same key material as a v2 suite key.
+pub fn v2_1_algo_for(v2_algo: &str) -> Option<&'static str> {
+    (v2_algo == E2EE_ALGO_X25519_AESGCM).then_some(E2EE_ALGO_X25519_AESGCM_V2_1)
+}
+
+/// Normalize an E2EE v2 or v2.1 public key to canonical lowercase hex for the
+/// suite's `algo`: 32-byte raw for X25519, 65-byte uncompressed SEC1 for
+/// secp256k1.
 pub fn normalize_aci_e2ee_public_key_hex(algo: &str, value: &str) -> Result<String, KeyError> {
-    match algo {
-        E2EE_ALGO_X25519_AESGCM => normalize_x25519_public_key_hex(value),
-        E2EE_ALGO_SECP256K1_AESGCM => normalize_secp256k1_public_key_hex(value),
-        other => Err(KeyError::UnsupportedAlgo(other.to_string())),
+    match curve_of(algo) {
+        Some(Curve::X25519) => normalize_x25519_public_key_hex(value),
+        Some(Curve::Secp256k1) => normalize_secp256k1_public_key_hex(value),
+        None => Err(KeyError::UnsupportedAlgo(algo.to_string())),
     }
 }
 
-/// Encrypt one E2EE v2 field to a recipient public key under the given §4
-/// suite. Used for response fields, keyed by the selected service E2EE key's
-/// `algo`.
+/// Encrypt one E2EE v2 or v2.1 field to a recipient public key under the
+/// suite named by `algo`.
 pub fn encrypt_aci_e2ee_for_public_key(
     algo: &str,
     recipient_public_key_hex: &str,
     plaintext: &[u8],
     aad: &[u8],
+    kdf: E2eeKdf<'_>,
 ) -> Result<String, KeyError> {
-    match algo {
-        E2EE_ALGO_X25519_AESGCM => {
-            encrypt_x25519_for_public_key(recipient_public_key_hex, plaintext, aad)
-        }
-        E2EE_ALGO_SECP256K1_AESGCM => {
-            encrypt_for_public_key(recipient_public_key_hex, plaintext, aad)
-        }
-        other => Err(KeyError::UnsupportedAlgo(other.to_string())),
+    match curve_of(algo) {
+        Some(Curve::X25519) => encrypt_x25519(recipient_public_key_hex, plaintext, aad, kdf),
+        Some(Curve::Secp256k1) => encrypt_secp256k1(recipient_public_key_hex, plaintext, aad, kdf),
+        None => Err(KeyError::UnsupportedAlgo(algo.to_string())),
     }
 }
 
@@ -142,16 +235,27 @@ pub fn x25519_secret_key_from_bytes(bytes: &[u8]) -> Result<X25519SecretKey, Key
     Ok(X25519SecretKey::from(bytes))
 }
 
+/// Encrypt one field under the X25519 suite with the v2 key derivation.
 pub fn encrypt_x25519_for_public_key(
     recipient_public_key_hex: &str,
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<String, KeyError> {
+    encrypt_x25519(recipient_public_key_hex, plaintext, aad, E2eeKdf::V2)
+}
+
+/// Encrypt one field under the X25519 suite with the given key derivation.
+pub fn encrypt_x25519(
+    recipient_public_key_hex: &str,
+    plaintext: &[u8],
+    aad: &[u8],
+    kdf: E2eeKdf<'_>,
+) -> Result<String, KeyError> {
     let recipient = x25519_public_key_from_hex(recipient_public_key_hex)?;
     let ephemeral = X25519SecretKey::from(rand::random::<[u8; 32]>());
     let ephemeral_public = X25519PublicKey::from(&ephemeral);
     let shared = ephemeral.diffie_hellman(&recipient);
-    let cipher = x25519_cipher_from_shared_secret(shared.as_bytes())?;
+    let cipher = aes_gcm_from_shared_secret(shared.as_bytes(), Curve::X25519, kdf)?;
     let nonce_bytes: [u8; NONCE_LEN] = rand::random();
     let ciphertext = cipher
         .encrypt(
@@ -170,10 +274,21 @@ pub fn encrypt_x25519_for_public_key(
     Ok(hex::encode(out))
 }
 
+/// Decrypt one X25519-suite field with the v2 key derivation.
 pub fn decrypt_x25519_with_secret_key(
     recipient_secret: &X25519SecretKey,
     ciphertext_hex: &str,
     aad: &[u8],
+) -> Result<Vec<u8>, KeyError> {
+    decrypt_x25519(recipient_secret, ciphertext_hex, aad, E2eeKdf::V2)
+}
+
+/// Decrypt one X25519-suite field with the given key derivation.
+pub fn decrypt_x25519(
+    recipient_secret: &X25519SecretKey,
+    ciphertext_hex: &str,
+    aad: &[u8],
+    kdf: E2eeKdf<'_>,
 ) -> Result<Vec<u8>, KeyError> {
     let blob = hex::decode(ciphertext_hex.strip_prefix("0x").unwrap_or(ciphertext_hex))
         .map_err(|e| KeyError::Crypto(format!("invalid X25519 E2EE ciphertext hex: {e}")))?;
@@ -193,7 +308,7 @@ pub fn decrypt_x25519_with_secret_key(
         .expect("nonce length is checked");
     let ciphertext = &blob[X25519_PUBLIC_KEY_LEN + NONCE_LEN..];
     let shared = recipient_secret.diffie_hellman(&eph);
-    let cipher = x25519_cipher_from_shared_secret(shared.as_bytes())?;
+    let cipher = aes_gcm_from_shared_secret(shared.as_bytes(), Curve::X25519, kdf)?;
     cipher
         .decrypt(
             &nonce_bytes.into(),
@@ -205,16 +320,27 @@ pub fn decrypt_x25519_with_secret_key(
         .map_err(|e| KeyError::Crypto(format!("X25519 E2EE decrypt failed: {e}")))
 }
 
+/// Encrypt one field under the secp256k1 suite with the v2 key derivation.
 pub fn encrypt_for_public_key(
     recipient_public_key_hex: &str,
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<String, KeyError> {
+    encrypt_secp256k1(recipient_public_key_hex, plaintext, aad, E2eeKdf::V2)
+}
+
+/// Encrypt one field under the secp256k1 suite with the given key derivation.
+pub fn encrypt_secp256k1(
+    recipient_public_key_hex: &str,
+    plaintext: &[u8],
+    aad: &[u8],
+    kdf: E2eeKdf<'_>,
+) -> Result<String, KeyError> {
     let recipient = public_key_from_hex(recipient_public_key_hex)?;
     let ephemeral = SecretKey::random(&mut OsRng);
     let shared = diffie_hellman(ephemeral.to_nonzero_scalar(), recipient.as_affine());
     let shared_bytes = shared.raw_secret_bytes();
-    let cipher = cipher_from_shared_secret(shared_bytes.as_ref())?;
+    let cipher = aes_gcm_from_shared_secret(shared_bytes.as_ref(), Curve::Secp256k1, kdf)?;
     let nonce_bytes: [u8; NONCE_LEN] = rand::random();
     let nonce = nonce_bytes.into();
     let ciphertext = cipher
@@ -294,10 +420,21 @@ pub fn encrypt_legacy_for_public_key(
     }
 }
 
+/// Decrypt one secp256k1-suite field with the v2 key derivation.
 pub fn decrypt_with_secret_key(
     recipient_secret: &SecretKey,
     ciphertext_hex: &str,
     aad: &[u8],
+) -> Result<Vec<u8>, KeyError> {
+    decrypt_secp256k1(recipient_secret, ciphertext_hex, aad, E2eeKdf::V2)
+}
+
+/// Decrypt one secp256k1-suite field with the given key derivation.
+pub fn decrypt_secp256k1(
+    recipient_secret: &SecretKey,
+    ciphertext_hex: &str,
+    aad: &[u8],
+    kdf: E2eeKdf<'_>,
 ) -> Result<Vec<u8>, KeyError> {
     let blob = hex::decode(ciphertext_hex.strip_prefix("0x").unwrap_or(ciphertext_hex))
         .map_err(|e| KeyError::Crypto(format!("invalid E2EE ciphertext hex: {e}")))?;
@@ -316,7 +453,7 @@ pub fn decrypt_with_secret_key(
     let ciphertext = &blob[PUBLIC_KEY_LEN + NONCE_LEN..];
     let shared = diffie_hellman(recipient_secret.to_nonzero_scalar(), eph.as_affine());
     let shared_bytes = shared.raw_secret_bytes();
-    let cipher = cipher_from_shared_secret(shared_bytes.as_ref())?;
+    let cipher = aes_gcm_from_shared_secret(shared_bytes.as_ref(), Curve::Secp256k1, kdf)?;
     cipher
         .decrypt(
             &nonce,
@@ -412,14 +549,6 @@ fn public_key_from_hex(value: &str) -> Result<PublicKey, KeyError> {
         .map_err(|e| KeyError::Crypto(format!("invalid secp256k1 public key: {e}")))
 }
 
-fn cipher_from_shared_secret(shared: &[u8]) -> Result<Aes256Gcm, KeyError> {
-    let hk = Hkdf::<Sha256>::new(None, shared);
-    let mut key = [0u8; 32];
-    hk.expand(SECP256K1_HKDF_INFO, &mut key)
-        .map_err(|e| KeyError::Crypto(format!("HKDF expand failed: {e}")))?;
-    Ok(Aes256Gcm::new_from_slice(&key).expect("AES-256 key length is fixed"))
-}
-
 fn x25519_public_key_from_hex(value: &str) -> Result<X25519PublicKey, KeyError> {
     let normalized = normalize_x25519_public_key_hex(value)?;
     let bytes: [u8; X25519_PUBLIC_KEY_LEN] = hex::decode(normalized)
@@ -428,14 +557,6 @@ fn x25519_public_key_from_hex(value: &str) -> Result<X25519PublicKey, KeyError> 
         .try_into()
         .expect("normalized X25519 key is 32 bytes");
     Ok(X25519PublicKey::from(bytes))
-}
-
-fn x25519_cipher_from_shared_secret(shared: &[u8]) -> Result<Aes256Gcm, KeyError> {
-    let hk = Hkdf::<Sha256>::new(None, shared);
-    let mut key = [0u8; 32];
-    hk.expand(X25519_HKDF_INFO, &mut key)
-        .map_err(|e| KeyError::Crypto(format!("HKDF expand failed: {e}")))?;
-    Ok(Aes256Gcm::new_from_slice(&key).expect("AES-256 key length is fixed"))
 }
 
 fn legacy_cipher_from_shared_secret(
@@ -519,12 +640,82 @@ mod tests {
     }
 
     #[test]
+    fn v2_1_field_key_needs_the_request_secret() {
+        let (secret, public_hex) = x25519_recipient();
+        let request_secret = [0x11u8; E2EE_REQUEST_SECRET_LEN];
+        let other_secret = [0x22u8; E2EE_REQUEST_SECRET_LEN];
+        let kdf = E2eeKdf::V2_1Field {
+            request_secret: &request_secret,
+        };
+        let ciphertext = encrypt_x25519(&public_hex, b"bound", b"aad", kdf).unwrap();
+        assert_eq!(
+            decrypt_x25519(&secret, &ciphertext, b"aad", kdf).unwrap(),
+            b"bound"
+        );
+        // The same ECDH output alone, or with another secret, opens nothing.
+        assert!(decrypt_x25519_with_secret_key(&secret, &ciphertext, b"aad").is_err());
+        assert!(decrypt_x25519(
+            &secret,
+            &ciphertext,
+            b"aad",
+            E2eeKdf::V2_1Field {
+                request_secret: &other_secret
+            }
+        )
+        .is_err());
+        assert!(decrypt_x25519(&secret, &ciphertext, b"aad", E2eeKdf::V2_1RequestKey).is_err());
+    }
+
+    #[test]
+    fn v2_1_request_key_label_is_separate_from_v2() {
+        let (secret, public_hex) = x25519_recipient();
+        let ciphertext =
+            encrypt_x25519(&public_hex, b"secret", b"aad", E2eeKdf::V2_1RequestKey).unwrap();
+        assert!(decrypt_x25519_with_secret_key(&secret, &ciphertext, b"aad").is_err());
+        assert_eq!(
+            decrypt_x25519(&secret, &ciphertext, b"aad", E2eeKdf::V2_1RequestKey).unwrap(),
+            b"secret"
+        );
+        // v2.1 has no secp256k1 suite.
+        let k256 = SecretKey::from_slice(&[0x05u8; 32]).unwrap();
+        assert!(encrypt_secp256k1(
+            &public_key_from_secret(&k256),
+            b"x",
+            b"aad",
+            E2eeKdf::V2_1RequestKey
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn v2_1_algos_map_to_their_v2_curves() {
+        let (_secret, public_hex) = x25519_recipient();
+        assert_eq!(
+            normalize_aci_e2ee_public_key_hex(E2EE_ALGO_X25519_AESGCM_V2_1, &public_hex).unwrap(),
+            public_hex
+        );
+        assert_eq!(
+            v2_1_algo_for(E2EE_ALGO_X25519_AESGCM),
+            Some(E2EE_ALGO_X25519_AESGCM_V2_1)
+        );
+        assert_eq!(v2_1_algo_for(E2EE_ALGO_SECP256K1_AESGCM), None);
+        assert!(is_aci_e2ee_v2_1_suite(E2EE_ALGO_X25519_AESGCM_V2_1));
+        assert!(!is_aci_e2ee_suite(E2EE_ALGO_X25519_AESGCM_V2_1));
+        assert!(!is_aci_e2ee_v2_1_suite(E2EE_ALGO_X25519_AESGCM));
+    }
+
+    #[test]
     fn suite_dispatch_routes_by_algo() {
         let (secret, public_hex) = x25519_recipient();
         let aad = b"aad";
-        let ciphertext =
-            encrypt_aci_e2ee_for_public_key(E2EE_ALGO_X25519_AESGCM, &public_hex, b"msg", aad)
-                .unwrap();
+        let ciphertext = encrypt_aci_e2ee_for_public_key(
+            E2EE_ALGO_X25519_AESGCM,
+            &public_hex,
+            b"msg",
+            aad,
+            E2eeKdf::V2,
+        )
+        .unwrap();
         assert_eq!(
             decrypt_x25519_with_secret_key(&secret, &ciphertext, aad).unwrap(),
             b"msg"

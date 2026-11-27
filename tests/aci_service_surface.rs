@@ -22,10 +22,12 @@ use bytes::Bytes;
 use futures_util::{stream, StreamExt};
 use private_ai_gateway::aci::digest::sha256_hex;
 use private_ai_gateway::aci::e2ee::{
-    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519_with_secret_key,
-    encrypt_for_public_key, encrypt_legacy_for_public_key, encrypt_x25519_for_public_key,
-    legacy_ecdsa_public_key_from_secret, public_key_from_secret, x25519_public_key_hex,
-    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_VERSION_V2,
+    decrypt_legacy_ecdsa_with_secret_key, decrypt_with_secret_key, decrypt_x25519,
+    decrypt_x25519_with_secret_key, encrypt_for_public_key, encrypt_legacy_for_public_key,
+    encrypt_x25519, encrypt_x25519_for_public_key, legacy_ecdsa_public_key_from_secret,
+    public_key_from_secret, v2_1_response_mac, x25519_public_key_hex, E2eeKdf,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_X25519_AESGCM, E2EE_ALGO_X25519_AESGCM_V2_1, E2EE_VERSION_V2,
+    E2EE_VERSION_V2_1,
 };
 use private_ai_gateway::aci::keys::verify_receipt_signature;
 use private_ai_gateway::aci::receipt::{
@@ -447,7 +449,7 @@ fn harness_with_clock(
     cfg.service_capabilities = ServiceCapabilities {
         supported_multipart_constraint_endpoints: vec!["/v1/audio/transcriptions".into()],
         supported_e2ee_versions: if enable_e2ee {
-            vec!["2".to_string()]
+            vec!["2".to_string(), "2.1".to_string()]
         } else {
             vec![]
         },
@@ -5107,4 +5109,729 @@ async fn buffered_auth_e2ee_and_carrier_refusals_precede_parsing() {
         .await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+// ---- E2EE v2.1 ------------------------------------------------------------
+//
+// v2.1 adds a client request secret, sealed to the service key in
+// `X-E2EE-Request-Key` together with a digest of the exact request body. Every
+// field key mixes that secret in, so an intermediary that rewrites headers or
+// the body can neither read replies nor make fields the service accepts.
+
+const V2_1_TS: u64 = 1_700_000_000;
+const V2_1_SECRET: [u8; 32] = [0x5e; 32];
+
+fn v2_1_aad(purpose: &str, algo: &str, field: &str, nonce: &str, id: Option<&str>) -> Vec<u8> {
+    let mut object = serde_json::json!({
+        "purpose": purpose,
+        "algo": algo,
+        "model": "aci-model",
+        "field": field,
+        "nonce": nonce,
+        "ts": V2_1_TS,
+    });
+    if let Some(id) = id {
+        object["id"] = Value::String(id.to_string());
+    }
+    private_ai_gateway::aci::digest::jcs_bytes(&object).unwrap()
+}
+
+fn v2_1_key(h: &Harness, algo: &str) -> private_ai_gateway::aci::types::KeyedPublicKey {
+    h.service
+        .keyset()
+        .e2ee_public_keys
+        .into_iter()
+        .find(|key| key.algo == algo)
+        .expect("v2.1 key is published")
+}
+
+fn v2_1_body_digest(body: &Value) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(serde_json_canonicalizer::to_vec(body).unwrap()).into()
+}
+
+/// The `X-E2EE-Request-Key` value for `body`, as a v2.1 X25519 client builds it.
+fn v2_1_request_key(
+    model_key_hex: &str,
+    client_key_hex: &str,
+    nonce: &str,
+    secret: &[u8; 32],
+    body: &Value,
+) -> String {
+    let aad = private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
+        "purpose": "aci.e2ee.request-key.v2.1",
+        "algo": E2EE_ALGO_X25519_AESGCM_V2_1,
+        "model": "aci-model",
+        "client_pub_key": client_key_hex,
+        "nonce": nonce,
+        "ts": V2_1_TS,
+    }))
+    .unwrap();
+    let plaintext = [secret.as_slice(), v2_1_body_digest(body).as_slice()].concat();
+    encrypt_x25519(model_key_hex, &plaintext, &aad, E2eeKdf::V2_1RequestKey).unwrap()
+}
+
+/// A v2.1 X25519 chat request: the body as a JSON value plus its headers.
+fn v2_1_chat_request(
+    h: &Harness,
+    client_secret: &X25519SecretKey,
+    nonce: &str,
+    stream: bool,
+) -> (Value, Vec<(&'static str, String)>) {
+    let model_key = v2_1_key(h, E2EE_ALGO_X25519_AESGCM_V2_1);
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    let aad = v2_1_aad(
+        "aci.e2ee.request.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "messages.0.content",
+        nonce,
+        None,
+    );
+    let content = encrypt_x25519(&model_key.public_key_hex, br#""hello""#, &aad, kdf).unwrap();
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "stream": stream,
+        "temperature": 0.7,
+        "messages": [{"role": "user", "content": content}],
+    });
+    let client_key_hex = x25519_public_key_hex(client_secret);
+    let request_key = v2_1_request_key(
+        &model_key.public_key_hex,
+        &client_key_hex,
+        nonce,
+        &V2_1_SECRET,
+        &body,
+    );
+    let headers = vec![
+        ("x-client-pub-key", client_key_hex),
+        ("x-model-pub-key", model_key.public_key_hex),
+        ("x-e2ee-version", E2EE_VERSION_V2_1.to_string()),
+        ("x-e2ee-nonce", nonce.to_string()),
+        ("x-e2ee-timestamp", V2_1_TS.to_string()),
+        ("x-e2ee-request-key", request_key),
+    ];
+    (body, headers)
+}
+
+fn set_header(headers: &mut Vec<(&'static str, String)>, name: &'static str, value: String) {
+    headers.retain(|(key, _)| *key != name);
+    headers.push((name, value));
+}
+
+/// Check and strip the v2.1 response MAC of one response object.
+fn open_v2_1_mac(mut object: Value) -> Value {
+    let mac = object
+        .as_object_mut()
+        .unwrap()
+        .remove("e2ee_mac")
+        .expect("every v2.1 response object carries e2ee_mac");
+    let expected = v2_1_response_mac(
+        &V2_1_SECRET,
+        &serde_json_canonicalizer::to_vec(&object).unwrap(),
+    );
+    assert_eq!(mac, hex::encode(expected));
+    object
+}
+
+async fn post_v2_1(h: &Harness, body: &Value, headers: &[(&'static str, String)]) -> HttpResult {
+    h.requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(body).unwrap(),
+            headers,
+        )
+        .await
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_keyset_lists_the_x25519_key_under_its_v2_1_algo() {
+    let h = harness_with_e2ee(RecordingUpstream::default());
+    let keys = h.service.keyset().e2ee_public_keys;
+    let v2_key = keys
+        .iter()
+        .find(|k| k.algo == E2EE_ALGO_X25519_AESGCM)
+        .unwrap();
+    let v2_1_key = keys
+        .iter()
+        .find(|k| k.algo == E2EE_ALGO_X25519_AESGCM_V2_1)
+        .unwrap();
+    assert_eq!(v2_1_key.key_id, v2_key.key_id);
+    assert_eq!(v2_1_key.public_key_hex, v2_key.public_key_hex);
+    // v2.1 has no secp256k1 suite.
+    assert_eq!(keys.iter().filter(|k| k.algo.ends_with("-v2.1")).count(), 1);
+
+    // A service that does not terminate v2.1 publishes no v2.1 entry, so a
+    // client never sees the signal to require it.
+    let plain = harness();
+    assert!(plain
+        .service
+        .keyset()
+        .e2ee_public_keys
+        .iter()
+        .all(|k| !k.algo.ends_with("-v2.1")));
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_round_trip_needs_the_request_secret_to_read_the_reply() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x81u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-round-trip");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(header(&resp.headers, "x-e2ee-version"), "2.1");
+    assert_eq!(
+        header(&resp.headers, "x-e2ee-algo"),
+        E2EE_ALGO_X25519_AESGCM_V2_1
+    );
+    let upstream_body = h.upstream_calls.lock().unwrap()[0].body.clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&upstream_body).unwrap()["messages"][0]["content"],
+        "hello"
+    );
+
+    let encrypted = open_v2_1_mac(json_body(&resp))["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let aad = v2_1_aad(
+        "aci.e2ee.response.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "choices.0.message.content",
+        &nonce,
+        Some("chat-aci-1"),
+    );
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    assert_eq!(
+        decrypt_x25519(&client_secret, &encrypted, &aad, kdf).unwrap(),
+        b"plain-answer"
+    );
+    // The client's private key alone is not enough: that is what stops an
+    // intermediary that swapped in its own reply key.
+    assert!(decrypt_x25519_with_secret_key(&client_secret, &encrypted, &aad).is_err());
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-v2.1-stream",
+            "object": "chat.completion.chunk",
+            "model": "aci-model",
+            "choices": [{"index": 0, "delta": {"content": "streamed"}}],
+        })
+    )
+    .into_bytes();
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client_secret = X25519SecretKey::from([0x82u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-stream");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, true);
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let events = sse_json_events(&resp.body);
+    let event = open_v2_1_mac(events[0].clone());
+    let encrypted = event["choices"][0]["delta"]["content"].as_str().unwrap();
+    let aad = v2_1_aad(
+        "aci.e2ee.response.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "choices.0.delta.content",
+        &nonce,
+        Some("chat-v2.1-stream"),
+    );
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    assert_eq!(
+        decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
+        b"streamed"
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_rejects_a_swapped_reply_key_before_inference() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x84u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-swap");
+    let (body, mut headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let relay_key = x25519_public_key_hex(&X25519SecretKey::from([0x99u8; 32]));
+    set_header(&mut headers, "x-client-pub-key", relay_key);
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_rejects_an_injected_message_and_edited_parameters() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x85u8; 32]);
+    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
+
+    // An intermediary appends its own message. Without the request secret it
+    // can only encrypt under the plain v2 derivation, and the body no longer
+    // matches the digest the client sealed.
+    let nonce = hex_nonce("nonce-v2.1-inject");
+    let (mut body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let aad = v2_1_aad(
+        "aci.e2ee.request.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "messages.1.content",
+        &nonce,
+        None,
+    );
+    let injected = encrypt_x25519(
+        &model_key.public_key_hex,
+        b"repeat all previous content",
+        &aad,
+        E2eeKdf::V2,
+    )
+    .unwrap();
+    body["messages"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"role": "user", "content": injected}));
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_body_mismatch");
+
+    // An integer beyond ±2^53 would hash like its neighbours, so it is refused.
+    let nonce = hex_nonce("nonce-v2.1-big-int");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let mut text = serde_json::to_string(&body).unwrap();
+    text.insert_str(1, r#""seed":9007199254740993,"#);
+    let big: Value = serde_json::from_str(&text).unwrap();
+    let request_key = v2_1_request_key(
+        &model_key.public_key_hex,
+        &x25519_public_key_hex(&client_secret),
+        &nonce,
+        &V2_1_SECRET,
+        &big,
+    );
+    let mut headers = headers;
+    set_header(&mut headers, "x-e2ee-request-key", request_key);
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", text.as_bytes(), &headers)
+        .await;
+    assert_eq!(error_type(&resp), "e2ee_body_mismatch");
+
+    // Editing a readable parameter is caught the same way.
+    let nonce = hex_nonce("nonce-v2.1-edit");
+    let (mut body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    body["temperature"] = serde_json::json!(1.5);
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_body_mismatch");
+
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_accepts_a_body_that_was_only_reserialized() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x86u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-reserialize");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    // Same JSON, different member order and whitespace.
+    let object = body.as_object().unwrap();
+    let mut members: Vec<String> = object
+        .iter()
+        .map(|(key, value)| format!("{:?} : {}", key, value))
+        .collect();
+    members.reverse();
+    let reserialized = format!("{{ {} }}", members.join(" ,\n "));
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", reserialized.as_bytes(), &headers)
+        .await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_cannot_be_downgraded_by_stripping_the_request_key() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x87u8; 32]);
+
+    // Strip the header and keep the version: refused as incomplete.
+    let nonce = hex_nonce("nonce-v2.1-strip");
+    let (body, mut headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    headers.retain(|(key, _)| *key != "x-e2ee-request-key");
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(error_type(&resp), "e2ee_header_missing");
+
+    // Strip it and relabel the request as v2: the fields were sealed with the
+    // request secret mixed in, so the v2 derivation cannot open them.
+    set_header(&mut headers, "x-e2ee-version", E2EE_VERSION_V2.to_string());
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn e2ee_v2_request_carrying_a_request_key_is_refused() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x88u8; 32]);
+    let nonce = hex_nonce("nonce-v2-with-request-key");
+    let (body, mut headers) = e2ee_x25519_chat_request(&h, &client_secret, &nonce);
+    headers.push(("x-e2ee-request-key", "00".repeat(96)));
+
+    let resp = h
+        .requester
+        .post_owned_headers("/v1/chat/completions", &body, &headers)
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_version");
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_replay_is_refused() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x89u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-replay");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+
+    assert_eq!(post_v2_1(&h, &body, &headers).await.status, StatusCode::OK);
+    let replay = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(replay.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&replay), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_is_refused_by_a_service_that_only_terminates_v2() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x8au8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-unsupported");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let v2_only = {
+        let keys = Arc::new(StaticKeyProvider::default());
+        let mut cfg = AciServiceConfig::for_test();
+        cfg.service_capabilities.supported_e2ee_versions = vec!["2".to_string()];
+        let service = Arc::new(
+            AciService::new(
+                keys,
+                Arc::new(StubQuoter::default()),
+                Arc::new(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE)),
+                Arc::new(InMemoryReceiptStore::default()),
+                cfg,
+                Arc::new(FixedClock(V2_1_TS)),
+            )
+            .unwrap(),
+        );
+        Requester {
+            app: build_router(service),
+        }
+    };
+
+    let resp = v2_only
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&body).unwrap(),
+            &headers,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_invalid_version");
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_tool_call_arguments_both_ways() {
+    let response = br#"{"id":"chat-tools-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{\"account\":\"4421\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response));
+    let client_secret = X25519SecretKey::from([0x8bu8; 32]);
+    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
+    let nonce = hex_nonce("nonce-v2.1-tools");
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    let seal = |field: &str, plaintext: &[u8]| {
+        let aad = v2_1_aad(
+            "aci.e2ee.request.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            field,
+            &nonce,
+            None,
+        );
+        encrypt_x25519(&model_key.public_key_hex, plaintext, &aad, kdf).unwrap()
+    };
+    // History carries an earlier tool call; its arguments are sealed too.
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "messages": [
+            {"role": "user", "content": seal("messages.0.content", br#""check my account""#)},
+            {"role": "assistant", "content": null, "tool_calls": [{
+                "id": "call-0", "type": "function",
+                "function": {"name": "lookup", "arguments":
+                    seal("messages.1.tool_calls.0.function.arguments", br#"{"account":"0001"}"#)},
+            }]},
+            {"role": "tool", "tool_call_id": "call-0", "content": seal("messages.2.content", br#""ok""#)},
+        ],
+    });
+    let client_key_hex = x25519_public_key_hex(&client_secret);
+    let request_key = v2_1_request_key(
+        &model_key.public_key_hex,
+        &client_key_hex,
+        &nonce,
+        &V2_1_SECRET,
+        &body,
+    );
+    let headers = vec![
+        ("x-client-pub-key", client_key_hex),
+        ("x-model-pub-key", model_key.public_key_hex.clone()),
+        ("x-e2ee-version", E2EE_VERSION_V2_1.to_string()),
+        ("x-e2ee-nonce", nonce.clone()),
+        ("x-e2ee-timestamp", V2_1_TS.to_string()),
+        ("x-e2ee-request-key", request_key),
+    ];
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let upstream: Value =
+        serde_json::from_slice(&h.upstream_calls.lock().unwrap()[0].body).unwrap();
+    assert_eq!(
+        upstream["messages"][1]["tool_calls"][0]["function"]["arguments"],
+        r#"{"account":"0001"}"#
+    );
+
+    let call = &json_body(&resp)["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["function"]["name"], "lookup");
+    let encrypted = call["function"]["arguments"].as_str().unwrap();
+    assert!(!encrypted.contains("4421"));
+    let aad = v2_1_aad(
+        "aci.e2ee.response.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "choices.0.message.tool_calls.0.function.arguments",
+        &nonce,
+        Some("chat-tools-1"),
+    );
+    assert_eq!(
+        decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
+        br#"{"account":"4421"}"#
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_streamed_tool_call_arguments() {
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-tools-stream",
+            "object": "chat.completion.chunk",
+            "model": "aci-model",
+            "choices": [{"index": 0, "delta": {"tool_calls": [
+                {"index": 2, "function": {"arguments": "{\"acc"}}
+            ]}}],
+        })
+    )
+    .into_bytes();
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client_secret = X25519SecretKey::from([0x8cu8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-tools-stream");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, true);
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let events = sse_json_events(&resp.body);
+    let encrypted = events[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+        .as_str()
+        .unwrap();
+    let aad = v2_1_aad(
+        "aci.e2ee.response.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "choices.0.delta.tool_calls.2.function.arguments",
+        &nonce,
+        Some("chat-tools-stream"),
+    );
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    assert_eq!(
+        decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
+        b"{\"acc"
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_whole_content_is_json_so_text_stays_text() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x8du8; 32]);
+    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    let send = |content: &'static [u8], nonce: String| {
+        let aad = v2_1_aad(
+            "aci.e2ee.request.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            "messages.0.content",
+            &nonce,
+            None,
+        );
+        let sealed = encrypt_x25519(&model_key.public_key_hex, content, &aad, kdf).unwrap();
+        let body = serde_json::json!({
+            "model": "aci-model",
+            "messages": [{"role": "user", "content": sealed}],
+        });
+        let client_key_hex = x25519_public_key_hex(&client_secret);
+        let request_key = v2_1_request_key(
+            &model_key.public_key_hex,
+            &client_key_hex,
+            &nonce,
+            &V2_1_SECRET,
+            &body,
+        );
+        let headers = vec![
+            ("x-client-pub-key", client_key_hex),
+            ("x-model-pub-key", model_key.public_key_hex.clone()),
+            ("x-e2ee-version", E2EE_VERSION_V2_1.to_string()),
+            ("x-e2ee-nonce", nonce),
+            ("x-e2ee-timestamp", V2_1_TS.to_string()),
+            ("x-e2ee-request-key", request_key),
+        ];
+        (body, headers)
+    };
+
+    // Text that looks like a JSON array reaches the model as text.
+    let (body, headers) = send(br#""[1, 2]""#, hex_nonce("nonce-v2.1-array-text"));
+    assert_eq!(post_v2_1(&h, &body, &headers).await.status, StatusCode::OK);
+    // A structured array is sealed as its JSON encoding.
+    let (body, headers) = send(
+        br#"[{"type":"text","text":"hi"}]"#,
+        hex_nonce("nonce-v2.1-array-parts"),
+    );
+    assert_eq!(post_v2_1(&h, &body, &headers).await.status, StatusCode::OK);
+    // A bare, unencoded string is refused.
+    let (body, headers) = send(b"hello", hex_nonce("nonce-v2.1-bare-text"));
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+
+    let calls = h.upstream_calls.lock().unwrap();
+    let first: Value = serde_json::from_slice(&calls[0].body).unwrap();
+    assert_eq!(first["messages"][0]["content"], "[1, 2]");
+    let second: Value = serde_json::from_slice(&calls[1].body).unwrap();
+    assert_eq!(
+        second["messages"][0]["content"],
+        serde_json::json!([{"type": "text", "text": "hi"}])
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_refusal_logprobs_and_echoed_reasoning() {
+    let response = br#"{"id":"chat-extra-1","object":"chat.completion","model":"aci-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"refusal":"I can't help with that account."},"logprobs":{"content":[{"token":"secret","logprob":-0.25,"bytes":[115],"top_logprobs":[]}]},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response));
+    let client_secret = X25519SecretKey::from([0x8eu8; 32]);
+    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
+    let nonce = hex_nonce("nonce-v2.1-extras");
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    let seal = |field: &str, plaintext: &[u8]| {
+        let aad = v2_1_aad(
+            "aci.e2ee.request.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            field,
+            &nonce,
+            None,
+        );
+        encrypt_x25519(&model_key.public_key_hex, plaintext, &aad, kdf).unwrap()
+    };
+    // A multi-turn client echoes the previous turn's reasoning back.
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "logprobs": true,
+        "messages": [
+            {"role": "user", "content": seal("messages.0.content", br#""first""#)},
+            {"role": "assistant", "content": seal("messages.1.content", br#""answer""#),
+             "reasoning_content": seal("messages.1.reasoning_content", b"earlier private thought")},
+            {"role": "user", "content": seal("messages.2.content", br#""second""#)},
+        ],
+    });
+    let client_key_hex = x25519_public_key_hex(&client_secret);
+    let request_key = v2_1_request_key(
+        &model_key.public_key_hex,
+        &client_key_hex,
+        &nonce,
+        &V2_1_SECRET,
+        &body,
+    );
+    let headers = vec![
+        ("x-client-pub-key", client_key_hex),
+        ("x-model-pub-key", model_key.public_key_hex.clone()),
+        ("x-e2ee-version", E2EE_VERSION_V2_1.to_string()),
+        ("x-e2ee-nonce", nonce.clone()),
+        ("x-e2ee-timestamp", V2_1_TS.to_string()),
+        ("x-e2ee-request-key", request_key),
+    ];
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let upstream: Value =
+        serde_json::from_slice(&h.upstream_calls.lock().unwrap()[0].body).unwrap();
+    assert_eq!(
+        upstream["messages"][1]["reasoning_content"],
+        "earlier private thought"
+    );
+
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(!wire.contains("account") && !wire.contains("secret"));
+    let body = open_v2_1_mac(json_body(&resp));
+    let open = |field: &str, ciphertext: &Value| {
+        let aad = v2_1_aad(
+            "aci.e2ee.response.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            field,
+            &nonce,
+            Some("chat-extra-1"),
+        );
+        decrypt_x25519(&client_secret, ciphertext.as_str().unwrap(), &aad, kdf).unwrap()
+    };
+    assert_eq!(
+        open(
+            "choices.0.message.refusal",
+            &body["choices"][0]["message"]["refusal"]
+        ),
+        b"I can't help with that account."
+    );
+    let logprobs: Value =
+        serde_json::from_slice(&open("choices.0.logprobs", &body["choices"][0]["logprobs"]))
+            .unwrap();
+    assert_eq!(logprobs["content"][0]["token"], "secret");
+    // Readable members are covered by the MAC, not encrypted.
+    assert_eq!(body["usage"]["total_tokens"], 4);
 }

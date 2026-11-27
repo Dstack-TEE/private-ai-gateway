@@ -92,6 +92,8 @@ pub enum E2eeError {
     InvalidPayloadModel,
     #[error("E2EE decryption failed")]
     DecryptionFailed,
+    #[error("request body does not match the E2EE v2.1 request key")]
+    BodyMismatch,
     #[error("E2EE encryption failed")]
     EncryptionFailed,
 }
