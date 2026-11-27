@@ -96,10 +96,6 @@ pub enum E2eeError {
     DecryptionFailed,
     #[error("request body does not match the E2EE v2.1 request key")]
     BodyMismatch,
-    /// v2.1: a request member, or a content value's form, v2.1 does not
-    /// encrypt or bind (§10.5). Carries the member's path.
-    #[error("E2EE v2.1 does not accept the request member `{0}`")]
-    UnsupportedMember(String),
     #[error("E2EE encryption failed")]
     EncryptionFailed,
 }

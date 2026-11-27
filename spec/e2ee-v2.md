@@ -284,7 +284,6 @@ a different status.
 | `e2ee_invalid_payload_model` | 400 | The request's top-level `model` is absent or not a string. |
 | `e2ee_decryption_failed` | 400 | A ciphertext is malformed, AEAD authentication fails, or decrypted content cannot be restored. |
 | `e2ee_body_mismatch` | 400 | v2.1: the request body does not match the digest sealed in `X-E2EE-Request-Key`. |
-| `e2ee_unsupported_member` | 400 | v2.1: the request carries a member, or a value form, the request allowlist does not allow (§10.5). |
 | `e2ee_unsupported_endpoint` | 400 | V2 headers were sent to an endpoint this protocol does not define. |
 
 ## 10. Version 2.1
@@ -396,73 +395,53 @@ encrypts whole (below), plus:
 
 | Direction | Field path | Plaintext |
 | --- | --- | --- |
-| request | `messages.{m}.reasoning`, `messages.{m}.reasoning_content` | the string |
-| request | `messages.{m}.tool_calls.{t}.function.arguments` | the string |
-| buffered response | `choices.{i}.message.refusal` | the string |
-| buffered response | `choices.{i}.message.tool_calls.{t}.function.arguments` | the string |
-| streaming response | `choices.{i}.delta.refusal` | the string |
-| streaming response | `choices.{i}.delta.tool_calls.{t}.function.arguments` | the string |
-| any response | `choices.{i}.logprobs` | its compact JSON |
+| request | `messages.{m}.reasoning`, `messages.{m}.reasoning_content`, `messages.{m}.refusal` | the string |
+| request | `messages.{m}.tool_calls.{t}.function.arguments`, `messages.{m}.function_call.arguments` | the string |
+| request | `prediction.content` | the JSON encoding of the value, as for whole content |
+| request | `suffix` (`/v1/completions`) | the string |
+| chat response, buffered `message` or streamed `delta` (`{p}` = `choices.{i}.message` or `choices.{i}.delta`) | `{p}.refusal`, `{p}.function_call.arguments`, `{p}.tool_calls.{t}.function.arguments`, `{p}.audio.transcript`, and in a stream `{p}.audio.data` | the string |
+| chat response | `{p}.annotations` | its compact JSON |
+| any response | `choices.{i}.logprobs`, `choices.{i}.token_ids`, `choices.{i}.prompt_token_ids`, `choices.{i}.prompt_logprobs`, `prompt_token_ids`, `prompt_logprobs` | its compact JSON |
 
-`{t}` is the tool call's `index` member when it is a non-negative integer and
-its array position otherwise. A number with a zero fraction, such as `1.0`,
-is that integer up to 2^53 − 1, the range a JavaScript `JSON.parse` keeps
-exact; the path is written in integer form (`…tool_calls.1…`). The client
-MUST encrypt every request string at these locations. The service decrypts
-every string at them, so a plaintext one fails with `e2ee_decryption_failed`.
+The `token_ids` and `prompt_*` members are vLLM's echoes of the generated and
+prompt tokens. `{t}` is the tool call's `index` member when it is a
+non-negative integer and its array position otherwise. A number with a zero
+fraction, such as `1.0`, is that integer up to 2^53 − 1, the range a
+JavaScript `JSON.parse` keeps exact; the path is written in integer form
+(`…tool_calls.1…`).
 
-A whole-content `messages.{m}.content` plaintext is the JSON encoding of the
-content value: a JSON string for text, a JSON array for structured content. The
-service restores it by parsing that JSON and rejects anything else with
-`e2ee_decryption_failed`. Text that happens to look like a JSON array therefore
+The client MUST encrypt every request string at these locations, and every
+non-null whole-content value. The service decrypts every string at them, so a
+plaintext one fails with `e2ee_decryption_failed`. A `null` or absent value is
+skipped. A value of another type at a string location, such as token ids in
+`prompt`, `input`, or a non-string `arguments`, passes through unencrypted, as
+in §5; it is readable. Unlike v2, a v2.1 request need not contain an encrypted
+field: the request key already binds the body, so a token-id prompt is valid.
+
+A whole-content plaintext (`messages.{m}.content`, `prediction.content`) is the
+JSON encoding of the value: a JSON string for text, a JSON array for structured
+content. The service restores the value by parsing that JSON and fails with
+`e2ee_decryption_failed` when it is not JSON. V2.1 has no per-part form, so a
+whole-content location that holds anything but a ciphertext string or `null`
+fails the same way. Text that happens to look like a JSON array therefore
 stays text, unlike v2's restoration rule (§5).
 
-#### Request allowlist
+#### Readable members
 
-A v2.1 request carries only what v2.1 protects: the members it encrypts, and
-readable parameters the body digest binds (§10.3). A client MUST NOT send
-anything else. The service rejects anything else with
-`e2ee_unsupported_member` before any upstream request. A member whose value is
-`null` counts as absent, so a reply sent back as history with `refusal: null`
-or `tool_calls: null` passes.
-[`e2ee-v2.1-request-members.json`](e2ee-v2.1-request-members.json) holds the
-same lists; the gateway loads it, and the TypeScript client tests against it.
+Everything else in a v2.1 request is sent as the client wrote it, so a v2.1
+request can carry every member a plaintext request can: sampling parameters,
+`tools` and `functions`, `response_format`, `metadata`, `user`,
+`prompt_cache_key`, `cache_salt`, `chat_template_kwargs`, `thinking`,
+`modalities` and `audio`, `provider`, vendor extensions, and members a reply
+echoes back as history, such as `annotations` or `audio: {"id": …}`. The
+service forwards them unchanged.
 
-| Object | Encrypted | Readable |
-| --- | --- | --- |
-| `/v1/chat/completions` body | `messages` | `model`, `stream`, `stream_options`, `n`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop`, `logprobs`, `top_logprobs`, `response_format`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `reasoning`, `user`, `provider` |
-| `/v1/completions` body | `prompt` | `model`, `stream`, `stream_options`, `n`, `max_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop`, `logprobs`, `user`, `provider` |
-| `/v1/embeddings` body | `input` | `model`, `encoding_format`, `dimensions`, `user`, `provider` |
-| message | `content`, `reasoning`, `reasoning_content` | `role`, `name`, `tool_calls`, `tool_call_id` |
-| message tool call | — | `id`, `type`, `function`, `index` |
-| tool call `function` | `arguments` | `name` |
-
-Why each readable parameter is allowed:
-
-| Parameters | Why |
-| --- | --- |
-| `model`, `stream`, `stream_options`, `n` | Routing and response shape. `model` is also in every AAD. |
-| `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop` | Sampling and limits. `stop` strings and `logit_bias` token ids stay readable. |
-| `logprobs`, `top_logprobs` | Ask for log-probabilities, which v2.1 encrypts in the response. |
-| `response_format`, `tools`, `tool_choice`, `parallel_tool_calls` | Output schema and tool definitions, readable (§10.8). The tool-call arguments they produce are encrypted. |
-| `reasoning_effort`, `reasoning` | Reasoning controls. The reasoning text is encrypted. |
-| `user` | An end-user id for abuse monitoring. |
-| `provider` | Routing preferences, including the ACI serving constraints ([ACI §5.3](aci.md#53-serving-constraints-aggregators)). |
-| `encoding_format`, `dimensions` | Embedding output form. The embedding is encrypted. |
-| `role`, `name`, `tool_call_id`, and a tool call's `id`, `type`, `index`, `name` | Message structure. |
-
-Values:
-
-- `messages` is an array of objects. A message's `content` is a ciphertext
-  string or `null`; structured content is encrypted whole, never per part.
-- `reasoning`, `reasoning_content`, and `arguments` are ciphertext strings or
-  `null`. `tool_calls` is an array of objects and `function` an object.
-- `prompt` and `input` are a string or an array of strings. Token-id arrays
-  are refused, because v2.1 cannot encrypt them.
-
-Everything else is refused, for example `functions`, `function_call`,
-`prediction`, `suffix`, `echo`, `metadata`, and `modalities` and `audio`,
-which ask for audio output whose `transcript` v2.1 does not encrypt.
+Readable members are visible to every intermediary, but the body digest
+(§10.3) binds them: none can be added, removed, or changed without
+`e2ee_body_mismatch`. Applications MUST NOT put private text in a readable
+member, for example in `metadata`, `user`, a tool description, or a vendor
+extension. A future version should encrypt the whole body instead, for
+example with HPKE or OHTTP.
 
 ### 10.6 Response MAC
 
@@ -509,10 +488,8 @@ failure, before any upstream request:
    `e2ee_decryption_failed`.
 7. The body is I-JSON, with no integer beyond ±2^53, and the sealed digest
    equals `SHA-256(JCS(body))` of the received body: `e2ee_body_mismatch`.
-8. Every member is on the request allowlist, with values of the allowed forms
-   (§10.5): `e2ee_unsupported_member`.
-9. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
-10. The replay tuple is unused (§7): `e2ee_replay_detected`.
+8. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
+9. The replay tuple is unused (§7): `e2ee_replay_detected`.
 
 V2 and v2.1 share replay state for the same key material. A successful v2.1
 response carries `X-E2EE-Version: 2.1` and the v2.1 algo in `X-E2EE-Algo`.
@@ -527,9 +504,10 @@ Receipts follow §8 unchanged.
   repeated, and reordered events, but not truncation. The receipt's
   `response.returned.body_hash` covers the exact stream (§8), so detecting
   truncation takes a receipt check over the raw bytes received.
+- Request members outside §5 and §10.5 stay readable (§10.5, Readable
+  members).
 - Response members outside §5 and §10.5 that an upstream adds stay readable;
-  the MAC stops changes to them. The request allowlist keeps clients from
-  asking for known ones, such as an audio `transcript`.
+  the MAC stops changes to them.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still

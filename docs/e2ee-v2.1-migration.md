@@ -32,8 +32,8 @@ rejects a tampered request before it reaches any model.
 | Request headers | `X-Signing-Algo`, `X-Client-Pub-Key`, `X-Model-Pub-Key` | `X-E2EE-Version: 2.1`, `X-Client-Pub-Key`, `X-Model-Pub-Key`, `X-E2EE-Nonce`, `X-E2EE-Timestamp`, `X-E2EE-Request-Key` |
 | Request body | messages can be added or edited | any change to a value is rejected (`e2ee_body_mismatch`) |
 | Response | fields encrypted, everything else editable | fields encrypted, every JSON object and SSE event MAC'd (`e2ee_mac`), stream events numbered (`e2ee_seq`) |
-| Request members | anything | only the [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist) |
-| Encrypted fields | message content, reasoning | also tool-call arguments, `refusal`, `logprobs`, and reasoning sent back in history |
+| Request members | anything | anything; [readable members](../spec/e2ee-v2.md#readable-members) are bound by the body digest |
+| Encrypted fields | message content, reasoning | also tool-call and function-call arguments, `refusal`, `prediction.content`, `suffix`, reasoning sent back in history, and in replies `logprobs`, `annotations`, the audio transcript, and vLLM token echoes |
 | Replay | accepted | rejected inside a 5-minute window |
 | Clock | not used | client time must be within 5 minutes of the gateway's |
 | Endpoints | chat completions, completions, embeddings | the same |
@@ -115,10 +115,10 @@ The client:
 - never retries in another mode. An error reply is handed back unchanged; a
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
-  `/v1/responses`, and any request member off the
-  [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist), such as `functions`
-  or token-id prompts. Members set to `null` count as absent, but drop a
-  reply's `annotations: []` before sending it back as history;
+  `/v1/responses`;
+- encrypts every content location and sends every other member as you wrote
+  it, so any request that works in plaintext works under v2.1. Those other
+  members are readable on the way (see [Readable members](#readable-members));
 - builds a new request, with a new nonce, every time it is called, so SDK
   retries are safe.
 
@@ -173,9 +173,10 @@ Where implementations go wrong:
 - **Hashing too early.** Hash the body after your SDK or framework has added
   everything it adds.
 - **Resending.** Every attempt is a new request with a new secret and nonce.
-- **Members v2.1 does not protect.** Send only the
-  [allowlisted members](../spec/e2ee-v2.md#request-allowlist); the gateway
-  refuses the rest with `e2ee_unsupported_member`.
+- **Missing a content location.** Encrypt every request location in §5 and
+  §10.5, including `refusal` and `function_call.arguments` in history,
+  `prediction.content`, and `suffix`. The gateway rejects a plaintext string
+  there with `e2ee_decryption_failed`.
 
 To test it, fix your random inputs to the values in the
 [v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21) and reproduce
@@ -303,16 +304,24 @@ cases now fail differently:
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
 | `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |
-| `e2ee_unsupported_member` | The request carries a member v2.1 does not protect. The error names it. |
 
 On the client side, `E2eeError` from the SDK means a successful response did
 not verify: something between the client and the gateway changed it.
 
+## Readable members
+
+V2.1 encrypts content, not the whole body. Every member outside the encrypted
+locations, such as `metadata`, `user`, `prompt_cache_key`, tool definitions,
+`response_format`, or a vendor extension, reaches the gateway as you sent it.
+Anything between the client and the gateway can read these members but not
+change them. Do not put private text in them; put it in the messages. A later
+version is expected to encrypt the whole body (for example with HPKE or OHTTP).
+
 ## Limits
 
-- Roles, message count, model, sampling parameters, tool definitions, usage
-  counts, and ciphertext lengths stay readable. V2.1 stops changes to them, not
-  reading them.
+- Roles, message count, model, sampling parameters, tool definitions, other
+  readable members, usage counts, and ciphertext lengths stay readable. V2.1
+  stops changes to them, not reading them.
 - A stream can still end early. `e2ee_seq` stops lost, repeated, and
   reordered events, but not a stream cut short. The signed receipt's
   `response.returned.body_hash` covers the exact stream, but the SDK does not

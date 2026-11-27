@@ -5539,30 +5539,6 @@ async fn e2ee_v2_1_replay_is_refused() {
     assert_eq!(error_type(&replay), "e2ee_replay_detected");
 }
 
-#[tokio::test]
-async fn e2ee_v2_1_refuses_members_it_does_not_protect_before_inference() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = X25519SecretKey::from([0x8du8; 32]);
-    let nonce = hex_nonce("nonce-v2.1-allowlist");
-    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
-    let (mut body, mut headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
-    // A legacy function call would come back with readable arguments. The
-    // client sealed the body, so the digest holds: only the allowlist refuses it.
-    body["functions"] = serde_json::json!([{"name": "lookup", "parameters": {}}]);
-    let request_key = v2_1_request_key(
-        &model_key.public_key_hex,
-        &x25519_public_key_hex(&client_secret),
-        &nonce,
-        &V2_1_SECRET,
-        &body,
-    );
-    set_header(&mut headers, "x-e2ee-request-key", request_key);
-    let resp = post_v2_1(&h, &body, &headers).await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_unsupported_member");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
 /// A service that advertises only E2EE v2.
 fn v2_only_requester() -> Requester {
     let keys = Arc::new(StaticKeyProvider::default());
@@ -5943,4 +5919,316 @@ async fn e2ee_v2_1_encrypts_refusal_logprobs_and_echoed_reasoning() {
     assert_eq!(logprobs["content"][0]["token"], "secret");
     // Readable members are covered by the MAC, not encrypted.
     assert_eq!(body["usage"]["total_tokens"], 4);
+}
+
+/// A v2.1 X25519 client for one request: seals request fields, builds the
+/// headers for a finished body, and opens response fields.
+struct V2_1Client {
+    model_key_hex: String,
+    client_secret: X25519SecretKey,
+    nonce: String,
+}
+
+impl V2_1Client {
+    fn new(h: &Harness, client_byte: u8, nonce: &str) -> Self {
+        Self {
+            model_key_hex: v2_1_key(h, E2EE_ALGO_X25519_AESGCM_V2_1).public_key_hex,
+            client_secret: X25519SecretKey::from([client_byte; 32]),
+            nonce: hex_nonce(nonce),
+        }
+    }
+
+    fn kdf(&self) -> E2eeKdf<'static> {
+        E2eeKdf::V2_1Field {
+            request_secret: &V2_1_SECRET,
+        }
+    }
+
+    fn seal(&self, field: &str, plaintext: &[u8]) -> String {
+        let aad = v2_1_aad(
+            "aci.e2ee.request.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            field,
+            &self.nonce,
+            None,
+        );
+        encrypt_x25519(&self.model_key_hex, plaintext, &aad, self.kdf()).unwrap()
+    }
+
+    fn headers(&self, body: &Value) -> Vec<(&'static str, String)> {
+        let client_key_hex = x25519_public_key_hex(&self.client_secret);
+        let request_key = v2_1_request_key(
+            &self.model_key_hex,
+            &client_key_hex,
+            &self.nonce,
+            &V2_1_SECRET,
+            body,
+        );
+        vec![
+            ("x-client-pub-key", client_key_hex),
+            ("x-model-pub-key", self.model_key_hex.clone()),
+            ("x-e2ee-version", E2EE_VERSION_V2_1.to_string()),
+            ("x-e2ee-nonce", self.nonce.clone()),
+            ("x-e2ee-timestamp", V2_1_TS.to_string()),
+            ("x-e2ee-request-key", request_key),
+        ]
+    }
+
+    fn open(&self, id: &str, field: &str, ciphertext: &Value) -> Vec<u8> {
+        let aad = v2_1_aad(
+            "aci.e2ee.response.v2.1",
+            E2EE_ALGO_X25519_AESGCM_V2_1,
+            field,
+            &self.nonce,
+            Some(id),
+        );
+        let ciphertext = ciphertext
+            .as_str()
+            .unwrap_or_else(|| panic!("{field} is not a ciphertext"));
+        decrypt_x25519(&self.client_secret, ciphertext, &aad, self.kdf()).unwrap()
+    }
+
+    fn open_json(&self, id: &str, field: &str, ciphertext: &Value) -> Value {
+        serde_json::from_slice(&self.open(id, field, ciphertext)).unwrap()
+    }
+
+    async fn post(&self, h: &Harness, path: &str, body: &Value) -> HttpResult {
+        let resp = h
+            .requester
+            .post_owned_headers(
+                path,
+                &serde_json::to_vec(body).unwrap(),
+                &self.headers(body),
+            )
+            .await;
+        assert_eq!(
+            resp.status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&resp.body)
+        );
+        resp
+    }
+}
+
+fn last_upstream_body(h: &Harness) -> Value {
+    serde_json::from_slice(&h.upstream_calls.lock().unwrap().last().unwrap().body).unwrap()
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_forwards_every_member_a_plaintext_request_can_carry() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client = V2_1Client::new(&h, 0x8f, "nonce-v2.1-members");
+    let readable = serde_json::json!({
+        "thinking": {"type": "enabled", "budget_tokens": 512},
+        "chat_template_kwargs": {"enable_thinking": false},
+        "include_reasoning": true,
+        "prompt_cache_key": "conversation-7",
+        "metadata": {"tenant": "t-1"},
+        "verbosity": "low",
+        "x_vendor_unknown": [1, {"a": null}],
+        "functions": [{"name": "lookup", "parameters": {}}],
+    });
+    let mut body = serde_json::json!({
+        "model": "aci-model",
+        // Predicted output is content, sealed whole as its JSON (§10.5).
+        "prediction": {"type": "content",
+                       "content": client.seal("prediction.content", br#""draft reply""#)},
+        "messages": [
+            {"role": "user", "content": client.seal("messages.0.content", br#""q""#)},
+            // A reply echoed back as history by the OpenAI SDK.
+            {"role": "assistant", "content": null, "annotations": [], "audio": null,
+             "refusal": client.seal("messages.1.refusal", b"I can't share that."),
+             "function_call": {"name": "lookup",
+                               "arguments": client.seal("messages.1.function_call.arguments", br#"{"id":1}"#)}},
+            {"role": "user", "content": client.seal("messages.2.content", br#"[{"type":"text","text":"q2"}]"#)},
+        ],
+    });
+    body.as_object_mut()
+        .unwrap()
+        .extend(readable.as_object().unwrap().clone());
+
+    client.post(&h, "/v1/chat/completions", &body).await;
+    let upstream = last_upstream_body(&h);
+    for (key, value) in readable.as_object().unwrap() {
+        assert_eq!(&upstream[key], value, "{key}");
+    }
+    assert_eq!(upstream["prediction"]["content"], "draft reply");
+    let history = &upstream["messages"][1];
+    assert_eq!(history["refusal"], "I can't share that.");
+    assert_eq!(history["annotations"], serde_json::json!([]));
+    assert_eq!(history["function_call"]["arguments"], r#"{"id":1}"#);
+    assert_eq!(
+        upstream["messages"][2]["content"],
+        serde_json::json!([{"type": "text", "text": "q2"}])
+    );
+
+    // A content location still holds only ciphertext: plaintext parts fail.
+    let client = V2_1Client::new(&h, 0x8f, "nonce-v2.1-plain-parts");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "in clear"}]}],
+    });
+    let resp = h
+        .requester
+        .post_owned_headers(
+            "/v1/chat/completions",
+            &serde_json::to_vec(&body).unwrap(),
+            &client.headers(&body),
+        )
+        .await;
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_completions_seal_the_suffix_and_pass_token_ids() {
+    let response = br#"{"id":"cmpl-v2.1","object":"text_completion","model":"aci-model","choices":[{"index":0,"text":"middle","token_ids":[7,8],"prompt_token_ids":[1,2],"finish_reason":"stop"}]}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response));
+    let client = V2_1Client::new(&h, 0x90, "nonce-v2.1-suffix");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "prompt": client.seal("prompt", b"def f():"),
+        "suffix": client.seal("suffix", b"return x"),
+    });
+    let resp = client.post(&h, "/v1/completions", &body).await;
+    let upstream = last_upstream_body(&h);
+    assert_eq!(upstream["prompt"], "def f():");
+    assert_eq!(upstream["suffix"], "return x");
+    let reply = open_v2_1_mac(json_body(&resp));
+    let choice = &reply["choices"][0];
+    assert_eq!(
+        client.open("cmpl-v2.1", "choices.0.text", &choice["text"]),
+        b"middle"
+    );
+    // Token echoes repeat the content, so they are sealed too.
+    assert_eq!(
+        client.open_json("cmpl-v2.1", "choices.0.token_ids", &choice["token_ids"]),
+        serde_json::json!([7, 8])
+    );
+    assert_eq!(
+        client.open_json(
+            "cmpl-v2.1",
+            "choices.0.prompt_token_ids",
+            &choice["prompt_token_ids"]
+        ),
+        serde_json::json!([1, 2])
+    );
+
+    // A token-id prompt has nothing to encrypt and passes through, as in v2.
+    let client = V2_1Client::new(&h, 0x90, "nonce-v2.1-token-prompt");
+    let body = serde_json::json!({"model": "aci-model", "prompt": [[1, 2, 3], [4]]});
+    client.post(&h, "/v1/completions", &body).await;
+    assert_eq!(
+        last_upstream_body(&h)["prompt"],
+        serde_json::json!([[1, 2, 3], [4]])
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_audio_transcript_and_annotations() {
+    let annotations = serde_json::json!([{"type": "url_citation", "url_citation": {
+        "start_index": 0, "end_index": 5, "url": "https://example.com/private", "title": "Private"}}]);
+    let response = serde_json::json!({
+        "id": "chat-audio-1", "object": "chat.completion", "model": "aci-model",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {
+            "role": "assistant", "content": "hello", "annotations": annotations,
+            "audio": {"id": "audio-1", "data": "UklGRg==", "expires_at": 1, "transcript": "spoken secret"},
+        }}],
+        "prompt_token_ids": [5, 6],
+    });
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
+        &serde_json::to_vec(&response).unwrap(),
+    ));
+    let client = V2_1Client::new(&h, 0x91, "nonce-v2.1-audio");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "modalities": ["text", "audio"],
+        "audio": {"voice": "alloy", "format": "wav"},
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", br#""hi""#)}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(!wire.contains("secret") && !wire.contains("example.com") && !wire.contains("UklGRg"));
+    let reply = open_v2_1_mac(json_body(&resp));
+    let message = &reply["choices"][0]["message"];
+    let id = "chat-audio-1";
+    let prefix = "choices.0.message";
+    assert_eq!(
+        client.open(
+            id,
+            &format!("{prefix}.audio.transcript"),
+            &message["audio"]["transcript"]
+        ),
+        b"spoken secret"
+    );
+    assert_eq!(
+        client.open(
+            id,
+            &format!("{prefix}.audio.data"),
+            &message["audio"]["data"]
+        ),
+        b"UklGRg=="
+    );
+    assert_eq!(message["audio"]["id"], "audio-1");
+    assert_eq!(
+        client.open_json(
+            id,
+            &format!("{prefix}.annotations"),
+            &message["annotations"]
+        ),
+        annotations
+    );
+    assert_eq!(
+        client.open_json(id, "prompt_token_ids", &reply["prompt_token_ids"]),
+        serde_json::json!([5, 6])
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_streamed_audio_and_annotations() {
+    let annotations = serde_json::json!([{"type": "url_citation", "url_citation": {
+        "start_index": 0, "end_index": 1, "url": "https://example.com/s", "title": "S"}}]);
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-audio-stream", "object": "chat.completion.chunk", "model": "aci-model",
+            "choices": [{"index": 0, "delta": {
+                "annotations": annotations,
+                "audio": {"id": "audio-2", "data": "AAEC", "transcript": "streamed secret"},
+            }}],
+        })
+    );
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client = V2_1Client::new(&h, 0x92, "nonce-v2.1-audio-stream");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", br#""hi""#)}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(!wire.contains("secret") && !wire.contains("example.com") && !wire.contains("AAEC"));
+    let event = open_v2_1_mac(sse_json_events(&resp.body).remove(0));
+    let delta = &event["choices"][0]["delta"];
+    let id = "chat-audio-stream";
+    assert_eq!(
+        client.open(
+            id,
+            "choices.0.delta.audio.transcript",
+            &delta["audio"]["transcript"]
+        ),
+        b"streamed secret"
+    );
+    assert_eq!(
+        client.open(id, "choices.0.delta.audio.data", &delta["audio"]["data"]),
+        b"AAEC"
+    );
+    assert_eq!(
+        client.open_json(id, "choices.0.delta.annotations", &delta["annotations"]),
+        annotations
+    );
 }
