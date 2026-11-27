@@ -488,14 +488,14 @@ The client MUST, for each response object:
 The client parses a stream as the event stream format of the WHATWG HTML
 Standard, §9.2 "Server-sent events" (§12). The checks above apply to the
 `data` of each event; the client passes `data: [DONE]` through and rejects any
-event with `data` after it. The other
-standard fields, `event`, `id`, and `retry`, are SSE metadata: the service
-relays them as a plaintext stream does, they are outside the MAC and not
-authenticated, and they carry no content. The client passes them through
-unchanged, also in a block without `data`, which dispatches no event. It
-ignores comments and unknown fields, as the format requires, and rejects no
-line for its field name: only `data` reaches the application as an event, and
-it is MAC'd. An event whose data is not a JSON object cannot carry
+event with `data` after it. The service relays the other standard fields,
+`event`, `id`, and `retry`, as a plaintext stream does, but they are outside
+the MAC, and an intermediary can add or change them; an application SDK can
+act on them, for example by yielding a named event instead of the chunk. The
+client therefore ignores them, as it ignores comments and unknown fields, and
+rejects no line for its field name: it hands the application only `data`
+events, each MAC'd, and `[DONE]`. A block whose data is empty carries nothing
+to check, and the client skips it. An event whose data is not a JSON object cannot carry
 `e2ee_mac`, so the service fails a v2.1 stream at such an event instead of
 sending it. Error responses (HTTP 4xx and 5xx) are not authenticated; a MAC
 may be present. The client returns them as errors and never as a successful
@@ -544,8 +544,10 @@ Receipts follow §8 unchanged.
   stream forwards it. OpenAI-compatible chat and completions streams send only
   objects.
 - SSE fields other than `data` (`event`, `id`, `retry`) are relayed outside
-  the MAC: an intermediary can change them. They carry no content. `[DONE]`
-  handling and the rejection of data events after it still apply.
+  the MAC, so an intermediary can change them; the client ignores them, and
+  an application behind it does not see them, so it cannot use event names,
+  `Last-Event-ID` resumption, or a server `retry` delay. `[DONE]` handling and
+  the rejection of data events after it still apply.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still

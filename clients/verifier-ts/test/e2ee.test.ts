@@ -553,36 +553,49 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   assert.equal(body.choices[0].message.content, 'plain-answer');
 });
 
-test('SSE metadata passes through outside the MAC, per the WHATWG event stream format', async () => {
+test('only MAC\'d data reaches the app; other SSE fields are ignored (WHATWG event stream)', async () => {
   // The published stream with metadata: a retry-only block, `event` and `id`
-  // on event 1, an unknown field and CRLF line endings on event 2, and `id`
-  // after [DONE].
+  // on event 1, an unknown field and CRLF line endings on event 2, empty data
+  // blocks, and `id` after [DONE].
   const body =
     'retry: 3000\n\n' +
     `event: chunk\nid: 1\ndata: ${EVENT_1}\n\n` +
+    'data:\n\ndata\n\n' +
     `unknown: x\r\ndata: ${EVENT_2}\r\n\r\n` +
     'data: [DONE]\n\nid: 2\n\n';
   const opened = await openResponse(served(body, 'text/event-stream'), 'chat', await vectorContext(true));
   const blocks = (await opened.text()).split('\n\n');
-  assert.equal(blocks[0], 'retry: 3000');
-  const [event, id, data] = blocks[1]!.split('\n');
-  assert.deepEqual([event, id], ['event: chunk', 'id: 1']);
-  assert.deepEqual(JSON.parse(data!.slice('data: '.length)), {
+  assert.equal(blocks.length, 4);
+  assert.deepEqual(JSON.parse(blocks[0]!.slice('data: '.length)), {
     id: 'chatcmpl-123',
     choices: [{ index: 0, delta: { content: 'Hello' } }],
   });
-  assert.ok(blocks[2]!.startsWith('data: {'), blocks[2]);
-  assert.equal(JSON.parse(blocks[2]!.slice('data: '.length)).choices[0].finish_reason, 'stop');
-  assert.deepEqual(blocks.slice(3), ['data: [DONE]', 'id: 2', '']);
+  assert.ok(blocks[1]!.startsWith('data: {'), blocks[1]);
+  assert.equal(JSON.parse(blocks[1]!.slice('data: '.length)).choices[0].finish_reason, 'stop');
+  assert.deepEqual(blocks.slice(2), ['data: [DONE]', '']);
 
-  // Metadata is outside the MAC, but data after [DONE] still fails, and a
-  // data event's MAC and sequence are checked whatever metadata it has.
+  // Metadata is ignored, but data after [DONE] still fails, and a data
+  // event's MAC and sequence are checked whatever fields it has.
   const rejects = async (stream: string, why: RegExp) => {
     const ctx = await vectorContext(true);
     await assert.rejects(async () => (await openResponse(served(stream, 'text/event-stream'), 'chat', ctx)).text(), why);
   };
   await rejects(`data: ${EVENT_1}\n\ndata: ${EVENT_2}\n\ndata: [DONE]\n\nevent: chunk\ndata: ${EVENT_2}\n\n`, /after \[DONE\]/);
   await rejects(`id: 1\ndata: ${EVENT_2}\n\n`, /out of sequence/);
+  await rejects(`data:\ndata:\n\n`, /JSON/);
+});
+
+test('an injected SSE event name does not reach the app, and the content still does', async () => {
+  // An intermediary prepends `event:` to a MAC'd event. An SDK would yield
+  // that event as `{event, data}` (or throw on `error`) instead of the chunk.
+  for (const name of ['thread.x', 'error']) {
+    const body = `event: ${name}\nid: 9\nretry: 1\ndata: ${EVENT_1}\n\ndata: ${EVENT_2}\n\ndata: [DONE]\n\n`;
+    const opened = await openResponse(served(body, 'text/event-stream'), 'chat', await vectorContext(true));
+    const text = await opened.text();
+    assert.ok(!/^(event|id|retry):/m.test(text), text);
+    const first = text.split('\n\n')[0]!;
+    assert.deepEqual(JSON.parse(first.slice('data: '.length)).choices[0].delta, { content: 'Hello' });
+  }
 });
 
 test('a client that ignores e2ee_seq still verifies and opens the published stream', async () => {

@@ -115,8 +115,9 @@ The client:
 - never retries in another mode. An error reply is handed back unchanged, as
   an error; it is not authenticated, even when it carries `e2ee_mac`. A
   successful reply that fails its MAC or decryption is refused;
-- passes the SSE fields `event`, `id`, and `retry` through unchanged and
-  ignores comments and unknown fields, as an `EventSource` does;
+- hands the SDK only each stream event's MAC'd `data` and `[DONE]`. It
+  ignores the SSE fields `event`, `id`, and `retry`, which are outside the
+  MAC, as well as comments and unknown fields;
 - refuses POST requests to endpoints v2.1 does not cover, such as
   `/v1/responses`;
 - encrypts every content location and sends every other member as you wrote
@@ -164,11 +165,11 @@ For each response:
    remove it. A missing or wrong MAC fails the response.
 4. Parse a stream as the WHATWG HTML event stream format and apply steps 3
    and 5 to each event's `data`. Pass `data: [DONE]` through and fail on any
-   event with `data` after it. Pass the `event`, `id`, and `retry` fields
-   through: they are SSE metadata outside the MAC and carry no content. Ignore
-   comments and unknown fields. Each event's `e2ee_seq` must be 0, 1, 2, … in
-   order; remove it. Every event object must carry the first event's `id`
-   member.
+   event with `data` after it. Skip a block with empty data. Ignore the
+   `event`, `id`, and `retry` fields, comments, and unknown fields: they are
+   outside the MAC, and an SDK can act on an injected `event` name. Each
+   event's `e2ee_seq` must be 0, 1, 2, … in order; remove it. Every event
+   object must carry the first event's `id` member.
 5. Decrypt each §10.5 location with your private key and the request secret,
    and parse the plaintext as JSON. A field that does not decrypt fails the
    response.
@@ -359,10 +360,11 @@ version is expected to encrypt the whole body (for example with HPKE or OHTTP).
   other than `[DONE]`, ends a v2.1 stream with an error, where a plaintext
   stream forwards it. OpenAI-compatible chat and completions streams send only
   objects.
-- SSE fields other than `data` (`event`, `id`, `retry`) are standard SSE
-  metadata. The gateway relays them outside the MAC, so an intermediary can
-  change them; they carry no content. `[DONE]` handling and the rejection of
-  data events after it still apply.
+- The gateway relays SSE fields other than `data` (`event`, `id`, `retry`)
+  outside the MAC, so an intermediary can change them. The SDK ignores them,
+  so an application does not see event names, `Last-Event-ID`, or a `retry`
+  delay under v2.1. `[DONE]` handling and the rejection of data events after
+  it still apply.
 - Replay protection lives in the gateway process. A gateway restart inside the
   5-minute window lets an earlier request run again, though its reply stays
   unreadable to the intermediary.

@@ -67,7 +67,9 @@ evidence) exactly as observed.
   create a new fetch.
   It encrypts every content location and sends every other request member
   as written, readable but bound by the body digest, so keep private text out
-  of members such as `metadata` and `user`. It refuses other POST endpoints
+  of members such as `metadata` and `user`. A stream reaches the SDK as
+  MAC'd `data` events and `[DONE]` only; SSE fields such as `event`, `id`,
+  and `retry` are outside the MAC and ignored. It refuses other POST endpoints
   and never falls back to v2, the legacy scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
 

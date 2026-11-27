@@ -433,10 +433,10 @@ async function openResponseFields(
 /**
  * Check and decrypt each event of an SSE stream (§10.6), parsed as the WHATWG
  * HTML event stream format. Each event's `data` must be a MAC'd object in
- * sequence, or `[DONE]`, after which no event with `data` may come. The
- * `event`, `id`, and `retry` fields are SSE metadata outside the MAC and pass
- * through unchanged, also in a block without `data`, which dispatches nothing.
- * Comments and unknown fields are ignored, and an event the stream does not
+ * sequence, or `[DONE]`, after which no event with `data` may come. Only
+ * `data` is emitted: the `event`, `id`, and `retry` fields are outside the MAC,
+ * so they are ignored like comments and unknown fields. A block with empty
+ * data carries nothing to check and is skipped. An event the stream does not
  * finish with a blank line is discarded, as an EventSource does. A repeated,
  * reordered, or missing event fails on its `e2ee_seq`; a stream cut short does
  * not (§10.8).
@@ -445,9 +445,8 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffered = '';
-  // The event being read: its `data` values and its metadata lines.
+  // The `data` values of the event being read.
   let data: string[] = [];
-  let metadata: string[] = [];
   // Every event of one stream carries the same response id and the next
   // position (§10.6).
   let streamId: unknown;
@@ -455,13 +454,10 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
   // `[DONE]` ends the stream; no event with `data` may follow it.
   let done = false;
   const dispatch = async (controller: TransformStreamDefaultController<Uint8Array>): Promise<void> => {
-    const lines = metadata;
-    const values = data;
-    metadata = [];
+    const joined = data.join('\n');
     data = [];
-    if (values.length > 0) {
+    if (joined !== '') {
       if (done) throw new E2eeError('stream event after [DONE]');
-      const joined = values.join('\n');
       done = joined === '[DONE]';
       let rendered = joined;
       if (!done) {
@@ -483,9 +479,8 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
         }
         rendered = JSON.stringify(payload);
       }
-      lines.push(`data: ${rendered}`);
+      controller.enqueue(encoder.encode(`data: ${rendered}\n\n`));
     }
-    if (lines.length > 0) controller.enqueue(encoder.encode(`${lines.join('\n')}\n\n`));
   };
   const readLines = async (controller: TransformStreamDefaultController<Uint8Array>, final: boolean): Promise<void> => {
     const lineEnd = /\r\n|\r|\n/g;
@@ -499,14 +494,9 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
         await dispatch(controller);
         continue;
       }
-      if (line.startsWith(':')) continue;
       const colon = line.indexOf(':');
       const field = colon < 0 ? line : line.slice(0, colon);
-      if (field === 'data') {
-        data.push(colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, ''));
-      } else if (field === 'event' || field === 'id' || field === 'retry') {
-        metadata.push(line);
-      }
+      if (field === 'data') data.push(colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, ''));
     }
     buffered = buffered.slice(start);
   };

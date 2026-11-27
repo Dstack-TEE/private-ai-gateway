@@ -336,8 +336,8 @@ V21_REJECT_SPLICED = v21_event(V21_EVENT_1) + v21_event(
 # Rejected: an event without a MAC.
 V21_REJECT_NO_MAC = ("data: " + jcs(V21_EVENT_1).decode() + "\n\n"
                      + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
-# Accepted: the same stream with SSE metadata, which is outside the MAC. The
-# client passes `event`, `id` and `retry` through and ignores unknown fields.
+# Accepted: the same stream with SSE fields other than `data`, which are outside
+# the MAC. The client yields only the data events and ignores the other fields.
 V21_STREAM_WITH_METADATA = ("retry: 3000\n\n" + "event: chunk\nid: 1\n" + v21_event(V21_EVENT_1)
                             + "unknown: x\n" + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
 
