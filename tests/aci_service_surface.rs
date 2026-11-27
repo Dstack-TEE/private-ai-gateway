@@ -6346,6 +6346,60 @@ async fn e2ee_v2_1_encrypts_streamed_audio_and_annotations() {
     );
 }
 
+#[tokio::test]
+async fn e2ee_v2_1_seals_message_in_a_stream_and_delta_in_a_buffered_body() {
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-message-stream", "object": "chat.completion.chunk", "model": "aci-model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "streamed secret"}}],
+        })
+    );
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client = V2_1Client::new(&h, 0x94, "nonce-v2.1-message-stream");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    assert!(!String::from_utf8_lossy(&resp.body).contains("secret"));
+    let event = open_v2_1_mac(sse_json_events(&resp.body).remove(0));
+    let message = &event["choices"][0]["message"];
+    assert_eq!(message["role"], "assistant");
+    assert_eq!(
+        client.open(
+            "chat-message-stream",
+            "choices.0.message.content",
+            &message["content"]
+        ),
+        "streamed secret"
+    );
+
+    let response = br#"{"id":"chat-delta-body","object":"chat.completion","model":"aci-model","choices":[{"index":0,"delta":{"role":"assistant","content":"buffered secret"},"finish_reason":"stop"}]}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response));
+    let client = V2_1Client::new(&h, 0x95, "nonce-v2.1-delta-body");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    assert!(!String::from_utf8_lossy(&resp.body).contains("secret"));
+    let reply = open_v2_1_mac(json_body(&resp));
+    let delta = &reply["choices"][0]["delta"];
+    assert_eq!(
+        client.open(
+            "chat-delta-body",
+            "choices.0.delta.content",
+            &delta["content"]
+        ),
+        "buffered secret"
+    );
+}
+
 /// Generated members beyond text, as reasoning and multimodal upstreams emit
 /// them, plus a custom tool call.
 fn v2_1_generated_members() -> Value {

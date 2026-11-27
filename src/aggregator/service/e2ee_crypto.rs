@@ -463,21 +463,21 @@ fn visit_v2_1_request(
     }
 }
 
-/// Every v2.1 response location of one response object (§5, §10.5). `part`
-/// is `message` for a buffered chat body and `delta` for a stream event.
+/// Every v2.1 response location of one response object (§5, §10.5). A chat
+/// choice's `message` and `delta` are both visited whenever present, buffered
+/// or streamed.
 fn visit_v2_1_response(
     endpoint_path: &str,
-    part: &str,
     payload: &mut serde_json::Map<String, Value>,
     visit: &mut V2_1Visit<'_>,
 ) -> Result<(), E2eeError> {
     for key in ["prompt_token_ids", "prompt_logprobs"] {
         visit_member(payload, key, key, visit)?;
     }
-    let (list, kind) = match endpoint_path {
-        EMBEDDINGS_PATH => ("data", None),
-        COMPLETIONS_PATH => ("choices", Some("text")),
-        _ => ("choices", Some(part)),
+    let list = if endpoint_path == EMBEDDINGS_PATH {
+        "data"
+    } else {
+        "choices"
     };
     let Some(Value::Array(entries)) = payload.get_mut(list) else {
         return Ok(());
@@ -488,17 +488,20 @@ fn visit_v2_1_response(
             continue;
         };
         let prefix = format!("{list}.{index}");
-        match kind {
-            None => visit_member(entry, "embedding", &format!("{prefix}.embedding"), visit)?,
-            Some(kind) => {
-                for key in V2_1_CHOICE_MEMBERS {
-                    visit_member(entry, key, &format!("{prefix}.{key}"), visit)?;
-                }
-                if kind == "text" {
-                    visit_member(entry, "text", &format!("{prefix}.text"), visit)?;
-                } else if let Some(Value::Object(message)) = entry.get_mut(kind) {
-                    visit_v2_1_message(message, &format!("{prefix}.{kind}"), visit)?;
-                }
+        if endpoint_path == EMBEDDINGS_PATH {
+            visit_member(entry, "embedding", &format!("{prefix}.embedding"), visit)?;
+            continue;
+        }
+        for key in V2_1_CHOICE_MEMBERS {
+            visit_member(entry, key, &format!("{prefix}.{key}"), visit)?;
+        }
+        if endpoint_path == COMPLETIONS_PATH {
+            visit_member(entry, "text", &format!("{prefix}.text"), visit)?;
+            continue;
+        }
+        for part in ["message", "delta"] {
+            if let Some(Value::Object(message)) = entry.get_mut(part) {
+                visit_v2_1_message(message, &format!("{prefix}.{part}"), visit)?;
             }
         }
     }
@@ -546,7 +549,6 @@ fn seal_v2_1_response(
     payload: &mut Value,
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
-    part: &str,
     seq: Option<u64>,
 ) -> Result<(), E2eeError> {
     let object = payload.as_object_mut().ok_or(E2eeError::EncryptionFailed)?;
@@ -555,7 +557,7 @@ fn seal_v2_1_response(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    visit_v2_1_response(endpoint_path, part, object, &mut |value, field| {
+    visit_v2_1_response(endpoint_path, object, &mut |value, field| {
         seal_v2_1_value(ctx, &response_id, value, field)
     })?;
     seal_response_object(payload, ctx, seq)
@@ -699,7 +701,7 @@ pub(super) fn encrypt_e2ee_response_body(
     let mut payload: Value =
         serde_json::from_slice(cleartext_body).map_err(|_| E2eeError::EncryptionFailed)?;
     if ctx.aad_mode == E2eeAadMode::AciV2_1 {
-        seal_v2_1_response(&mut payload, ctx, endpoint_path, "message", None)?;
+        seal_v2_1_response(&mut payload, ctx, endpoint_path, None)?;
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     }
     let response_id = payload
@@ -913,7 +915,7 @@ pub(super) fn encrypt_e2ee_stream_value(
     }
     if ctx.aad_mode == E2eeAadMode::AciV2_1 {
         drop_empty_delta_content(&mut payload);
-        seal_v2_1_response(&mut payload, ctx, endpoint_path, "delta", Some(seq))?;
+        seal_v2_1_response(&mut payload, ctx, endpoint_path, Some(seq))?;
         return Ok(payload);
     }
     let response_id = payload

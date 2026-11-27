@@ -301,13 +301,8 @@ async function visitRequest(body: Record<string, unknown>, endpoint: Endpoint, v
   }
 }
 
-/** Every location of one response object; `part` is `message` buffered and `delta` streamed. */
-async function visitResponse(
-  payload: Record<string, unknown>,
-  endpoint: Endpoint,
-  part: 'message' | 'delta',
-  visit: Visit,
-): Promise<void> {
+/** Every location of one response object; a choice's `message` and `delta` are both visited when present. */
+async function visitResponse(payload: Record<string, unknown>, endpoint: Endpoint, visit: Visit): Promise<void> {
   for (const key of ['prompt_token_ids', 'prompt_logprobs']) await visitMember(payload, key, key, visit);
   const list = endpoint === 'embeddings' ? 'data' : 'choices';
   for (const [i, entry] of indexed(payload[list])) {
@@ -319,8 +314,10 @@ async function visitResponse(
     for (const key of CHOICE_MEMBERS) await visitMember(entry, key, `${prefix}.${key}`, visit);
     if (endpoint === 'completions') {
       await visitMember(entry, 'text', `${prefix}.text`, visit);
-    } else if (isObject(entry[part])) {
-      await visitMessage(entry[part], `${prefix}.${part}`, visit);
+    } else {
+      for (const part of ['message', 'delta']) {
+        if (isObject(entry[part])) await visitMessage(entry[part], `${prefix}.${part}`, visit);
+      }
     }
   }
 }
@@ -415,7 +412,7 @@ async function openResponseFields(
     }
   }
   const id = typeof payload.id === 'string' ? payload.id : '';
-  await visitResponse(payload, endpoint, ctx.stream ? 'delta' : 'message', async (value, field) => {
+  await visitResponse(payload, endpoint, async (value, field) => {
     if (value === null) return null;
     if (typeof value !== 'string') throw new E2eeError(`${field} is not a ciphertext string`);
     const plaintext = await openBytes(

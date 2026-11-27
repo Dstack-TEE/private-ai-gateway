@@ -398,9 +398,10 @@ Field AAD is the §6 object with the purposes `aci.e2ee.request.v2.1` and
 
 V2.1 encrypts the locations below. They include every §5 location except
 per-part request content, which v2.1 encrypts whole. In a chat message, `{p}`
-is `messages.{m}` in a request (history the client sends back) and
-`choices.{i}.message` or, in a stream, `choices.{i}.delta` in a response. The
-same message locations apply in both directions:
+is `messages.{m}` in a request (history the client sends back) and, in a
+response, both `choices.{i}.message` and `choices.{i}.delta` whenever present,
+in a buffered body and in a stream alike. The same message locations apply in
+both directions:
 
 | Where | Field paths |
 | --- | --- |

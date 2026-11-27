@@ -242,32 +242,34 @@ async function sealSse(
   sealResponse: (id: string, field: string, value: unknown) => Promise<string>,
   secret: Uint8Array,
 ): Promise<string> {
-  const sealPayload = async (payload: Record<string, any>, part: 'message' | 'delta') => {
+  const sealPayload = async (payload: Record<string, any>) => {
     const sealAt = async (container: Record<string, any> | undefined, key: string, field: string) => {
       if (container?.[key] !== undefined && container[key] !== null) container[key] = await sealResponse(payload.id ?? '', field, container[key]);
     };
     for (const choice of payload.choices ?? []) {
       const prefix = `choices.${choice.index}`;
-      const target = choice[part];
-      for (const key of GENERATED) await sealAt(target, key, `${prefix}.${part}.${key}`);
-      for (const key of ['data', 'transcript']) await sealAt(target?.audio, key, `${prefix}.${part}.audio.${key}`);
-      await sealAt(target?.function_call, 'arguments', `${prefix}.${part}.function_call.arguments`);
-      for (const [t, call] of (target?.tool_calls ?? []).entries()) {
-        const index = call.index ?? t;
-        await sealAt(call.function, 'arguments', `${prefix}.${part}.tool_calls.${index}.function.arguments`);
-        await sealAt(call.custom, 'input', `${prefix}.${part}.tool_calls.${index}.custom.input`);
+      for (const part of ['message', 'delta']) {
+        const target = choice[part];
+        for (const key of GENERATED) await sealAt(target, key, `${prefix}.${part}.${key}`);
+        for (const key of ['data', 'transcript']) await sealAt(target?.audio, key, `${prefix}.${part}.audio.${key}`);
+        await sealAt(target?.function_call, 'arguments', `${prefix}.${part}.function_call.arguments`);
+        for (const [t, call] of (target?.tool_calls ?? []).entries()) {
+          const index = call.index ?? t;
+          await sealAt(call.function, 'arguments', `${prefix}.${part}.tool_calls.${index}.function.arguments`);
+          await sealAt(call.custom, 'input', `${prefix}.${part}.tool_calls.${index}.custom.input`);
+        }
       }
       for (const key of ['text', 'token_ids']) await sealAt(choice, key, `${prefix}.${key}`);
     }
     for (const [i, entry] of (payload.data ?? []).entries()) await sealAt(entry, 'embedding', `data.${i}.embedding`);
     return withMac(payload, secret);
   };
-  if (!contentType.startsWith('text/event-stream')) return sealPayload(JSON.parse(body), 'message');
+  if (!contentType.startsWith('text/event-stream')) return sealPayload(JSON.parse(body));
   const events = [];
   let seq = 0;
   for (const event of body.split('\n\n').filter(Boolean)) {
     const data = event.slice('data: '.length);
-    events.push(data === '[DONE]' ? event : `data: ${await sealPayload({ ...JSON.parse(data), e2ee_seq: seq++ }, 'delta')}`);
+    events.push(data === '[DONE]' ? event : `data: ${await sealPayload({ ...JSON.parse(data), e2ee_seq: seq++ })}`);
   }
   return events.map((event) => event + '\n\n').join('');
 }
@@ -659,6 +661,20 @@ test('reasoning, images, and custom tool input in a reply open, buffered and str
   const streamed = recorded(() => ({ contentType: 'text/event-stream', body: sse }));
   const events = (await (await ask(streamed.e2eeFetch, { stream: true })).text()).split('\n\n').filter(Boolean);
   assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, generated);
+});
+
+test('a message in a stream event and a delta in a buffered body open', async () => {
+  const sse = `data: ${JSON.stringify({ id: 's-m', choices: [{ index: 0, message: { role: 'assistant', content: 'streamed' } }] })}\n\ndata: [DONE]\n\n`;
+  const streamed = recorded(() => ({ contentType: 'text/event-stream', body: sse }));
+  const events = (await (await ask(streamed.e2eeFetch, { stream: true })).text()).split('\n\n').filter(Boolean);
+  assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].message, { role: 'assistant', content: 'streamed' });
+
+  const buffered = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ id: 'chat-d', choices: [{ index: 0, delta: { content: 'buffered' } }] }),
+  }));
+  const reply = (await (await ask(buffered.e2eeFetch)).json()) as any;
+  assert.deepEqual(reply.choices[0].delta, { content: 'buffered' });
 });
 
 test('a reply value that is not the usual string opens to the same value', async () => {
