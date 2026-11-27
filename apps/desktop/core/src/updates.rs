@@ -99,6 +99,8 @@ pub enum Installation {
     Deb,
     Rpm,
     Pacman,
+    /// CLI installed by the official install script.
+    InstallScript,
     /// A native package from a release that did not record its package manager.
     SystemPackage,
     Npm,
@@ -137,6 +139,9 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
             Installation::DesktopApp
         };
     }
+    if cfg!(unix) && install_script_directory(directory) {
+        return Installation::InstallScript;
+    }
     match package_manager {
         Some("deb") => Installation::Deb,
         Some("rpm") => Installation::Rpm,
@@ -150,6 +155,23 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
         }
         _ => Installation::Portable,
     }
+}
+
+/// The official installer keeps each release in `versions/<semver>` and
+/// points the user's command links at that directory. Canonicalizing the
+/// executable before classification makes this work with custom install and
+/// bin directories too.
+fn install_script_directory(directory: &Path) -> bool {
+    directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            semver::Version::parse(name).is_ok()
+                && directory
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|name| name == "versions")
+        })
 }
 
 #[derive(Clone, Debug, Serialize, ts_rs::TS)]
@@ -376,6 +398,33 @@ fn upgrade_steps(
             ],
             None,
         ),
+        Installation::InstallScript => {
+            let channel = if version.contains('-') {
+                "beta"
+            } else {
+                "stable"
+            };
+            (
+                vec![
+                    command(&[
+                        "curl",
+                        "-fsSL",
+                        "https://redpill.ai/private-ai-proxy/install.sh",
+                        "-o",
+                        "private-ai-proxy-install.sh",
+                    ])?,
+                    command(&[
+                        "sh",
+                        "private-ai-proxy-install.sh",
+                        "--channel",
+                        channel,
+                        "--version",
+                        version,
+                    ])?,
+                ],
+                None,
+            )
+        }
         Installation::Portable => (
             Vec::new(),
             Some(asset(&name(
@@ -488,6 +537,16 @@ mod tests {
             classify("/home/u/private-ai-proxy-cli-0.1.7-linux-x64", false, None),
             Installation::Portable
         );
+        if cfg!(unix) {
+            assert_eq!(
+                classify(
+                    "/home/u/.local/share/private-ai-proxy/versions/0.1.7",
+                    false,
+                    None
+                ),
+                Installation::InstallScript
+            );
+        }
         if cfg!(target_os = "linux") {
             assert_eq!(classify("/usr/bin", true, None), Installation::DesktopApp);
             assert_eq!(
@@ -527,6 +586,13 @@ mod tests {
             ]
         );
         assert_eq!(
+            upgrade_steps(Installation::InstallScript, root, "0.1.8-beta.2").0,
+            [
+                "curl -fsSL https://redpill.ai/private-ai-proxy/install.sh -o private-ai-proxy-install.sh",
+                "sh private-ai-proxy-install.sh --channel beta --version 0.1.8-beta.2",
+            ]
+        );
+        assert_eq!(
             upgrade_steps(Installation::DesktopApp, root, "0.1.8"),
             (Vec::new(), None)
         );
@@ -554,6 +620,7 @@ mod tests {
         for arch in ["arm", "i686", "riscv64"] {
             for installation in [
                 Installation::Portable,
+                Installation::InstallScript,
                 Installation::Deb,
                 Installation::DesktopPacman,
             ] {

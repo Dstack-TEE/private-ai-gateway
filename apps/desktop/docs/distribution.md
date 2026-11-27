@@ -348,6 +348,7 @@ publishing stable releases to the beta feed.
 | CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
 | CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
 | npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
+| Official install script | Same | `pap update` downloads the official script and reruns it with `--channel <channel> --version <version>`; manual updates use `curl -fsSL https://redpill.ai/private-ai-proxy/install.sh \| sh -s -- --channel <channel> --version <version>` | The script stops the current backend before switching the command links |
 | Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
 | Mac App Store | App Store | App Store | MAS has no feed checks |
 | AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
@@ -384,19 +385,12 @@ maintainer, homepage and the desktop description) comes from the brand
 configuration, as Tauri's does, and every entry carries the commit time (or
 `SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.
 
-Packages up to 0.1.7-beta.n refuse removal while a Private AI Proxy process
-other than the updating app runs. Only DEB upgrades met that: dpkg runs the old
-package's `prerm upgrade` before unpacking. The DEBs therefore carry one
-maintainer script, a `prerm` that succeeds for `failed-upgrade`, which dpkg runs
-when the old `prerm` fails (Debian Policy 6.6) and which lets the upgrade
-continue. rpm runs the old `%preun` only after the new files are installed, and
-pacman runs only the new package's scripts on upgrade.
-
-### Planned removals (0.3)
-
-The packaging compatibility code for installations of 0.1.x (the DEB `prerm`
-for `failed-upgrade`, the Windows `.cmd` shim migration) is listed with every
-other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
+Package pre-removal hooks run only for an actual removal. They disable the
+per-user login service, stop the backend, and restore managed agent settings for
+users reachable from the package script. Upgrade hooks remain no-ops, so an
+upgrade can replace files while a backend is running. Cleanup failures are
+reported and do not block removal. See [Uninstall](../../../docs/private-ai-proxy-install.md#uninstall)
+for recovery steps when a user service is unavailable.
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one

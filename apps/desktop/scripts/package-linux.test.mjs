@@ -113,7 +113,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${tauri.bundle.shortDescription}\n ${tauri.bundle.longDescription}`);
     // Every entry carries SOURCE_DATE_EPOCH (2026-01-01), so builds are reproducible.
     assert.doesNotMatch(debListing(deb), /^(?!.* 2026-01-01 00:00 ).+$/m);
-    // The only maintainer script is the prerm that lets 0.1.x upgrades continue (Debian Policy 6.6).
+    // The pre-removal hook preserves upgrades and cleans up user services on removal.
     assert.match(output("dpkg-deb", ["-I", deb]), /^ +\d+ bytes, +\d+ lines +\* +prerm +#!\/bin\/sh$/m);
     assert.doesNotMatch(output("dpkg-deb", ["-I", deb]), /preinst|postinst|postrm/);
     execFileSync("sh", ["-c", 'dpkg-deb -I "$1" prerm | sh -s failed-upgrade 0.1.7~beta.4', "sh", deb]);
@@ -129,7 +129,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.match(output("rpm", ["-qp", "--provides", rpm]), /^private-ai-proxy-cli = 1\.2\.3~beta\.4-1$/m);
       assert.equal(output("rpm", ["-qp", "--conflicts", rpm]), "private-ai-proxy-cli");
       assert.equal(output("rpm", ["-qp", "--obsoletes", rpm]), "");
-      assert.equal(output("rpm", ["-qp", "--scripts", rpm]), "");
+      assert.match(output("rpm", ["-qp", "--scripts", rpm]), /preuninstall scriptlet/);
     }
     const info = pkginfo(arch);
     assert.match(info, new RegExp(`^packager = ${maintainer}$`, "m"));
@@ -139,7 +139,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(info, /^depend = webkit2gtk-4\.1$/m);
     assert.doesNotMatch(info, /^replaces/m);
     assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
-    assert.doesNotMatch(execFileSync("bsdtar", ["-tf", arch], { encoding: "utf8" }), /\.INSTALL/);
+    assert.match(execFileSync("bsdtar", ["-tf", arch], { encoding: "utf8" }), /\.INSTALL/);
     for (const file of [deb, rpm]) {
       const signature = Buffer.from(await readFile(`${file}.sig`, "utf8"), "base64").toString("utf8");
       assert.match(signature, new RegExp(`trusted comment: timestamp:\\d+\\tfile:${path.basename(file).replaceAll(".", "\\.")}\\tversion:1\\.2\\.3-beta\\.4`));

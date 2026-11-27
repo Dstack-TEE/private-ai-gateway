@@ -31,9 +31,7 @@ const markerDirectory = "/usr/share/private-ai-proxy";
 // in argv[0].
 export const aliases = ["pap", "aci"];
 export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst: `/usr/bin/${alias}`, type: "symlink" }));
-// Debian Policy 6.6: lets an upgrade continue past the refusing prerm of
-// packages up to 0.1.7-beta.n. Remove in 0.3.
-const debPrerm = path.join(appRoot, "src-tauri/installer/deb-prerm.sh");
+const linuxPreremove = path.join(appRoot, "src-tauri/installer/linux-preremove.sh");
 const userUnit = "private-ai-proxy.service";
 
 // Tauri names the desktop package after the product and describes it with the
@@ -147,7 +145,11 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
         { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
       ] : []),
     ],
-    overrides: { deb: { scripts: { preremove: debPrerm } } },
+    overrides: {
+      deb: { scripts: { preremove: linuxPreremove } },
+      rpm: { scripts: { preremove: linuxPreremove } },
+      archlinux: { scripts: { preremove: linuxPreremove } },
+    },
     deb: { compression: "xz" },
     archlinux: { packager: maintainer },
   };

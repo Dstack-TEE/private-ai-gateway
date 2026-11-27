@@ -2,6 +2,7 @@
 //! local API as the desktop app does.
 
 use std::{
+    fs,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -1234,10 +1235,9 @@ fn update(client: &Client) -> Result<Value, CallError> {
         .filter(|step| *step != desktop_core::updates::STOP_STEP)
         .cloned()
         .collect();
-    // Read now: the installation replaces this file, and the release it
-    // puts at this path is the one to start, whatever `PATH` finds first.
-    let command =
-        std::env::current_exe().map_err(|error| format!("Cannot locate this command: {error}"))?;
+    // Read now: package updates replace this file in place. The install script
+    // removes the old version directory, so use its stable PATH link instead.
+    let command = update_command(notice.installation)?;
     let command = command.to_str().ok_or("This command's path is not UTF-8")?;
     client
         .install_update(|| desktop_core::updates::run(&steps))
@@ -1257,6 +1257,24 @@ fn update(client: &Client) -> Result<Value, CallError> {
     let mut updated = value(&notice)?;
     updated["protectionResumed"] = json!(protecting);
     Ok(updated)
+}
+
+fn update_command(installation: desktop_core::updates::Installation) -> Result<PathBuf, String> {
+    let current =
+        std::env::current_exe().map_err(|error| format!("Cannot locate this command: {error}"))?;
+    if installation != desktop_core::updates::Installation::InstallScript {
+        return Ok(current);
+    }
+    let canonical = fs::canonicalize(&current).unwrap_or_else(|_| current.clone());
+    let Some(name) = canonical.file_name() else {
+        return Ok(current);
+    };
+    Ok(std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .map(|directory| directory.join(name))
+        .find(|link| fs::canonicalize(link).is_ok_and(|target| target == canonical))
+        .unwrap_or(current))
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
