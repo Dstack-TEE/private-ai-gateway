@@ -23,10 +23,10 @@ const REQUEST_KEY =
 const RESPONSE_AAD =
   '{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2.1","ts":1750000000}';
 const RESPONSE_CIPHERTEXT =
-  '57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e';
+  '57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f';
 
-const RESPONSE_OBJECT = '{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}';
-const RESPONSE_MAC = '139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e';
+const RESPONSE_OBJECT = '{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f","role":"assistant"}}],"id":"chatcmpl-123"}';
+const RESPONSE_MAC = '85874235a2eb56bdcf4bf6dc7f52f0fab9b3edfd410274bb9aaf56b4dd620c28';
 
 // Labels written out independently of the implementation (spec §10.4).
 const FIELD_INFO = new TextEncoder().encode('aci.e2ee.v2.1.x25519');
@@ -110,7 +110,8 @@ test('the client opens the published v2.1 response field', async () => {
   const client = await x25519FromSeed(0x04);
   assert.equal(await rawPublic(client), CLIENT_PUB);
   const plaintext = await openBytes(client.privateKey, RESPONSE_CIPHERTEXT, enc.encode(RESPONSE_AAD), SECRET, FIELD_INFO);
-  assert.equal(dec.decode(plaintext), 'plain-answer');
+  // Every v2.1 plaintext is the JSON of the value (§10.5).
+  assert.equal(dec.decode(plaintext), '"plain-answer"');
   // Without the request secret the client's own key opens nothing.
   await assert.rejects(
     openBytes(client.privateKey, RESPONSE_CIPHERTEXT, enc.encode(RESPONSE_AAD), new Uint8Array(32), FIELD_INFO),
@@ -192,37 +193,34 @@ function fakeService(
     );
     const secret = opened.subarray(0, 32);
     assert.equal(toHex(opened.subarray(32)), await sha256Hex(canonicalJson(body)));
-    const open = async (field: string, ciphertext: string) =>
-      dec.decode(
-        await openBytes(service.privateKey, ciphertext, aad({ purpose: 'aci.e2ee.request.v2.1', model: body.model, field, nonce, ts }), secret, FIELD_INFO),
-      );
-    const openString = async (container: Record<string, any> | undefined, key: string, field: string) => {
-      if (typeof container?.[key] === 'string') container[key] = await open(field, container[key]);
+    // Every v2.1 request location holds the JSON of its value (§10.5).
+    const open = async (container: Record<string, any> | undefined, key: string | number, field: string) => {
+      if (typeof container?.[key] !== 'string') return;
+      const aadBytes = aad({ purpose: 'aci.e2ee.request.v2.1', model: body.model, field, nonce, ts });
+      container[key] = JSON.parse(dec.decode(await openBytes(service.privateKey, container[key], aadBytes, secret, FIELD_INFO)));
     };
-    if (typeof body.prediction?.content === 'string') {
-      body.prediction.content = JSON.parse(await open('prediction.content', body.prediction.content));
-    }
+    await open(body.prediction, 'content', 'prediction.content');
     for (const [m, message] of (body.messages ?? []).entries()) {
-      if (typeof message.content === 'string') message.content = JSON.parse(await open(`messages.${m}.content`, message.content));
-      for (const key of ['reasoning', 'reasoning_content', 'refusal']) await openString(message, key, `messages.${m}.${key}`);
-      await openString(message.function_call, 'arguments', `messages.${m}.function_call.arguments`);
+      for (const key of GENERATED) await open(message, key, `messages.${m}.${key}`);
+      await open(message.function_call, 'arguments', `messages.${m}.function_call.arguments`);
       for (const [t, call] of (message.tool_calls ?? []).entries()) {
-        await openString(call.function, 'arguments', `messages.${m}.tool_calls.${t}.function.arguments`);
+        await open(call.function, 'arguments', `messages.${m}.tool_calls.${t}.function.arguments`);
+        await open(call.custom, 'input', `messages.${m}.tool_calls.${t}.custom.input`);
       }
     }
     for (const key of ['prompt', 'input']) {
       if (Array.isArray(body[key])) {
-        for (const [i, item] of body[key].entries()) await openString(body[key], String(i), `${key}.${i}`);
+        for (const i of body[key].keys()) await open(body[key], i, `${key}.${i}`);
       } else {
-        await openString(body, key, key);
+        await open(body, key, key);
       }
     }
-    await openString(body, 'suffix', 'suffix');
+    await open(body, 'suffix', 'suffix');
     seen.push({ headers, plaintext: body });
 
     const clientKey = await subtle.importKey('raw', fromHex(client) as BufferSource, { name: 'X25519' }, true, []);
-    const sealResponse = (id: string, field: string, plaintext: string) =>
-      seal(clientKey, enc.encode(plaintext), aad({ purpose: 'aci.e2ee.response.v2.1', model: body.model, id, field, nonce, ts }), secret, FIELD_INFO);
+    const sealResponse = (id: string, field: string, value: unknown) =>
+      seal(clientKey, enc.encode(JSON.stringify(value)), aad({ purpose: 'aci.e2ee.response.v2.1', model: body.model, id, field, nonce, ts }), secret, FIELD_INFO);
     const out = reply(body);
     const sealed = tamper(await sealSse(out.body, out.contentType, sealResponse, secret));
     return new Response(sealed, {
@@ -231,40 +229,37 @@ function fakeService(
   };
 }
 
+/** Message or delta members sealed whole, as the JSON of their value (spec §10.5). */
+const GENERATED = [
+  'content', 'reasoning', 'reasoning_content', 'refusal', 'annotations',
+  'reasoning_details', 'thinking_blocks', 'reasoning_items', 'images',
+];
+
 /** Encrypt the content fields of a buffered body or of each SSE `data:` event. */
 async function sealSse(
   body: string,
   contentType: string,
-  sealResponse: (id: string, field: string, plaintext: string) => Promise<string>,
+  sealResponse: (id: string, field: string, value: unknown) => Promise<string>,
   secret: Uint8Array,
 ): Promise<string> {
   const sealPayload = async (payload: Record<string, any>, part: 'message' | 'delta') => {
+    const sealAt = async (container: Record<string, any> | undefined, key: string, field: string) => {
+      if (container?.[key] !== undefined && container[key] !== null) container[key] = await sealResponse(payload.id ?? '', field, container[key]);
+    };
     for (const choice of payload.choices ?? []) {
+      const prefix = `choices.${choice.index}`;
       const target = choice[part];
-      if (typeof target?.content === 'string') {
-        target.content = await sealResponse(payload.id, `choices.${choice.index}.${part}.content`, target.content);
-      }
-      const prefix = `choices.${choice.index}.${part}`;
-      for (const key of ['refusal', 'audio.data', 'audio.transcript']) {
-        const [outer, inner] = key.includes('.') ? [target?.audio, key.split('.')[1]!] : [target, key];
-        if (typeof outer?.[inner] === 'string') outer[inner] = await sealResponse(payload.id, `${prefix}.${key}`, outer[inner]);
-      }
-      if (target?.annotations !== undefined) {
-        target.annotations = await sealResponse(payload.id, `${prefix}.annotations`, JSON.stringify(target.annotations));
-      }
-      if (typeof choice.text === 'string') choice.text = await sealResponse(payload.id, `choices.${choice.index}.text`, choice.text);
-      if (choice.token_ids !== undefined) {
-        choice.token_ids = await sealResponse(payload.id, `choices.${choice.index}.token_ids`, JSON.stringify(choice.token_ids));
-      }
+      for (const key of GENERATED) await sealAt(target, key, `${prefix}.${part}.${key}`);
+      for (const key of ['data', 'transcript']) await sealAt(target?.audio, key, `${prefix}.${part}.audio.${key}`);
+      await sealAt(target?.function_call, 'arguments', `${prefix}.${part}.function_call.arguments`);
       for (const [t, call] of (target?.tool_calls ?? []).entries()) {
         const index = call.index ?? t;
-        call.function.arguments = await sealResponse(
-          payload.id,
-          `choices.${choice.index}.${part}.tool_calls.${index}.function.arguments`,
-          call.function.arguments,
-        );
+        await sealAt(call.function, 'arguments', `${prefix}.${part}.tool_calls.${index}.function.arguments`);
+        await sealAt(call.custom, 'input', `${prefix}.${part}.tool_calls.${index}.custom.input`);
       }
+      for (const key of ['text', 'token_ids']) await sealAt(choice, key, `${prefix}.${key}`);
     }
+    for (const [i, entry] of (payload.data ?? []).entries()) await sealAt(entry, 'embedding', `data.${i}.embedding`);
     return withMac(payload, secret);
   };
   if (!contentType.startsWith('text/event-stream')) return sealPayload(JSON.parse(body), 'message');
@@ -487,7 +482,7 @@ test('fails closed on uncovered endpoints and anything not v2.1', async () => {
 
 // ---- Published streamed vector and the streams a client must reject ----------
 
-const EVENT_1 = '{"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44","e2ee_seq":0,"id":"chatcmpl-123"}';
+const EVENT_1 = '{"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0d9ec4f191936e4e179f68a3bbe739537e639286fe5c6a6b"},"index":0}],"e2ee_mac":"5ebf698533dd276e7017daf135bde41e3bf351b5e49d08223260b5e03e57ec21","e2ee_seq":0,"id":"chatcmpl-123"}';
 const EVENT_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c","e2ee_seq":1,"id":"chatcmpl-123"}';
 const SPLICED_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"bc1bf0a5179c96234d1533533f31f7d2fc5471004c2b7f7b10d37e4d94bb24fe","e2ee_seq":1,"id":"chatcmpl-124"}';
 const stream = (...events: string[]) => events.map((event) => `data: ${event}\n\n`).join('') + 'data: [DONE]\n\n';
@@ -559,7 +554,7 @@ test('a client that ignores e2ee_seq still verifies and opens the published stre
       algo: E2EE_V2_1_X25519, field: 'choices.0.delta.content', id: rest.id, model: 'demo-model',
       nonce: NONCE, purpose: 'aci.e2ee.response.v2.1', ts: 1_750_000_000,
     });
-    contents.push(dec.decode(await openBytes(client.privateKey, content, aad, SECRET, FIELD_INFO)));
+    contents.push(JSON.parse(dec.decode(await openBytes(client.privateKey, content, aad, SECRET, FIELD_INFO))));
   }
   assert.deepEqual(contents, ['Hello']);
 });
@@ -594,6 +589,15 @@ test('every member a plaintext request can carry is sent, its content encrypted'
       {
         role: 'assistant', content: null, annotations: [], audio: null,
         refusal: 'private refusal', function_call: { name: 'lookup', arguments: '{"private":1}' },
+      },
+      // History with reasoning and tool calls that carry unknown members.
+      {
+        role: 'assistant', content: null, x_message_extra: 3,
+        reasoning_details: [{ type: 'reasoning.text', text: 'private plan', signature: 'sig' }],
+        tool_calls: [
+          { id: 'c0', type: 'function', x_call_extra: { k: 1 }, function: { name: 'f', x_function_extra: true, arguments: '{"private":2}' } },
+          { id: 'c1', type: 'custom', custom: { name: 'shell', input: 'cat private.txt' } },
+        ],
       },
     ],
   };
@@ -634,4 +638,56 @@ test('audio, annotations, and refusals in a reply open, buffered and streamed', 
   const streamed = recorded(() => ({ contentType: 'text/event-stream', body: sse }));
   const events = (await (await ask(streamed.e2eeFetch, { stream: true })).text()).split('\n\n').filter(Boolean);
   assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, generated);
+});
+
+test('reasoning, images, and custom tool input in a reply open, buffered and streamed', async () => {
+  const generated = {
+    reasoning_details: [{ type: 'reasoning.text', text: 'plan', signature: 'sig' }],
+    thinking_blocks: [{ type: 'thinking', thinking: 'thought', signature: 'sig' }],
+    reasoning_items: [{ type: 'reasoning', summary: [{ text: 'summary' }] }],
+    images: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }],
+    tool_calls: [{ index: 0, id: 'ctc', type: 'custom', custom: { name: 'shell', input: 'ls' } }],
+  };
+  const buffered = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ id: 'chat-g', choices: [{ index: 0, message: { role: 'assistant', ...generated } }] }),
+  }));
+  const message = ((await (await ask(buffered.e2eeFetch)).json()) as any).choices[0].message;
+  assert.deepEqual(message, { role: 'assistant', ...generated });
+
+  const sse = `data: ${JSON.stringify({ id: 's-g', choices: [{ index: 0, delta: generated }] })}\n\ndata: [DONE]\n\n`;
+  const streamed = recorded(() => ({ contentType: 'text/event-stream', body: sse }));
+  const events = (await (await ask(streamed.e2eeFetch, { stream: true })).text()).split('\n\n').filter(Boolean);
+  assert.deepEqual(JSON.parse(events[0]!.slice(6)).choices[0].delta, generated);
+});
+
+test('a reply value that is not the usual string opens to the same value', async () => {
+  const message = {
+    role: 'assistant',
+    content: [{ type: 'text', text: 'parts' }],
+    function_call: { name: 'lookup', arguments: { account: 7 } },
+  };
+  const { e2eeFetch } = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ id: 'chat-n', choices: [{ index: 0, message }] }),
+  }));
+  assert.deepEqual(((await (await ask(e2eeFetch)).json()) as any).choices[0].message, message);
+});
+
+test('embeddings encrypt text and multimodal input and messages, and pass token ids', async () => {
+  const { e2eeFetch, seen, wire } = recorded(() => ({
+    contentType: 'application/json',
+    body: JSON.stringify({ object: 'list', data: [{ index: 0, embedding: [0.5, -0.25] }] }),
+  }));
+  const image = { type: 'image_url', image_url: { url: 'data:image/png;base64,cHJpdmF0ZQ==' } };
+  const request = {
+    model: 'demo-model',
+    input: ['private text', image, [1, 2]],
+    messages: [{ role: 'user', content: [image] }],
+  };
+  const reply = (await (await e2eeFetch('https://relay.example/v1/embeddings', { method: 'POST', body: JSON.stringify(request) })).json()) as any;
+  assert.deepEqual(reply.data[0].embedding, [0.5, -0.25]);
+  assert.deepEqual(seen[0]!.plaintext, request);
+  assert.ok(!wire[0]!.includes('private') && !wire[0]!.includes('cHJpdmF0ZQ'));
+  assert.ok(wire[0]!.includes('[1,2]'));
 });

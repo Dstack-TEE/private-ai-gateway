@@ -219,12 +219,118 @@ function endpointOf(pathname: string): Endpoint | undefined {
   return undefined;
 }
 
+// ---- Locations (§5, §10.5) --------------------------------------------------
+
+/**
+ * Maps one present location value, given its field path, to its replacement.
+ * Every v2.1 plaintext is the compact JSON encoding of the value (§10.5).
+ */
+type Visit = (value: unknown, field: string) => Promise<unknown>;
+
+/** Chat message or delta members whose whole value is content, both ways (§10.5). */
+const MESSAGE_MEMBERS = [
+  'content',
+  'reasoning',
+  'reasoning_content',
+  'refusal',
+  'annotations',
+  'reasoning_details',
+  'thinking_blocks',
+  'reasoning_items',
+  'images',
+];
+
+/** Choice members that carry or echo tokens (§10.5). */
+const CHOICE_MEMBERS = ['logprobs', 'token_ids', 'prompt_token_ids', 'prompt_logprobs'];
+
+async function visitMember(container: Record<string, unknown>, key: string, field: string, visit: Visit): Promise<void> {
+  if (container[key] !== undefined) container[key] = await visit(container[key], field);
+}
+
+/** Every location of a chat message or delta, the same set in requests and responses. */
+async function visitMessage(message: Record<string, unknown>, prefix: string, visit: Visit): Promise<void> {
+  for (const key of MESSAGE_MEMBERS) await visitMember(message, key, `${prefix}.${key}`, visit);
+  if (isObject(message.audio)) {
+    for (const key of ['data', 'transcript']) await visitMember(message.audio, key, `${prefix}.audio.${key}`, visit);
+  }
+  if (isObject(message.function_call)) {
+    await visitMember(message.function_call, 'arguments', `${prefix}.function_call.arguments`, visit);
+  }
+  for (const [t, call] of indexed(message.tool_calls)) {
+    for (const [kind, key] of [['function', 'arguments'], ['custom', 'input']] as const) {
+      const inner = call[kind];
+      if (isObject(inner)) await visitMember(inner, key, `${prefix}.tool_calls.${t}.${kind}.${key}`, visit);
+    }
+  }
+}
+
+async function visitMessages(body: Record<string, unknown>, visit: Visit): Promise<void> {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  for (const [m, message] of messages.entries()) {
+    if (isObject(message)) await visitMessage(message, `messages.${m}`, visit);
+  }
+}
+
+/** Token ids, a number or an array of numbers, stay readable in `prompt` and `input` (§5). */
+function isTokenIds(value: unknown): boolean {
+  return typeof value === 'number' || (Array.isArray(value) && value.every((item) => typeof item === 'number'));
+}
+
+/** `prompt` / `input`: the whole value, or each array item, unless it is token ids. */
+async function visitTextItems(body: Record<string, unknown>, key: string, visit: Visit): Promise<void> {
+  const value = body[key];
+  if (Array.isArray(value)) {
+    for (const [i, item] of value.entries()) {
+      if (!isTokenIds(item)) value[i] = await visit(item, `${key}.${i}`);
+    }
+  } else if (value !== undefined && !isTokenIds(value)) {
+    body[key] = await visit(value, key);
+  }
+}
+
+async function visitRequest(body: Record<string, unknown>, endpoint: Endpoint, visit: Visit): Promise<void> {
+  if (endpoint === 'completions') {
+    await visitTextItems(body, 'prompt', visit);
+    await visitMember(body, 'suffix', 'suffix', visit);
+  } else if (endpoint === 'embeddings') {
+    await visitTextItems(body, 'input', visit);
+    await visitMessages(body, visit);
+  } else {
+    if (isObject(body.prediction)) await visitMember(body.prediction, 'content', 'prediction.content', visit);
+    await visitMessages(body, visit);
+  }
+}
+
+/** Every location of one response object; `part` is `message` buffered and `delta` streamed. */
+async function visitResponse(
+  payload: Record<string, unknown>,
+  endpoint: Endpoint,
+  part: 'message' | 'delta',
+  visit: Visit,
+): Promise<void> {
+  for (const key of ['prompt_token_ids', 'prompt_logprobs']) await visitMember(payload, key, key, visit);
+  const list = endpoint === 'embeddings' ? 'data' : 'choices';
+  for (const [i, entry] of indexed(payload[list])) {
+    const prefix = `${list}.${i}`;
+    if (endpoint === 'embeddings') {
+      await visitMember(entry, 'embedding', `${prefix}.embedding`, visit);
+      continue;
+    }
+    for (const key of CHOICE_MEMBERS) await visitMember(entry, key, `${prefix}.${key}`, visit);
+    if (endpoint === 'completions') {
+      await visitMember(entry, 'text', `${prefix}.text`, visit);
+    } else if (isObject(entry[part])) {
+      await visitMessage(entry[part], `${prefix}.${part}`, visit);
+    }
+  }
+}
+
 // ---- Request fields (§5, §10.5) ---------------------------------------------
 
 /**
- * Encrypt every request content location in place. Every other member is sent
- * as it is: readable, but bound by the body digest (§10.3). Non-string items at
- * a string location, such as token ids in `prompt`, pass through as in v2 (§5).
+ * Encrypt every request content location in place, as the JSON of its value.
+ * Every other member is sent as it is: readable, but bound by the body digest
+ * (§10.3). Token ids in `prompt` and `input` stay readable as in v2 (§5).
  */
 async function sealRequestFields(
   payload: Record<string, unknown>,
@@ -232,56 +338,17 @@ async function sealRequestFields(
   ctx: RequestContext,
   serviceKey: CryptoKey,
 ): Promise<void> {
-  const sealField = (field: string, plaintext: string): Promise<string> =>
-    seal(
-      serviceKey,
-      new TextEncoder().encode(plaintext),
-      fieldAad('aci.e2ee.request.v2.1', ctx, field),
-      ctx.secret,
-      FIELD_INFO,
-    );
-  const sealString = async (container: Record<string, unknown>, key: string, field: string) => {
-    const value = container[key];
-    if (typeof value === 'string') container[key] = await sealField(field, value);
-  };
-  // Whole content is the JSON encoding of its value, whatever its form (§10.5).
-  const sealWhole = async (container: Record<string, unknown>, field: string) => {
-    const value = container.content;
-    if (value !== undefined && value !== null) container.content = await sealField(field, JSON.stringify(value));
-  };
-
-  if (endpoint === 'chat') {
-    if (isObject(payload.prediction)) await sealWhole(payload.prediction, 'prediction.content');
-    const messages = Array.isArray(payload.messages) ? payload.messages : [];
-    for (const [m, message] of messages.entries()) {
-      if (!isObject(message)) continue;
-      await sealWhole(message, `messages.${m}.content`);
-      // Members a client echoes back from an earlier reply (§10.5).
-      for (const key of ['reasoning', 'reasoning_content', 'refusal']) {
-        await sealString(message, key, `messages.${m}.${key}`);
-      }
-      if (isObject(message.function_call)) {
-        await sealString(message.function_call, 'arguments', `messages.${m}.function_call.arguments`);
-      }
-      for (const [t, call] of toolCalls(message)) {
-        if (isObject(call.function)) {
-          await sealString(call.function, 'arguments', `messages.${m}.tool_calls.${t}.function.arguments`);
-        }
-      }
-    }
-    return;
-  }
-
-  const key = endpoint === 'completions' ? 'prompt' : 'input';
-  const value = payload[key];
-  if (typeof value === 'string') {
-    payload[key] = await sealField(key, value);
-  } else if (Array.isArray(value)) {
-    for (const [i, item] of value.entries()) {
-      if (typeof item === 'string') value[i] = await sealField(`${key}.${i}`, item);
-    }
-  }
-  if (endpoint === 'completions') await sealString(payload, 'suffix', 'suffix');
+  await visitRequest(payload, endpoint, async (value, field) =>
+    value === null
+      ? null
+      : seal(
+          serviceKey,
+          new TextEncoder().encode(JSON.stringify(value)),
+          fieldAad('aci.e2ee.request.v2.1', ctx, field),
+          ctx.secret,
+          FIELD_INFO,
+        ),
+  );
 }
 
 // ---- Responses (§5, §10.5) --------------------------------------------------
@@ -342,10 +409,14 @@ async function openResponseFields(
   endpoint: Endpoint,
   ctx: RequestContext,
 ): Promise<void> {
+  for (const name of ['choices', 'data']) {
+    if (payload[name] !== undefined && payload[name] !== null && !Array.isArray(payload[name])) {
+      throw new E2eeError(`"${name}" is not an array`);
+    }
+  }
   const id = typeof payload.id === 'string' ? payload.id : '';
-  const open = async (container: Record<string, unknown>, key: string, field: string) => {
-    const value = container[key];
-    if (value === undefined || value === null) return;
+  await visitResponse(payload, endpoint, ctx.stream ? 'delta' : 'message', async (value, field) => {
+    if (value === null) return null;
     if (typeof value !== 'string') throw new E2eeError(`${field} is not a ciphertext string`);
     const plaintext = await openBytes(
       ctx.clientPrivateKey,
@@ -354,49 +425,12 @@ async function openResponseFields(
       ctx.secret,
       FIELD_INFO,
     );
-    container[key] = new TextDecoder('utf-8', { fatal: true }).decode(plaintext);
-  };
-  const openJson = async (container: Record<string, unknown>, key: string, field: string) => {
-    await open(container, key, field);
-    if (typeof container[key] === 'string') container[key] = JSON.parse(container[key] as string);
-  };
-
-  if (endpoint === 'embeddings') {
-    for (const [i, entry] of indexed(payload.data, 'data')) {
-      await openJson(entry, 'embedding', `data.${i}.embedding`);
+    try {
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    } catch {
+      throw new E2eeError(`${field} does not hold JSON`);
     }
-    return;
-  }
-  // vLLM token echoes repeat the prompt or the output (§10.5).
-  for (const key of ['prompt_token_ids', 'prompt_logprobs']) await openJson(payload, key, key);
-  for (const [i, choice] of indexed(payload.choices, 'choices')) {
-    for (const key of ['logprobs', 'token_ids', 'prompt_token_ids', 'prompt_logprobs']) {
-      await openJson(choice, key, `choices.${i}.${key}`);
-    }
-    if (endpoint === 'completions') {
-      await open(choice, 'text', `choices.${i}.text`);
-      continue;
-    }
-    const part = ctx.stream ? 'delta' : 'message';
-    const message = choice[part];
-    if (!isObject(message)) continue;
-    const prefix = `choices.${i}.${part}`;
-    for (const key of ['content', 'reasoning', 'reasoning_content', 'refusal']) {
-      await open(message, key, `${prefix}.${key}`);
-    }
-    await openJson(message, 'annotations', `${prefix}.annotations`);
-    if (isObject(message.audio)) {
-      for (const key of ['data', 'transcript']) await open(message.audio, key, `${prefix}.audio.${key}`);
-    }
-    if (isObject(message.function_call)) {
-      await open(message.function_call, 'arguments', `${prefix}.function_call.arguments`);
-    }
-    for (const [t, call] of toolCalls(message)) {
-      if (isObject(call.function)) {
-        await open(call.function, 'arguments', `${prefix}.tool_calls.${t}.function.arguments`);
-      }
-    }
-  }
+  });
 }
 
 /**
@@ -613,20 +647,16 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 /**
  * Entries of an array with their path index: the `index` member when it is a
- * non-negative integer, else the position (§5). A present non-array is refused.
+ * non-negative safe integer, else the position (§10.5). Anything but an array
+ * has none.
  */
-function indexed(value: unknown, name: string): Array<[number, Record<string, unknown>]> {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw new E2eeError(`"${name}" is not an array`);
+function indexed(value: unknown): Array<[number, Record<string, unknown>]> {
+  if (!Array.isArray(value)) return [];
   return value.flatMap((entry, position): Array<[number, Record<string, unknown>]> => {
     if (!isObject(entry)) return [];
     const index = entry.index;
-    return [[typeof index === 'number' && Number.isInteger(index) && index >= 0 ? index : position, entry]];
+    return [[typeof index === 'number' && Number.isSafeInteger(index) && index >= 0 ? index : position, entry]];
   });
-}
-
-function toolCalls(message: Record<string, unknown>): Array<[number, Record<string, unknown>]> {
-  return indexed(message.tool_calls, 'tool_calls');
 }
 
 function randomBytes(length: number): Uint8Array {
