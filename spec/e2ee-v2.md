@@ -414,7 +414,9 @@ both directions:
 | embeddings response | `data.{i}.embedding` |
 
 The `token_ids` and `prompt_*` members are vLLM's echoes of the generated and
-prompt tokens. `{i}` and `{t}` are the entry's `index` member when it is a
+prompt tokens. In an embeddings response only `data.{i}.embedding` carries
+content; `id`, `object`, `created`, `model`, `usage`, and each entry's
+`object` and `index` are metadata and stay readable. `{i}` and `{t}` are the entry's `index` member when it is a
 non-negative integer up to 2^53 − 1, the range a JavaScript `JSON.parse`
 keeps exact, and its array position otherwise. A number with a zero fraction,
 such as `1.0`, is that integer; the path is written in integer form
@@ -483,7 +485,9 @@ The client MUST, for each response object:
 6. decrypt every §10.5 location that is present.
 
 In a stream, the client passes `data: [DONE]` through, ignores SSE comment
-lines, and rejects any other line and any event after `[DONE]`. Error
+lines, and rejects any other line and any event after `[DONE]`. An event whose
+data is not a JSON object cannot carry `e2ee_mac`, so the service fails a v2.1
+stream at such an event instead of sending it. Error
 responses (HTTP 4xx and 5xx) carry no MAC and are not authenticated.
 
 ### 10.7 Service processing
@@ -521,8 +525,13 @@ Receipts follow §8 unchanged.
   members), and so do token ids in `prompt` and `input`.
 - Response members outside §10.5 stay readable; the MAC stops changes to
   them. They include a tool call's `name` and `id`, `audio.id`, a choice's
-  `finish_reason` and in-band `error`, and members an upstream adds that the
+  `finish_reason` and in-band `error`, an embeddings response's metadata
+  (`object`, `model`, `usage`, `index`), and members an upstream adds that the
   service does not know.
+- A stream event whose data is not a JSON object, such as `data: 42` or text
+  other than `[DONE]`, ends a v2.1 stream with an error, where a plaintext
+  stream forwards it. OpenAI-compatible chat and completions streams send only
+  objects.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still

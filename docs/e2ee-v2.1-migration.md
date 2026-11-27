@@ -289,9 +289,12 @@ and `usage`.
 
 ### Behavior changes for existing requests
 
-Well-formed plaintext, v2, and legacy requests behave as before. Two malformed
-cases now fail differently:
+Well-formed plaintext, v2, and legacy requests behave as before. Three
+malformed cases now fail differently:
 
+- A v2 or legacy request that carries `X-E2EE-Request-Key` is refused with
+  `e2ee_invalid_version`: the client expects v2.1's protection, which v2 and
+  legacy do not give.
 - An `X-Signing-Algo` that is not visible ASCII counts as absent, as before,
   so the request goes through the `X-E2EE-Version` gate. With a version the
   gateway does not advertise it gets the gate's `e2ee_invalid_version`
@@ -309,7 +312,7 @@ cases now fail differently:
 | `e2ee_header_missing` | A header was dropped in transit. |
 | `e2ee_invalid_header` | An E2EE header of a v2.1 request was repeated or rewritten in transit. |
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
-| `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
+| `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 or legacy request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |
 
 On the client side, `E2eeError` from the SDK means a successful response did
