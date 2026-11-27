@@ -481,14 +481,25 @@ The client MUST, for each response object:
 3. in a stream, require `e2ee_seq` to equal the number of events accepted
    before this one, then remove it;
 4. require `choices` and `data`, when present, to be arrays;
-5. in a stream, require every event's `id` to equal the first event's;
+5. in a stream, require every event object's `id` member to equal the first
+   event's;
 6. decrypt every §10.5 location that is present.
 
-In a stream, the client passes `data: [DONE]` through, ignores SSE comment
-lines, and rejects any other line and any event after `[DONE]`. An event whose
-data is not a JSON object cannot carry `e2ee_mac`, so the service fails a v2.1
-stream at such an event instead of sending it. Error
-responses (HTTP 4xx and 5xx) carry no MAC and are not authenticated.
+The client parses a stream as the event stream format of the WHATWG HTML
+Standard, §9.2 "Server-sent events" (§12). The checks above apply to the
+`data` of each event; the client passes `data: [DONE]` through and rejects any
+event with `data` after it. The other
+standard fields, `event`, `id`, and `retry`, are SSE metadata: the service
+relays them as a plaintext stream does, they are outside the MAC and not
+authenticated, and they carry no content. The client passes them through
+unchanged, also in a block without `data`, which dispatches no event. It
+ignores comments and unknown fields, as the format requires, and rejects no
+line for its field name: only `data` reaches the application as an event, and
+it is MAC'd. An event whose data is not a JSON object cannot carry
+`e2ee_mac`, so the service fails a v2.1 stream at such an event instead of
+sending it. Error responses (HTTP 4xx and 5xx) are not authenticated; a MAC
+may be present. The client returns them as errors and never as a successful
+response.
 
 ### 10.7 Service processing
 
@@ -532,6 +543,9 @@ Receipts follow §8 unchanged.
   other than `[DONE]`, ends a v2.1 stream with an error, where a plaintext
   stream forwards it. OpenAI-compatible chat and completions streams send only
   objects.
+- SSE fields other than `data` (`event`, `id`, `retry`) are relayed outside
+  the MAC: an intermediary can change them. They carry no content. `[DONE]`
+  handling and the rejection of data events after it still apply.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still
@@ -565,3 +579,5 @@ Normative for this compatibility protocol:
 - NIST SP 800-38D: AES-GCM.
 - RFC 8785: JSON Canonicalization Scheme (JCS).
 - RFC 2104: HMAC.
+- WHATWG HTML Standard, §9.2 "Server-sent events": the SSE event stream
+  format.

@@ -336,8 +336,10 @@ V21_REJECT_SPLICED = v21_event(V21_EVENT_1) + v21_event(
 # Rejected: an event without a MAC.
 V21_REJECT_NO_MAC = ("data: " + jcs(V21_EVENT_1).decode() + "\n\n"
                      + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
-# Rejected: an SSE line other than `data:` or a comment.
-V21_REJECT_FOREIGN_LINE = "id: 1\n" + V21_STREAM
+# Accepted: the same stream with SSE metadata, which is outside the MAC. The
+# client passes `event`, `id` and `retry` through and ignores unknown fields.
+V21_STREAM_WITH_METADATA = ("retry: 3000\n\n" + "event: chunk\nid: 1\n" + v21_event(V21_EVENT_1)
+                            + "unknown: x\n" + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
 
 # ---- Published constants (must match the spec vector documents) -------------
 PINNED = {
@@ -462,6 +464,7 @@ def main():
     print("stream event 2 MAC =", v21_mac(V21_EVENT_2))
     print("spliced event MAC =", v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}))
     print("stream =", repr(V21_STREAM))
+    print("stream with SSE metadata =", repr(V21_STREAM_WITH_METADATA))
     return 0 if ok else 1
 
 

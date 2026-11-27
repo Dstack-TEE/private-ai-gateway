@@ -5392,6 +5392,73 @@ async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
     );
 }
 
+/// SSE fields other than `data` are standard metadata outside the MAC (§10.6):
+/// the gateway relays them as a plaintext stream would, and seals only the
+/// `data` payload.
+#[tokio::test]
+async fn e2ee_v2_1_stream_relays_sse_metadata_and_seals_each_event() {
+    let event = |content: Value, finish: Value| {
+        serde_json::json!({
+            "id": "chat-v2.1-meta",
+            "object": "chat.completion.chunk",
+            "model": "aci-model",
+            "choices": [{"index": 0, "delta": content, "finish_reason": finish}],
+        })
+    };
+    let first = format!(
+        "event: chunk\nid: 7\nretry: 100\ndata: {}\n\n",
+        event(serde_json::json!({"content": "streamed"}), Value::Null)
+    );
+    let second = format!(
+        "id: 8\ndata: {}\n\n",
+        event(serde_json::json!({}), Value::from("stop"))
+    );
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(first),
+        Bytes::from(second),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client_secret = X25519SecretKey::from([0x83u8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-stream-metadata");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, true);
+
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let text = String::from_utf8(resp.body.to_vec()).unwrap();
+    for line in ["event: chunk\n", "id: 7\n", "retry: 100\n", "id: 8\n"] {
+        assert!(text.contains(line), "{line:?} is relayed: {text}");
+    }
+    assert!(
+        !text.contains("\"streamed\""),
+        "no content in clear: {text}"
+    );
+    let events: Vec<Value> = sse_json_events(&resp.body)
+        .into_iter()
+        .map(open_v2_1_mac)
+        .collect();
+    assert_eq!(events.len(), 2);
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(event["e2ee_seq"], position as u64);
+    }
+    let encrypted = events[0]["choices"][0]["delta"]["content"]
+        .as_str()
+        .unwrap();
+    let aad = v2_1_aad(
+        "aci.e2ee.response.v2.1",
+        E2EE_ALGO_X25519_AESGCM_V2_1,
+        "choices.0.delta.content",
+        &nonce,
+        Some("chat-v2.1-meta"),
+    );
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V2_1_SECRET,
+    };
+    assert_eq!(
+        decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
+        br#""streamed""#
+    );
+}
+
 #[tokio::test]
 async fn e2ee_v2_1_rejects_a_swapped_reply_key_before_inference() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));

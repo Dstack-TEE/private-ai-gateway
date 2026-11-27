@@ -147,6 +147,12 @@ A client accepts this stream and yields `Hello`, then a finish event with
 `"finish_reason":"stop"`, then `[DONE]`, with no `e2ee_mac` or `e2ee_seq`
 members.
 
+SSE fields other than `data` are metadata outside the MAC (§10.6). A client
+also accepts the same stream with a block `retry: 3000` before event 1, the
+lines `event: chunk` and `id: 1` before event 1's `data:` line, and a line
+`unknown: x` before event 2's. It yields the same events, keeps the `retry`,
+`event`, and `id` lines, and ignores the unknown field.
+
 ### Streams a client must reject
 
 Each stream below differs from the one above in one way. A conforming client
@@ -160,7 +166,7 @@ fails it (§10.6).
 | Event 1 appears twice, before event 2. | The second copy's `e2ee_seq` is 0, not 1. |
 | Event 2 comes before event 1. | The first event's `e2ee_seq` is 1, not 0. |
 | Event 1 is missing. | The first event's `e2ee_seq` is 1, not 0. |
-| The stream starts with the line `id: 1`. | Only `data:` lines and comments are allowed. |
+| `data: [DONE]` is followed by event 2 again, after the line `event: chunk`. | No event with `data` may follow `[DONE]`, whatever its metadata. |
 | The buffered response object from "Response MAC" above, served as `application/json`. | The request asked for a stream. |
 
 A stream that stops after event 1 still passes these checks; only a receipt

@@ -356,8 +356,8 @@ export async function openResponse(
   endpoint: Endpoint,
   ctx: RequestContext,
 ): Promise<Response> {
-  // Errors are unauthenticated hints (§9): hand them back as they are, never retry
-  // in another mode.
+  // An error is not authenticated, even when it carries an `e2ee_mac` (§10.6):
+  // hand it back as it is, with its error status, and never retry in another mode.
   if (!response.ok) return response;
   const applied = response.headers.get('x-e2ee-applied');
   const version = response.headers.get('x-e2ee-version');
@@ -431,40 +431,40 @@ async function openResponseFields(
 }
 
 /**
- * Check and decrypt each `data:` event of an SSE stream (§10.6). `[DONE]`
- * passes through, comments are dropped, and any other line fails the stream.
- * A repeated, reordered, or missing event fails on its `e2ee_seq`; a stream
- * cut short does not (§10.8).
+ * Check and decrypt each event of an SSE stream (§10.6), parsed as the WHATWG
+ * HTML event stream format. Each event's `data` must be a MAC'd object in
+ * sequence, or `[DONE]`, after which no event with `data` may come. The
+ * `event`, `id`, and `retry` fields are SSE metadata outside the MAC and pass
+ * through unchanged, also in a block without `data`, which dispatches nothing.
+ * Comments and unknown fields are ignored, and an event the stream does not
+ * finish with a blank line is discarded, as an EventSource does. A repeated,
+ * reordered, or missing event fails on its `e2ee_seq`; a stream cut short does
+ * not (§10.8).
  */
 function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffered = '';
+  // The event being read: its `data` values and its metadata lines.
+  let data: string[] = [];
+  let metadata: string[] = [];
   // Every event of one stream carries the same response id and the next
   // position (§10.6).
   let streamId: unknown;
   let nextSeq = 0;
-  // `[DONE]` ends the stream; nothing may follow it.
+  // `[DONE]` ends the stream; no event with `data` may follow it.
   let done = false;
-  const flushEvents = async (
-    controller: TransformStreamDefaultController<Uint8Array>,
-    final: boolean,
-  ): Promise<void> => {
-    const events = buffered.split(/\r?\n\r?\n/);
-    buffered = final ? '' : (events.pop() ?? '');
-    for (const event of events) {
-      const data: string[] = [];
-      for (const line of event.split(/\r?\n/)) {
-        if (line === '' || line.startsWith(':')) continue;
-        if (!line.startsWith('data:')) throw new E2eeError('unexpected line in E2EE v2.1 stream');
-        data.push(line.slice('data:'.length).replace(/^ /, ''));
-      }
-      if (data.length === 0) continue;
+  const dispatch = async (controller: TransformStreamDefaultController<Uint8Array>): Promise<void> => {
+    const lines = metadata;
+    const values = data;
+    metadata = [];
+    data = [];
+    if (values.length > 0) {
       if (done) throw new E2eeError('stream event after [DONE]');
-      const joined = data.join('\n');
+      const joined = values.join('\n');
       done = joined === '[DONE]';
       let rendered = joined;
-      if (joined !== '[DONE]') {
+      if (!done) {
         const payload = await openObject(joined, endpoint, ctx);
         if (payload[SEQ_MEMBER] !== nextSeq) {
           throw new E2eeError(`stream event is out of sequence: expected ${SEQ_MEMBER} ${nextSeq}`);
@@ -483,17 +483,41 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
         }
         rendered = JSON.stringify(payload);
       }
-      controller.enqueue(encoder.encode(`data: ${rendered}\n\n`));
+      lines.push(`data: ${rendered}`);
     }
+    if (lines.length > 0) controller.enqueue(encoder.encode(`${lines.join('\n')}\n\n`));
+  };
+  const readLines = async (controller: TransformStreamDefaultController<Uint8Array>, final: boolean): Promise<void> => {
+    const lineEnd = /\r\n|\r|\n/g;
+    let start = 0;
+    for (let match = lineEnd.exec(buffered); match !== null; match = lineEnd.exec(buffered)) {
+      // A CR that ends the buffer may be the first half of a CRLF.
+      if (match[0] === '\r' && lineEnd.lastIndex === buffered.length && !final) break;
+      const line = buffered.slice(start, match.index);
+      start = lineEnd.lastIndex;
+      if (line === '') {
+        await dispatch(controller);
+        continue;
+      }
+      if (line.startsWith(':')) continue;
+      const colon = line.indexOf(':');
+      const field = colon < 0 ? line : line.slice(0, colon);
+      if (field === 'data') {
+        data.push(colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, ''));
+      } else if (field === 'event' || field === 'id' || field === 'retry') {
+        metadata.push(line);
+      }
+    }
+    buffered = buffered.slice(start);
   };
   return new TransformStream({
     async transform(chunk, controller) {
       buffered += decoder.decode(chunk, { stream: true });
-      await flushEvents(controller, false);
+      await readLines(controller, false);
     },
     async flush(controller) {
       buffered += decoder.decode();
-      await flushEvents(controller, true);
+      await readLines(controller, true);
     },
   });
 }

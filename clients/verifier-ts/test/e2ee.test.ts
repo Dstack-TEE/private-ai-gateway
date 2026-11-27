@@ -437,7 +437,8 @@ test('fails closed on uncovered endpoints and anything not v2.1', async () => {
   const objectChoices = JSON.stringify({ id: 'x', choices: { 0: { message: { content: 'x' } } }, e2ee_mac: '0'.repeat(64) });
   await assert.rejects(ask(reply(objectChoices, { 'content-type': 'application/json' })), E2eeError);
 
-  // In a stream, a line that is not `data:` or a comment fails the stream.
+  // In a stream, comments and unknown fields are ignored (WHATWG SSE): an
+  // unknown field cannot add content.
   const streamed = createE2eeFetch({
     transcript: transcript(),
     fetch: fakeService(
@@ -447,7 +448,9 @@ test('fails closed on uncovered endpoints and anything not v2.1', async () => {
     ),
   });
   const response = await ask(streamed, { stream: true });
-  await assert.rejects(response.text(), /unexpected line/);
+  const text = await response.text();
+  assert.equal(JSON.parse(text.split('\n\n')[0]!.slice('data: '.length)).choices[0].delta.content, 'a');
+  assert.ok(!text.includes('FORGED') && !text.includes('keep-alive'), text);
 
   // Events of one stream must share one response id.
   const spliced = createE2eeFetch({
@@ -528,7 +531,6 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   await rejects(stream(EVENT_1, EVENT_2.replace('"finish_reason":"stop"', '"finish_reason":"length"')), 'text/event-stream', /MAC/);
   await rejects(stream(EVENT_1, SPLICED_2), 'text/event-stream', /another response/);
   await rejects(stream(EVENT_1.replace(/,"e2ee_mac":"[0-9a-f]+"/, ''), EVENT_2), 'text/event-stream', /e2ee_mac/);
-  await rejects('id: 1\n' + stream(EVENT_1, EVENT_2), 'text/event-stream', /unexpected line/);
   // Each event is validly MAC'd, but not in its position.
   await rejects(stream(EVENT_1, EVENT_1, EVENT_2), 'text/event-stream', /out of sequence/);
   await rejects(stream(EVENT_2, EVENT_1), 'text/event-stream', /out of sequence/);
@@ -537,9 +539,50 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   const buffered = JSON.stringify({ ...JSON.parse(RESPONSE_OBJECT), e2ee_mac: RESPONSE_MAC });
   await rejects(buffered, 'application/json', /expected an SSE stream/);
 
+  // An error is handed back unchanged, with its status, even with a MAC (§10.6).
+  const failure = await openResponse(
+    new Response(`{"error":{"type":"upstream_error"},"e2ee_mac":"${'0'.repeat(64)}"}`, { status: 502 }),
+    'chat',
+    await vectorContext(true),
+  );
+  assert.equal(failure.status, 502);
+  assert.equal(failure.ok, false);
+
   // The same buffered object opens when the request did not ask for a stream.
   const body = await (await openResponse(served(buffered, 'application/json'), 'chat', await vectorContext(false))).json() as any;
   assert.equal(body.choices[0].message.content, 'plain-answer');
+});
+
+test('SSE metadata passes through outside the MAC, per the WHATWG event stream format', async () => {
+  // The published stream with metadata: a retry-only block, `event` and `id`
+  // on event 1, an unknown field and CRLF line endings on event 2, and `id`
+  // after [DONE].
+  const body =
+    'retry: 3000\n\n' +
+    `event: chunk\nid: 1\ndata: ${EVENT_1}\n\n` +
+    `unknown: x\r\ndata: ${EVENT_2}\r\n\r\n` +
+    'data: [DONE]\n\nid: 2\n\n';
+  const opened = await openResponse(served(body, 'text/event-stream'), 'chat', await vectorContext(true));
+  const blocks = (await opened.text()).split('\n\n');
+  assert.equal(blocks[0], 'retry: 3000');
+  const [event, id, data] = blocks[1]!.split('\n');
+  assert.deepEqual([event, id], ['event: chunk', 'id: 1']);
+  assert.deepEqual(JSON.parse(data!.slice('data: '.length)), {
+    id: 'chatcmpl-123',
+    choices: [{ index: 0, delta: { content: 'Hello' } }],
+  });
+  assert.ok(blocks[2]!.startsWith('data: {'), blocks[2]);
+  assert.equal(JSON.parse(blocks[2]!.slice('data: '.length)).choices[0].finish_reason, 'stop');
+  assert.deepEqual(blocks.slice(3), ['data: [DONE]', 'id: 2', '']);
+
+  // Metadata is outside the MAC, but data after [DONE] still fails, and a
+  // data event's MAC and sequence are checked whatever metadata it has.
+  const rejects = async (stream: string, why: RegExp) => {
+    const ctx = await vectorContext(true);
+    await assert.rejects(async () => (await openResponse(served(stream, 'text/event-stream'), 'chat', ctx)).text(), why);
+  };
+  await rejects(`data: ${EVENT_1}\n\ndata: ${EVENT_2}\n\ndata: [DONE]\n\nevent: chunk\ndata: ${EVENT_2}\n\n`, /after \[DONE\]/);
+  await rejects(`id: 1\ndata: ${EVENT_2}\n\n`, /out of sequence/);
 });
 
 test('a client that ignores e2ee_seq still verifies and opens the published stream', async () => {
