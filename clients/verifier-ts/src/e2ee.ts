@@ -102,8 +102,11 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
   const baseFetch: E2eeFetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    // Decide the method before building a Request, which would consume the
+    // body of a caller's Request that is passed through unchanged.
+    const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+    if (method !== 'POST') return baseFetch(input, init);
     const request = new Request(input, init);
-    if (request.method !== 'POST') return baseFetch(input, init);
     const endpoint = endpointOf(new URL(request.url).pathname);
     if (endpoint === undefined) {
       throw new E2eeError(`E2EE v2.1 does not cover POST ${new URL(request.url).pathname}`);

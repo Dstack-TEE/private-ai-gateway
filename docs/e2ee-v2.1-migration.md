@@ -314,10 +314,12 @@ V2.1 encrypts listed fields; it does not encrypt the whole HTTP message. See
 - The receipt's `request.received.body_hash` is an unkeyed hash of the
   plaintext body, so anyone with receipt access who knows the rest of the
   request can confirm a guess of a short encrypted input.
-- A request with nothing to encrypt, such as token-id-only `input` or
-  `prompt`, is refused with `e2ee_decryption_failed`, and a response whose
-  `content` or tool-call `arguments` is not a string fails with HTTP 500.
-  Plaintext accepts both.
+- Plaintext accepts both of these; v2.1 does not. A request with nothing to
+  encrypt, such as token-id-only `input` or `prompt`, is refused with
+  `e2ee_decryption_failed`. A response whose `content` or tool-call
+  `arguments` is neither a string nor null fails: with HTTP 500 when
+  buffered, and by aborting the stream at that event, with no receipt, when
+  streamed.
 - The SDK checks the transcript once, when you create the client. It does not
   re-check the keyset's `not_after` or a changed `X-ACI-Keyset-Digest` later:
   run `verifyService` again and create a new client before the keyset expires

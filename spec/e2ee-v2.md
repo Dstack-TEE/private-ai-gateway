@@ -494,10 +494,12 @@ design:
   restored plaintext body. Anyone who can read a receipt and knows the rest of
   the request can confirm a guess of a short encrypted input. The receipt
   format is unchanged.
-- Two requests plaintext accepts are refused: a request with nothing to
-  encrypt, such as token-id-only `input` or `prompt`, gets
-  `e2ee_decryption_failed` (§5); and a response whose `content` or tool-call
-  `arguments` is neither a string nor null fails with HTTP 500.
+- Two exchanges that plaintext accepts fail. A request with nothing to
+  encrypt, such as token-id-only `input` or `prompt`, is refused with
+  `e2ee_decryption_failed` (§5). An upstream response whose `content` or
+  tool-call `arguments` is neither a string nor null cannot be encrypted: a
+  buffered response fails with HTTP 500, and a stream is aborted at that event
+  with no receipt published.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still

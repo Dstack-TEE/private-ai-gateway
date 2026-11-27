@@ -117,7 +117,7 @@ test('the published v2.1 response MAC reproduces', async () => {
   assert.equal(JSON.parse(await withMac(JSON.parse(RESPONSE_OBJECT), SECRET)).e2ee_mac, RESPONSE_MAC);
 });
 
-test('only a VERIFIED transcript with id-4 and id-6 under the v2.1 binding makes a client', () => {
+test('only a VERIFIED transcript with id-2, id-4, and id-6 under the v2.1 binding makes a client', () => {
   assert.doesNotThrow(() => createE2eeFetch({ transcript: verified() }));
   const refused = (transcript: ReportTranscript) => assert.throws(() => createE2eeFetch({ transcript }), E2eeError);
   refused(verified(keyset('x25519-aes-256-gcm-hkdf-sha256')));
@@ -353,6 +353,20 @@ test('the caller\'s own fetch arguments reach the underlying fetch', async () =>
   }
   assert.equal(calls[0]!.init, extra);
   assert.equal(new Headers(calls[1]!.init?.headers).get('x-e2ee-version'), '2.1');
+});
+
+test('non-POST requests reach the underlying fetch with their body untouched', async () => {
+  const bodies: string[] = [];
+  const e2eeFetch = createE2eeFetch({
+    transcript: verified(),
+    fetch: async (input, init) => {
+      bodies.push(await new Request(input, init).text());
+      return new Response('ok');
+    },
+  });
+  await e2eeFetch(new Request('https://relay.example/v1/files/1', { method: 'PUT', body: 'raw' }));
+  await e2eeFetch('https://relay.example/v1/files/2', { method: 'put', body: 'inline' });
+  assert.deepEqual(bodies, ['raw', 'inline']);
 });
 
 test('the caller\'s request options reach the underlying fetch', async () => {
