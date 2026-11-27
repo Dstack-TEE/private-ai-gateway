@@ -5363,6 +5363,70 @@ async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
 }
 
 #[tokio::test]
+async fn e2ee_v2_1_reads_a_choice_index_by_json_number_value() {
+    // `"index": 1.0` is the JSON number 1, as a JavaScript client reads it, so
+    // the field path is `choices.1...` in both the buffered and streamed reply.
+    let opens =
+        |client_secret: &X25519SecretKey, nonce: &str, id: &str, field: &str, value: &str| {
+            let aad = v2_1_aad(
+                "aci.e2ee.response.v2.1",
+                E2EE_ALGO_X25519_AESGCM_V2_1,
+                field,
+                nonce,
+                Some(id),
+            );
+            let kdf = E2eeKdf::V2_1Field {
+                request_secret: &V2_1_SECRET,
+            };
+            decrypt_x25519(client_secret, value, &aad, kdf).unwrap()
+        };
+
+    let buffered = br#"{"id":"chat-float-index","object":"chat.completion","model":"aci-model","choices":[{"index":1.0,"message":{"role":"assistant","content":"buffered"},"finish_reason":"stop"}]}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(buffered));
+    let client_secret = X25519SecretKey::from([0x8eu8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-float-index");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let reply = open_v2_1_mac(serde_json::from_slice(&resp.body).unwrap());
+    let value = reply["choices"][0]["message"]["content"].as_str().unwrap();
+    assert_eq!(
+        opens(
+            &client_secret,
+            &nonce,
+            "chat-float-index",
+            "choices.1.message.content",
+            value
+        ),
+        b"buffered"
+    );
+
+    let frame = br#"data: {"id":"chat-float-stream","object":"chat.completion.chunk","model":"aci-model","choices":[{"index":1.0,"delta":{"content":"streamed"}}]}
+
+"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from_static(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let nonce = hex_nonce("nonce-v2.1-float-index-stream");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, true);
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::OK);
+    let event = open_v2_1_mac(sse_json_events(&resp.body)[0].clone());
+    let value = event["choices"][0]["delta"]["content"].as_str().unwrap();
+    assert_eq!(
+        opens(
+            &client_secret,
+            &nonce,
+            "chat-float-stream",
+            "choices.1.delta.content",
+            value
+        ),
+        b"streamed"
+    );
+}
+
+#[tokio::test]
 async fn e2ee_v2_1_rejects_a_swapped_reply_key_before_inference() {
     let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
     let client_secret = X25519SecretKey::from([0x84u8; 32]);

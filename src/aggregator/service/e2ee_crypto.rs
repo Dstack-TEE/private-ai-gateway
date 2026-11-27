@@ -433,6 +433,18 @@ fn entry_index(entry: &Value, position: usize) -> u64 {
         .map_or(position as u64, |index| index as u64)
 }
 
+/// A response `choices` or `data` entry's path index: by JSON number value
+/// under v2.1 ([`entry_index`]); v2 and legacy keep reading integers only.
+fn response_entry_index(entry: &Value, position: usize, ctx: &E2eeRequestContext) -> u64 {
+    match ctx.aad_mode {
+        E2eeAadMode::AciV2_1 => entry_index(entry, position),
+        _ => entry
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or(position as u64),
+    }
+}
+
 /// v2.1: encrypt `{prefix}.tool_calls.{t}.function.arguments` in place.
 fn encrypt_tool_call_arguments(
     container: &mut serde_json::Map<String, Value>,
@@ -610,10 +622,7 @@ pub(super) fn encrypt_e2ee_response_body(
         None => [].iter_mut(),
     };
     for (position, choice) in choices.enumerate() {
-        let choice_index = choice
-            .get("index")
-            .and_then(Value::as_u64)
-            .unwrap_or(position as u64);
+        let choice_index = response_entry_index(choice, position, ctx);
         let Some(choice) = choice.as_object_mut() else {
             continue;
         };
@@ -724,10 +733,7 @@ pub(super) fn encrypt_embedding_data(
         return Ok(());
     };
     for (position, item) in items.iter_mut().enumerate() {
-        let data_index = item
-            .get("index")
-            .and_then(Value::as_u64)
-            .unwrap_or(position as u64);
+        let data_index = response_entry_index(item, position, ctx);
         let Some(entry) = item.as_object_mut() else {
             continue;
         };
@@ -833,10 +839,7 @@ pub(super) fn encrypt_e2ee_stream_value(
         None => [].iter_mut(),
     };
     for (position, choice) in choices.enumerate() {
-        let choice_index = choice
-            .get("index")
-            .and_then(Value::as_u64)
-            .unwrap_or(position as u64);
+        let choice_index = response_entry_index(choice, position, ctx);
         let Some(choice) = choice.as_object_mut() else {
             continue;
         };
