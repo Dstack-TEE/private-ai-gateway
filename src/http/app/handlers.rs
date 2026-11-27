@@ -21,9 +21,8 @@ use crate::aci::types::{
     AttestationReport, KeyedPublicKey, PROVIDER_ACI_SESSION_IDS, PROVIDER_ACI_VERIFIED,
 };
 use crate::aggregator::service::{
-    E2eeRequestContext, E2eeRequestParts, GatewayRequestContext, ReceiptOwner, ServiceError,
-    CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH,
-    SYSTEMONE_PATH,
+    E2eeRequestContext, GatewayRequestContext, ReceiptOwner, ServiceError, CHAT_COMPLETIONS_PATH,
+    COMPLETIONS_PATH, EMBEDDINGS_PATH, MESSAGES_PATH, RESPONSES_PATH, SYSTEMONE_PATH,
 };
 use crate::aggregator::upstream_config::{parse_config_text, UpstreamProvider};
 
@@ -39,8 +38,8 @@ use super::error_responses::{
 };
 use super::rejected_body::discard_before_reply;
 use super::util::{
-    enforce_admin, enforce_owner, extract_bearer, force_tee_true, has_e2ee_headers, header_str,
-    request_host_domain,
+    e2ee_request_parts, enforce_admin, enforce_owner, extract_bearer, force_tee_true,
+    has_e2ee_headers, header_str, request_host_domain,
 };
 use super::AppState;
 use crate::middleware::errors::Surface;
@@ -857,45 +856,41 @@ pub(super) async fn openai_completion_endpoint(
         Ok(body) => body,
         Err(response) => return *response,
     };
-    let has_e2ee = has_e2ee_headers(&headers);
+    let e2ee_parts = match e2ee_request_parts(&headers) {
+        Ok(parts) => parts,
+        Err(err) => return e2ee_error_response(err),
+    };
     // `supported_e2ee_versions` advertises client-facing E2EE extensions (ACI
     // §6). The inherited
     // dstack-vllm-proxy path predates it and is identified by
     // `x-signing-algo`, so an explicit ACI opt-out does not disable that path.
     // A missing version is left to the v2 parser so it returns the precise
     // `e2ee_header_missing` error.
-    if has_e2ee
-        && headers.get("x-signing-algo").is_none()
-        && header_str(&headers, "x-e2ee-version").is_some_and(|requested| {
-            !state
-                .service
-                .supported_e2ee_versions()
-                .iter()
-                .any(|advertised| advertised == requested)
-        })
-    {
-        return unsupported_e2ee_response();
+    if let Some(parts) = &e2ee_parts {
+        if parts.signing_algo.is_none()
+            && parts.version.is_some_and(|requested| {
+                !state
+                    .service
+                    .supported_e2ee_versions()
+                    .iter()
+                    .any(|advertised| advertised == requested)
+            })
+        {
+            return unsupported_e2ee_response();
+        }
     }
 
-    let (service_body, e2ee) = if has_e2ee {
-        match state.service.prepare_e2ee_v2_request(
-            E2eeRequestParts {
-                signing_algo: header_str(&headers, "x-signing-algo"),
-                client_public_key: header_str(&headers, "x-client-pub-key"),
-                model_public_key: header_str(&headers, "x-model-pub-key"),
-                version: header_str(&headers, "x-e2ee-version"),
-                nonce: header_str(&headers, "x-e2ee-nonce"),
-                timestamp: header_str(&headers, "x-e2ee-timestamp"),
-                request_key: header_str(&headers, "x-e2ee-request-key"),
-            },
-            body.as_ref(),
-            endpoint_path,
-        ) {
-            Ok(prepared) => (Bytes::from(prepared.decrypted_body), Some(prepared.context)),
-            Err(err) => return e2ee_error_response(err),
+    let (service_body, e2ee) = match e2ee_parts {
+        Some(parts) => {
+            match state
+                .service
+                .prepare_e2ee_v2_request(parts, body.as_ref(), endpoint_path)
+            {
+                Ok(prepared) => (Bytes::from(prepared.decrypted_body), Some(prepared.context)),
+                Err(err) => return e2ee_error_response(err),
+            }
         }
-    } else {
-        (body, None)
+        None => (body, None),
     };
 
     // Surface obviously-broken bodies early; we still hash exactly

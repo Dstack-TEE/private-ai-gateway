@@ -6,7 +6,7 @@ use axum::{
     response::Response,
 };
 
-use crate::aggregator::service::ReceiptOwner;
+use crate::aggregator::service::{E2eeError, E2eeRequestParts, ReceiptOwner};
 
 use super::error_responses::{admin_not_found_response, error_response};
 use super::AppState;
@@ -72,18 +72,56 @@ pub(super) fn force_tee_true(query: Option<String>) -> String {
     params.join("&")
 }
 
+/// Every request header an E2EE mode reads (legacy, v2, v2.1).
+const E2EE_REQUEST_HEADERS: [&str; 7] = [
+    "x-signing-algo",
+    "x-client-pub-key",
+    "x-model-pub-key",
+    "x-e2ee-version",
+    "x-e2ee-nonce",
+    "x-e2ee-timestamp",
+    "x-e2ee-request-key",
+];
+
 pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
-    [
-        "x-signing-algo",
-        "x-client-pub-key",
-        "x-model-pub-key",
-        "x-e2ee-version",
-        "x-e2ee-nonce",
-        "x-e2ee-timestamp",
-        "x-e2ee-request-key",
-    ]
-    .into_iter()
-    .any(|name| headers.contains_key(name))
+    E2EE_REQUEST_HEADERS
+        .into_iter()
+        .any(|name| headers.contains_key(name))
+}
+
+/// Parse the E2EE request headers once, into the one value both the version
+/// gate and the dispatch read. `None` when the request carries none of them.
+/// A repeated header, or a value that is not visible ASCII, is refused rather
+/// than read as absent.
+pub(super) fn e2ee_request_parts(
+    headers: &HeaderMap,
+) -> Result<Option<E2eeRequestParts<'_>>, E2eeError> {
+    if !has_e2ee_headers(headers) {
+        return Ok(None);
+    }
+    Ok(Some(E2eeRequestParts {
+        signing_algo: single_header(headers, "x-signing-algo")?,
+        client_public_key: single_header(headers, "x-client-pub-key")?,
+        model_public_key: single_header(headers, "x-model-pub-key")?,
+        version: single_header(headers, "x-e2ee-version")?,
+        nonce: single_header(headers, "x-e2ee-nonce")?,
+        timestamp: single_header(headers, "x-e2ee-timestamp")?,
+        request_key: single_header(headers, "x-e2ee-request-key")?,
+    }))
+}
+
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, E2eeError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(E2eeError::InvalidHeader);
+    }
+    value
+        .to_str()
+        .map(Some)
+        .map_err(|_| E2eeError::InvalidHeader)
 }
 
 /// Returns `Some(response)` when the caller MUST be rejected; returns

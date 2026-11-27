@@ -9,7 +9,7 @@
 
 import { fromHex, sha256, toHex } from './crypto.js';
 import { AciError } from './errors.js';
-import type { WorkloadKeyset } from './types.js';
+import type { ReportTranscript } from './transcript.js';
 
 /** The v2.1 X25519 keyset `algo` (§10.1). */
 export const E2EE_V2_1_X25519 = 'x25519-aes-256-gcm-hkdf-sha256-v2.1';
@@ -43,12 +43,28 @@ export class E2eeError extends AciError {
   }
 }
 
+/**
+ * The verified service changed or expired: its keyset passed `not_after`, or a
+ * response carried a different `X-ACI-Keyset-Digest`. Run `verifyService`
+ * again and create a new client from the new transcript.
+ */
+export class E2eeReverifyError extends E2eeError {
+  constructor(message: string) {
+    super(`${message}; verify the service again`);
+    this.name = 'E2eeReverifyError';
+  }
+}
+
 /** The `fetch` call shape this client takes and returns. */
 export type E2eeFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
 export interface E2eeFetchOptions {
-  /** The keyset of a report you verified, e.g. `verifyService(url)).verification.keyset`. */
-  keyset: WorkloadKeyset;
+  /**
+   * A VERIFIED transcript whose id-6 passed with `channel: { e2ee:
+   * E2EE_V2_1_X25519 }`, e.g. from `verifyService(url, { acceptedComposeHashes,
+   * channel })`.
+   */
+  transcript: ReportTranscript;
   /** The underlying `fetch`. Defaults to `globalThis.fetch`. */
   fetch?: E2eeFetch;
 }
@@ -74,17 +90,36 @@ export interface RequestContext {
  * requests are refused rather than sent in plaintext; other methods pass
  * through unchanged.
  *
- * Throws {@link E2eeError} at creation when the keyset offers no v2.1 X25519
- * key. There is no fallback to v2, the legacy scheme, or plaintext (§10.1).
+ * Throws {@link E2eeError} at creation unless the transcript is VERIFIED with
+ * the E2EE v2.1 channel binding and its keyset offers a v2.1 X25519 key.
+ * There is no fallback to v2, the legacy scheme, or plaintext (§10.1). Sends
+ * throw {@link E2eeReverifyError} once the keyset expires or the service
+ * reports a different keyset digest (ACI §5.2).
  */
 export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
-  const serviceKey = options.keyset.e2ee_public_keys.find((key) => key.algo === E2EE_V2_1_X25519);
-  if (serviceKey === undefined) {
+  const { transcript } = options;
+  const channel = transcript.channel;
+  const bound =
+    channel !== undefined &&
+    'e2ee' in channel &&
+    channel.e2ee === E2EE_V2_1_X25519 &&
+    transcript.lines.some((entry) => entry.id === 'id-6' && entry.status === 'pass');
+  if (!transcript.verdict.verified || !bound) {
+    throw new E2eeError(
+      `the transcript must be VERIFIED with channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
+    );
+  }
+  const { keyset, workloadKeysetDigest } = transcript.verification;
+  const serviceKey = keyset?.e2ee_public_keys.find((key) => key.algo === E2EE_V2_1_X25519);
+  if (keyset === undefined || workloadKeysetDigest === undefined || serviceKey === undefined) {
     throw new E2eeError(`the verified keyset lists no ${E2EE_V2_1_X25519} key`);
   }
+  const notAfter = keyset.not_after;
   const servicePublicKeyHex = serviceKey.public_key.replace(/^0x/i, '').toLowerCase();
   const servicePublicKey = importX25519Public(fromHex(servicePublicKeyHex));
   const baseFetch: E2eeFetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+  // Set once a response names another keyset; every later send is refused.
+  let changedDigest: string | undefined;
 
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
@@ -92,6 +127,12 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     const endpoint = endpointOf(new URL(request.url).pathname);
     if (endpoint === undefined) {
       throw new E2eeError(`E2EE v2.1 does not cover POST ${new URL(request.url).pathname}`);
+    }
+    if (changedDigest !== undefined) {
+      throw new E2eeReverifyError(`the service now serves keyset ${changedDigest}, not ${workloadKeysetDigest}`);
+    }
+    if (Date.now() / 1000 >= notAfter) {
+      throw new E2eeReverifyError('the verified keyset has expired (not_after)');
     }
 
     const payload = parseJsonObject(await request.text(), 'request body');
@@ -133,6 +174,12 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
       body: JSON.stringify(payload),
       signal: request.signal,
     });
+    // Headers are hints, but a changed one gates new sends (ACI §5.2). This
+    // response, made for the verified key, still opens.
+    const servedDigest = response.headers.get('x-aci-keyset-digest');
+    if (servedDigest !== null && servedDigest.trim().toLowerCase() !== workloadKeysetDigest.toLowerCase()) {
+      changedDigest = servedDigest;
+    }
     return openResponse(response, endpoint, ctx);
   };
 }

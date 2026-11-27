@@ -322,8 +322,9 @@ console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 It fetches the report with a fresh nonce and verifies the hardware quote
 (via [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against
 the Phala PCCS), the binding chain, and the compose measurement. It skips key
-custody (check 5) and checks the attested E2EE key for channel binding (check 6).
-Use that key to encrypt requests as shown in the
+custody (check 5) and checks the attested E2EE v2.1 key for channel binding
+(check 6), which needs `acceptedComposeHashes`. That binding holds only once you
+pass the transcript to `createE2eeFetch({ transcript })`, as shown in the
 [E2EE client guide](e2ee-v2.1-migration.md#client-use-the-typescript-sdk).
 
 For a pinned fetch transport in Node or Bun, and for receipt verification, see

@@ -53,7 +53,10 @@ take it from an attestation report it verified itself:
   can neither forge the quote nor remove the v2.1 key from it.
 
 Encrypting to the attested E2EE key binds the channel for check 6. Relay and
-browser clients can use this binding without observing the gateway's TLS certificate.
+browser clients can use this binding without observing the gateway's TLS
+certificate. `channel: { e2ee }` passes check 6 only for the v2.1 algo and
+only with `acceptedComposeHashes` set, and the binding holds only for requests
+sent through `createE2eeFetch`, which refuses any other transcript.
 
 To build this check yourself, see [Verifier: write your own](#verifier-write-your-own).
 
@@ -75,16 +78,13 @@ const transcript = await verifyService('https://gateway.example', {
   acceptedComposeHashes: ['<reviewed sha256(app_compose)>'],
   channel: { e2ee: E2EE_V2_1_X25519 },
 });
-const { keyset } = transcript.verification;
-if (!transcript.verdict.verified || keyset === undefined) {
-  throw new Error(transcript.verdict.line);
-}
+if (!transcript.verdict.verified) throw new Error(transcript.verdict.line);
 
 // 2. Encrypt every request and decrypt every reply.
 const client = new OpenAI({
   baseURL: 'https://api.your-service.example/v1', // your API in front of the gateway
   apiKey: process.env.API_KEY,
-  fetch: createE2eeFetch({ keyset }),
+  fetch: createE2eeFetch({ transcript }),
 });
 
 // 3. Use the SDK as usual, buffered or streamed.
@@ -106,8 +106,12 @@ be added before the request reaches it.
 
 The client:
 
-- uses v2.1 whenever the verified keyset lists a v2.1 key, and throws if it
-  lists none;
+- takes the verified transcript and throws unless it is VERIFIED with the
+  v2.1 channel binding and lists a v2.1 key;
+- throws `E2eeReverifyError` instead of sending once the keyset's `not_after`
+  passes, or after any response carries a different `X-ACI-Keyset-Digest`.
+  The gateway renews its keyset about every 15 days, which changes the digest.
+  Verify again and create a new client;
 - never retries in another mode. An error reply is handed back unchanged; a
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
@@ -273,6 +277,7 @@ and `usage`.
 | `e2ee_body_mismatch` | A body value changed after the client encrypted it, or the client hashed a different body than it sent. |
 | `e2ee_decryption_failed` | `X-Client-Pub-Key` or `X-E2EE-Request-Key` changed in transit, or a field was not encrypted. |
 | `e2ee_header_missing` | A header was dropped in transit. |
+| `e2ee_invalid_header` | An E2EE header was repeated or rewritten in transit. |
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
 | `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |

@@ -56,11 +56,14 @@ evidence) exactly as observed.
   evidence, and is one you pinned with `provider.aci_session_ids`). Pass
   `{ session, pinnedSessions, requiresVerified }`; anything absent is a skip
   with its reason, never a pass.
-- **E2EE v2.1 client.** `createE2eeFetch({ keyset })` returns a `fetch` that
+- **E2EE v2.1 client.** `createE2eeFetch({ transcript })` returns a `fetch` that
   encrypts chat completions, completions, and embeddings under
   [E2EE v2.1](../../spec/e2ee-v2.md#10-version-21) (X25519, Web Crypto only)
-  and decrypts their responses, buffered or streamed. Give it the keyset of a
-  report you verified, and pass it as the `fetch` of an OpenAI-compatible SDK.
+  and decrypts their responses, buffered or streamed. Give it a VERIFIED
+  `verifyService` transcript made with `acceptedComposeHashes` and
+  `channel: { e2ee: E2EE_V2_1_X25519 }`, and pass it as the `fetch` of an
+  OpenAI-compatible SDK. Sends throw `E2eeReverifyError` once the keyset
+  expires or a response names another keyset digest.
   It refuses other POST endpoints and never falls back to v2, the legacy
   scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
@@ -80,8 +83,8 @@ A session contains an establishing-evidence snapshot. A reused session does not 
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
   implemented in this package; it reports a skip.
 - **No TLS observation in a browser.** A browser cannot see the server
-  certificate. For E2EE, set `channel.e2ee` and encrypt to a key from the
-  verified keyset. For TLS, supply `channel.observedSpkiSha256` from your
+  certificate. For E2EE, set `channel.e2ee` to `E2EE_V2_1_X25519` with
+  `acceptedComposeHashes`, and send through `createE2eeFetch`. For TLS, supply `channel.observedSpkiSha256` from your
   own TLS stack or use a pinned runtime transport. A live run needs one of
   these bindings to pass id-6 (§1.1).
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`

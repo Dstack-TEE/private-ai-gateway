@@ -8,7 +8,7 @@
  * binding (§9.1 checks 2–3), receipts and body hashes (§9.3), and sessions
  * (§8, §9.3). Every check other than the quote uses Web Crypto (Ed25519 and
  * SHA-256). {@link createE2eeFetch} is an E2EE v2.1 client (X25519) for a
- * keyset you verified.
+ * service you verified.
  */
 
 // Crypto primitives (Web Crypto)
@@ -61,10 +61,11 @@ export type {
   ReceiptTranscript,
   TranscriptOptions,
   VerifyServiceOptions,
+  ChannelBinding,
 } from './transcript.js';
 
 // E2EE v2.1 client (E2EE spec §10)
-export { createE2eeFetch, E2eeError, E2EE_V2_1_X25519 } from './e2ee.js';
+export { createE2eeFetch, E2eeError, E2eeReverifyError, E2EE_V2_1_X25519 } from './e2ee.js';
 export type { E2eeFetch, E2eeFetchOptions } from './e2ee.js';
 
 // Errors

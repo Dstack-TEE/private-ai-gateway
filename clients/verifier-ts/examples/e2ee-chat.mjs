@@ -13,23 +13,22 @@ import { createE2eeFetch, E2EE_V2_1_X25519, verifyService } from '@phala/aci-ver
 const { GATEWAY_URL, API_URL, COMPOSE_HASHES, API_KEY, MODEL } = process.env;
 if (!COMPOSE_HASHES) throw new Error('set COMPOSE_HASHES to the gateway releases you accept');
 
-// 1. Verify the gateway against the releases you reviewed, and take its keyset.
-//    Without the pin, any genuine dstack workload would pass, including one
-//    run by whoever sits between you and the gateway.
+// 1. Verify the gateway against the releases you reviewed. Without the pin,
+//    any genuine dstack workload would pass, including one run by whoever
+//    sits between you and the gateway.
 const transcript = await verifyService(GATEWAY_URL, {
   acceptedComposeHashes: COMPOSE_HASHES.split(','),
   channel: { e2ee: E2EE_V2_1_X25519 },
 });
-const { keyset } = transcript.verification;
-if (!transcript.verdict.verified || keyset === undefined) {
-  throw new Error(transcript.verdict.line);
-}
+if (!transcript.verdict.verified) throw new Error(transcript.verdict.line);
 
 // 2. Encrypt every request and decrypt every reply at the transport layer.
+//    Sends throw E2eeReverifyError once the keyset expires or is renewed;
+//    then verify again and create a new client.
 const client = new OpenAI({
   baseURL: API_URL,
   apiKey: API_KEY,
-  fetch: createE2eeFetch({ keyset }),
+  fetch: createE2eeFetch({ transcript }),
 });
 
 // 3. Use the SDK as usual. Buffered and streamed replies both work.

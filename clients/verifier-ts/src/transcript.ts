@@ -17,6 +17,7 @@ import { verifyReportBinding, verifyComposeMeasurement, verifyQuote } from './re
 import { verifyReceipt, checkRequestBodyHash, checkResponseBodyHash, findEvent } from './receipt.js';
 import { computeSessionId, checkSessionApiVersion, checkSessionEvidence } from './session.js';
 import { AciError } from './errors.js';
+import { E2EE_V2_1_X25519 } from './e2ee.js';
 import { DEFAULT_ARTIFACT_TIMEOUT_MS, readAciJson, timedFetch } from './attestation-http.js';
 import type {
   AttestationReport,
@@ -55,7 +56,12 @@ export interface ReportTranscript {
   verification: ReportVerification;
   /** RTMR3-bound sha256(app_compose), present only when id-4 measured successfully. */
   composeHash?: string;
+  /** The channel binding id-6 appraised, when one was supplied. */
+  channel?: ChannelBinding;
 }
+
+/** How this client's channel is bound to the attested keyset (§9.1(6)). */
+export type ChannelBinding = { observedSpkiSha256: string; host?: string } | { e2ee: string };
 
 export interface TranscriptOptions {
   /**
@@ -77,10 +83,11 @@ export interface TranscriptOptions {
   online?: boolean;
   /**
    * How this client's channel is bound to the attested keyset (§9.1(6)):
-   * the TLS leaf SPKI the caller's own stack observed, or the algorithm
-   * the caller will use to encrypt to a key from the verified keyset.
+   * the TLS leaf SPKI the caller's own stack observed, or E2EE v2.1
+   * (`{ e2ee: E2EE_V2_1_X25519 }`), which also needs `acceptedComposeHashes`
+   * and holds only for requests sent through `createE2eeFetch`.
    */
-  channel?: { observedSpkiSha256: string; host?: string } | { e2ee: string };
+  channel?: ChannelBinding;
   /**
    * Reviewed RTMR3-bound compose hashes accepted by this verifier (§1.3).
    * An empty or omitted list verifies and reports the measurement without
@@ -355,17 +362,18 @@ export async function reportTranscript(
     verdict: computeVerdict(lines),
     verification,
     ...(composeHash === undefined ? {} : { composeHash }),
+    ...(options.channel === undefined ? {} : { channel: options.channel }),
   };
 }
 
 /** @internal Re-appraise id-6 with the binding used by the transport. */
 export function bindReportTranscriptChannel(
   transcript: ReportTranscript,
-  channel: NonNullable<TranscriptOptions['channel']>,
+  channel: ChannelBinding,
 ): ReportTranscript {
   const channelCheck = channelLine(transcript.verification.keyset, { online: true, channel });
   const lines = transcript.lines.map((entry) => (entry.id === 'id-6' ? channelCheck : entry));
-  return { ...transcript, lines, verdict: computeVerdict(lines) };
+  return { ...transcript, lines, verdict: computeVerdict(lines), channel };
 }
 
 /**
@@ -383,10 +391,23 @@ function channelLine(
       return line(ID_TITLES, 'id-6', 'fail', 'no decoded keyset to match the channel against (see id-2)');
     }
     if ('e2ee' in channel) {
+      // Only v2.1 resists a relay that swaps keys or edits requests, and only
+      // a pinned release makes the attested key one the caller chose (§1.1).
+      if (channel.e2ee !== E2EE_V2_1_X25519) {
+        return line(ID_TITLES, 'id-6', 'fail', `channel.e2ee must be ${E2EE_V2_1_X25519}; ${channel.e2ee} does not bind the channel (§1.1)`);
+      }
+      if ((options.acceptedComposeHashes ?? []).length === 0) {
+        return line(ID_TITLES, 'id-6', 'fail', 'an E2EE binding needs acceptedComposeHashes: without a pinned release any dstack workload can present a key (§1.1)');
+      }
       const entries = Array.isArray(keyset.e2ee_public_keys) ? keyset.e2ee_public_keys : [];
       const key = entries.find((entry) => typeof entry?.algo === 'string' && entry.algo === channel.e2ee);
       return key
-        ? line(ID_TITLES, 'id-6', 'pass', `E2EE key ${key.key_id} (${channel.e2ee}) is in the attested keyset`)
+        ? line(
+            ID_TITLES,
+            'id-6',
+            'pass',
+            `E2EE key ${key.key_id} (${channel.e2ee}) is in the attested keyset; the binding is declared and holds only for requests sent through createE2eeFetch`,
+          )
         : line(ID_TITLES, 'id-6', 'fail', `the attested keyset lists no E2EE key for ${channel.e2ee} (§1.1)`);
     }
     const host = channel.host?.toLowerCase().replace(/\.$/, '');

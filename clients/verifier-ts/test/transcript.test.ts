@@ -146,6 +146,15 @@ test('transcript: an E2EE v2.1 key satisfies id-6 online', async () => {
   // The fixture has a synthetic quote, so id-1 still fails the verdict.
   assert.deepEqual(matched.lines.filter((line) => line.status === 'fail').map((line) => line.id), ['id-1']);
   assert.equal(matched.verdict.verified, false);
+  assert.deepEqual(matched.channel, { e2ee: E2EE_V2_1_X25519 });
+
+  // Only v2.1 binds the channel, and only for a pinned release.
+  const id6 = async (overrides: object) =>
+    (await reportTranscript(measured.report, NONCE, { ...options, ...overrides })).lines.find((l) => l.id === 'id-6');
+  assert.match((await id6({ channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } }))?.detail ?? '', /must be/);
+  assert.equal((await id6({ channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } }))?.status, 'fail');
+  assert.equal((await id6({ acceptedComposeHashes: [] }))?.status, 'fail');
+  assert.equal((await id6({ acceptedComposeHashes: undefined }))?.status, 'fail');
 });
 
 test('transcript: compose policy accepts reviewed releases and rejects other measurements', async () => {

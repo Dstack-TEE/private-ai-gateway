@@ -274,6 +274,7 @@ a different status.
 | Type | Status | Meaning |
 | --- | --- | --- |
 | `e2ee_header_missing` | 400 | Some but not all required headers are present: five for v2, six for v2.1. |
+| `e2ee_invalid_header` | 400 | An E2EE request header appears more than once, or its value is not visible ASCII. |
 | `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, the service does not terminate that version, or a v2 request carries `X-E2EE-Request-Key`. |
 | `e2ee_invalid_public_key` | 400 | A supplied public key is not valid for the selected suite. |
 | `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
