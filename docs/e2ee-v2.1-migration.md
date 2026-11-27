@@ -53,13 +53,10 @@ take it from an attestation report it verified itself:
 - Fetching the report through your own API is fine once it is pinned: a relay
   can neither forge the quote nor remove the v2.1 key from it.
 
-Encrypting to the attested E2EE key binds the channel for check 6. Relay and
-browser clients can use this binding without observing the gateway's TLS
-certificate. `channel: { e2ee }` passes check 6 only for the v2.1 algo and
-only with `acceptedComposeHashes` set, and the binding holds only for requests
-sent through `createE2eeFetch`, which refuses any other transcript, including
-an offline one whose check 4 skipped because the report publishes no
-`app_compose`.
+- Pass `channel: { e2ee: E2EE_V2_1_X25519 }`. Encrypting to the attested key
+  binds the channel for check 6, so relay and browser clients need not observe
+  the gateway's TLS certificate. The binding holds only for requests sent
+  through `createE2eeFetch`, which refuses any other transcript.
 
 To build this check yourself, see [Verifier: write your own](#verifier-write-your-own).
 
@@ -119,11 +116,9 @@ The client:
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
   `/v1/responses`, and any request member off the
-  [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist), such as
-  `functions`, `prediction`, `suffix`, `modalities`, `chat_template_kwargs`, or
-  token-id prompts, which v2.1 does not protect. Members set to `null`, as in
-  an assistant reply sent back as history, count as absent; drop a reply's
-  `annotations: []` before sending it back, or it is refused;
+  [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist), such as `functions`
+  or token-id prompts. Members set to `null` count as absent, but drop a
+  reply's `annotations: []` before sending it back as history;
 - builds a new request, with a new nonce, every time it is called, so SDK
   retries are safe.
 
@@ -160,8 +155,9 @@ For each response:
 3. For the JSON body, or each SSE `data:` event: check `e2ee_mac` (§10.6), then
    remove it. A missing or wrong MAC fails the response.
 4. In a stream, drop comment lines, pass `data: [DONE]` through, and fail on
-   any other line and on any event after `[DONE]`. Each event's `e2ee_seq` must be 0, 1, 2, … in order; remove
-   it. Every event must carry the first event's `id`.
+   any other line and on any event after `[DONE]`. Each event's `e2ee_seq`
+   must be 0, 1, 2, … in order; remove it. Every event must carry the first
+   event's `id`.
 5. Decrypt each §5 and §10.5 location with your private key and the request
    secret. A field that does not decrypt fails the response.
 
@@ -300,8 +296,6 @@ not verify: something between the client and the gateway changed it.
 - Roles, message count, model, sampling parameters, tool definitions, usage
   counts, and ciphertext lengths stay readable. V2.1 stops changes to them, not
   reading them.
-- Only the [allowlisted request members](../spec/e2ee-v2.md#request-allowlist)
-  are accepted; anything else is refused, not sent in the clear.
 - A stream can still end early. `e2ee_seq` stops lost, repeated, and
   reordered events, but not a stream cut short. The signed receipt's
   `response.returned.body_hash` covers the exact stream, but the SDK does not

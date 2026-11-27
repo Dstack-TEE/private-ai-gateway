@@ -424,7 +424,7 @@ anything else. The service rejects anything else with
 `null` counts as absent, so a reply sent back as history with `refusal: null`
 or `tool_calls: null` passes.
 [`e2ee-v2.1-request-members.json`](e2ee-v2.1-request-members.json) holds the
-same lists, and the reference implementations test against it.
+same lists; the gateway loads it, and the TypeScript client tests against it.
 
 | Object | Encrypted | Readable |
 | --- | --- | --- |
@@ -486,8 +486,8 @@ The client MUST, for each response object:
 6. decrypt every §5 and §10.5 location that is present.
 
 In a stream, the client passes `data: [DONE]` through, ignores SSE comment
-lines, and rejects any other line and any event after `[DONE]`. Error responses (HTTP 4xx and 5xx) carry no
-MAC and are not authenticated.
+lines, and rejects any other line and any event after `[DONE]`. Error
+responses (HTTP 4xx and 5xx) carry no MAC and are not authenticated.
 
 ### 10.7 Service processing
 

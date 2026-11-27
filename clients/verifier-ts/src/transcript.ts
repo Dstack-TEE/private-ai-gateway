@@ -400,7 +400,7 @@ function channelLine(
         return line(ID_TITLES, 'id-6', 'fail', 'an E2EE binding needs acceptedComposeHashes: without a pinned release any dstack workload can present a key (§1.1)');
       }
       const entries = Array.isArray(keyset.e2ee_public_keys) ? keyset.e2ee_public_keys : [];
-      const key = entries.find((entry) => typeof entry?.algo === 'string' && entry.algo === channel.e2ee);
+      const key = entries.find((entry) => entry?.algo === channel.e2ee);
       return key
         ? line(
             ID_TITLES,

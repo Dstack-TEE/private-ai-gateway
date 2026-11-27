@@ -62,8 +62,7 @@ evidence) exactly as observed.
   and decrypts their responses, buffered or streamed. Give it a VERIFIED
   `verifyService` transcript made with `acceptedComposeHashes` and
   `channel: { e2ee: E2EE_V2_1_X25519 }`, and pass it as the `fetch` of an
-  OpenAI-compatible SDK. Sends throw `E2eeReverifyError` once the keyset
-  expires or a response names another keyset digest.
+  OpenAI-compatible SDK.
   It refuses other POST endpoints and never falls back to v2, the legacy
   scheme, or plaintext. Also available alone as `@phala/aci-verifier/e2ee`.
   See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md).
@@ -83,10 +82,8 @@ A session contains an establishing-evidence snapshot. A reused session does not 
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
   implemented in this package; it reports a skip.
 - **No TLS observation in a browser.** A browser cannot see the server
-  certificate. For E2EE, set `channel.e2ee` to `E2EE_V2_1_X25519` with
-  `acceptedComposeHashes`, and send through `createE2eeFetch`. For TLS, supply `channel.observedSpkiSha256` from your
-  own TLS stack or use a pinned runtime transport. A live run needs one of
-  these bindings to pass id-6 (§1.1).
+  certificate, so a live run passes id-6 only with the E2EE binding above or
+  a `channel.observedSpkiSha256` from your own TLS stack (§1.1).
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
   stops there; neither in-tree verifier appraises the evidence itself

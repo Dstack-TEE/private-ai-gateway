@@ -1,82 +1,33 @@
 //! The E2EE v2.1 request allowlist (spec/e2ee-v2.md §10.5). A v2.1 request may
 //! carry only the members v2.1 encrypts and readable parameters the body
 //! digest binds; anything else is refused before forwarding, so nothing v2.1
-//! does not protect reaches an upstream. The lists are those of
-//! `spec/e2ee-v2.1-request-members.json`.
+//! does not protect reaches an upstream.
 
+use std::sync::LazyLock;
+
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{E2eeError, CHAT_COMPLETIONS_PATH, COMPLETIONS_PATH, EMBEDDINGS_PATH};
 
-const CHAT: &[&str] = &[
-    "messages",
-    "model",
-    "stream",
-    "stream_options",
-    "max_tokens",
-    "max_completion_tokens",
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
-    "frequency_penalty",
-    "presence_penalty",
-    "repetition_penalty",
-    "logit_bias",
-    "logprobs",
-    "top_logprobs",
-    "seed",
-    "stop",
-    "n",
-    "response_format",
-    "tools",
-    "tool_choice",
-    "parallel_tool_calls",
-    "reasoning_effort",
-    "reasoning",
-    "user",
-    "provider",
-];
-const COMPLETIONS: &[&str] = &[
-    "prompt",
-    "model",
-    "stream",
-    "stream_options",
-    "max_tokens",
-    "temperature",
-    "top_p",
-    "top_k",
-    "min_p",
-    "frequency_penalty",
-    "presence_penalty",
-    "repetition_penalty",
-    "logit_bias",
-    "logprobs",
-    "seed",
-    "stop",
-    "n",
-    "user",
-    "provider",
-];
-const EMBEDDINGS: &[&str] = &[
-    "input",
-    "model",
-    "encoding_format",
-    "dimensions",
-    "user",
-    "provider",
-];
-const MESSAGE: &[&str] = &[
-    "role",
-    "content",
-    "name",
-    "tool_calls",
-    "tool_call_id",
-    "reasoning",
-    "reasoning_content",
-];
-const TOOL_CALL: &[&str] = &["id", "type", "function", "index"];
-const TOOL_CALL_FUNCTION: &[&str] = &["name", "arguments"];
+/// The lists of `spec/e2ee-v2.1-request-members.json`, compiled in.
+#[derive(Deserialize)]
+struct Members {
+    chat: Vec<String>,
+    completions: Vec<String>,
+    embeddings: Vec<String>,
+    message: Vec<String>,
+    tool_call: Vec<String>,
+    tool_call_function: Vec<String>,
+}
+
+static MEMBERS: LazyLock<Members> = LazyLock::new(|| {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/spec/e2ee-v2.1-request-members.json"
+    )))
+    .expect("spec/e2ee-v2.1-request-members.json is a valid allowlist")
+});
 
 /// Refuse a v2.1 request body that carries anything outside the allowlist, or
 /// a content location in a form v2.1 does not encrypt: a structured
@@ -88,7 +39,7 @@ pub(super) fn check_v2_1_request_members(
     let body = payload.as_object().ok_or(E2eeError::DecryptionFailed)?;
     match endpoint_path {
         CHAT_COMPLETIONS_PATH => {
-            only(body, CHAT, "")?;
+            only(body, &MEMBERS.chat, "")?;
             let messages = body
                 .get("messages")
                 .and_then(Value::as_array)
@@ -99,11 +50,11 @@ pub(super) fn check_v2_1_request_members(
             Ok(())
         }
         COMPLETIONS_PATH => {
-            only(body, COMPLETIONS, "")?;
+            only(body, &MEMBERS.completions, "")?;
             check_text_items(body, "prompt")
         }
         EMBEDDINGS_PATH => {
-            only(body, EMBEDDINGS, "")?;
+            only(body, &MEMBERS.embeddings, "")?;
             check_text_items(body, "input")
         }
         // No other endpoint terminates E2EE.
@@ -113,7 +64,7 @@ pub(super) fn check_v2_1_request_members(
 
 fn check_message(message: &Value, path: &str) -> Result<(), E2eeError> {
     let message = message.as_object().ok_or_else(|| unsupported(path))?;
-    only(message, MESSAGE, path)?;
+    only(message, &MEMBERS.message, path)?;
     // v2.1 seals content whole; reasoning is a string (§10.5).
     for key in ["content", "reasoning", "reasoning_content"] {
         string_or_null(message, key, path)?;
@@ -127,11 +78,11 @@ fn check_message(message: &Value, path: &str) -> Result<(), E2eeError> {
     for (t, call) in calls.iter().enumerate() {
         let path = format!("{path}.tool_calls.{t}");
         let call = call.as_object().ok_or_else(|| unsupported(&path))?;
-        only(call, TOOL_CALL, &path)?;
+        only(call, &MEMBERS.tool_call, &path)?;
         if let Some(function) = call.get("function").filter(|function| !function.is_null()) {
             let path = format!("{path}.function");
             let function = function.as_object().ok_or_else(|| unsupported(&path))?;
-            only(function, TOOL_CALL_FUNCTION, &path)?;
+            only(function, &MEMBERS.tool_call_function, &path)?;
             string_or_null(function, "arguments", &path)?;
         }
     }
@@ -153,10 +104,10 @@ fn check_text_items(body: &Map<String, Value>, key: &str) -> Result<(), E2eeErro
 
 /// A member whose value is null counts as absent (§10.5), so a reply sent
 /// back as history (`refusal: null`, `tool_calls: null`, ...) passes.
-fn only(object: &Map<String, Value>, allowed: &[&str], path: &str) -> Result<(), E2eeError> {
+fn only(object: &Map<String, Value>, allowed: &[String], path: &str) -> Result<(), E2eeError> {
     match object
         .iter()
-        .find(|(key, value)| !value.is_null() && !allowed.contains(&key.as_str()))
+        .find(|(key, value)| !value.is_null() && !allowed.contains(key))
         .map(|(key, _)| key)
     {
         Some(key) if path.is_empty() => Err(unsupported(key)),
@@ -182,42 +133,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn lists_match_the_spec_allowlist() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/spec/e2ee-v2.1-request-members.json"
-        );
-        let spec: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        for (name, list) in [
-            ("chat", CHAT),
-            ("completions", COMPLETIONS),
-            ("embeddings", EMBEDDINGS),
-            ("message", MESSAGE),
-            ("tool_call", TOOL_CALL),
-            ("tool_call_function", TOOL_CALL_FUNCTION),
-        ] {
-            assert_eq!(spec[name], json!(list), "{name}");
-        }
-    }
-
-    #[test]
     fn accepts_a_reply_sent_back_as_history() {
         let body = json!({"model": "m", "messages": [
             {"role": "user", "content": "q"},
             {"role": "assistant", "content": "a", "refusal": null, "tool_calls": null,
              "annotations": null, "audio": null, "function_call": null},
+            // A null tool-call `function` counts as absent, like an omitted one.
+            {"role": "assistant", "tool_calls": [{"id": "c"}, {"id": "d", "function": null}]},
             {"role": "user", "content": "q2"},
         ]});
         check_v2_1_request_members(CHAT_COMPLETIONS_PATH, &body).unwrap();
-    }
-
-    #[test]
-    fn a_null_tool_call_function_counts_as_absent() {
-        for call in [json!({"id": "c"}), json!({"id": "c", "function": null})] {
-            let body =
-                json!({"model": "m", "messages": [{"role": "assistant", "tool_calls": [call]}]});
-            check_v2_1_request_members(CHAT_COMPLETIONS_PATH, &body).unwrap();
-        }
     }
 
     #[test]

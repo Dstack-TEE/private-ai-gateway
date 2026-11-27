@@ -73,21 +73,18 @@ pub(super) fn force_tee_true(query: Option<String>) -> String {
     params.join("&")
 }
 
-/// Every request header an E2EE mode reads (legacy, v2, v2.1).
-const E2EE_REQUEST_HEADERS: [&str; 7] = [
-    "x-signing-algo",
-    "x-client-pub-key",
-    "x-model-pub-key",
-    "x-e2ee-version",
-    "x-e2ee-nonce",
-    "x-e2ee-timestamp",
-    "x-e2ee-request-key",
-];
-
 pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
-    E2EE_REQUEST_HEADERS
-        .into_iter()
-        .any(|name| headers.contains_key(name))
+    [
+        "x-signing-algo",
+        "x-client-pub-key",
+        "x-model-pub-key",
+        "x-e2ee-version",
+        "x-e2ee-nonce",
+        "x-e2ee-timestamp",
+        "x-e2ee-request-key",
+    ]
+    .into_iter()
+    .any(|name| headers.contains_key(name))
 }
 
 /// Parse the E2EE request headers once, into the one value both the version

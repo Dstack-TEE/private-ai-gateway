@@ -739,13 +739,11 @@ impl ResponseOwner {
         if let Some(ctx) = &self.e2ee {
             // A record after the terminal is still encrypted but never sent,
             // so it takes no v2.1 stream position.
-            let mut unsent = self.e2ee_seq;
-            let seq = if self.saw_terminal {
-                &mut unsent
-            } else {
-                &mut self.e2ee_seq
-            };
-            encrypt_e2ee_record(&mut record, ctx, &self.endpoint, seq)?;
+            let mut seq = self.e2ee_seq;
+            encrypt_e2ee_record(&mut record, ctx, &self.endpoint, &mut seq)?;
+            if !self.saw_terminal {
+                self.e2ee_seq = seq;
+            }
         }
         let bytes = serialize(&record)?;
         if self.saw_terminal {

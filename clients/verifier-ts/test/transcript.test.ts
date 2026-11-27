@@ -151,8 +151,9 @@ test('transcript: an E2EE v2.1 key satisfies id-6 online', async () => {
   // Only v2.1 binds the channel, and only for a pinned release.
   const id6 = async (overrides: object) =>
     (await reportTranscript(measured.report, NONCE, { ...options, ...overrides })).lines.find((l) => l.id === 'id-6');
-  assert.match((await id6({ channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } }))?.detail ?? '', /must be/);
-  assert.equal((await id6({ channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } }))?.status, 'fail');
+  const v2 = await id6({ channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } });
+  assert.equal(v2?.status, 'fail');
+  assert.match(v2?.detail ?? '', /must be/);
   assert.equal((await id6({ acceptedComposeHashes: [] }))?.status, 'fail');
   assert.equal((await id6({ acceptedComposeHashes: undefined }))?.status, 'fail');
 });

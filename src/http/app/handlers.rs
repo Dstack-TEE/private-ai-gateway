@@ -866,8 +866,8 @@ pub(super) async fn openai_completion_endpoint(
     // `x-signing-algo`, so an explicit ACI opt-out does not disable that path.
     // A missing version is left to the v2 parser so it returns the precise
     // `e2ee_header_missing` error.
-    if let Some(parts) = &e2ee_parts {
-        if parts.signing_algo.is_none()
+    if e2ee_parts.as_ref().is_some_and(|parts| {
+        parts.signing_algo.is_none()
             && parts.version.is_some_and(|requested| {
                 !state
                     .service
@@ -875,9 +875,8 @@ pub(super) async fn openai_completion_endpoint(
                     .iter()
                     .any(|advertised| advertised == requested)
             })
-        {
-            return unsupported_e2ee_response();
-        }
+    }) {
+        return unsupported_e2ee_response();
     }
 
     let (service_body, e2ee) = match e2ee_parts {

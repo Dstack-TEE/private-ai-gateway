@@ -5601,67 +5601,67 @@ async fn e2ee_v2_1_is_refused_by_a_service_that_only_terminates_v2() {
     assert_eq!(error_type(&resp), "e2ee_invalid_version");
 }
 
-#[tokio::test]
-async fn e2ee_v2_1_headers_that_are_repeated_or_not_ascii_are_refused_before_the_version_gate() {
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = X25519SecretKey::from([0x8cu8; 32]);
-    let nonce = hex_nonce("nonce-v2.1-malformed-header");
-    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
-    let body = serde_json::to_vec(&body).unwrap();
-    let send = |requester: Requester, extra: (&'static str, HeaderValue)| {
-        let mut req = Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json");
-        for (name, value) in &headers {
-            req = req.header(*name, value);
-        }
-        req = req.header(extra.0, extra.1);
-        let req = req.body(Body::from(body.clone())).unwrap();
-        async move { requester.call(req).await }
-    };
-
-    // A malformed `X-Signing-Algo` once skipped the version gate and then read
-    // as absent, so a v2-only service ran the request as v2.1. The gate and
-    // dispatch now read one parse, and v2.1 refuses the malformed value.
-    let not_ascii = HeaderValue::from_bytes(b"ecdsa\xff").unwrap();
-    let resp = send(v2_only_requester(), ("x-signing-algo", not_ascii)).await;
-    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
-    assert_eq!(error_type(&resp), "e2ee_invalid_header");
-
-    let resp = send(
-        h.requester.clone(),
-        ("x-e2ee-version", HeaderValue::from_static("2")),
-    )
-    .await;
-    assert_eq!(error_type(&resp), "e2ee_invalid_header");
-    assert!(h.upstream_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn e2ee_v2_reads_a_repeated_or_not_ascii_header_as_before() {
-    // v2 keeps its original header reading: a non-visible-ASCII value counts
-    // as absent and a repeated header yields its first value.
-    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
-    let client_secret = X25519SecretKey::from([0x8du8; 32]);
-    let nonce = hex_nonce("nonce-v2-lenient-header");
-    let (body, headers) = e2ee_x25519_chat_request(&h, &client_secret, &nonce);
+/// POST a chat request with `headers`, then the `extra` headers appended.
+async fn post_with_extra_headers(
+    requester: &Requester,
+    body: Vec<u8>,
+    headers: &[(&str, String)],
+    extra: &[(&str, HeaderValue)],
+) -> HttpResult {
     let mut req = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
         .header("content-type", "application/json");
-    for (name, value) in &headers {
+    for (name, value) in headers {
         req = req.header(*name, value);
     }
-    let req = req
-        .header(
-            "x-signing-algo",
-            HeaderValue::from_bytes(b"ecdsa\xff").unwrap(),
-        )
-        .header("x-e2ee-version", "2.1")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = h.requester.call(req).await;
+    for (name, value) in extra {
+        req = req.header(*name, value);
+    }
+    requester.call(req.body(Body::from(body)).unwrap()).await
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_refuses_repeated_or_not_ascii_headers_and_v2_reads_them_as_before() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let not_ascii = || HeaderValue::from_bytes(b"ecdsa\xff").unwrap();
+    let client_secret = X25519SecretKey::from([0x8cu8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-malformed-header");
+    let (body, headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    let body = serde_json::to_vec(&body).unwrap();
+
+    // A malformed `X-Signing-Algo` once skipped the version gate and then read
+    // as absent, so a v2-only service ran the request as v2.1. The gate and
+    // dispatch now read one parse, and v2.1 refuses the malformed value; a
+    // repeated `X-E2EE-Version` is refused too.
+    for (requester, extra) in [
+        (v2_only_requester(), ("x-signing-algo", not_ascii())),
+        (
+            h.requester.clone(),
+            ("x-e2ee-version", HeaderValue::from_static("2")),
+        ),
+    ] {
+        let resp = post_with_extra_headers(&requester, body.clone(), &headers, &[extra]).await;
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error_type(&resp), "e2ee_invalid_header");
+    }
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
+
+    // v2 keeps its original header reading: a non-visible-ASCII value counts
+    // as absent and a repeated header yields its first value.
+    let client_secret = X25519SecretKey::from([0x8du8; 32]);
+    let nonce = hex_nonce("nonce-v2-lenient-header");
+    let (body, headers) = e2ee_x25519_chat_request(&h, &client_secret, &nonce);
+    let resp = post_with_extra_headers(
+        &h.requester,
+        body,
+        &headers,
+        &[
+            ("x-signing-algo", not_ascii()),
+            ("x-e2ee-version", HeaderValue::from_static("2.1")),
+        ],
+    )
+    .await;
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(header(&resp.headers, "x-e2ee-applied"), "true");
 }
