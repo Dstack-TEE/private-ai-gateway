@@ -31,14 +31,15 @@ rejects a tampered request before it reaches any model.
 | Client key | long-lived, often secp256k1 | fresh X25519 key per request, made by the client library |
 | Request headers | `X-Signing-Algo`, `X-Client-Pub-Key`, `X-Model-Pub-Key` | `X-E2EE-Version: 2.1`, `X-Client-Pub-Key`, `X-Model-Pub-Key`, `X-E2EE-Nonce`, `X-E2EE-Timestamp`, `X-E2EE-Request-Key` |
 | Request body | messages can be added or edited | any change to a value is rejected (`e2ee_body_mismatch`) |
-| Response | fields encrypted, everything else editable | fields encrypted, every JSON object and SSE event MAC'd (`e2ee_mac`) |
+| Response | fields encrypted, everything else editable | fields encrypted, every JSON object and SSE event MAC'd (`e2ee_mac`), stream events numbered (`e2ee_seq`) |
+| Request members | anything | only the [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist) |
 | Encrypted fields | message content, reasoning | also tool-call arguments, `refusal`, `logprobs`, and reasoning sent back in history |
 | Replay | accepted | rejected inside a 5-minute window |
 | Clock | not used | client time must be within 5 minutes of the gateway's |
 | Endpoints | chat completions, completions, embeddings | the same |
 
 Request and response bodies keep their OpenAI-compatible shape. The client
-library removes `e2ee_mac` before your code sees a response.
+library removes `e2ee_mac` and `e2ee_seq` before your code sees a response.
 
 ## Trust the right keyset
 
@@ -115,8 +116,10 @@ The client:
 - never retries in another mode. An error reply is handed back unchanged; a
   successful reply that fails its MAC or decryption is refused;
 - refuses POST requests to endpoints v2.1 does not cover, such as
-  `/v1/responses`, and requests with `prediction`, `functions`, or
-  `function_call`, which v2.1 does not encrypt;
+  `/v1/responses`, and any request member off the
+  [v2.1 allowlist](../spec/e2ee-v2.md#request-allowlist), such as
+  `functions`, `prediction`, `suffix`, `modalities`, or token-id prompts, which
+  v2.1 does not protect;
 - builds a new request, with a new nonce, every time it is called, so SDK
   retries are safe.
 
@@ -153,7 +156,8 @@ For each response:
 3. For the JSON body, or each SSE `data:` event: check `e2ee_mac` (§10.6), then
    remove it. A missing or wrong MAC fails the response.
 4. In a stream, drop comment lines, pass `data: [DONE]` through, and fail on
-   any other line. Every event must carry the first event's `id`.
+   any other line. Each event's `e2ee_seq` must be 0, 1, 2, … in order; remove
+   it. Every event must carry the first event's `id`.
 5. Decrypt each §5 and §10.5 location with your private key and the request
    secret. A field that does not decrypt fails the response.
 
@@ -165,8 +169,9 @@ Where implementations go wrong:
 - **Hashing too early.** Hash the body after your SDK or framework has added
   everything it adds.
 - **Resending.** Every attempt is a new request with a new secret and nonce.
-- **Fields v2.1 does not encrypt.** Never send `prediction`, `functions`, or
-  `function_call`.
+- **Members v2.1 does not protect.** Send only the
+  [allowlisted members](../spec/e2ee-v2.md#request-allowlist); the gateway
+  refuses the rest with `e2ee_unsupported_member`.
 
 To test it, fix your random inputs to the values in the
 [v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21) and reproduce
@@ -281,6 +286,7 @@ and `usage`.
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
 | `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |
+| `e2ee_unsupported_member` | The request carries a member v2.1 does not protect. The error names it. |
 
 On the client side, `E2eeError` from the SDK means a successful response did
 not verify: something between the client and the gateway changed it.
@@ -290,10 +296,12 @@ not verify: something between the client and the gateway changed it.
 - Roles, message count, model, sampling parameters, tool definitions, usage
   counts, and ciphertext lengths stay readable. V2.1 stops changes to them, not
   reading them.
-- A stream can still lose, repeat, or reorder whole events, or end early, for
-  example dropping the event that carries " not". The signed receipt's
+- Only the [allowlisted request members](../spec/e2ee-v2.md#request-allowlist)
+  are accepted; anything else is refused, not sent in the clear.
+- A stream can still end early. `e2ee_seq` stops lost, repeated, and
+  reordered events, but not a stream cut short. The signed receipt's
   `response.returned.body_hash` covers the exact stream, but the SDK does not
-  check receipts, so on its own it does not detect this.
+  check receipts, so on its own it does not detect truncation.
 - Replay protection lives in the gateway process. A gateway restart inside the
   5-minute window lets an earlier request run again, though its reply stays
   unreadable to the intermediary.

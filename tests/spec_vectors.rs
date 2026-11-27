@@ -394,14 +394,14 @@ fn e2ee_v2_1_stream_vector_matches_the_gateway_mac_and_opens_for_the_client() {
     };
     let delta = "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433";
     assert_eq!(
-        mac(serde_json::json!({"id": "chatcmpl-123",
+        mac(serde_json::json!({"id": "chatcmpl-123", "e2ee_seq": 0,
             "choices": [{"index": 0, "delta": {"content": delta}}]})),
-        "902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b"
+        "5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44"
     );
     assert_eq!(
-        mac(serde_json::json!({"id": "chatcmpl-123",
+        mac(serde_json::json!({"id": "chatcmpl-123", "e2ee_seq": 1,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})),
-        "c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e"
+        "7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c"
     );
     let aad = private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
         "purpose": "aci.e2ee.response.v2.1", "algo": "x25519-aes-256-gcm-hkdf-sha256-v2.1",

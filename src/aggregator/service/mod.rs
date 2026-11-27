@@ -45,6 +45,7 @@ mod clock;
 mod config;
 mod e2ee;
 mod e2ee_crypto;
+mod e2ee_members;
 pub use e2ee_crypto::is_sse_content_type;
 mod errors;
 mod forward;

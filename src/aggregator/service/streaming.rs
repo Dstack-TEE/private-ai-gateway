@@ -433,6 +433,8 @@ pub(crate) struct ResponseOwner {
     receipt: Option<ReceiptContext>,
     mode: ResponseMode,
     e2ee: Option<E2eeRequestContext>,
+    /// The next v2.1 stream event's `e2ee_seq`.
+    e2ee_seq: u64,
     endpoint: String,
     protocol: Option<SseProtocol>,
     non_sse: bool,
@@ -463,6 +465,7 @@ impl ResponseOwner {
             receipt: None,
             mode,
             e2ee,
+            e2ee_seq: 0,
             endpoint,
             protocol,
             non_sse: false,
@@ -734,7 +737,15 @@ impl ResponseOwner {
         self.non_sse |= matches!(record, Record::NonSse(_) | Record::BeginNonSse);
         self.ids.observe(&record);
         if let Some(ctx) = &self.e2ee {
-            encrypt_e2ee_record(&mut record, ctx, &self.endpoint)?;
+            // A record after the terminal is still encrypted but never sent,
+            // so it takes no v2.1 stream position.
+            let mut unsent = self.e2ee_seq;
+            let seq = if self.saw_terminal {
+                &mut unsent
+            } else {
+                &mut self.e2ee_seq
+            };
+            encrypt_e2ee_record(&mut record, ctx, &self.endpoint, seq)?;
         }
         let bytes = serialize(&record)?;
         if self.saw_terminal {
@@ -999,10 +1010,11 @@ pub(super) fn finalize_sse_body(
     let records = crate::sse::decode_buffered(Bytes::copy_from_slice(bytes), None)?;
     let mut ids = Identifiers::default();
     let mut out = Vec::new();
+    let mut seq = 0;
     for mut record in records {
         ids.observe(&record);
         if let Some(ctx) = e2ee {
-            encrypt_e2ee_record(&mut record, ctx, endpoint)?;
+            encrypt_e2ee_record(&mut record, ctx, endpoint, &mut seq)?;
         }
         out.extend(serialize(&record)?);
     }

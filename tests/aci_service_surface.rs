@@ -5333,8 +5333,19 @@ async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
         })
     )
     .into_bytes();
+    let finish = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-v2.1-stream",
+            "object": "chat.completion.chunk",
+            "model": "aci-model",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        })
+    )
+    .into_bytes();
     let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
         Bytes::from(frame),
+        Bytes::from(finish),
         Bytes::from_static(b"data: [DONE]\n\n"),
     ]));
     let client_secret = X25519SecretKey::from([0x82u8; 32]);
@@ -5343,8 +5354,16 @@ async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
 
     let resp = post_v2_1(&h, &body, &headers).await;
     assert_eq!(resp.status, StatusCode::OK);
-    let events = sse_json_events(&resp.body);
-    let event = open_v2_1_mac(events[0].clone());
+    let events: Vec<Value> = sse_json_events(&resp.body)
+        .into_iter()
+        .map(open_v2_1_mac)
+        .collect();
+    // Every event carries its position under the MAC.
+    assert!(events.len() >= 2);
+    for (position, event) in events.iter().enumerate() {
+        assert_eq!(event["e2ee_seq"], position as u64);
+    }
+    let event = &events[0];
     let encrypted = event["choices"][0]["delta"]["content"].as_str().unwrap();
     let aad = v2_1_aad(
         "aci.e2ee.response.v2.1",
@@ -5518,6 +5537,30 @@ async fn e2ee_v2_1_replay_is_refused() {
     let replay = post_v2_1(&h, &body, &headers).await;
     assert_eq!(replay.status, StatusCode::BAD_REQUEST);
     assert_eq!(error_type(&replay), "e2ee_replay_detected");
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_refuses_members_it_does_not_protect_before_inference() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client_secret = X25519SecretKey::from([0x8du8; 32]);
+    let nonce = hex_nonce("nonce-v2.1-allowlist");
+    let model_key = v2_1_key(&h, E2EE_ALGO_X25519_AESGCM_V2_1);
+    let (mut body, mut headers) = v2_1_chat_request(&h, &client_secret, &nonce, false);
+    // A legacy function call would come back with readable arguments. The
+    // client sealed the body, so the digest holds: only the allowlist refuses it.
+    body["functions"] = serde_json::json!([{"name": "lookup", "parameters": {}}]);
+    let request_key = v2_1_request_key(
+        &model_key.public_key_hex,
+        &x25519_public_key_hex(&client_secret),
+        &nonce,
+        &V2_1_SECRET,
+        &body,
+    );
+    set_header(&mut headers, "x-e2ee-request-key", request_key);
+    let resp = post_v2_1(&h, &body, &headers).await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_type(&resp), "e2ee_unsupported_member");
+    assert!(h.upstream_calls.lock().unwrap().is_empty());
 }
 
 /// A service that advertises only E2EE v2.

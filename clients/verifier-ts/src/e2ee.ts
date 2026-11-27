@@ -19,6 +19,7 @@ const FIELD_INFO = new TextEncoder().encode('aci.e2ee.v2.1.x25519');
 const REQUEST_KEY_INFO = new TextEncoder().encode('aci.e2ee.v2.1.x25519.request-key');
 const MAC_INFO = new TextEncoder().encode('aci.e2ee.v2.1.response-mac');
 const MAC_MEMBER = 'e2ee_mac';
+const SEQ_MEMBER = 'e2ee_seq';
 const NO_SALT = new Uint8Array(0);
 const KEY_LEN = 32;
 const NONCE_LEN = 12;
@@ -136,9 +137,7 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     }
 
     const payload = parseJsonObject(await request.text(), 'request body');
-    for (const key of UNENCRYPTED_REQUEST_MEMBERS) {
-      if (key in payload) throw new E2eeError(`E2EE v2.1 does not encrypt "${key}"; remove it`);
-    }
+    checkRequestMembers(payload, endpoint);
     const ctx = await newContext(payload);
     await sealRequestFields(payload, endpoint, ctx, await servicePublicKey);
     const digest = await sha256(canonicalJson(payload));
@@ -210,8 +209,83 @@ async function newContext(payload: Record<string, unknown>): Promise<RequestCont
   };
 }
 
-/** Request members v2.1 leaves readable that can carry user content (§10.5). */
-const UNENCRYPTED_REQUEST_MEMBERS = ['prediction', 'functions', 'function_call'];
+/**
+ * The v2.1 request allowlist (§10.5, `spec/e2ee-v2.1-request-members.json`):
+ * the members v2.1 encrypts plus readable parameters the body digest binds.
+ * Not part of the package API.
+ */
+export const REQUEST_MEMBERS = {
+  chat: [
+    'messages', 'model', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
+    'temperature', 'top_p', 'top_k', 'min_p', 'frequency_penalty', 'presence_penalty',
+    'repetition_penalty', 'logit_bias', 'logprobs', 'top_logprobs', 'seed', 'stop', 'n',
+    'response_format', 'tools', 'tool_choice', 'parallel_tool_calls', 'reasoning_effort',
+    'reasoning', 'user', 'provider',
+  ],
+  completions: [
+    'prompt', 'model', 'stream', 'stream_options', 'max_tokens', 'temperature', 'top_p', 'top_k',
+    'min_p', 'frequency_penalty', 'presence_penalty', 'repetition_penalty', 'logit_bias',
+    'logprobs', 'seed', 'stop', 'n', 'user', 'provider',
+  ],
+  embeddings: ['input', 'model', 'encoding_format', 'dimensions', 'user', 'provider'],
+  message: ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'reasoning', 'reasoning_content'],
+  tool_call: ['id', 'type', 'function', 'index'],
+  tool_call_function: ['name', 'arguments'],
+} as const;
+
+/**
+ * Throw before sending anything v2.1 would leave unprotected: a member off the
+ * allowlist, a non-string reasoning or arguments value, or a token-id prompt.
+ */
+function checkRequestMembers(payload: Record<string, unknown>, endpoint: Endpoint): void {
+  only(payload, REQUEST_MEMBERS[endpoint], '');
+  if (endpoint !== 'chat') {
+    const key = endpoint === 'completions' ? 'prompt' : 'input';
+    const value = payload[key];
+    if (typeof value === 'string') return;
+    if (!Array.isArray(value)) refuseMember(key);
+    const i = value.findIndex((item) => typeof item !== 'string');
+    if (i >= 0) refuseMember(`${key}.${i}`);
+    return;
+  }
+  const messages = payload.messages;
+  if (!Array.isArray(messages)) refuseMember('messages');
+  for (const [m, message] of messages.entries()) {
+    const path = `messages.${m}`;
+    if (!isObject(message)) refuseMember(path);
+    only(message, REQUEST_MEMBERS.message, path);
+    // Content is sealed whole, as its JSON: a string, an array, or null.
+    if (!Array.isArray(message.content)) stringOrNull(message, 'content', path);
+    stringOrNull(message, 'reasoning', path);
+    stringOrNull(message, 'reasoning_content', path);
+    if (message.tool_calls === undefined) continue;
+    if (!Array.isArray(message.tool_calls)) refuseMember(`${path}.tool_calls`);
+    for (const [t, call] of message.tool_calls.entries()) {
+      const callPath = `${path}.tool_calls.${t}`;
+      if (!isObject(call)) refuseMember(callPath);
+      only(call, REQUEST_MEMBERS.tool_call, callPath);
+      const fn = call.function;
+      if (fn === undefined) continue;
+      if (!isObject(fn)) refuseMember(`${callPath}.function`);
+      only(fn, REQUEST_MEMBERS.tool_call_function, `${callPath}.function`);
+      stringOrNull(fn, 'arguments', `${callPath}.function`);
+    }
+  }
+}
+
+function refuseMember(path: string): never {
+  throw new E2eeError(`E2EE v2.1 does not protect request member "${path}"; remove it`);
+}
+
+function only(object: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const extra = Object.keys(object).find((key) => !allowed.includes(key));
+  if (extra !== undefined) refuseMember(path === '' ? extra : `${path}.${extra}`);
+}
+
+function stringOrNull(object: Record<string, unknown>, key: string, path: string): void {
+  const value = object[key];
+  if (value !== undefined && value !== null && typeof value !== 'string') refuseMember(`${path}.${key}`);
+}
 
 function endpointOf(pathname: string): Endpoint | undefined {
   if (pathname.endsWith('/chat/completions')) return 'chat';
@@ -242,9 +316,6 @@ async function sealRequestFields(
     if (!Array.isArray(messages)) throw new E2eeError('chat request has no "messages" array');
     for (const [m, message] of messages.entries()) {
       if (!isObject(message)) continue;
-      if ('function_call' in message) {
-        throw new E2eeError('E2EE v2.1 does not encrypt "function_call"; use tool_calls');
-      }
       // Whole content is the JSON encoding of the content value (§10.5).
       if (typeof message.content === 'string' || Array.isArray(message.content)) {
         message.content = await sealField(`messages.${m}.content`, JSON.stringify(message.content));
@@ -272,10 +343,8 @@ async function sealRequestFields(
   if (typeof value === 'string') {
     payload[key] = await sealField(key, value);
   } else if (Array.isArray(value)) {
-    for (const [i, item] of value.entries()) {
-      // Token-id arrays pass through unencrypted (§5).
-      if (typeof item === 'string') value[i] = await sealField(`${key}.${i}`, item);
-    }
+    // Every item is a string (checkRequestMembers).
+    for (const [i, item] of value.entries()) value[i] = await sealField(`${key}.${i}`, item as string);
   }
 }
 
@@ -389,13 +458,17 @@ async function openResponseFields(
 /**
  * Check and decrypt each `data:` event of an SSE stream (§10.6). `[DONE]`
  * passes through, comments are dropped, and any other line fails the stream.
+ * A repeated, reordered, or missing event fails on its `e2ee_seq`; a stream
+ * cut short does not (§10.8).
  */
 function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffered = '';
-  // Every event of one stream carries the same response id (§10.6).
+  // Every event of one stream carries the same response id and the next
+  // position (§10.6).
   let streamId: unknown;
+  let nextSeq = 0;
   const flushEvents = async (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -414,6 +487,11 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
       let rendered = joined;
       if (joined !== '[DONE]') {
         const payload = await openObject(joined, endpoint, ctx);
+        if (payload[SEQ_MEMBER] !== nextSeq) {
+          throw new E2eeError(`stream event is out of sequence: expected ${SEQ_MEMBER} ${nextSeq}`);
+        }
+        delete payload[SEQ_MEMBER];
+        nextSeq += 1;
         streamId ??= payload.id;
         if (payload.id !== streamId) throw new E2eeError('stream event belongs to another response');
         rendered = JSON.stringify(payload);

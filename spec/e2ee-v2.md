@@ -284,6 +284,7 @@ a different status.
 | `e2ee_invalid_payload_model` | 400 | The request's top-level `model` is absent or not a string. |
 | `e2ee_decryption_failed` | 400 | A ciphertext is malformed, AEAD authentication fails, or decrypted content cannot be restored. |
 | `e2ee_body_mismatch` | 400 | v2.1: the request body does not match the digest sealed in `X-E2EE-Request-Key`. |
+| `e2ee_unsupported_member` | 400 | v2.1: the request carries a member, or a value form, the request allowlist does not allow (§10.5). |
 | `e2ee_unsupported_endpoint` | 400 | V2 headers were sent to an endpoint this protocol does not define. |
 
 ## 10. Version 2.1
@@ -299,11 +300,11 @@ carries a MAC keyed from it. Without the secret, an intermediary cannot:
   parameters such as `max_tokens`, `tools`, or a message `role`;
 - change, add, or remove anything inside a response object, including readable
   members such as a tool call's `name`, `finish_reason`, or `usage`;
+- drop, repeat, or reorder SSE events, except by ending the stream early;
 - downgrade the request to v2, because fields sealed under v2.1 do not open
   under the v2 key derivation.
 
-It can still drop, repeat, or reorder whole SSE events, or end a stream early.
-The receipt detects these (§8, §10.7).
+It can still end a stream early. The receipt detects this (§8, §10.8).
 
 ### 10.1 Keys and selection
 
@@ -390,7 +391,8 @@ key and the request secret. Clients SHOULD use a fresh client key per request.
 Field AAD is the §6 object with the purposes `aci.e2ee.request.v2.1` and
 `aci.e2ee.response.v2.1`, and `algo` set to the v2.1 algo.
 
-V2.1 encrypts all §5 locations, plus:
+V2.1 encrypts all §5 locations except per-part request content, which it
+encrypts whole (below), plus:
 
 | Direction | Field path | Plaintext |
 | --- | --- | --- |
@@ -404,6 +406,8 @@ V2.1 encrypts all §5 locations, plus:
 
 `{t}` is the tool call's `index` member when present and its array position
 otherwise. The client MUST encrypt every request string at these locations.
+The service decrypts every string at them, so a plaintext one fails with
+`e2ee_decryption_failed`.
 
 A whole-content `messages.{m}.content` plaintext is the JSON encoding of the
 content value: a JSON string for text, a JSON array for structured content. The
@@ -411,8 +415,50 @@ service restores it by parsing that JSON and rejects anything else with
 `e2ee_decryption_failed`. Text that happens to look like a JSON array therefore
 stays text, unlike v2's restoration rule (§5).
 
-V2.1 does not encrypt `prediction` or the deprecated `functions` and
-`function_call` members. A client MUST NOT send them under v2.1.
+#### Request allowlist
+
+A v2.1 request carries only what v2.1 protects: the members it encrypts, and
+readable parameters the body digest binds (§10.3). A client MUST NOT send
+anything else. The service rejects anything else with
+`e2ee_unsupported_member` before any upstream request.
+[`e2ee-v2.1-request-members.json`](e2ee-v2.1-request-members.json) holds the
+same lists, and the reference implementations test against it.
+
+| Object | Encrypted | Readable |
+| --- | --- | --- |
+| `/v1/chat/completions` body | `messages` | `model`, `stream`, `stream_options`, `n`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop`, `logprobs`, `top_logprobs`, `response_format`, `tools`, `tool_choice`, `parallel_tool_calls`, `reasoning_effort`, `reasoning`, `user`, `provider` |
+| `/v1/completions` body | `prompt` | `model`, `stream`, `stream_options`, `n`, `max_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop`, `logprobs`, `user`, `provider` |
+| `/v1/embeddings` body | `input` | `model`, `encoding_format`, `dimensions`, `user`, `provider` |
+| message | `content`, `reasoning`, `reasoning_content` | `role`, `name`, `tool_calls`, `tool_call_id` |
+| message tool call | — | `id`, `type`, `function`, `index` |
+| tool call `function` | `arguments` | `name` |
+
+Why each readable parameter is allowed:
+
+| Parameters | Why |
+| --- | --- |
+| `model`, `stream`, `stream_options`, `n` | Routing and response shape. `model` is also in every AAD. |
+| `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `frequency_penalty`, `presence_penalty`, `repetition_penalty`, `logit_bias`, `seed`, `stop` | Sampling and limits. `stop` strings and `logit_bias` token ids stay readable. |
+| `logprobs`, `top_logprobs` | Ask for log-probabilities, which v2.1 encrypts in the response. |
+| `response_format`, `tools`, `tool_choice`, `parallel_tool_calls` | Output schema and tool definitions, readable (§10.8). The tool-call arguments they produce are encrypted. |
+| `reasoning_effort`, `reasoning` | Reasoning controls. The reasoning text is encrypted. |
+| `user` | An end-user id for abuse monitoring. |
+| `provider` | Routing preferences, including the ACI serving constraints ([ACI §5.3](aci.md#53-serving-constraints-aggregators)). |
+| `encoding_format`, `dimensions` | Embedding output form. The embedding is encrypted. |
+| `role`, `name`, `tool_call_id`, and a tool call's `id`, `type`, `index`, `name` | Message structure. |
+
+Values:
+
+- `messages` is an array of objects. A message's `content` is a ciphertext
+  string or `null`; structured content is encrypted whole, never per part.
+- `reasoning`, `reasoning_content`, and `arguments` are ciphertext strings or
+  `null`. `tool_calls` is an array of objects and `function` an object.
+- `prompt` and `input` are a string or an array of strings. Token-id arrays
+  are refused, because v2.1 cannot encrypt them.
+
+Everything else is refused, for example `functions`, `function_call`,
+`prediction`, `suffix`, `echo`, `metadata`, and `modalities` and `audio`,
+which ask for audio output whose `transcript` v2.1 does not encrypt.
 
 ### 10.6 Response MAC
 
@@ -421,14 +467,21 @@ buffered JSON body, and the JSON of each SSE `data:` event. Its value is the
 lowercase-hex HMAC-SHA256, under the MAC key (§10.4), of the JCS form of the
 object without `e2ee_mac`, computed after the fields are encrypted.
 
+In a stream, the service first adds `e2ee_seq` to every event object: the
+event's position among the stream's JSON events, the integer 0 for the first
+and one more for each next one. The MAC covers it. A buffered body has no
+`e2ee_seq`.
+
 The client MUST, for each response object:
 
 1. require the response kind to match the request: an SSE stream for
    `"stream": true`, a JSON body otherwise;
 2. require `e2ee_mac` and check it, then remove it;
-3. require `choices` and `data`, when present, to be arrays;
-4. in a stream, require every event's `id` to equal the first event's;
-5. decrypt every §5 and §10.5 location that is present.
+3. in a stream, require `e2ee_seq` to equal the number of events accepted
+   before this one, then remove it;
+4. require `choices` and `data`, when present, to be arrays;
+5. in a stream, require every event's `id` to equal the first event's;
+6. decrypt every §5 and §10.5 location that is present.
 
 In a stream, the client passes `data: [DONE]` through, ignores SSE comment
 lines, and rejects any other line. Error responses (HTTP 4xx and 5xx) carry no
@@ -449,8 +502,10 @@ failure, before any upstream request:
    `e2ee_decryption_failed`.
 7. The body is I-JSON, with no integer beyond ±2^53, and the sealed digest
    equals `SHA-256(JCS(body))` of the received body: `e2ee_body_mismatch`.
-8. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
-9. The replay tuple is unused (§7): `e2ee_replay_detected`.
+8. Every member is on the request allowlist, with values of the allowed forms
+   (§10.5): `e2ee_unsupported_member`.
+9. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
+10. The replay tuple is unused (§7): `e2ee_replay_detected`.
 
 V2 and v2.1 share replay state for the same key material. A successful v2.1
 response carries `X-E2EE-Version: 2.1` and the v2.1 algo in `X-E2EE-Algo`.
@@ -461,9 +516,13 @@ Receipts follow §8 unchanged.
 - Structure and metadata stay readable: roles, message count, model, sampling
   parameters, tool definitions, usage counts, and ciphertext lengths. The body
   digest and the response MAC stop changes to them, not reading them.
-- A stream can still lose, repeat, or reorder whole events, or end early. The
-  receipt's `response.returned.body_hash` covers the exact stream (§8), so
-  detecting this takes a receipt check over the raw bytes received.
+- A stream can still end early, after any event: `e2ee_seq` stops lost,
+  repeated, and reordered events, but not truncation. The receipt's
+  `response.returned.body_hash` covers the exact stream (§8), so detecting
+  truncation takes a receipt check over the raw bytes received.
+- Response members outside §5 and §10.5 that an upstream adds stay readable;
+  the MAC stops changes to them. The request allowlist keeps clients from
+  asking for known ones, such as an audio `transcript`.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still
@@ -481,6 +540,7 @@ Receipts follow §8 unchanged.
 | Request-key AAD purpose | — | `aci.e2ee.request-key.v2.1` |
 | HKDF info | `aci.e2ee.v2.x25519`, `aci.e2ee.v2.secp256k1` | `aci.e2ee.v2.1.x25519`, `aci.e2ee.v2.1.x25519.request-key`, `aci.e2ee.v2.1.response-mac` |
 | Response MAC member | — | `e2ee_mac` |
+| Stream position member | — | `e2ee_seq` |
 | Algorithms | `x25519-aes-256-gcm-hkdf-sha256`, `secp256k1-aes-256-gcm-hkdf-sha256` | `x25519-aes-256-gcm-hkdf-sha256-v2.1` |
 
 Unknown versions and algorithms MUST be rejected. Implementations MUST NOT

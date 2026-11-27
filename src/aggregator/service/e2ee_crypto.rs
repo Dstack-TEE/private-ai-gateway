@@ -598,7 +598,7 @@ pub(super) fn encrypt_e2ee_response_body(
 
     if endpoint_path == EMBEDDINGS_PATH {
         encrypt_embedding_data(&mut payload, ctx, &response_id)?;
-        seal_response_object(&mut payload, ctx)?;
+        seal_response_object(&mut payload, ctx, None)?;
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     }
 
@@ -659,7 +659,7 @@ pub(super) fn encrypt_e2ee_response_body(
         encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
 
-    seal_response_object(&mut payload, ctx)?;
+    seal_response_object(&mut payload, ctx, None)?;
     serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
 }
 
@@ -692,16 +692,27 @@ fn encrypt_v2_1_choice_extras(
 
 /// The member carrying the v2.1 response MAC.
 pub(super) const RESPONSE_MAC_MEMBER: &str = "e2ee_mac";
+/// The member carrying a v2.1 stream event's position, from 0.
+pub(super) const STREAM_SEQ_MEMBER: &str = "e2ee_seq";
 
 /// v2.1: add an HMAC over the JCS form of a response object (a buffered body
 /// or one SSE event), keyed from the request secret, so its readable members
-/// cannot be changed either.
-fn seal_response_object(payload: &mut Value, ctx: &E2eeRequestContext) -> Result<(), E2eeError> {
+/// cannot be changed either. A stream event first gets its position `seq`,
+/// so the MAC also fixes the event order.
+fn seal_response_object(
+    payload: &mut Value,
+    ctx: &E2eeRequestContext,
+    seq: Option<u64>,
+) -> Result<(), E2eeError> {
     let Some(secret) = &ctx.request_secret else {
         return Ok(());
     };
     let object = payload.as_object_mut().ok_or(E2eeError::EncryptionFailed)?;
     object.remove(RESPONSE_MAC_MEMBER);
+    object.remove(STREAM_SEQ_MEMBER);
+    if let Some(seq) = seq {
+        object.insert(STREAM_SEQ_MEMBER.to_string(), Value::from(seq));
+    }
     let bytes =
         serde_json_canonicalizer::to_vec(&*object).map_err(|_| E2eeError::EncryptionFailed)?;
     let mac = crate::aci::e2ee::v2_1_response_mac(&secret.0, &bytes);
@@ -788,10 +799,13 @@ pub fn is_sse_content_type(content_type: Option<&str>) -> bool {
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
+/// Encrypt one SSE record. `seq` counts the JSON events of this stream: the
+/// next one's position, advanced for each event encrypted.
 pub(super) fn encrypt_e2ee_record(
     record: &mut crate::sse::Record,
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
+    seq: &mut u64,
 ) -> Result<(), E2eeError> {
     let Some(event) = record.event() else {
         return Ok(());
@@ -806,7 +820,8 @@ pub(super) fn encrypt_e2ee_record(
         return Err(E2eeError::EncryptionFailed);
     };
     let value = value.take();
-    record.set_encrypted(encrypt_e2ee_stream_value(value, ctx, endpoint_path)?);
+    record.set_encrypted(encrypt_e2ee_stream_value(value, ctx, endpoint_path, *seq)?);
+    *seq += 1;
     Ok(())
 }
 
@@ -814,6 +829,7 @@ pub(super) fn encrypt_e2ee_stream_value(
     mut payload: Value,
     ctx: &E2eeRequestContext,
     endpoint_path: &str,
+    seq: u64,
 ) -> Result<Value, E2eeError> {
     if endpoint_path == EMBEDDINGS_PATH {
         // Embeddings are buffered-only. A streaming embedding is an internal
@@ -881,7 +897,7 @@ pub(super) fn encrypt_e2ee_stream_value(
         encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
 
-    seal_response_object(&mut payload, ctx)?;
+    seal_response_object(&mut payload, ctx, Some(seq))?;
     Ok(payload)
 }
 

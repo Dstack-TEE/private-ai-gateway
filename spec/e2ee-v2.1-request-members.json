@@ -1,0 +1,8 @@
+{
+  "chat": ["messages", "model", "stream", "stream_options", "max_tokens", "max_completion_tokens", "temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "logit_bias", "logprobs", "top_logprobs", "seed", "stop", "n", "response_format", "tools", "tool_choice", "parallel_tool_calls", "reasoning_effort", "reasoning", "user", "provider"],
+  "completions": ["prompt", "model", "stream", "stream_options", "max_tokens", "temperature", "top_p", "top_k", "min_p", "frequency_penalty", "presence_penalty", "repetition_penalty", "logit_bias", "logprobs", "seed", "stop", "n", "user", "provider"],
+  "embeddings": ["input", "model", "encoding_format", "dimensions", "user", "provider"],
+  "message": ["role", "content", "name", "tool_calls", "tool_call_id", "reasoning", "reasoning_content"],
+  "tool_call": ["id", "type", "function", "index"],
+  "tool_call_function": ["name", "arguments"]
+}

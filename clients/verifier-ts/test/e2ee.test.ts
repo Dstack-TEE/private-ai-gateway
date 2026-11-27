@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createE2eeFetch, E2eeError, E2eeReverifyError, E2EE_V2_1_X25519, fromHex, sha256Hex, toHex } from '../src/index.js';
 import type { ReportTranscript, WorkloadKeyset } from '../src/index.js';
-import { canonicalJson, openBytes, openResponse, seal } from '../src/e2ee.js';
+import { readFileSync } from 'node:fs';
+import { canonicalJson, openBytes, openResponse, REQUEST_MEMBERS, seal } from '../src/e2ee.js';
 import type { RequestContext } from '../src/e2ee.js';
 
 // Constants from spec/e2ee-v2-test-vectors.md, "Version 2.1".
@@ -233,9 +234,10 @@ async function sealSse(
   };
   if (!contentType.startsWith('text/event-stream')) return sealPayload(JSON.parse(body), 'message');
   const events = [];
+  let seq = 0;
   for (const event of body.split('\n\n').filter(Boolean)) {
     const data = event.slice('data: '.length);
-    events.push(data === '[DONE]' ? event : `data: ${await sealPayload(JSON.parse(data), 'delta')}`);
+    events.push(data === '[DONE]' ? event : `data: ${await sealPayload({ ...JSON.parse(data), e2ee_seq: seq++ }, 'delta')}`);
   }
   return events.map((event) => event + '\n\n').join('');
 }
@@ -389,8 +391,21 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
     passthrough('https://relay.example/v1/responses', { method: 'POST', body: '{"model":"m"}' }),
     E2eeError,
   );
-  await assert.rejects(ask(passthrough, { prediction: { type: 'content', content: 'secret' } }), E2eeError);
-  await assert.rejects(ask(passthrough, { functions: [] }), E2eeError);
+  // Only what v2.1 protects is sent (§10.5).
+  for (const extra of [
+    { prediction: { type: 'content', content: 'secret' } },
+    { functions: [] },
+    { modalities: ['text', 'audio'], audio: { voice: 'alloy', format: 'wav' } },
+    { messages: [{ role: 'user', content: 'hi', audio: { id: 'a' } }] },
+    { messages: [{ role: 'assistant', tool_calls: [{ id: 'c', function: { name: 'f', arguments: '{}', strict: true } }] }] },
+  ]) {
+    await assert.rejects(ask(passthrough, extra), /does not protect request member/);
+  }
+  const post = (path: string, body: Record<string, unknown>) =>
+    passthrough(`https://relay.example${path}`, { method: 'POST', body: JSON.stringify({ model: 'm', ...body }) });
+  await assert.rejects(post('/v1/completions', { prompt: 'def f(', suffix: 'return x' }), /"suffix"/);
+  await assert.rejects(post('/v1/completions', { prompt: [[1, 2]] }), /"prompt.0"/);
+  await assert.rejects(post('/v1/embeddings', { input: ['a', 3] }), /"input.1"/);
 
   const forged = JSON.stringify({ id: 'x', choices: [{ index: 0, message: { content: 'FORGED' } }] });
   const reply = (body: string, headers: Record<string, string>) =>
@@ -431,9 +446,9 @@ test('fails closed on uncovered endpoints, unencrypted members, and anything not
 
 // ---- Published streamed vector and the streams a client must reject ----------
 
-const EVENT_1 = '{"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b","id":"chatcmpl-123"}';
-const EVENT_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e","id":"chatcmpl-123"}';
-const SPLICED_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328","id":"chatcmpl-124"}';
+const EVENT_1 = '{"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44","e2ee_seq":0,"id":"chatcmpl-123"}';
+const EVENT_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c","e2ee_seq":1,"id":"chatcmpl-123"}';
+const SPLICED_2 = '{"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"bc1bf0a5179c96234d1533533f31f7d2fc5471004c2b7f7b10d37e4d94bb24fe","e2ee_seq":1,"id":"chatcmpl-124"}';
 const stream = (...events: string[]) => events.map((event) => `data: ${event}\n\n`).join('') + 'data: [DONE]\n\n';
 
 /** The request context of the published vectors (fixed secret, nonce, and client key). */
@@ -476,10 +491,19 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   await rejects(stream(EVENT_1, SPLICED_2), 'text/event-stream', /another response/);
   await rejects(stream(EVENT_1.replace(/,"e2ee_mac":"[0-9a-f]+"/, ''), EVENT_2), 'text/event-stream', /e2ee_mac/);
   await rejects('id: 1\n' + stream(EVENT_1, EVENT_2), 'text/event-stream', /unexpected line/);
+  // Each event is validly MAC'd, but not in its position.
+  await rejects(stream(EVENT_1, EVENT_1, EVENT_2), 'text/event-stream', /out of sequence/);
+  await rejects(stream(EVENT_2, EVENT_1), 'text/event-stream', /out of sequence/);
+  await rejects(stream(EVENT_2), 'text/event-stream', /out of sequence/);
   const buffered = JSON.stringify({ ...JSON.parse(RESPONSE_OBJECT), e2ee_mac: RESPONSE_MAC });
   await rejects(buffered, 'application/json', /expected an SSE stream/);
 
   // The same buffered object opens when the request did not ask for a stream.
   const body = await (await openResponse(served(buffered, 'application/json'), 'chat', await vectorContext(false))).json() as any;
   assert.equal(body.choices[0].message.content, 'plain-answer');
+});
+
+test('the request allowlist is the one the spec publishes', () => {
+  const spec = JSON.parse(readFileSync(new URL('../../../../spec/e2ee-v2.1-request-members.json', import.meta.url), 'utf8'));
+  assert.deepEqual(spec, REQUEST_MEMBERS);
 });

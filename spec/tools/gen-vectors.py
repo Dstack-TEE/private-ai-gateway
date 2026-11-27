@@ -316,11 +316,16 @@ def v21_event(obj):
     return "data: " + jcs({**obj, "e2ee_mac": v21_mac(obj)}).decode() + "\n\n"
 
 
-V21_EVENT_1 = {"id": "chatcmpl-123",
+V21_EVENT_1 = {"id": "chatcmpl-123", "e2ee_seq": 0,
                "choices": [{"index": 0, "delta": {"content": V21_STREAM_CIPHERTEXT}}]}
-V21_EVENT_2 = {"id": "chatcmpl-123",
+V21_EVENT_2 = {"id": "chatcmpl-123", "e2ee_seq": 1,
                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
 V21_STREAM = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2) + "data: [DONE]\n\n"
+# Rejected: a validly MAC'd event repeated, the events reordered, or event 1 dropped.
+V21_REJECT_REPEATED = (v21_event(V21_EVENT_1) + v21_event(V21_EVENT_1)
+                       + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
+V21_REJECT_REORDERED = v21_event(V21_EVENT_2) + v21_event(V21_EVENT_1) + "data: [DONE]\n\n"
+V21_REJECT_DROPPED = v21_event(V21_EVENT_2) + "data: [DONE]\n\n"
 # Rejected: a readable member edited after the MAC.
 V21_REJECT_EDITED = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2).replace(
     '"finish_reason":"stop"', '"finish_reason":"length"') + "data: [DONE]\n\n"
@@ -380,11 +385,11 @@ PINNED = {
         "0d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa47809834"
         "33"),
     "v2.1 stream event 1 MAC": (v21_mac(V21_EVENT_1),
-        "902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b"),
+        "5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44"),
     "v2.1 stream event 2 MAC": (v21_mac(V21_EVENT_2),
-        "c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e"),
+        "7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c"),
     "v2.1 spliced event MAC": (v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}),
-        "f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328"),
+        "bc1bf0a5179c96234d1533533f31f7d2fc5471004c2b7f7b10d37e4d94bb24fe"),
     "v2.1 response field ciphertext": (V21_RESPONSE_CIPHERTEXT,
         "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421"
         "0b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28"

@@ -7,6 +7,7 @@ use super::e2ee_crypto::{
     request_body_digest, request_key_aad, validate_aci_e2ee_nonce, validate_aci_payload_model,
     E2eeFieldCrypto,
 };
+use super::e2ee_members::check_v2_1_request_members;
 use super::wire::{E2eeAadMode, E2eeDecryptor, RequestSecret};
 use super::{
     AciService, E2eeError, E2eePreparedRequest, E2eeReplayKey, E2eeRequestContext,
@@ -349,6 +350,9 @@ impl AciService {
             nonce: Some(nonce),
             timestamp: Some(timestamp),
         };
+        if aad_mode == E2eeAadMode::AciV2_1 {
+            check_v2_1_request_members(endpoint_path, &payload)?;
+        }
         decrypt_request_payload(&crypto, endpoint_path, &mut payload)?;
         self.claim_e2ee_replay(model_public_key_hex, nonce.to_ascii_lowercase(), timestamp)?;
         let decrypted_body =
