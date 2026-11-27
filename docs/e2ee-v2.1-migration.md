@@ -286,7 +286,7 @@ and `usage`.
 | `e2ee_body_mismatch` | A body value changed after the client encrypted it, or the client hashed a different body than it sent. |
 | `e2ee_decryption_failed` | `X-Client-Pub-Key` or `X-E2EE-Request-Key` changed in transit, or a field was not encrypted. |
 | `e2ee_header_missing` | A header was dropped in transit. |
-| `e2ee_invalid_header` | An E2EE header was repeated or rewritten in transit. |
+| `e2ee_invalid_header` | An E2EE header of a v2.1 request was repeated or rewritten in transit. |
 | `e2ee_invalid_timestamp` | The client clock is more than 5 minutes off. |
 | `e2ee_invalid_version` | The gateway does not offer v2.1, or a v2 request carried `X-E2EE-Request-Key`. |
 | `e2ee_replay_detected` | The same request reached the gateway twice. |

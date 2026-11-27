@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 
+use crate::aci::e2ee::E2EE_VERSION_V2_1;
 use crate::aggregator::service::{E2eeError, E2eeRequestParts, ReceiptOwner};
 
 use super::error_responses::{admin_not_found_response, error_response};
@@ -91,23 +92,36 @@ pub(super) fn has_e2ee_headers(headers: &HeaderMap) -> bool {
 
 /// Parse the E2EE request headers once, into the one value both the version
 /// gate and the dispatch read. `None` when the request carries none of them.
-/// A repeated header, or a value that is not visible ASCII, is refused rather
-/// than read as absent.
+///
+/// v2 and legacy requests keep their original reading: a value that is not
+/// visible ASCII counts as absent and a repeated header yields its first
+/// value. A v2.1 request (no `X-Signing-Algo`, `X-E2EE-Version: 2.1`) is
+/// re-read strictly: a repeated or non-visible-ASCII header is refused.
 pub(super) fn e2ee_request_parts(
     headers: &HeaderMap,
 ) -> Result<Option<E2eeRequestParts<'_>>, E2eeError> {
     if !has_e2ee_headers(headers) {
         return Ok(None);
     }
-    Ok(Some(E2eeRequestParts {
-        signing_algo: single_header(headers, "x-signing-algo")?,
-        client_public_key: single_header(headers, "x-client-pub-key")?,
-        model_public_key: single_header(headers, "x-model-pub-key")?,
-        version: single_header(headers, "x-e2ee-version")?,
-        nonce: single_header(headers, "x-e2ee-nonce")?,
-        timestamp: single_header(headers, "x-e2ee-timestamp")?,
-        request_key: single_header(headers, "x-e2ee-request-key")?,
-    }))
+    let parts = read_e2ee_headers(|name| Ok(header_str(headers, name)))?;
+    if parts.signing_algo.is_some() || parts.version != Some(E2EE_VERSION_V2_1) {
+        return Ok(Some(parts));
+    }
+    read_e2ee_headers(|name| single_header(headers, name)).map(Some)
+}
+
+fn read_e2ee_headers<'a>(
+    read: impl Fn(&str) -> Result<Option<&'a str>, E2eeError>,
+) -> Result<E2eeRequestParts<'a>, E2eeError> {
+    Ok(E2eeRequestParts {
+        signing_algo: read("x-signing-algo")?,
+        client_public_key: read("x-client-pub-key")?,
+        model_public_key: read("x-model-pub-key")?,
+        version: read("x-e2ee-version")?,
+        nonce: read("x-e2ee-nonce")?,
+        timestamp: read("x-e2ee-timestamp")?,
+        request_key: read("x-e2ee-request-key")?,
+    })
 }
 
 fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, E2eeError> {
