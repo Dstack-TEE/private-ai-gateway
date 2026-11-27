@@ -781,9 +781,11 @@ fn seal_response_object(
     ctx: &E2eeRequestContext,
     seq: Option<u64>,
 ) -> Result<(), E2eeError> {
-    let Some(secret) = &ctx.request_secret else {
-        return Ok(());
-    };
+    // Only v2.1 responses are sealed here, and every v2.1 request has a secret.
+    let secret = ctx
+        .request_secret
+        .as_ref()
+        .ok_or(E2eeError::EncryptionFailed)?;
     let object = payload.as_object_mut().ok_or(E2eeError::EncryptionFailed)?;
     object.remove(RESPONSE_MAC_MEMBER);
     object.remove(STREAM_SEQ_MEMBER);
