@@ -21,6 +21,7 @@ pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 
 const INVALID_FEED: &str = "Updates are not configured correctly for this build";
 const PACKAGE_MANAGER_MARKER: &str = "/usr/share/private-ai-proxy/package-manager";
+const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
 
 pub fn channel_name(channel: UpdateChannel) -> &'static str {
     match channel {
@@ -487,6 +488,7 @@ fn upgrade_steps(
         Installation::Rpm => (
             vec![
                 stop,
+                command(&["sudo", "rpm", "--import", RPM_SIGNING_KEY_URL])?,
                 command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
             ],
             None,
@@ -690,6 +692,13 @@ mod tests {
             assert_eq!(
                 upgrade_steps(Installation::DesktopPacman, root, "0.1.8-beta.2").0[1],
                 "sudo pacman -U https://example.test/o/r/releases/download/desktop-v0.1.8-beta.2/private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst"
+            );
+            assert_eq!(
+                upgrade_steps(Installation::Rpm, root, "0.1.8").0[1..],
+                [
+                    format!("sudo rpm --import {RPM_SIGNING_KEY_URL}"),
+                    "sudo rpm -U https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.rpm".to_string(),
+                ]
             );
             assert_eq!(
                 upgrade_steps(Installation::Deb, root, "0.1.8").0[1..],
