@@ -112,8 +112,11 @@ The client:
   passes, or after any response carries a different `X-ACI-Keyset-Digest`.
   The gateway renews its keyset about every 15 days, which changes the digest.
   Verify again and create a new client;
-- never retries in another mode. An error reply is handed back unchanged; a
+- never retries in another mode. An error reply is handed back unchanged, as
+  an error; it is not authenticated, even when it carries `e2ee_mac`. A
   successful reply that fails its MAC or decryption is refused;
+- passes the SSE fields `event`, `id`, and `retry` through unchanged and
+  ignores comments and unknown fields, as an `EventSource` does;
 - refuses POST requests to endpoints v2.1 does not cover, such as
   `/v1/responses`;
 - encrypts every content location and sends every other member as you wrote
@@ -152,16 +155,20 @@ For each request:
 
 For each response:
 
-1. An error status goes back to the caller unchanged. Never retry it in
-   another mode.
+1. An error status goes back to the caller unchanged, as an error. It is not
+   authenticated, even when it carries `e2ee_mac`. Never retry it in another
+   mode.
 2. Require an SSE stream if the request had `"stream": true`, and a JSON body
    otherwise.
 3. For the JSON body, or each SSE `data:` event: check `e2ee_mac` (§10.6), then
    remove it. A missing or wrong MAC fails the response.
-4. In a stream, drop comment lines, pass `data: [DONE]` through, and fail on
-   any other line and on any event after `[DONE]`. Each event's `e2ee_seq`
-   must be 0, 1, 2, … in order; remove it. Every event must carry the first
-   event's `id`.
+4. Parse a stream as the WHATWG HTML event stream format and apply steps 3
+   and 5 to each event's `data`. Pass `data: [DONE]` through and fail on any
+   event with `data` after it. Pass the `event`, `id`, and `retry` fields
+   through: they are SSE metadata outside the MAC and carry no content. Ignore
+   comments and unknown fields. Each event's `e2ee_seq` must be 0, 1, 2, … in
+   order; remove it. Every event object must carry the first event's `id`
+   member.
 5. Decrypt each §10.5 location with your private key and the request secret,
    and parse the plaintext as JSON. A field that does not decrypt fails the
    response.
@@ -289,8 +296,8 @@ and `usage`.
 
 ### Behavior changes for existing requests
 
-Well-formed plaintext, v2, and legacy requests behave as before. Three
-malformed cases now fail differently:
+Well-formed plaintext, v2, and legacy requests behave as before, apart from
+the number parsing noted below. Three malformed cases now fail differently:
 
 - A v2 or legacy request that carries `X-E2EE-Request-Key` is refused with
   `e2ee_invalid_version`: the client expects v2.1's protection, which v2 and
@@ -300,8 +307,19 @@ malformed cases now fail differently:
   gateway does not advertise it gets the gate's `e2ee_invalid_version`
   message (same status and type), and a gateway with E2EE disabled refuses
   it instead of running it as v2.
-- A request whose only E2EE header is `X-E2EE-Request-Key` is refused with
-  `e2ee_header_missing` instead of being forwarded as plaintext.
+- `X-E2EE-Request-Key` now counts as an E2EE header on every endpoint, so a
+  plaintext request whose only E2EE header it is is no longer forwarded as
+  plaintext. Chat completions, completions, and embeddings refuse it with
+  `e2ee_header_missing`; `/v1/messages`, `/v1/responses`, and
+  `/v1/systemone` refuse it with `e2ee_unsupported_endpoint`. The other
+  native endpoints, such as rerank, images, and audio, already refused any
+  `X-E2EE-*` header and are unchanged.
+
+The gateway now enables `serde_json`'s `float_roundtrip` feature for the
+whole workspace, which the v2.1 body digest needs. Plaintext bodies then parse
+every number to its exact double too. A re-serialized number can therefore
+differ from before in its last digit, in rare cases; the new value is the
+correct one.
 
 ## Errors you may see
 
@@ -337,6 +355,14 @@ version is expected to encrypt the whole body (for example with HPKE or OHTTP).
   reordered events, but not a stream cut short. The signed receipt's
   `response.returned.body_hash` covers the exact stream, but the SDK does not
   check receipts, so on its own it does not detect truncation.
+- A stream event whose data is not a JSON object, such as `data: 42` or text
+  other than `[DONE]`, ends a v2.1 stream with an error, where a plaintext
+  stream forwards it. OpenAI-compatible chat and completions streams send only
+  objects.
+- SSE fields other than `data` (`event`, `id`, `retry`) are standard SSE
+  metadata. The gateway relays them outside the MAC, so an intermediary can
+  change them; they carry no content. `[DONE]` handling and the rejection of
+  data events after it still apply.
 - Replay protection lives in the gateway process. A gateway restart inside the
   5-minute window lets an earlier request run again, though its reply stays
   unreadable to the intermediary.
