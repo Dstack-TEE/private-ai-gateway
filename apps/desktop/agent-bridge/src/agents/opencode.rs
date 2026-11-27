@@ -2,6 +2,145 @@
 //! 2's `providers` shape.
 
 use super::*;
+use std::{
+    io::{Read, Seek},
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+#[derive(Clone, Copy)]
+pub(super) enum OpenCodeVersion {
+    V1,
+    V2,
+}
+
+impl OpenCodeVersion {
+    pub(super) fn detect() -> Option<Self> {
+        let path = env::var_os("PATH")?;
+        #[cfg(not(windows))]
+        let names = ["opencode"];
+        #[cfg(windows)]
+        let names = ["opencode.exe", "opencode.cmd"];
+        let executable = env::split_paths(&path)
+            .filter(|dir| dir.is_absolute())
+            .flat_map(|dir| names.map(|name| dir.join(name)))
+            .find(|candidate| executable_metadata(candidate).is_some())?;
+
+        // Both releases initialize OpenCode directories even for --version.
+        let home = tempfile::Builder::new()
+            .prefix("pap-opencode-")
+            .tempdir()
+            .ok()?;
+        let mut stdout = tempfile::tempfile_in(home.path()).ok()?;
+        let mut command = Command::new(executable);
+        command
+            .arg("--version")
+            .current_dir(home.path())
+            .env_clear()
+            .env("PATH", path)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_STATE_HOME", home.path().join("state"))
+            .env("XDG_CACHE_HOME", home.path().join("cache"))
+            .stdin(Stdio::null())
+            .stdout(stdout.try_clone().ok()?)
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            if let Some(system_root) = env::var_os("SystemRoot") {
+                command.env("SystemRoot", system_root);
+            }
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+
+        let mut child = command.spawn().ok()?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => break,
+                Ok(Some(_)) => return None,
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) | Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+
+        stdout.rewind().ok()?;
+        let mut output = String::new();
+        stdout.take(256).read_to_string(&mut output).ok()?;
+        let version = output.trim();
+        let version = version.strip_prefix("opencode v").unwrap_or(version);
+        match semver::Version::parse(version).ok()?.major {
+            1 => Some(Self::V1),
+            2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ConnectionCatalog<'a> {
+    pub(super) catalog: &'a Catalog,
+    pub(super) opencode_version: Option<OpenCodeVersion>,
+}
+
+impl Projector {
+    pub(super) fn connection_catalog<'a>(
+        &self,
+        agent: Agent,
+        connect: bool,
+        catalog: Option<&'a Catalog>,
+    ) -> Option<ConnectionCatalog<'a>> {
+        catalog.map(|catalog| ConnectionCatalog {
+            catalog,
+            opencode_version: (agent == Agent::OpenCode && connect && self.tool_env)
+                .then(OpenCodeVersion::detect)
+                .flatten(),
+        })
+    }
+}
+
+pub(super) fn project_opencode_shape(
+    fields: &mut Vec<Field>,
+    doc: &ConfigDoc,
+    prior: Option<&Connection>,
+    connection: ConnectionCatalog<'_>,
+) {
+    const LEGACY: &[&str] = &["provider", "private-ai-proxy"];
+    const NATIVE: &[&str] = &["providers", "private-ai-proxy"];
+    let v2 = match connection.opencode_version {
+        Some(OpenCodeVersion::V1) => false,
+        Some(OpenCodeVersion::V2) => true,
+        None => doc.contains(&["providers"]) || doc.contains(&["policies"]),
+    };
+    if v2 {
+        if let Some(field) = fields.iter_mut().find(|field| field.path == LEGACY) {
+            if let Some(ConfigValue::Json(provider)) = &field.value {
+                field.path = owned(NATIVE);
+                field.value = Some(ConfigValue::Json(opencode_provider_v2(
+                    provider,
+                    connection.catalog,
+                )));
+            }
+        }
+    }
+    let other = if v2 { LEGACY } else { NATIVE };
+    if prior.is_some_and(|record| {
+        record.fields.iter().any(|field| {
+            field.path == other
+                && (!doc.contains(other) || field.holds(doc.get_value(other).as_ref()))
+        })
+    }) {
+        fields.push(absent(other));
+    }
+}
 
 pub(super) fn opencode_provider(
     catalog: &Catalog,
@@ -66,9 +205,10 @@ pub(super) fn opencode_provider_v2(
 ) -> serde_json::Value {
     use serde_json::json;
     let mut native = serde_json::Map::new();
-    if let Some(package) = provider.get("npm") {
-        native.insert("package".into(), package.clone());
-    }
+    native.insert(
+        "package".into(),
+        json!("@opencode/ai/providers/openai-compatible"),
+    );
     if let Some(name) = provider.get("name") {
         native.insert("name".into(), name.clone());
     }
@@ -93,9 +233,7 @@ pub(super) fn opencode_provider_v2(
             .filter_map(|id| catalog.get(id))
             .map(|model| {
                 let facts = OpenCodeModel::of(model);
-                // V2 builds the variants for the provider package from
-                // `reasoning`; without it, every model gets low, medium and
-                // high.
+                // OpenCode 2 builds variants from the listed reasoning efforts.
                 let mut reasoning = json!({"supported": model.reasons()});
                 if let Some(efforts) = facts.efforts.as_ref().filter(|efforts| !efforts.is_empty())
                 {

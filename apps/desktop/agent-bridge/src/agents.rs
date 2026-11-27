@@ -472,11 +472,18 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
+        let connection = self.connection_catalog(agent, connect, catalog);
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match self.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
-            Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
+            Ok(mut doc) => match self.edit(
+                agent,
+                &mut doc,
+                &store,
+                connection.filter(|_| connect),
+                options,
+            ) {
                 Ok(edit) => edit,
                 Err(error) if !connect && store.contains_key(agent.id()) => {
                     restore_problem = Some(error.to_string());
@@ -508,7 +515,7 @@ impl Projector {
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
-                catalog,
+                connection,
                 options,
             ),
         })
@@ -591,7 +598,7 @@ fn revision(
     path: Option<&Path>,
     text: Option<&str>,
     record: Option<&Connection>,
-    catalog: Option<&Catalog>,
+    connection: Option<ConnectionCatalog<'_>>,
     options: &ConnectOptions,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -616,8 +623,8 @@ fn revision(
             .as_bytes(),
     );
     part(
-        catalog
-            .map_or("", |catalog| catalog.revision.as_str())
+        connection
+            .map_or("", |connection| connection.catalog.revision.as_str())
             .as_bytes(),
     );
     part(
@@ -627,6 +634,12 @@ fn revision(
             .unwrap_or_default()
             .as_bytes(),
     );
+    if let Some(version) = connection.and_then(|connection| connection.opencode_version) {
+        part(match version {
+            OpenCodeVersion::V1 => b"1",
+            OpenCodeVersion::V2 => b"2",
+        });
+    }
     hex::encode(hasher.finalize())
 }
 

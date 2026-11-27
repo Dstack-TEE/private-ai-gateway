@@ -30,12 +30,14 @@ jsonc-parser = { version = "0.34.0", features = ["serde", "cst"] }
 multer = { version = "3", default-features = false }
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 # Keep serde_json's default float parsing: config_doc's `recorded` depends on
 # it, and a test fails if `float_roundtrip` is enabled by feature unification.
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 shlex = "2"
+tempfile = "3"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "rt-multi-thread", "macros", "net", "process", "sync", "time"] }
 tokio-util = "0.7"
@@ -53,5 +55,4 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 # Core's update check enables reqwest's provider-less rustls; tests that build
 # clients without the backend's provider setup need the bundled one.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
-tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "test-util", "time"] }

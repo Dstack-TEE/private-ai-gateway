@@ -29,6 +29,7 @@ impl Projector {
         catalog: Option<&Catalog>,
         options: &ConnectOptions,
     ) -> Result<AgentStatus, AgentError> {
+        let connection = self.connection_catalog(agent, connect, catalog);
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()
                 .map_err(|_| AgentError::RecordUnavailable)?;
@@ -43,7 +44,7 @@ impl Projector {
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
-                catalog,
+                connection,
                 options,
             ) != revision_seen
             {
@@ -54,9 +55,9 @@ impl Projector {
                 if read_error.is_some() {
                     return Err(AgentError::ConfigurationRead);
                 }
-                if catalog.is_some() {
+                if let Some(connection) = connection {
                     self.require_helper()?;
-                    self.connect(agent, &mut store, text, &path, catalog, options)
+                    self.connect(agent, &mut store, text, &path, connection, options)
                         .map_err(ConnectFailure::error)?;
                 } else {
                     if self.current_record(agent, store.get(agent.id())).is_some() {
@@ -294,12 +295,15 @@ impl Projector {
         let path = self
             .action_path(agent, store.get(agent.id()), true)
             .map_err(|error| ConnectFailure::Conflict(AgentError::ConfigurationConflict(error)))?;
+        let connection = self
+            .connection_catalog(agent, true, catalog)
+            .ok_or(AgentError::InvalidState)?;
         self.connect(
             agent,
             store,
             text,
             &path,
-            catalog,
+            connection,
             &ConnectOptions::default(),
         )
     }
@@ -414,9 +418,10 @@ impl Projector {
         store: &mut Store,
         text: Option<String>,
         path: &Path,
-        catalog: Option<&Catalog>,
+        connection: ConnectionCatalog<'_>,
         options: &ConnectOptions,
     ) -> Result<(), ConnectFailure> {
+        let catalog = connection.catalog;
         let mut doc = self
             .parse_config(agent, text.as_deref())
             .map_err(ConnectFailure::Conflict)?;
@@ -424,7 +429,7 @@ impl Projector {
             agent,
             &doc,
             self.current_record(agent, store.get(agent.id())),
-            catalog,
+            Some(catalog),
             options,
         );
         if store.get(agent.id()).is_some_and(|record| {
@@ -438,17 +443,17 @@ impl Projector {
             )));
         }
         let edit = self
-            .edit(agent, true, &mut doc, store, catalog, &options)
+            .edit(agent, &mut doc, store, Some(connection), &options)
             .map_err(ConnectFailure::Conflict)?;
         if agent == Agent::Codex {
-            self.sync_codex_catalog(catalog.ok_or(AgentError::InvalidState)?)?;
+            self.sync_codex_catalog(catalog)?;
         }
         let previous_record = store.get(agent.id()).cloned();
         let mut next_record = edit.record.clone().ok_or(AgentError::Internal)?;
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
-        next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
-        next_record.catalog_model_ids = catalog_model_ids(agent, catalog);
+        next_record.catalog_revision = Some(catalog.revision.clone());
+        next_record.catalog_model_ids = catalog_model_ids(agent, Some(catalog));
         next_record.endpoint = Some(self.endpoint.clone());
         next_record.empty_original = match &text {
             _ if agent.format() != Format::YamlList => None,

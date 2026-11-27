@@ -725,11 +725,7 @@ pub(super) fn project(
             && still_ours.is_none()
             && !prior.iter().any(|recorded| {
                 recorded.path == field.path
-                    || (agent == Agent::OpenCode
-                        && ((recorded.path == owned(&["provider", "private-ai-proxy"])
-                            && field.path == owned(&["providers", "private-ai-proxy"]))
-                            || (recorded.path == owned(&["providers", "private-ai-proxy"])
-                                && field.path == owned(&["provider", "private-ai-proxy"]))))
+                    && (agent != Agent::OpenCode || recorded.value.is_some())
             })
         {
             return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));

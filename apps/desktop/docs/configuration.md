@@ -266,9 +266,13 @@ unlocked OS keychain for a process running as you.
   while keeping a default model you selected from another provider.
   PAP accepts JSON with comments and trailing commas in both OpenCode
   `opencode.json` and `opencode.jsonc` files.
-  OpenCode 2 configurations use the native `providers` provider shape when
-  their file uses v2 keys, while OpenCode 1 files keep the legacy `provider`
-  shape. In Oh My Pi's companion `config.yml` or `config.yaml`, a global
+  PAP uses `providers` for OpenCode 2 and `provider` for OpenCode 1. It
+  reads the OpenCode version from the executable on the backend's PATH.
+  If the version is unavailable, or PAP runs with an explicitly scoped
+  Agent Home, file keys `providers` and `policies` select the OpenCode 2
+  shape. Otherwise PAP uses `provider`. Reconnecting moves the PAP provider
+  entry when the shape changes and preserves other providers.
+  In Oh My Pi's companion `config.yml` or `config.yaml`, a global
   `disabledProviders` entry for Private AI Proxy pauses access. Path-scoped
   provider filters and `enabledModels` restrictions can show a notice while
   the connection stays authorized.
@@ -286,8 +290,9 @@ unlocked OS keychain for a process running as you.
     service knows, and an omitted list offers no effort choice. `none` is the
     agent's reasoning off. The service's `default_effort` becomes the default in
     Codex, Oh My Pi, OpenClaw and dsh. A model without reasoning metadata keeps
-    each agent's own controls for a model it does not know (none in Codex);
-    the service accepts every effort name and ignores reasoning settings for
+    each agent's own controls for a model it does not know (no effort choices in
+    Codex or OpenCode 2).
+    The service accepts every effort name and ignores reasoning settings for
     models that do not reason.
   - Claude Code's Opus, Sonnet, Haiku and Fable aliases, which its helper
     subagents and background tasks use, are the default model, and its context
