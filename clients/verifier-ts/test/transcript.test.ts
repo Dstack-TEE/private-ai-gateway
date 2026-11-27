@@ -17,6 +17,7 @@ import {
   reportTranscript,
   receiptTranscript,
   receiptTranscriptFromDigests,
+  E2EE_V2_1_X25519,
   toHex,
   fromHex,
   toBase64,
@@ -25,7 +26,7 @@ import {
   type ReceiptEnvelope,
   type WorkloadKeyset,
 } from '../src/index.js';
-import { makeMeasuredComposeReport } from './fixtures.js';
+import { KEYSET, NONCE, makeMeasuredComposeReport } from './fixtures.js';
 import { bindReportTranscriptChannel } from '../src/transcript.js';
 
 const report = JSON.parse(
@@ -115,6 +116,36 @@ test('transcript: a runtime-observed TLS peer satisfies id-6', async () => {
     host: 'gateway.example',
   });
   assert.equal(bound.lines.find((line) => line.id === 'id-6')?.status, 'pass');
+});
+
+test('transcript: an E2EE v2.1 key satisfies id-6 online', async () => {
+  const measured = await makeMeasuredComposeReport();
+  const keyset = {
+    ...KEYSET,
+    e2ee_public_keys: KEYSET.e2ee_public_keys.map((key) => ({ ...key, algo: E2EE_V2_1_X25519 })),
+  };
+  const options = {
+    now: FIXED_NOW,
+    online: true,
+    channel: { e2ee: E2EE_V2_1_X25519 },
+    acceptedComposeHashes: [measured.composeHash],
+  };
+
+  const unmatched = await reportTranscript(measured.report, NONCE, options);
+  assert.equal(unmatched.lines.find((line) => line.id === 'id-6')?.status, 'fail');
+
+  const digest = await computeKeysetDigest(keyset);
+  measured.report.attestation.workload_keyset = keyset;
+  measured.report.workload_keyset_digest = digest;
+  measured.report.attestation.report_data = await computeReportData(digest, NONCE);
+  const matched = await reportTranscript(measured.report, NONCE, options);
+  const binding = matched.lines.find((line) => line.id === 'id-6');
+  assert.equal(binding?.status, 'pass');
+  assert.ok(binding.detail?.includes(E2EE_V2_1_X25519));
+  assert.ok(binding.detail?.includes('e2ee-1'));
+  // The fixture has a synthetic quote, so id-1 still fails the verdict.
+  assert.deepEqual(matched.lines.filter((line) => line.status === 'fail').map((line) => line.id), ['id-1']);
+  assert.equal(matched.verdict.verified, false);
 });
 
 test('transcript: compose policy accepts reviewed releases and rejects other measurements', async () => {

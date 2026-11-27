@@ -8,7 +8,7 @@
 // GATEWAY_URL is the attested gateway; API_URL is whatever the requests go
 // through, such as your own API in front of it.
 import OpenAI from 'openai';
-import { createE2eeFetch, verifyService } from '@phala/aci-verifier';
+import { createE2eeFetch, E2EE_V2_1_X25519, verifyService } from '@phala/aci-verifier';
 
 const { GATEWAY_URL, API_URL, COMPOSE_HASHES, API_KEY, MODEL } = process.env;
 if (!COMPOSE_HASHES) throw new Error('set COMPOSE_HASHES to the gateway releases you accept');
@@ -18,6 +18,7 @@ if (!COMPOSE_HASHES) throw new Error('set COMPOSE_HASHES to the gateway releases
 //    run by whoever sits between you and the gateway.
 const transcript = await verifyService(GATEWAY_URL, {
   acceptedComposeHashes: COMPOSE_HASHES.split(','),
+  channel: { e2ee: E2EE_V2_1_X25519 },
 });
 const { keyset } = transcript.verification;
 if (!transcript.verdict.verified || keyset === undefined) {

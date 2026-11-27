@@ -307,19 +307,24 @@ Install the public ESM package:
 npm install @phala/aci-verifier
 ```
 
-The browser entry verifies a service in one call:
+The browser entry can verify an E2EE v2.1 gateway using its attested encryption
+key. Use your gateway URL and the compose hash you reviewed.
 
 ```ts
-import { verifyService } from '@phala/aci-verifier';
-const { verdict, lines } = await verifyService('https://tee.redpill.ai');
+import { E2EE_V2_1_X25519, verifyService } from '@phala/aci-verifier';
+const { verdict } = await verifyService('https://gateway.example', {
+  acceptedComposeHashes: ['<reviewed sha256(app_compose)>'],
+  channel: { e2ee: E2EE_V2_1_X25519 },
+});
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 ```
 
 It fetches the report with a fresh nonce and verifies the hardware quote
 (via [`@phala/dcap-qvl`](https://www.npmjs.com/package/@phala/dcap-qvl) against
-the Phala PCCS), the binding chain, and the compose measurement. These are the
-§9.1 checks the CLI runs, except key custody (check 5) and the TLS-certificate
-pin (check 6), which a plain browser cannot reach.
+the Phala PCCS), the binding chain, and the compose measurement. It skips key
+custody (check 5) and checks the attested E2EE key for channel binding (check 6).
+Use that key to encrypt requests as shown in the
+[E2EE client guide](e2ee-v2.1-migration.md#client-use-the-typescript-sdk).
 
 For a pinned fetch transport in Node or Bun, and for receipt verification, see
 the [TypeScript client guide](../clients/verifier-ts/README.md).

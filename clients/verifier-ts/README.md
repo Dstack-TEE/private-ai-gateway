@@ -80,9 +80,10 @@ A session contains an establishing-evidence snapshot. A reused session does not 
 - **No custody check.** §9.1 check 5 (the dstack KMS chain) is not
   implemented in this package; it reports a skip.
 - **No TLS observation in a browser.** A browser cannot see the server
-  certificate, so id-6 needs the SPKI your own TLS stack observed (the
-  `channel` option), or the `pap` CLI / `pap serve` proxy, which can; with
-  neither, a live run fails id-6 (§1.1).
+  certificate. For E2EE, set `channel.e2ee` and encrypt to a key from the
+  verified keyset. For TLS, supply `channel.observedSpkiSha256` from your
+  own TLS stack or use a pinned runtime transport. A live run needs one of
+  these bindings to pass id-6 (§1.1).
 - **No deep audit of upstream evidence (§9.2(4)).** `checkSessionEvidence`
   proves the cited session's `evidence.data` hashes to `evidence.digest` and
   stops there; neither in-tree verifier appraises the evidence itself
@@ -105,15 +106,20 @@ configuration with an independent dstack verifier. The deprecated
 
 ## Usage
 
-One call runs the ACI checks:
+For an E2EE v2.1 gateway, verify the attestation before encrypting to its keyset.
 
 ```ts
-import { verifyService } from '@phala/aci-verifier';
+import { E2EE_V2_1_X25519, verifyService } from '@phala/aci-verifier';
 
-const { verdict, lines } = await verifyService('https://tee.redpill.ai');
+const { verdict, lines } = await verifyService('https://gateway.example', {
+  acceptedComposeHashes: ['<reviewed sha256(app_compose)>'],
+  channel: { e2ee: E2EE_V2_1_X25519 },
+});
 console.log(verdict.line); // VERIFIED / PARTIAL / NOT VERIFIED
 for (const l of lines) console.log(l.status, l.id, l.title);
 ```
+
+See [Migrate to E2EE v2.1](../../docs/e2ee-v2.1-migration.md) for the encrypted transport.
 
 ### Runtime SDK and agent frameworks
 

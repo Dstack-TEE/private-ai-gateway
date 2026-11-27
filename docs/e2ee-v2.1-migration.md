@@ -52,6 +52,9 @@ take it from an attestation report it verified itself:
 - Fetching the report through your own API is fine once it is pinned: a relay
   can neither forge the quote nor remove the v2.1 key from it.
 
+Encrypting to the attested E2EE key binds the channel for check 6. Relay and
+browser clients can use this binding without observing the gateway's TLS certificate.
+
 To build this check yourself, see [Verifier: write your own](#verifier-write-your-own).
 
 ## Client: use the TypeScript SDK
@@ -65,11 +68,12 @@ npm install @phala/aci-verifier openai
 
 ```ts
 import OpenAI from 'openai';
-import { createE2eeFetch, verifyService } from '@phala/aci-verifier';
+import { createE2eeFetch, E2EE_V2_1_X25519, verifyService } from '@phala/aci-verifier';
 
 // 1. Verify the gateway against the releases you reviewed.
 const transcript = await verifyService('https://gateway.example', {
   acceptedComposeHashes: ['<reviewed sha256(app_compose)>'],
+  channel: { e2ee: E2EE_V2_1_X25519 },
 });
 const { keyset } = transcript.verification;
 if (!transcript.verdict.verified || keyset === undefined) {
