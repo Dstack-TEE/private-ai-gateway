@@ -118,7 +118,7 @@ fn check_message(message: &Value, path: &str) -> Result<(), E2eeError> {
     for key in ["content", "reasoning", "reasoning_content"] {
         string_or_null(message, key, path)?;
     }
-    let Some(calls) = message.get("tool_calls") else {
+    let Some(calls) = message.get("tool_calls").filter(|calls| !calls.is_null()) else {
         return Ok(());
     };
     let calls = calls
@@ -151,8 +151,14 @@ fn check_text_items(body: &Map<String, Value>, key: &str) -> Result<(), E2eeErro
     }
 }
 
+/// A member whose value is null counts as absent (§10.5), so a reply sent
+/// back as history (`refusal: null`, `tool_calls: null`, ...) passes.
 fn only(object: &Map<String, Value>, allowed: &[&str], path: &str) -> Result<(), E2eeError> {
-    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+    match object
+        .iter()
+        .find(|(key, value)| !value.is_null() && !allowed.contains(&key.as_str()))
+        .map(|(key, _)| key)
+    {
         Some(key) if path.is_empty() => Err(unsupported(key)),
         Some(key) => Err(unsupported(&format!("{path}.{key}"))),
         None => Ok(()),
@@ -192,6 +198,17 @@ mod tests {
         ] {
             assert_eq!(spec[name], json!(list), "{name}");
         }
+    }
+
+    #[test]
+    fn accepts_a_reply_sent_back_as_history() {
+        let body = json!({"model": "m", "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a", "refusal": null, "tool_calls": null,
+             "annotations": null, "audio": null, "function_call": null},
+            {"role": "user", "content": "q2"},
+        ]});
+        check_v2_1_request_members(CHAT_COMPLETIONS_PATH, &body).unwrap();
     }
 
     #[test]

@@ -104,10 +104,14 @@ export function createE2eeFetch(options: E2eeFetchOptions): E2eeFetch {
     channel !== undefined &&
     'e2ee' in channel &&
     channel.e2ee === E2EE_V2_1_X25519 &&
-    transcript.lines.some((entry) => entry.id === 'id-6' && entry.status === 'pass');
+    // id-6 binds the key to the workload; id-4 is what pins that workload's
+    // compose, so a skipped id-4 leaves the binding unpinned.
+    ['id-4', 'id-6'].every((id) =>
+      transcript.lines.some((entry) => entry.id === id && entry.status === 'pass'),
+    );
   if (!transcript.verdict.verified || !bound) {
     throw new E2eeError(
-      `the transcript must be VERIFIED with channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
+      `the transcript must be VERIFIED, with a measured compose (id-4) and channel { e2ee: ${E2EE_V2_1_X25519} }: ${transcript.verdict.line}`,
     );
   }
   const { keyset, workloadKeysetDigest } = transcript.verification;
@@ -258,7 +262,7 @@ function checkRequestMembers(payload: Record<string, unknown>, endpoint: Endpoin
     if (!Array.isArray(message.content)) stringOrNull(message, 'content', path);
     stringOrNull(message, 'reasoning', path);
     stringOrNull(message, 'reasoning_content', path);
-    if (message.tool_calls === undefined) continue;
+    if (message.tool_calls === undefined || message.tool_calls === null) continue;
     if (!Array.isArray(message.tool_calls)) refuseMember(`${path}.tool_calls`);
     for (const [t, call] of message.tool_calls.entries()) {
       const callPath = `${path}.tool_calls.${t}`;
@@ -277,8 +281,9 @@ function refuseMember(path: string): never {
   throw new E2eeError(`E2EE v2.1 does not protect request member "${path}"; remove it`);
 }
 
+/** A member whose value is null is absent (§10.5), as in a reply sent back as history. */
 function only(object: Record<string, unknown>, allowed: readonly string[], path: string): void {
-  const extra = Object.keys(object).find((key) => !allowed.includes(key));
+  const extra = Object.keys(object).find((key) => object[key] !== null && !allowed.includes(key));
   if (extra !== undefined) refuseMember(path === '' ? extra : `${path}.${extra}`);
 }
 
@@ -469,6 +474,8 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
   // position (§10.6).
   let streamId: unknown;
   let nextSeq = 0;
+  // `[DONE]` ends the stream; nothing may follow it.
+  let done = false;
   const flushEvents = async (
     controller: TransformStreamDefaultController<Uint8Array>,
     final: boolean,
@@ -483,7 +490,9 @@ function openSseStream(endpoint: Endpoint, ctx: RequestContext): TransformStream
         data.push(line.slice('data:'.length).replace(/^ /, ''));
       }
       if (data.length === 0) continue;
+      if (done) throw new E2eeError('stream event after [DONE]');
       const joined = data.join('\n');
+      done = joined === '[DONE]';
       let rendered = joined;
       if (joined !== '[DONE]') {
         const payload = await openObject(joined, endpoint, ctx);

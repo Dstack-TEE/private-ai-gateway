@@ -65,7 +65,10 @@ const DIGEST = `sha256:${'ab'.repeat(32)}`;
 /** A transcript as `verifyService` returns it once id-6 passed with the E2EE v2.1 binding. */
 function transcript(ks: WorkloadKeyset = keyset(), overrides: Partial<ReportTranscript> = {}): ReportTranscript {
   return {
-    lines: [{ id: 'id-6', section: '9.1(6)', title: 'channel', status: 'pass' }],
+    lines: [
+      { id: 'id-4', section: '9.1(4)', title: 'provenance', status: 'pass' },
+      { id: 'id-6', section: '9.1(6)', title: 'channel', status: 'pass' },
+    ],
     verdict: { verified: true, line: 'VERIFIED (6 pass)' },
     verification: { ok: true, checks: [], keyset: ks, workloadKeysetDigest: DIGEST },
     channel: { e2ee: E2EE_V2_1_X25519 },
@@ -127,9 +130,17 @@ test('no client without a VERIFIED transcript bound to E2EE v2.1 and a v2.1 key'
     { channel: { observedSpkiSha256: 'ab'.repeat(32) } },
     { channel: { e2ee: 'x25519-aes-256-gcm-hkdf-sha256' } },
     { lines: [{ id: 'id-6', section: '9.1(6)', title: 'channel', status: 'fail' }] },
+    // Offline, a report without app_compose skips id-4 and still verifies;
+    // its id-6 binding then pins no compose.
+    {
+      lines: [
+        { id: 'id-4', section: '9.1(4)', title: 'provenance', status: 'skip' },
+        { id: 'id-6', section: '9.1(6)', title: 'channel', status: 'pass' },
+      ],
+    },
   ];
   for (const overrides of refused) {
-    assert.throws(() => createE2eeFetch({ transcript: transcript(keyset(), overrides) }), /VERIFIED with channel/);
+    assert.throws(() => createE2eeFetch({ transcript: transcript(keyset(), overrides) }), /must be VERIFIED/);
   }
 });
 
@@ -275,6 +286,9 @@ test('chat round trip: the service sees plaintext, the caller gets it back, noth
       { role: 'assistant', content: null, tool_calls: [{ id: 'c0', type: 'function', function: { name: 'f', arguments: '{"a":1}' } }] },
       { role: 'tool', tool_call_id: 'c0', content: [{ type: 'text', text: 'ok' }] },
       { role: 'assistant', content: 'done', reasoning_content: 'earlier private thought' },
+      // A reply sent back as history: its null members count as absent.
+      { role: 'assistant', content: 'again', refusal: null, tool_calls: null, annotations: null, audio: null, function_call: null },
+      { role: 'user', content: 'thanks' },
     ],
   };
   const response = await e2eeFetch('https://relay.example/api/v1/chat/completions', {
@@ -495,6 +509,7 @@ test('the published v2.1 stream opens, and each must-reject variant is refused',
   await rejects(stream(EVENT_1, EVENT_1, EVENT_2), 'text/event-stream', /out of sequence/);
   await rejects(stream(EVENT_2, EVENT_1), 'text/event-stream', /out of sequence/);
   await rejects(stream(EVENT_2), 'text/event-stream', /out of sequence/);
+  await rejects(stream(EVENT_1) + `data: ${EVENT_2}\n\n`, 'text/event-stream', /after \[DONE\]/);
   const buffered = JSON.stringify({ ...JSON.parse(RESPONSE_OBJECT), e2ee_mac: RESPONSE_MAC });
   await rejects(buffered, 'application/json', /expected an SSE stream/);
 

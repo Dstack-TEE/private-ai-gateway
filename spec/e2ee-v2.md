@@ -420,7 +420,9 @@ stays text, unlike v2's restoration rule (§5).
 A v2.1 request carries only what v2.1 protects: the members it encrypts, and
 readable parameters the body digest binds (§10.3). A client MUST NOT send
 anything else. The service rejects anything else with
-`e2ee_unsupported_member` before any upstream request.
+`e2ee_unsupported_member` before any upstream request. A member whose value is
+`null` counts as absent, so a reply sent back as history with `refusal: null`
+or `tool_calls: null` passes.
 [`e2ee-v2.1-request-members.json`](e2ee-v2.1-request-members.json) holds the
 same lists, and the reference implementations test against it.
 
@@ -484,7 +486,7 @@ The client MUST, for each response object:
 6. decrypt every §5 and §10.5 location that is present.
 
 In a stream, the client passes `data: [DONE]` through, ignores SSE comment
-lines, and rejects any other line. Error responses (HTTP 4xx and 5xx) carry no
+lines, and rejects any other line and any event after `[DONE]`. Error responses (HTTP 4xx and 5xx) carry no
 MAC and are not authenticated.
 
 ### 10.7 Service processing
