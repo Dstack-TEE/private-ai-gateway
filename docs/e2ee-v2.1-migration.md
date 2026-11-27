@@ -33,7 +33,7 @@ rejects a tampered request before it reaches any model.
 | Request body | messages can be added or edited | any change to a value is rejected (`e2ee_body_mismatch`) |
 | Response | fields encrypted, everything else editable | fields encrypted, every JSON object and SSE event MAC'd (`e2ee_mac`), stream events numbered (`e2ee_seq`) |
 | Request members | anything | anything; [readable members](../spec/e2ee-v2.md#readable-members) are bound by the body digest |
-| Encrypted fields | message content, reasoning | also tool-call and function-call arguments, `refusal`, `prediction.content`, `suffix`, reasoning sent back in history, and in replies `logprobs`, `annotations`, the audio transcript, and vLLM token echoes |
+| Encrypted fields | message content, reasoning | also, both ways, tool-call and function-call arguments, custom tool input, `refusal`, `annotations`, `reasoning_details`, `thinking_blocks`, `reasoning_items`, `images`, and the audio transcript; in requests `prediction.content`, `suffix`, multimodal embeddings input and embeddings `messages`; in replies `logprobs` and vLLM token echoes |
 | Replay | accepted | rejected inside a 5-minute window |
 | Clock | not used | client time must be within 5 minutes of the gateway's |
 | Endpoints | chat completions, completions, embeddings | the same |
@@ -137,11 +137,14 @@ For each request:
 
 1. Generate a fresh X25519 key pair, a 32-byte request secret, and a 32-byte
    nonce, written as 64 lowercase hex characters. Take the current Unix time.
-2. Encrypt each field §5 and §10.5 list. Each field gets a fresh ephemeral key
+2. Encrypt each location §10.5 lists. Each field gets a fresh ephemeral key
    and AES-GCM nonce; its key mixes in the request secret, and its AAD is the
-   field's JCS object (§10.4, §10.5). A whole message `content` is encrypted as
-   its JSON encoding: the text `hello` is sealed as `"hello"`.
+   field's JCS object (§10.4, §10.5). Every plaintext is the compact JSON
+   encoding of the value: the text `hello` is sealed as `"hello"`, an object
+   or array as itself. Token ids in `prompt` and `input` stay as they are.
 3. Hash the final body: `SHA-256(JCS(body))`, with the ciphertexts in place.
+   An integer beyond ±2^53, such as a large `seed`, is hashed as its exact
+   digits rather than as JCS's double (§10.3).
 4. Seal the request secret followed by that hash into `X-E2EE-Request-Key`
    (§10.3).
 5. Send the six headers and that body.
@@ -158,8 +161,9 @@ For each response:
    any other line and on any event after `[DONE]`. Each event's `e2ee_seq`
    must be 0, 1, 2, … in order; remove it. Every event must carry the first
    event's `id`.
-5. Decrypt each §5 and §10.5 location with your private key and the request
-   secret. A field that does not decrypt fails the response.
+5. Decrypt each §10.5 location with your private key and the request secret,
+   and parse the plaintext as JSON. A field that does not decrypt fails the
+   response.
 
 Where implementations go wrong:
 
@@ -173,10 +177,12 @@ Where implementations go wrong:
 - **Hashing too early.** Hash the body after your SDK or framework has added
   everything it adds.
 - **Resending.** Every attempt is a new request with a new secret and nonce.
-- **Missing a content location.** Encrypt every request location in §5 and
-  §10.5, including `refusal` and `function_call.arguments` in history,
-  `prediction.content`, and `suffix`. The gateway rejects a plaintext string
-  there with `e2ee_decryption_failed`.
+- **Missing a content location.** Encrypt every request location in §10.5,
+  including history members such as `refusal`, `reasoning_details`, and tool
+  call arguments or custom input, `prediction.content`, and `suffix`. The
+  gateway rejects content in clear there with `e2ee_decryption_failed`.
+- **Sealing a raw string.** Seal the JSON of the value, `"hello"` and not
+  `hello`, at every location, in both directions.
 
 To test it, fix your random inputs to the values in the
 [v2.1 test vectors](../spec/e2ee-v2-test-vectors.md#version-21) and reproduce
@@ -314,7 +320,8 @@ V2.1 encrypts content, not the whole body. Every member outside the encrypted
 locations, such as `metadata`, `user`, `prompt_cache_key`, tool definitions,
 `response_format`, or a vendor extension, reaches the gateway as you sent it.
 Anything between the client and the gateway can read these members but not
-change them. Do not put private text in them; put it in the messages. A later
+change them. Token ids in `prompt` and `input` stay readable too, as in v2.
+Do not put private text in them; put it in the messages. A later
 version is expected to encrypt the whole body (for example with HPKE or OHTTP).
 
 ## Limits

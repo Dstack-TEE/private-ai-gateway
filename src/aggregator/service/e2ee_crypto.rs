@@ -193,30 +193,57 @@ pub(super) fn request_key_aad(
     .map_err(|_| E2eeError::DecryptionFailed)
 }
 
-/// E2EE v2.1 body digest: SHA-256 of the RFC 8785 JCS form of the request
-/// body as received, ciphertext fields in place. The body must be I-JSON:
-/// JCS writes numbers as doubles, so an integer beyond ±2^53 would hash like
-/// its neighbours while its exact digits are forwarded.
+/// E2EE v2.1 body digest (§10.3): SHA-256 of the request body as received,
+/// ciphertext fields in place, in RFC 8785 JCS form except that an integer is
+/// written as its exact decimal digits. Inside ±2^53 that is what JCS writes;
+/// beyond it JCS rounds to a double, so two bodies whose forwarded integers
+/// differ could hash alike.
 pub(super) fn request_body_digest(payload: &Value) -> Result<[u8; 32], E2eeError> {
     use sha2::{Digest, Sha256};
-    if !is_i_json_numbers(payload) {
-        return Err(E2eeError::BodyMismatch);
-    }
-    let bytes = serde_json_canonicalizer::to_vec(payload).map_err(|_| E2eeError::BodyMismatch)?;
+    let mut bytes = Vec::new();
+    write_digest_json(payload, &mut bytes)?;
     Ok(Sha256::digest(bytes).into())
 }
 
-fn is_i_json_numbers(value: &Value) -> bool {
-    const MAX_SAFE: u64 = (1 << 53) - 1;
+fn write_digest_json(value: &Value, out: &mut Vec<u8>) -> Result<(), E2eeError> {
     match value {
-        Value::Number(n) => {
-            n.as_u64().is_none_or(|v| v <= MAX_SAFE)
-                && n.as_i64().is_none_or(|v| v.unsigned_abs() <= MAX_SAFE)
+        Value::Number(number) if number.is_u64() || number.is_i64() => {
+            out.extend_from_slice(number.to_string().as_bytes());
         }
-        Value::Array(items) => items.iter().all(is_i_json_numbers),
-        Value::Object(map) => map.values().all(is_i_json_numbers),
-        _ => true,
+        Value::Array(items) => {
+            out.push(b'[');
+            for (position, item) in items.iter().enumerate() {
+                if position > 0 {
+                    out.push(b',');
+                }
+                write_digest_json(item, out)?;
+            }
+            out.push(b']');
+        }
+        Value::Object(members) => {
+            // JCS orders member names by their UTF-16 code units.
+            let mut members: Vec<_> = members.iter().collect();
+            members.sort_by(|(a, _), (b, _)| a.encode_utf16().cmp(b.encode_utf16()));
+            out.push(b'{');
+            for (position, (name, member)) in members.into_iter().enumerate() {
+                if position > 0 {
+                    out.push(b',');
+                }
+                write_jcs(name, out)?;
+                out.push(b':');
+                write_digest_json(member, out)?;
+            }
+            out.push(b'}');
+        }
+        leaf => write_jcs(leaf, out)?,
     }
+    Ok(())
+}
+
+fn write_jcs<T: serde::Serialize>(value: &T, out: &mut Vec<u8>) -> Result<(), E2eeError> {
+    let bytes = serde_json_canonicalizer::to_vec(value).map_err(|_| E2eeError::BodyMismatch)?;
+    out.extend_from_slice(&bytes);
+    Ok(())
 }
 
 pub(super) struct E2eeFieldCrypto<'a> {
@@ -243,22 +270,22 @@ pub(super) fn decrypt_request_payload(
     endpoint_path: &str,
     payload: &mut Value,
 ) -> Result<(), E2eeError> {
-    let v2_1 = crypto.aad_mode == E2eeAadMode::AciV2_1;
+    if crypto.aad_mode == E2eeAadMode::AciV2_1 {
+        // The request key binds the whole body, so a v2.1 request with nothing
+        // to encrypt, such as a token-id prompt, is still v2.1.
+        let body = payload.as_object_mut().ok_or(E2eeError::DecryptionFailed)?;
+        return visit_v2_1_request(endpoint_path, body, &mut |value, field| {
+            open_v2_1_value(crypto, value, field)
+        });
+    }
     let decrypted_count = match endpoint_path {
-        COMPLETIONS_PATH => {
-            let mut count = decrypt_text_items(crypto, payload, "prompt")?;
-            if let (true, Some(body)) = (v2_1, payload.as_object_mut()) {
-                count += decrypt_string_member(crypto, body, "suffix", "suffix")?;
-            }
-            count
-        }
+        COMPLETIONS_PATH => decrypt_text_items(crypto, payload, "prompt")?,
         EMBEDDINGS_PATH => decrypt_text_items(crypto, payload, "input")?,
         _ => decrypt_chat_payload(crypto, payload)?,
     };
     // v2 and legacy need one ciphertext to tell an E2EE request from a
-    // plaintext one. v2.1 binds the whole body to its request key, so a
-    // request with nothing to encrypt, such as a token-id prompt, is still v2.1.
-    if decrypted_count == 0 && !v2_1 {
+    // plaintext one.
+    if decrypted_count == 0 {
         return Err(E2eeError::DecryptionFailed);
     }
     Ok(())
@@ -268,34 +295,11 @@ fn decrypt_chat_payload(
     crypto: &E2eeFieldCrypto<'_>,
     payload: &mut Value,
 ) -> Result<usize, E2eeError> {
-    let v2_1 = crypto.aad_mode == E2eeAadMode::AciV2_1;
-    let mut decrypted_count = 0usize;
-    if let (true, Some(Value::Object(prediction))) = (v2_1, payload.get_mut("prediction")) {
-        decrypted_count += decrypt_v2_1_whole_content(crypto, prediction, "prediction.content")?;
-    }
     let Some(messages) = payload.get_mut("messages").and_then(Value::as_array_mut) else {
-        return Ok(decrypted_count);
+        return Ok(0);
     };
+    let mut decrypted_count = 0usize;
     for (message_index, message) in messages.iter_mut().enumerate() {
-        let Some(message) = message.as_object_mut() else {
-            continue;
-        };
-        if v2_1 {
-            let prefix = format!("messages.{message_index}");
-            for key in ["reasoning", "reasoning_content", "refusal"] {
-                decrypted_count +=
-                    decrypt_string_member(crypto, message, key, &format!("{prefix}.{key}"))?;
-            }
-            if let Some(Value::Object(function_call)) = message.get_mut("function_call") {
-                let field = format!("{prefix}.function_call.arguments");
-                decrypted_count +=
-                    decrypt_string_member(crypto, function_call, "arguments", &field)?;
-            }
-            decrypted_count += decrypt_tool_call_arguments(crypto, message_index, message)?;
-            decrypted_count +=
-                decrypt_v2_1_whole_content(crypto, message, &format!("{prefix}.content"))?;
-            continue;
-        }
         let Some(content) = message.get_mut("content") else {
             continue;
         };
@@ -363,102 +367,257 @@ pub(super) fn decrypt_content_value(
     }
 }
 
-/// v2.1 whole content (`messages.{m}.content`, `prediction.content`): the
-/// plaintext is the JSON encoding of the value, so text is never mistaken for
-/// structured parts. v2.1 has no per-part form, so a present value other than
-/// a ciphertext string is plaintext content and fails.
-fn decrypt_v2_1_whole_content(
-    crypto: &E2eeFieldCrypto<'_>,
+/// Visits one v2.1 location: a present member value and its field path.
+type V2_1Visit<'a> = dyn FnMut(&mut Value, &str) -> Result<(), E2eeError> + 'a;
+
+/// The v2.1 members of a chat message or delta whose whole value is content
+/// (§10.5); they also come back as history in later requests.
+const V2_1_MESSAGE_MEMBERS: [&str; 9] = [
+    "content",
+    "reasoning",
+    "reasoning_content",
+    "refusal",
+    "annotations",
+    "reasoning_details",
+    "thinking_blocks",
+    "reasoning_items",
+    "images",
+];
+
+/// vLLM members that repeat prompt or generated tokens, on a choice; the
+/// `prompt_*` ones also at the top of a response.
+const V2_1_CHOICE_MEMBERS: [&str; 4] = [
+    "logprobs",
+    "token_ids",
+    "prompt_token_ids",
+    "prompt_logprobs",
+];
+
+fn visit_member(
     container: &mut serde_json::Map<String, Value>,
+    key: &str,
     field: &str,
-) -> Result<usize, E2eeError> {
-    let content = match container.get_mut("content") {
-        None | Some(Value::Null) => return Ok(0),
-        Some(content) => content,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    match container.get_mut(key) {
+        Some(value) => visit(value, field),
+        None => Ok(()),
+    }
+}
+
+/// Every v2.1 location of a chat message or delta under `prefix`, the same
+/// set in requests (history) and responses (§10.5).
+fn visit_v2_1_message(
+    message: &mut serde_json::Map<String, Value>,
+    prefix: &str,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    for key in V2_1_MESSAGE_MEMBERS {
+        visit_member(message, key, &format!("{prefix}.{key}"), visit)?;
+    }
+    if let Some(Value::Object(audio)) = message.get_mut("audio") {
+        for key in ["data", "transcript"] {
+            visit_member(audio, key, &format!("{prefix}.audio.{key}"), visit)?;
+        }
+    }
+    if let Some(Value::Object(function_call)) = message.get_mut("function_call") {
+        let field = format!("{prefix}.function_call.arguments");
+        visit_member(function_call, "arguments", &field, visit)?;
+    }
+    if let Some(Value::Array(calls)) = message.get_mut("tool_calls") {
+        for (position, call) in calls.iter_mut().enumerate() {
+            let call_index = entry_index(call, position);
+            for (kind, key) in [("function", "arguments"), ("custom", "input")] {
+                if let Some(Value::Object(inner)) = call.get_mut(kind) {
+                    let field = format!("{prefix}.tool_calls.{call_index}.{kind}.{key}");
+                    visit_member(inner, key, &field, visit)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn visit_v2_1_messages(
+    body: &mut serde_json::Map<String, Value>,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    let Some(Value::Array(messages)) = body.get_mut("messages") else {
+        return Ok(());
     };
-    let Value::String(ciphertext_hex) = content else {
-        return Err(E2eeError::DecryptionFailed);
+    for (message_index, message) in messages.iter_mut().enumerate() {
+        if let Some(message) = message.as_object_mut() {
+            visit_v2_1_message(message, &format!("messages.{message_index}"), visit)?;
+        }
+    }
+    Ok(())
+}
+
+/// Token ids, an integer or an array of integers, stay readable in `prompt`
+/// and `input` (§5, §10.5).
+fn is_token_ids(value: &Value) -> bool {
+    match value {
+        Value::Number(_) => true,
+        Value::Array(items) => items.iter().all(Value::is_number),
+        _ => false,
+    }
+}
+
+/// `prompt` / `input`: the whole value, or each array item, unless it is
+/// token ids.
+fn visit_v2_1_text_items(
+    body: &mut serde_json::Map<String, Value>,
+    key: &str,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    match body.get_mut(key) {
+        Some(Value::Array(items)) => {
+            for (index, item) in items.iter_mut().enumerate() {
+                if !is_token_ids(item) {
+                    visit(item, &format!("{key}.{index}"))?;
+                }
+            }
+            Ok(())
+        }
+        Some(value) if !is_token_ids(value) => visit(value, key),
+        _ => Ok(()),
+    }
+}
+
+/// Every v2.1 request location (§10.5).
+fn visit_v2_1_request(
+    endpoint_path: &str,
+    body: &mut serde_json::Map<String, Value>,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    match endpoint_path {
+        COMPLETIONS_PATH => {
+            visit_v2_1_text_items(body, "prompt", visit)?;
+            visit_member(body, "suffix", "suffix", visit)
+        }
+        EMBEDDINGS_PATH => {
+            visit_v2_1_text_items(body, "input", visit)?;
+            visit_v2_1_messages(body, visit)
+        }
+        _ => {
+            if let Some(Value::Object(prediction)) = body.get_mut("prediction") {
+                visit_member(prediction, "content", "prediction.content", visit)?;
+            }
+            visit_v2_1_messages(body, visit)
+        }
+    }
+}
+
+/// Every v2.1 response location of one response object (§5, §10.5). `part`
+/// is `message` for a buffered chat body and `delta` for a stream event.
+fn visit_v2_1_response(
+    endpoint_path: &str,
+    part: &str,
+    payload: &mut serde_json::Map<String, Value>,
+    visit: &mut V2_1Visit<'_>,
+) -> Result<(), E2eeError> {
+    for key in ["prompt_token_ids", "prompt_logprobs"] {
+        visit_member(payload, key, key, visit)?;
+    }
+    let (list, kind) = match endpoint_path {
+        EMBEDDINGS_PATH => ("data", None),
+        COMPLETIONS_PATH => ("choices", Some("text")),
+        _ => ("choices", Some(part)),
+    };
+    let Some(Value::Array(entries)) = payload.get_mut(list) else {
+        return Ok(());
+    };
+    for (position, entry) in entries.iter_mut().enumerate() {
+        let index = entry_index(entry, position);
+        let Some(entry) = entry.as_object_mut() else {
+            continue;
+        };
+        let prefix = format!("{list}.{index}");
+        match kind {
+            None => visit_member(entry, "embedding", &format!("{prefix}.embedding"), visit)?,
+            Some(kind) => {
+                for key in V2_1_CHOICE_MEMBERS {
+                    visit_member(entry, key, &format!("{prefix}.{key}"), visit)?;
+                }
+                if kind == "text" {
+                    visit_member(entry, "text", &format!("{prefix}.text"), visit)?;
+                } else if let Some(Value::Object(message)) = entry.get_mut(kind) {
+                    visit_v2_1_message(message, &format!("{prefix}.{kind}"), visit)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Open one v2.1 request location: the plaintext is the JSON encoding of the
+/// value (§10.5). Any present value but a ciphertext string or `null` is
+/// content in clear and fails.
+fn open_v2_1_value(
+    crypto: &E2eeFieldCrypto<'_>,
+    value: &mut Value,
+    field: &str,
+) -> Result<(), E2eeError> {
+    let ciphertext_hex = match value {
+        Value::Null => return Ok(()),
+        Value::String(ciphertext_hex) => ciphertext_hex,
+        _ => return Err(E2eeError::DecryptionFailed),
     };
     let aad = request_field_aad(crypto, field)?;
     let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
-    *content = serde_json::from_slice(&plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
-    Ok(1)
+    *value = serde_json::from_slice(&plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
+    Ok(())
 }
 
-/// v2.1: decrypt `messages.{m}.tool_calls.{t}.function.arguments` in place.
-fn decrypt_tool_call_arguments(
-    crypto: &E2eeFieldCrypto<'_>,
-    message_index: usize,
-    message: &mut serde_json::Map<String, Value>,
-) -> Result<usize, E2eeError> {
-    let Some(Value::Array(calls)) = message.get_mut("tool_calls") else {
-        return Ok(0);
-    };
-    let mut decrypted_count = 0usize;
-    for (position, call) in calls.iter_mut().enumerate() {
-        let call_index = entry_index(call, position);
-        let Some(Value::String(ciphertext_hex)) = call
-            .get_mut("function")
-            .and_then(|function| function.get_mut("arguments"))
-        else {
-            continue;
-        };
-        let field = format!("messages.{message_index}.tool_calls.{call_index}.function.arguments");
-        let aad = request_field_aad(crypto, &field)?;
-        let plaintext = decrypt_e2ee_field(crypto, ciphertext_hex, aad.as_deref())?;
-        *ciphertext_hex = String::from_utf8(plaintext).map_err(|_| E2eeError::DecryptionFailed)?;
-        decrypted_count += 1;
+/// Seal one v2.1 response location as the compact JSON of its value, whatever
+/// its type (§10.5). `null` stays as it is.
+fn seal_v2_1_value(
+    ctx: &E2eeRequestContext,
+    response_id: &str,
+    value: &mut Value,
+    field: &str,
+) -> Result<(), E2eeError> {
+    if value.is_null() {
+        return Ok(());
     }
-    Ok(decrypted_count)
+    let plaintext = serde_json::to_vec(value).map_err(|_| E2eeError::EncryptionFailed)?;
+    let aad = response_aad_for_context(ctx, response_id, field)?;
+    *value = Value::String(encrypt_response_plaintext(ctx, &plaintext, aad.as_deref())?);
+    Ok(())
+}
+
+/// Seal every v2.1 location of one response object and add its MAC.
+fn seal_v2_1_response(
+    payload: &mut Value,
+    ctx: &E2eeRequestContext,
+    endpoint_path: &str,
+    part: &str,
+    seq: Option<u64>,
+) -> Result<(), E2eeError> {
+    let object = payload.as_object_mut().ok_or(E2eeError::EncryptionFailed)?;
+    let response_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    visit_v2_1_response(endpoint_path, part, object, &mut |value, field| {
+        seal_v2_1_value(ctx, &response_id, value, field)
+    })?;
+    seal_response_object(payload, ctx, seq)
 }
 
 /// An array entry's path index: its `index` member when it is a non-negative
-/// integer, its array position otherwise (§10.5). An integral float such as
-/// `1.0` up to 2^53 - 1 counts as that integer, as it does for a JavaScript
-/// client, whose `JSON.parse` cannot tell `1` from `1.0`.
+/// integer up to 2^53 - 1, its array position otherwise (§10.5). An integral
+/// float such as `1.0` counts as that integer, as it does for a JavaScript
+/// client, whose `JSON.parse` cannot tell `1` from `1.0` and cannot hold a
+/// larger integer exactly.
 fn entry_index(entry: &Value, position: usize) -> u64 {
     const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-    let Some(index) = entry.get("index") else {
-        return position as u64;
-    };
-    index
-        .as_u64()
-        .or_else(|| {
-            index
-                .as_f64()
-                .filter(|value| value.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER).contains(value))
-                .map(|value| value as u64)
-        })
-        .unwrap_or(position as u64)
-}
-
-/// v2.1: encrypt `{prefix}.tool_calls.{t}.function.arguments` in place.
-fn encrypt_tool_call_arguments(
-    container: &mut serde_json::Map<String, Value>,
-    prefix: &str,
-    ctx: &E2eeRequestContext,
-    response_id: &str,
-) -> Result<(), E2eeError> {
-    if ctx.aad_mode != E2eeAadMode::AciV2_1 {
-        return Ok(());
-    }
-    let Some(Value::Array(calls)) = container.get_mut("tool_calls") else {
-        return Ok(());
-    };
-    for (position, call) in calls.iter_mut().enumerate() {
-        let call_index = entry_index(call, position);
-        let Some(Value::Object(function)) = call.get_mut("function") else {
-            continue;
-        };
-        encrypt_response_field(
-            function,
-            "arguments",
-            &format!("{prefix}.tool_calls.{call_index}.function.arguments"),
-            ctx,
-            response_id,
-        )?;
-    }
-    Ok(())
+    entry
+        .get("index")
+        .and_then(Value::as_f64)
+        .filter(|value| value.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER).contains(value))
+        .map_or(position as u64, |value| value as u64)
 }
 
 /// Decrypt one structured content part in place. `text` parts are decrypted in
@@ -489,8 +648,8 @@ fn decrypt_content_part(
     }
 }
 
-/// Decrypt a string member in place: a content part's `text`, or a v2.1
-/// string location. A null or non-string value passes through.
+/// Decrypt a content part's `text` in place. A null or non-string value
+/// passes through.
 fn decrypt_string_member(
     crypto: &E2eeFieldCrypto<'_>,
     part: &mut serde_json::Map<String, Value>,
@@ -584,6 +743,10 @@ pub(super) fn encrypt_e2ee_response_body(
 ) -> Result<Vec<u8>, E2eeError> {
     let mut payload: Value =
         serde_json::from_slice(cleartext_body).map_err(|_| E2eeError::EncryptionFailed)?;
+    if ctx.aad_mode == E2eeAadMode::AciV2_1 {
+        seal_v2_1_response(&mut payload, ctx, endpoint_path, "message", None)?;
+        return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
+    }
     let response_id = payload
         .get("id")
         .and_then(Value::as_str)
@@ -592,15 +755,14 @@ pub(super) fn encrypt_e2ee_response_body(
 
     if endpoint_path == EMBEDDINGS_PATH {
         encrypt_embedding_data(&mut payload, ctx, &response_id)?;
-        seal_response_object(&mut payload, ctx, None)?;
         return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     }
 
-    let choices = match payload.get_mut("choices").and_then(Value::as_array_mut) {
-        Some(choices) => choices.iter_mut(),
-        None => [].iter_mut(),
+    let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
+        return serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed);
     };
-    for (position, choice) in choices.enumerate() {
+
+    for (position, choice) in choices.iter_mut().enumerate() {
         let choice_index = choice
             .get("index")
             .and_then(Value::as_u64)
@@ -642,115 +804,10 @@ pub(super) fn encrypt_e2ee_response_body(
             if ctx.aad_mode.is_aci() {
                 encrypt_message_audio_data(message, ctx, &response_id, choice_index)?;
             }
-            encrypt_tool_call_arguments(
-                message,
-                &format!("choices.{choice_index}.message"),
-                ctx,
-                &response_id,
-            )?;
         }
-        let part = (endpoint_path != COMPLETIONS_PATH).then_some("message");
-        encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
-    encrypt_v2_1_top_level(&mut payload, ctx, &response_id)?;
 
-    seal_response_object(&mut payload, ctx, None)?;
     serde_json::to_vec(&payload).map_err(|_| E2eeError::EncryptionFailed)
-}
-
-/// v2.1 encrypts the generated content v2 leaves readable (§10.5): in the
-/// message or delta, `refusal`, `audio.transcript` (and a streamed
-/// `audio.data`), `function_call.arguments`, and the compact JSON of
-/// `annotations`; on the choice, the compact JSON of `logprobs` and of the
-/// vLLM token echoes `token_ids`, `prompt_token_ids`, and `prompt_logprobs`.
-fn encrypt_v2_1_choice_extras(
-    choice: &mut serde_json::Map<String, Value>,
-    part: Option<&str>,
-    choice_index: u64,
-    ctx: &E2eeRequestContext,
-    response_id: &str,
-) -> Result<(), E2eeError> {
-    if ctx.aad_mode != E2eeAadMode::AciV2_1 {
-        return Ok(());
-    }
-    if let Some(part) = part {
-        if let Some(Value::Object(container)) = choice.get_mut(part) {
-            let prefix = format!("choices.{choice_index}.{part}");
-            encrypt_response_field(
-                container,
-                "refusal",
-                &format!("{prefix}.refusal"),
-                ctx,
-                response_id,
-            )?;
-            encrypt_response_json(
-                container,
-                "annotations",
-                &format!("{prefix}.annotations"),
-                ctx,
-                response_id,
-            )?;
-            if let Some(Value::Object(audio)) = container.get_mut("audio") {
-                // A buffered `message.audio.data` is a v2 location, already sealed.
-                let keys: &[&str] = match part {
-                    "delta" => &["data", "transcript"],
-                    _ => &["transcript"],
-                };
-                for key in keys {
-                    let field = format!("{prefix}.audio.{key}");
-                    encrypt_response_field(audio, key, &field, ctx, response_id)?;
-                }
-            }
-            if let Some(Value::Object(function_call)) = container.get_mut("function_call") {
-                let field = format!("{prefix}.function_call.arguments");
-                encrypt_response_field(function_call, "arguments", &field, ctx, response_id)?;
-            }
-        }
-    }
-    for key in V2_1_TOKEN_ECHOES.iter().chain(["logprobs"].iter()) {
-        let field = format!("choices.{choice_index}.{key}");
-        encrypt_response_json(choice, key, &field, ctx, response_id)?;
-    }
-    Ok(())
-}
-
-/// vLLM members that repeat prompt or generated tokens: on a choice, and for
-/// `prompt_*` also at the top of a chat response.
-const V2_1_TOKEN_ECHOES: [&str; 3] = ["token_ids", "prompt_token_ids", "prompt_logprobs"];
-
-/// v2.1: encrypt the top-level `prompt_token_ids` and `prompt_logprobs`.
-fn encrypt_v2_1_top_level(
-    payload: &mut Value,
-    ctx: &E2eeRequestContext,
-    response_id: &str,
-) -> Result<(), E2eeError> {
-    if ctx.aad_mode != E2eeAadMode::AciV2_1 {
-        return Ok(());
-    }
-    let Some(object) = payload.as_object_mut() else {
-        return Ok(());
-    };
-    for key in ["prompt_token_ids", "prompt_logprobs"] {
-        encrypt_response_json(object, key, key, ctx, response_id)?;
-    }
-    Ok(())
-}
-
-/// Encrypt a present, non-null member as its compact JSON.
-fn encrypt_response_json(
-    container: &mut serde_json::Map<String, Value>,
-    key: &str,
-    field: &str,
-    ctx: &E2eeRequestContext,
-    response_id: &str,
-) -> Result<(), E2eeError> {
-    let Some(value) = container.get_mut(key).filter(|value| !value.is_null()) else {
-        return Ok(());
-    };
-    let plaintext = serde_json::to_vec(value).map_err(|_| E2eeError::EncryptionFailed)?;
-    let aad = response_aad_for_context(ctx, response_id, field)?;
-    *value = Value::String(encrypt_response_plaintext(ctx, &plaintext, aad.as_deref())?);
-    Ok(())
 }
 
 /// The member carrying the v2.1 response MAC.
@@ -899,16 +956,21 @@ pub(super) fn encrypt_e2ee_stream_value(
         // inconsistency: fail closed rather than send unencrypted vectors.
         return Err(E2eeError::EncryptionFailed);
     }
+    if ctx.aad_mode == E2eeAadMode::AciV2_1 {
+        drop_empty_delta_content(&mut payload);
+        seal_v2_1_response(&mut payload, ctx, endpoint_path, "delta", Some(seq))?;
+        return Ok(payload);
+    }
     let response_id = payload
         .get("id")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let choices = match payload.get_mut("choices").and_then(Value::as_array_mut) {
-        Some(choices) => choices.iter_mut(),
-        None => [].iter_mut(),
+    let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
+        return Ok(payload);
     };
-    for (position, choice) in choices.enumerate() {
+
+    for (position, choice) in choices.iter_mut().enumerate() {
         let choice_index = choice
             .get("index")
             .and_then(Value::as_u64)
@@ -949,20 +1011,25 @@ pub(super) fn encrypt_e2ee_stream_value(
                 ctx,
                 &response_id,
             )?;
-            encrypt_tool_call_arguments(
-                delta,
-                &format!("choices.{choice_index}.delta"),
-                ctx,
-                &response_id,
-            )?;
         }
-        let part = (endpoint_path != COMPLETIONS_PATH).then_some("delta");
-        encrypt_v2_1_choice_extras(choice, part, choice_index, ctx, &response_id)?;
     }
-    encrypt_v2_1_top_level(&mut payload, ctx, &response_id)?;
 
-    seal_response_object(&mut payload, ctx, Some(seq))?;
     Ok(payload)
+}
+
+/// An empty streamed `delta.content` carries nothing; drop it rather than
+/// encrypt it.
+fn drop_empty_delta_content(payload: &mut Value) {
+    let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for choice in choices {
+        if let Some(Value::Object(delta)) = choice.get_mut("delta") {
+            if delta.get("content").and_then(Value::as_str) == Some("") {
+                delta.remove("content");
+            }
+        }
+    }
 }
 
 pub(super) fn encrypt_response_field(
@@ -1079,8 +1146,22 @@ pub(super) fn encrypt_response_plaintext(
 
 #[cfg(test)]
 mod tests {
-    use super::{aci_request_aad, aci_response_aad, entry_index, optional_response_string};
+    use super::{
+        aci_request_aad, aci_response_aad, entry_index, optional_response_string,
+        request_body_digest,
+    };
     use serde_json::json;
+
+    #[test]
+    fn body_digest_is_jcs_inside_the_safe_integer_range() {
+        use sha2::{Digest, Sha256};
+        let body = json!({
+            "\u{e9}": 1, "b": [-9_007_199_254_740_991_i64, 9_007_199_254_740_991_u64, 0.1, 1e21, 4.5e-6],
+            "a": {"10": "x\u{2028}\"", "9": null, "\u{1f600}": true, "\u{ff61}": false},
+        });
+        let jcs: [u8; 32] = Sha256::digest(serde_json_canonicalizer::to_vec(&body).unwrap()).into();
+        assert_eq!(request_body_digest(&body).unwrap(), jcs);
+    }
 
     #[test]
     fn entry_index_reads_an_integral_index_as_a_javascript_client_does() {
@@ -1097,6 +1178,7 @@ mod tests {
             json!(-1),
             json!(-1.0),
             json!(9_007_199_254_740_992.0_f64),
+            json!(9_007_199_254_740_993_u64),
             json!("1"),
         ] {
             assert_eq!(index(json!({"index": not_an_index})), 7);

@@ -5158,6 +5158,17 @@ fn v2_1_request_key(
     secret: &[u8; 32],
     body: &Value,
 ) -> String {
+    let digest = v2_1_body_digest(body);
+    v2_1_request_key_for_digest(model_key_hex, client_key_hex, nonce, secret, &digest)
+}
+
+fn v2_1_request_key_for_digest(
+    model_key_hex: &str,
+    client_key_hex: &str,
+    nonce: &str,
+    secret: &[u8; 32],
+    digest: &[u8; 32],
+) -> String {
     let aad = private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
         "purpose": "aci.e2ee.request-key.v2.1",
         "algo": E2EE_ALGO_X25519_AESGCM_V2_1,
@@ -5167,7 +5178,7 @@ fn v2_1_request_key(
         "ts": V2_1_TS,
     }))
     .unwrap();
-    let plaintext = [secret.as_slice(), v2_1_body_digest(body).as_slice()].concat();
+    let plaintext = [secret.as_slice(), digest.as_slice()].concat();
     encrypt_x25519(model_key_hex, &plaintext, &aad, E2eeKdf::V2_1RequestKey).unwrap()
 }
 
@@ -5314,7 +5325,7 @@ async fn e2ee_v2_1_round_trip_needs_the_request_secret_to_read_the_reply() {
     };
     assert_eq!(
         decrypt_x25519(&client_secret, &encrypted, &aad, kdf).unwrap(),
-        b"plain-answer"
+        br#""plain-answer""#
     );
     // The client's private key alone is not enough: that is what stops an
     // intermediary that swapped in its own reply key.
@@ -5377,7 +5388,7 @@ async fn e2ee_v2_1_streamed_fields_use_the_request_secret() {
     };
     assert_eq!(
         decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
-        b"streamed"
+        br#""streamed""#
     );
 }
 
@@ -5670,7 +5681,7 @@ async fn e2ee_v2_1_encrypts_tool_call_arguments_both_ways() {
             {"role": "assistant", "content": null, "tool_calls": [{
                 "id": "call-0", "type": "function",
                 "function": {"name": "lookup", "arguments":
-                    seal("messages.1.tool_calls.0.function.arguments", br#"{"account":"0001"}"#)},
+                    seal("messages.1.tool_calls.0.function.arguments", br#""{\"account\":\"0001\"}""#)},
             }]},
             {"role": "tool", "tool_call_id": "call-0", "content": seal("messages.2.content", br#""ok""#)},
         ],
@@ -5719,7 +5730,7 @@ async fn e2ee_v2_1_encrypts_tool_call_arguments_both_ways() {
     );
     assert_eq!(
         decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
-        br#"{"account":"4421"}"#
+        br#""{\"account\":\"4421\"}""#
     );
 }
 
@@ -5763,7 +5774,7 @@ async fn e2ee_v2_1_encrypts_streamed_tool_call_arguments() {
     };
     assert_eq!(
         decrypt_x25519(&client_secret, encrypted, &aad, kdf).unwrap(),
-        b"{\"acc"
+        br#""{\"acc""#
     );
 }
 
@@ -5858,7 +5869,7 @@ async fn e2ee_v2_1_encrypts_refusal_logprobs_and_echoed_reasoning() {
         "messages": [
             {"role": "user", "content": seal("messages.0.content", br#""first""#)},
             {"role": "assistant", "content": seal("messages.1.content", br#""answer""#),
-             "reasoning_content": seal("messages.1.reasoning_content", b"earlier private thought")},
+             "reasoning_content": seal("messages.1.reasoning_content", br#""earlier private thought""#)},
             {"role": "user", "content": seal("messages.2.content", br#""second""#)},
         ],
     });
@@ -5911,7 +5922,7 @@ async fn e2ee_v2_1_encrypts_refusal_logprobs_and_echoed_reasoning() {
             "choices.0.message.refusal",
             &body["choices"][0]["message"]["refusal"]
         ),
-        b"I can't help with that account."
+        br#""I can't help with that account.""#
     );
     let logprobs: Value =
         serde_json::from_slice(&open("choices.0.logprobs", &body["choices"][0]["logprobs"]))
@@ -5944,7 +5955,9 @@ impl V2_1Client {
         }
     }
 
-    fn seal(&self, field: &str, plaintext: &[u8]) -> String {
+    /// Seal a request location: the plaintext is the value's JSON (§10.5).
+    fn seal(&self, field: &str, value: Value) -> String {
+        let plaintext = serde_json::to_vec(&value).unwrap();
         let aad = v2_1_aad(
             "aci.e2ee.request.v2.1",
             E2EE_ALGO_X25519_AESGCM_V2_1,
@@ -5952,17 +5965,21 @@ impl V2_1Client {
             &self.nonce,
             None,
         );
-        encrypt_x25519(&self.model_key_hex, plaintext, &aad, self.kdf()).unwrap()
+        encrypt_x25519(&self.model_key_hex, &plaintext, &aad, self.kdf()).unwrap()
     }
 
     fn headers(&self, body: &Value) -> Vec<(&'static str, String)> {
+        self.headers_for_digest(&v2_1_body_digest(body))
+    }
+
+    fn headers_for_digest(&self, digest: &[u8; 32]) -> Vec<(&'static str, String)> {
         let client_key_hex = x25519_public_key_hex(&self.client_secret);
-        let request_key = v2_1_request_key(
+        let request_key = v2_1_request_key_for_digest(
             &self.model_key_hex,
             &client_key_hex,
             &self.nonce,
             &V2_1_SECRET,
-            body,
+            digest,
         );
         vec![
             ("x-client-pub-key", client_key_hex),
@@ -5974,7 +5991,8 @@ impl V2_1Client {
         ]
     }
 
-    fn open(&self, id: &str, field: &str, ciphertext: &Value) -> Vec<u8> {
+    /// Open a response location back into its JSON value.
+    fn open(&self, id: &str, field: &str, ciphertext: &Value) -> Value {
         let aad = v2_1_aad(
             "aci.e2ee.response.v2.1",
             E2EE_ALGO_X25519_AESGCM_V2_1,
@@ -5985,11 +6003,8 @@ impl V2_1Client {
         let ciphertext = ciphertext
             .as_str()
             .unwrap_or_else(|| panic!("{field} is not a ciphertext"));
-        decrypt_x25519(&self.client_secret, ciphertext, &aad, self.kdf()).unwrap()
-    }
-
-    fn open_json(&self, id: &str, field: &str, ciphertext: &Value) -> Value {
-        serde_json::from_slice(&self.open(id, field, ciphertext)).unwrap()
+        let plaintext = decrypt_x25519(&self.client_secret, ciphertext, &aad, self.kdf()).unwrap();
+        serde_json::from_slice(&plaintext).unwrap()
     }
 
     async fn post(&self, h: &Harness, path: &str, body: &Value) -> HttpResult {
@@ -6029,19 +6044,32 @@ async fn e2ee_v2_1_forwards_every_member_a_plaintext_request_can_carry() {
         "x_vendor_unknown": [1, {"a": null}],
         "functions": [{"name": "lookup", "parameters": {}}],
     });
+    let reasoning_details =
+        serde_json::json!([{"type": "reasoning.text", "text": "plan", "signature": "sig"}]);
     let mut body = serde_json::json!({
         "model": "aci-model",
         // Predicted output is content, sealed whole as its JSON (§10.5).
         "prediction": {"type": "content",
-                       "content": client.seal("prediction.content", br#""draft reply""#)},
+                       "content": client.seal("prediction.content", serde_json::json!("draft reply"))},
         "messages": [
-            {"role": "user", "content": client.seal("messages.0.content", br#""q""#)},
+            {"role": "user", "content": client.seal("messages.0.content", serde_json::json!("q"))},
             // A reply echoed back as history by the OpenAI SDK.
-            {"role": "assistant", "content": null, "annotations": [], "audio": null,
-             "refusal": client.seal("messages.1.refusal", b"I can't share that."),
+            {"role": "assistant", "content": null, "audio": null,
+             "annotations": client.seal("messages.1.annotations", serde_json::json!([])),
+             "refusal": client.seal("messages.1.refusal", serde_json::json!("I can't share that.")),
              "function_call": {"name": "lookup",
-                               "arguments": client.seal("messages.1.function_call.arguments", br#"{"id":1}"#)}},
-            {"role": "user", "content": client.seal("messages.2.content", br#"[{"type":"text","text":"q2"}]"#)},
+                               "arguments": client.seal("messages.1.function_call.arguments", serde_json::json!(r#"{"id":1}"#))}},
+            // History with reasoning and tool calls that carry unknown members.
+            {"role": "assistant", "content": null, "x_message_extra": 3,
+             "reasoning_details": client.seal("messages.2.reasoning_details", reasoning_details.clone()),
+             "tool_calls": [
+                {"id": "call-0", "type": "function", "x_call_extra": {"k": 1},
+                 "function": {"name": "lookup", "x_function_extra": true,
+                              "arguments": client.seal("messages.2.tool_calls.0.function.arguments", serde_json::json!("{}"))}},
+                {"id": "call-1", "type": "custom",
+                 "custom": {"name": "shell", "input": client.seal("messages.2.tool_calls.1.custom.input", serde_json::json!("ls ~"))}},
+             ]},
+            {"role": "user", "content": client.seal("messages.3.content", serde_json::json!([{"type": "text", "text": "q2"}]))},
         ],
     });
     body.as_object_mut()
@@ -6059,26 +6087,92 @@ async fn e2ee_v2_1_forwards_every_member_a_plaintext_request_can_carry() {
     assert_eq!(history["annotations"], serde_json::json!([]));
     assert_eq!(history["function_call"]["arguments"], r#"{"id":1}"#);
     assert_eq!(
-        upstream["messages"][2]["content"],
+        upstream["messages"][2],
+        serde_json::json!({"role": "assistant", "content": null, "x_message_extra": 3,
+        "reasoning_details": reasoning_details,
+        "tool_calls": [
+         {"id": "call-0", "type": "function", "x_call_extra": {"k": 1},
+          "function": {"name": "lookup", "x_function_extra": true, "arguments": "{}"}},
+         {"id": "call-1", "type": "custom", "custom": {"name": "shell", "input": "ls ~"}},
+        ]})
+    );
+    assert_eq!(
+        upstream["messages"][3]["content"],
         serde_json::json!([{"type": "text", "text": "q2"}])
     );
 
-    // A content location still holds only ciphertext: plaintext parts fail.
-    let client = V2_1Client::new(&h, 0x8f, "nonce-v2.1-plain-parts");
+    // A content location holds only ciphertext: content in clear fails, a
+    // string as much as structured parts.
+    for (nonce, message) in [
+        (
+            "nonce-v2.1-plain-parts",
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "in clear"}]}),
+        ),
+        (
+            "nonce-v2.1-plain-reasoning",
+            serde_json::json!({"role": "assistant", "reasoning_details": [{"text": "in clear"}]}),
+        ),
+    ] {
+        let client = V2_1Client::new(&h, 0x8f, nonce);
+        let body = serde_json::json!({"model": "aci-model", "messages": [message]});
+        let resp = h
+            .requester
+            .post_owned_headers(
+                "/v1/chat/completions",
+                &serde_json::to_vec(&body).unwrap(),
+                &client.headers(&body),
+            )
+            .await;
+        assert_eq!(error_type(&resp), "e2ee_decryption_failed");
+    }
+    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_binds_integers_beyond_2_pow_53_by_their_exact_digits() {
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(E2EE_CHAT_RESPONSE));
+    let client = V2_1Client::new(&h, 0x93, "nonce-v2.1-seed");
+    let content = client.seal("messages.0.content", serde_json::json!("hi"));
+    let seed: u64 = 12_345_678_901_234_567_890;
     let body = serde_json::json!({
         "model": "aci-model",
-        "messages": [{"role": "user", "content": [{"type": "text", "text": "in clear"}]}],
+        "seed": seed,
+        "messages": [{"role": "user", "content": content}],
     });
-    let resp = h
-        .requester
-        .post_owned_headers(
-            "/v1/chat/completions",
-            &serde_json::to_vec(&body).unwrap(),
-            &client.headers(&body),
-        )
-        .await;
-    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
-    assert_eq!(h.upstream_calls.lock().unwrap().len(), 1);
+    // Written out by hand: JCS, with the integer's own digits.
+    let canonical = format!(
+        r#"{{"messages":[{{"content":"{content}","role":"user"}}],"model":"aci-model","seed":12345678901234567890}}"#
+    );
+    let digest: [u8; 32] = {
+        use sha2::Digest;
+        sha2::Sha256::digest(canonical.as_bytes()).into()
+    };
+    let requester = &h.requester;
+    let send = |body: Value| {
+        let headers = client.headers_for_digest(&digest);
+        async move {
+            requester
+                .post_owned_headers(
+                    "/v1/chat/completions",
+                    &serde_json::to_vec(&body).unwrap(),
+                    &headers,
+                )
+                .await
+        }
+    };
+    // A neighbour that rounds to the same double is a different body.
+    let mut edited = body.clone();
+    edited["seed"] = serde_json::json!(seed + 1);
+    assert_eq!(error_type(&send(edited).await), "e2ee_body_mismatch");
+
+    let resp = send(body).await;
+    assert_eq!(
+        resp.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(last_upstream_body(&h)["seed"], serde_json::json!(seed));
 }
 
 #[tokio::test]
@@ -6088,8 +6182,8 @@ async fn e2ee_v2_1_completions_seal_the_suffix_and_pass_token_ids() {
     let client = V2_1Client::new(&h, 0x90, "nonce-v2.1-suffix");
     let body = serde_json::json!({
         "model": "aci-model",
-        "prompt": client.seal("prompt", b"def f():"),
-        "suffix": client.seal("suffix", b"return x"),
+        "prompt": client.seal("prompt", serde_json::json!("def f():")),
+        "suffix": client.seal("suffix", serde_json::json!("return x")),
     });
     let resp = client.post(&h, "/v1/completions", &body).await;
     let upstream = last_upstream_body(&h);
@@ -6099,15 +6193,15 @@ async fn e2ee_v2_1_completions_seal_the_suffix_and_pass_token_ids() {
     let choice = &reply["choices"][0];
     assert_eq!(
         client.open("cmpl-v2.1", "choices.0.text", &choice["text"]),
-        b"middle"
+        "middle"
     );
     // Token echoes repeat the content, so they are sealed too.
     assert_eq!(
-        client.open_json("cmpl-v2.1", "choices.0.token_ids", &choice["token_ids"]),
+        client.open("cmpl-v2.1", "choices.0.token_ids", &choice["token_ids"]),
         serde_json::json!([7, 8])
     );
     assert_eq!(
-        client.open_json(
+        client.open(
             "cmpl-v2.1",
             "choices.0.prompt_token_ids",
             &choice["prompt_token_ids"]
@@ -6123,6 +6217,50 @@ async fn e2ee_v2_1_completions_seal_the_suffix_and_pass_token_ids() {
         last_upstream_body(&h)["prompt"],
         serde_json::json!([[1, 2, 3], [4]])
     );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_embeddings_seal_multimodal_input_and_messages() {
+    let response = br#"{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.5,-0.25]}],"model":"aci-model","usage":{"prompt_tokens":5,"total_tokens":5}}"#;
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(response));
+    let client = V2_1Client::new(&h, 0x94, "nonce-v2.1-embeddings");
+    let image = serde_json::json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}});
+    let body = serde_json::json!({
+        "model": "aci-model",
+        // Text and an image are sealed; token ids stay readable.
+        "input": [client.seal("input.0", serde_json::json!("private text")), client.seal("input.1", image.clone()), [1, 2]],
+        // vLLM's chat-style embeddings input, sealed as chat messages are.
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!([image.clone()]))}],
+    });
+    let resp = client.post(&h, "/v1/embeddings", &body).await;
+    let upstream = last_upstream_body(&h);
+    assert_eq!(
+        upstream["input"],
+        serde_json::json!(["private text", image.clone(), [1, 2]])
+    );
+    assert_eq!(
+        upstream["messages"][0]["content"],
+        serde_json::json!([image])
+    );
+    let reply = open_v2_1_mac(json_body(&resp));
+    assert_eq!(
+        client.open("", "data.0.embedding", &reply["data"][0]["embedding"]),
+        serde_json::json!([0.5, -0.25])
+    );
+
+    // A multimodal item in clear fails.
+    let client = V2_1Client::new(&h, 0x94, "nonce-v2.1-embeddings-clear");
+    let body =
+        serde_json::json!({"model": "aci-model", "input": [{"type": "text", "text": "in clear"}]});
+    let resp = h
+        .requester
+        .post_owned_headers(
+            "/v1/embeddings",
+            &serde_json::to_vec(&body).unwrap(),
+            &client.headers(&body),
+        )
+        .await;
+    assert_eq!(error_type(&resp), "e2ee_decryption_failed");
 }
 
 #[tokio::test]
@@ -6145,7 +6283,7 @@ async fn e2ee_v2_1_encrypts_audio_transcript_and_annotations() {
         "model": "aci-model",
         "modalities": ["text", "audio"],
         "audio": {"voice": "alloy", "format": "wav"},
-        "messages": [{"role": "user", "content": client.seal("messages.0.content", br#""hi""#)}],
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
     });
     let resp = client.post(&h, "/v1/chat/completions", &body).await;
     let wire = String::from_utf8(resp.body.clone()).unwrap();
@@ -6160,7 +6298,7 @@ async fn e2ee_v2_1_encrypts_audio_transcript_and_annotations() {
             &format!("{prefix}.audio.transcript"),
             &message["audio"]["transcript"]
         ),
-        b"spoken secret"
+        "spoken secret"
     );
     assert_eq!(
         client.open(
@@ -6168,11 +6306,11 @@ async fn e2ee_v2_1_encrypts_audio_transcript_and_annotations() {
             &format!("{prefix}.audio.data"),
             &message["audio"]["data"]
         ),
-        b"UklGRg=="
+        "UklGRg=="
     );
     assert_eq!(message["audio"]["id"], "audio-1");
     assert_eq!(
-        client.open_json(
+        client.open(
             id,
             &format!("{prefix}.annotations"),
             &message["annotations"]
@@ -6180,7 +6318,7 @@ async fn e2ee_v2_1_encrypts_audio_transcript_and_annotations() {
         annotations
     );
     assert_eq!(
-        client.open_json(id, "prompt_token_ids", &reply["prompt_token_ids"]),
+        client.open(id, "prompt_token_ids", &reply["prompt_token_ids"]),
         serde_json::json!([5, 6])
     );
 }
@@ -6207,7 +6345,7 @@ async fn e2ee_v2_1_encrypts_streamed_audio_and_annotations() {
     let body = serde_json::json!({
         "model": "aci-model",
         "stream": true,
-        "messages": [{"role": "user", "content": client.seal("messages.0.content", br#""hi""#)}],
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
     });
     let resp = client.post(&h, "/v1/chat/completions", &body).await;
     let wire = String::from_utf8(resp.body.clone()).unwrap();
@@ -6221,14 +6359,134 @@ async fn e2ee_v2_1_encrypts_streamed_audio_and_annotations() {
             "choices.0.delta.audio.transcript",
             &delta["audio"]["transcript"]
         ),
-        b"streamed secret"
+        "streamed secret"
     );
     assert_eq!(
         client.open(id, "choices.0.delta.audio.data", &delta["audio"]["data"]),
-        b"AAEC"
+        "AAEC"
     );
     assert_eq!(
-        client.open_json(id, "choices.0.delta.annotations", &delta["annotations"]),
+        client.open(id, "choices.0.delta.annotations", &delta["annotations"]),
         annotations
+    );
+}
+
+/// Generated members beyond text, as reasoning and multimodal upstreams emit
+/// them, plus a custom tool call.
+fn v2_1_generated_members() -> Value {
+    serde_json::json!({
+        "reasoning_details": [{"type": "reasoning.text", "text": "secret plan", "signature": "sig"}],
+        "thinking_blocks": [{"type": "thinking", "thinking": "secret thought", "signature": "sig"}],
+        "reasoning_items": [{"type": "reasoning", "summary": [{"text": "secret summary"}]}],
+        "images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,c2VjcmV0"}}],
+        "tool_calls": [{"index": 0, "id": "ctc-1", "type": "custom",
+                        "custom": {"name": "shell", "input": "cat secret.txt"}}],
+    })
+}
+
+/// Open every location of [`v2_1_generated_members`] in `part`, and check
+/// what stays readable.
+fn assert_v2_1_generated_members_open(client: &V2_1Client, id: &str, prefix: &str, part: &Value) {
+    let generated = v2_1_generated_members();
+    for key in [
+        "reasoning_details",
+        "thinking_blocks",
+        "reasoning_items",
+        "images",
+    ] {
+        assert_eq!(
+            client.open(id, &format!("{prefix}.{key}"), &part[key]),
+            generated[key],
+            "{key}"
+        );
+    }
+    let call = &part["tool_calls"][0];
+    assert_eq!(call["custom"]["name"], "shell");
+    assert_eq!(
+        client.open(
+            id,
+            &format!("{prefix}.tool_calls.0.custom.input"),
+            &call["custom"]["input"]
+        ),
+        "cat secret.txt"
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_reasoning_images_and_custom_tool_input() {
+    let mut message = v2_1_generated_members();
+    message["role"] = serde_json::json!("assistant");
+    // Values a plaintext reply serves although the schema says string: they
+    // are sealed as their JSON and open to the same value.
+    message["content"] = serde_json::json!([{"type": "text", "text": "secret parts"}]);
+    message["function_call"] =
+        serde_json::json!({"name": "lookup", "arguments": {"account": "secret"}});
+    let response = serde_json::json!({
+        "id": "chat-generated-1", "object": "chat.completion", "model": "aci-model",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": message}],
+    });
+    let h = harness_with_e2ee(RecordingUpstream::with_response_body(
+        &serde_json::to_vec(&response).unwrap(),
+    ));
+    let client = V2_1Client::new(&h, 0x95, "nonce-v2.1-generated");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !wire.contains("secret") && !wire.contains("c2VjcmV0"),
+        "{wire}"
+    );
+    let reply = open_v2_1_mac(json_body(&resp));
+    let part = &reply["choices"][0]["message"];
+    let (id, prefix) = ("chat-generated-1", "choices.0.message");
+    assert_v2_1_generated_members_open(&client, id, prefix, part);
+    assert_eq!(
+        client.open(id, &format!("{prefix}.content"), &part["content"]),
+        serde_json::json!([{"type": "text", "text": "secret parts"}])
+    );
+    assert_eq!(
+        client.open(
+            id,
+            &format!("{prefix}.function_call.arguments"),
+            &part["function_call"]["arguments"]
+        ),
+        serde_json::json!({"account": "secret"})
+    );
+}
+
+#[tokio::test]
+async fn e2ee_v2_1_encrypts_streamed_reasoning_images_and_custom_tool_input() {
+    let frame = format!(
+        "data: {}\n\n",
+        serde_json::json!({
+            "id": "chat-generated-stream", "object": "chat.completion.chunk", "model": "aci-model",
+            "choices": [{"index": 0, "delta": v2_1_generated_members()}],
+        })
+    );
+    let h = harness_with_e2ee(RecordingUpstream::with_stream_chunks(vec![
+        Bytes::from(frame),
+        Bytes::from_static(b"data: [DONE]\n\n"),
+    ]));
+    let client = V2_1Client::new(&h, 0x96, "nonce-v2.1-generated-stream");
+    let body = serde_json::json!({
+        "model": "aci-model",
+        "stream": true,
+        "messages": [{"role": "user", "content": client.seal("messages.0.content", serde_json::json!("hi"))}],
+    });
+    let resp = client.post(&h, "/v1/chat/completions", &body).await;
+    let wire = String::from_utf8(resp.body.clone()).unwrap();
+    assert!(
+        !wire.contains("secret") && !wire.contains("c2VjcmV0"),
+        "{wire}"
+    );
+    let event = open_v2_1_mac(sse_json_events(&resp.body).remove(0));
+    assert_v2_1_generated_members_open(
+        &client,
+        "chat-generated-stream",
+        "choices.0.delta",
+        &event["choices"][0]["delta"],
     );
 }

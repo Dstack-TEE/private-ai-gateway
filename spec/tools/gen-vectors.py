@@ -246,7 +246,7 @@ V21_FIELD_AAD = jcs({
     "nonce": TEST_NONCE,
     "ts": 1750000000,
 })
-# v2.1 whole content is the JSON encoding of the content value (§10.5).
+# Every v2.1 plaintext is the JSON encoding of the value (§10.5).
 V21_FIELD_CIPHERTEXT = x25519_seal(
     V21_FIELD_EPH, E2EE_PUB, json.dumps("hello").encode(), V21_FIELD_AAD,
     V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", V21_FIELD_NONCE)
@@ -280,8 +280,9 @@ V21_RESPONSE_AAD = jcs({
     "nonce": TEST_NONCE,
     "ts": 1750000000,
 })
+# Every v2.1 plaintext is the JSON encoding of the value (§10.5).
 V21_RESPONSE_CIPHERTEXT = x25519_seal(
-    V21_RESPONSE_EPH, V21_CLIENT_PUB, b"plain-answer", V21_RESPONSE_AAD,
+    V21_RESPONSE_EPH, V21_CLIENT_PUB, json.dumps("plain-answer").encode(), V21_RESPONSE_AAD,
     V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", V21_RESPONSE_NONCE)
 
 V21_RESPONSE_OBJECT = {
@@ -303,7 +304,7 @@ V21_STREAM_AAD = jcs({
     "ts": 1750000000,
 })
 V21_STREAM_CIPHERTEXT = x25519_seal(
-    x25519_from_seed(bytes([0x0C]) * 32)[0], V21_CLIENT_PUB, b"Hello", V21_STREAM_AAD,
+    x25519_from_seed(bytes([0x0C]) * 32)[0], V21_CLIENT_PUB, json.dumps("Hello").encode(), V21_STREAM_AAD,
     V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", bytes([0x0D]) * 12)
 
 
@@ -379,21 +380,21 @@ PINNED = {
         "b0fa918cd95421605c3b82b5bd7ac017cda0e8ac1c9836d409013e2369dd90e2"
         "54dbbe44006ff09d098c5f212ff666088c3724c5c51b43e51576c633"),
     "v2.1 response MAC": (V21_RESPONSE_MAC,
-        "139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e"),
+        "85874235a2eb56bdcf4bf6dc7f52f0fab9b3edfd410274bb9aaf56b4dd620c28"),
     "v2.1 stream delta ciphertext": (V21_STREAM_CIPHERTEXT,
         "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333"
-        "0d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa47809834"
-        "33"),
+        "0d0d0d0d0d0d0d0d0d0d0d0d9ec4f191936e4e179f68a3bbe739537e639286fe"
+        "5c6a6b"),
     "v2.1 stream event 1 MAC": (v21_mac(V21_EVENT_1),
-        "5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44"),
+        "5ebf698533dd276e7017daf135bde41e3bf351b5e49d08223260b5e03e57ec21"),
     "v2.1 stream event 2 MAC": (v21_mac(V21_EVENT_2),
         "7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c"),
     "v2.1 spliced event MAC": (v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}),
         "bc1bf0a5179c96234d1533533f31f7d2fc5471004c2b7f7b10d37e4d94bb24fe"),
     "v2.1 response field ciphertext": (V21_RESPONSE_CIPHERTEXT,
         "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421"
-        "0b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28"
-        "ccdc25655e089f8e"),
+        "0b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773a"
+        "ca36860864a0c2f3f37f"),
 }
 
 

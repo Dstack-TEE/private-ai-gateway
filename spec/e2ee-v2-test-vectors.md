@@ -103,8 +103,8 @@ Plaintext: the request secret followed by `body_digest`. AAD:
 
 ### Response field
 
-`choices.0.message.content` = `plain-answer`, encrypted to the client key, with
-AAD:
+`choices.0.message.content` = `"plain-answer"` (the JSON encoding of the text,
+§10.5), encrypted to the client key, with AAD:
 
 ```text
 {"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2.1","ts":1750000000}
@@ -113,7 +113,7 @@ AAD:
 Ciphertext:
 
 ```text
-57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e
+57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f
 ```
 
 ### Response MAC
@@ -121,21 +121,21 @@ Ciphertext:
 The response object carrying that field, in JCS form without `e2ee_mac`:
 
 ```text
-{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}
+{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f","role":"assistant"}}],"id":"chatcmpl-123"}
 ```
 
-`e2ee_mac` = `139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e`
+`e2ee_mac` = `85874235a2eb56bdcf4bf6dc7f52f0fab9b3edfd410274bb9aaf56b4dd620c28`
 
 ### Streamed response
 
-A `"stream": true` request to the inputs above. The delta `Hello` is sealed to
-the client key with ephemeral seed 32 × `0x0c` and AES-GCM nonce 12 × `0x0d`,
+A `"stream": true` request to the inputs above. The delta `Hello` is sealed as
+`"Hello"` to the client key with ephemeral seed 32 × `0x0c` and AES-GCM nonce 12 × `0x0d`,
 field `choices.0.delta.content`, response id `chatcmpl-123`. Each event carries
 its position `e2ee_seq` and its MAC. The exact stream bytes, with `\n` line
 endings:
 
 ```text
-data: {"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433"},"index":0}],"e2ee_mac":"5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44","e2ee_seq":0,"id":"chatcmpl-123"}
+data: {"choices":[{"delta":{"content":"97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0d9ec4f191936e4e179f68a3bbe739537e639286fe5c6a6b"},"index":0}],"e2ee_mac":"5ebf698533dd276e7017daf135bde41e3bf351b5e49d08223260b5e03e57ec21","e2ee_seq":0,"id":"chatcmpl-123"}
 
 data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"e2ee_mac":"7d11e2d261802a4a90f15a70727e541c1972168c6e053dd7ef5d4e6fe3b5cd7c","e2ee_seq":1,"id":"chatcmpl-123"}
 

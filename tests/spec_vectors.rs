@@ -298,10 +298,10 @@ const V21_BODY_DIGEST: &str = "dc75693896a5b40b45592667704f41ff057a5063c92e3117d
 const V21_REQUEST_KEY_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","client_pub_key":"ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request-key.v2.1","ts":1750000000}"#;
 const V21_REQUEST_KEY: &str = "13be4feaeaf204c7fd3358fc9c00721881d174278128227ec674f37f7fe97b6d080808080808080808080808d4c43624763b8e0079b38271adfa9fae2e78243bb0fa918cd95421605c3b82b5bd7ac017cda0e8ac1c9836d409013e2369dd90e254dbbe44006ff09d098c5f212ff666088c3724c5c51b43e51576c633";
 const V21_RESPONSE_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2.1","ts":1750000000}"#;
-const V21_RESPONSE_CIPHERTEXT: &str = "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e";
+const V21_RESPONSE_CIPHERTEXT: &str = "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f";
 
-const V21_RESPONSE_OBJECT: &str = r#"{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}"#;
-const V21_RESPONSE_MAC: &str = "139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e";
+const V21_RESPONSE_OBJECT: &str = r#"{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b2db692c9ddf499146c55c93bff5841a9a068773aca36860864a0c2f3f37f","role":"assistant"}}],"id":"chatcmpl-123"}"#;
+const V21_RESPONSE_MAC: &str = "85874235a2eb56bdcf4bf6dc7f52f0fab9b3edfd410274bb9aaf56b4dd620c28";
 
 #[test]
 fn e2ee_v2_1_vectors_open_with_the_library_constructions() {
@@ -369,7 +369,7 @@ fn e2ee_v2_1_vectors_open_with_the_library_constructions() {
             kdf
         )
         .unwrap(),
-        b"plain-answer"
+        br#""plain-answer""#
     );
 
     // The response MAC is HMAC-SHA256 over the object's JCS form.
@@ -392,11 +392,11 @@ fn e2ee_v2_1_stream_vector_matches_the_gateway_mac_and_opens_for_the_client() {
             &serde_json_canonicalizer::to_vec(&object).unwrap(),
         ))
     };
-    let delta = "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433";
+    let delta = "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0d9ec4f191936e4e179f68a3bbe739537e639286fe5c6a6b";
     assert_eq!(
         mac(serde_json::json!({"id": "chatcmpl-123", "e2ee_seq": 0,
             "choices": [{"index": 0, "delta": {"content": delta}}]})),
-        "5c37140c3570da5ce27bb6442265d2c1bc452824d12d06d1a59e11f3a01f1b44"
+        "5ebf698533dd276e7017daf135bde41e3bf351b5e49d08223260b5e03e57ec21"
     );
     assert_eq!(
         mac(serde_json::json!({"id": "chatcmpl-123", "e2ee_seq": 1,
@@ -413,5 +413,8 @@ fn e2ee_v2_1_stream_vector_matches_the_gateway_mac_and_opens_for_the_client() {
     let kdf = E2eeKdf::V2_1Field {
         request_secret: &V21_REQUEST_SECRET,
     };
-    assert_eq!(decrypt_x25519(&client, delta, &aad, kdf).unwrap(), b"Hello");
+    assert_eq!(
+        decrypt_x25519(&client, delta, &aad, kdf).unwrap(),
+        br#""Hello""#
+    );
 }

@@ -345,8 +345,12 @@ The client:
 2. Encrypts every request field (§10.5) with the v2.1 field key (§10.4).
 3. Computes `body_digest = SHA-256(JCS(body))` over the final JSON request
    body, with the ciphertext fields in place. JCS is RFC 8785, including its
-   number formatting. The body MUST be I-JSON (RFC 7493), so integers stay
-   within ±2^53.
+   number formatting, with one difference: a number written without fraction
+   or exponent from −2^63 to 2^64 − 1 is written as its exact decimal digits.
+   Inside ±2^53 that is what JCS writes; beyond it JCS rounds to a double, so
+   a changed integer such as a large `seed` could keep the digest. A
+   JavaScript client holds no larger integer exactly and sends the digits of
+   its double, so plain JCS gives it the same digest.
 4. Seals the 64 bytes `request_secret || body_digest` to the service key with
    the §4 construction, the request-key HKDF info (§10.4), and this AAD:
 
@@ -390,41 +394,47 @@ key and the request secret. Clients SHOULD use a fresh client key per request.
 Field AAD is the §6 object with the purposes `aci.e2ee.request.v2.1` and
 `aci.e2ee.response.v2.1`, and `algo` set to the v2.1 algo.
 
-V2.1 encrypts all §5 locations except per-part request content, which it
-encrypts whole (below), plus:
+V2.1 encrypts the locations below. They include every §5 location except
+per-part request content, which v2.1 encrypts whole. In a chat message, `{p}`
+is `messages.{m}` in a request (history the client sends back) and
+`choices.{i}.message` or, in a stream, `choices.{i}.delta` in a response. The
+same message locations apply in both directions:
 
-| Direction | Field path | Plaintext |
-| --- | --- | --- |
-| request | `messages.{m}.reasoning`, `messages.{m}.reasoning_content`, `messages.{m}.refusal` | the string |
-| request | `messages.{m}.tool_calls.{t}.function.arguments`, `messages.{m}.function_call.arguments` | the string |
-| request | `prediction.content` | the JSON encoding of the value, as for whole content |
-| request | `suffix` (`/v1/completions`) | the string |
-| chat response, buffered `message` or streamed `delta` (`{p}` = `choices.{i}.message` or `choices.{i}.delta`) | `{p}.refusal`, `{p}.function_call.arguments`, `{p}.tool_calls.{t}.function.arguments`, `{p}.audio.transcript`, and in a stream `{p}.audio.data` | the string |
-| chat response | `{p}.annotations` | its compact JSON |
-| any response | `choices.{i}.logprobs`, `choices.{i}.token_ids`, `choices.{i}.prompt_token_ids`, `choices.{i}.prompt_logprobs`, `prompt_token_ids`, `prompt_logprobs` | its compact JSON |
+| Where | Field paths |
+| --- | --- |
+| chat message, request and response | `{p}.content`, `{p}.reasoning`, `{p}.reasoning_content`, `{p}.refusal`, `{p}.annotations`, `{p}.reasoning_details`, `{p}.thinking_blocks`, `{p}.reasoning_items`, `{p}.images`, `{p}.audio.data`, `{p}.audio.transcript`, `{p}.function_call.arguments`, `{p}.tool_calls.{t}.function.arguments`, `{p}.tool_calls.{t}.custom.input` |
+| chat request | `prediction.content` |
+| completions request | `prompt` or `prompt.{n}`, `suffix` |
+| embeddings request | `input` or `input.{n}`, and `messages` as in chat |
+| chat and completions response | `choices.{i}.logprobs`, `choices.{i}.token_ids`, `choices.{i}.prompt_token_ids`, `choices.{i}.prompt_logprobs`, `prompt_token_ids`, `prompt_logprobs` |
+| completions response | `choices.{i}.text` |
+| embeddings response | `data.{i}.embedding` |
 
 The `token_ids` and `prompt_*` members are vLLM's echoes of the generated and
-prompt tokens. `{t}` is the tool call's `index` member when it is a
-non-negative integer and its array position otherwise. A number with a zero
-fraction, such as `1.0`, is that integer up to 2^53 − 1, the range a
-JavaScript `JSON.parse` keeps exact; the path is written in integer form
-(`…tool_calls.1…`).
+prompt tokens. `{i}` and `{t}` are the entry's `index` member when it is a
+non-negative integer up to 2^53 − 1, the range a JavaScript `JSON.parse`
+keeps exact, and its array position otherwise. A number with a zero fraction,
+such as `1.0`, is that integer; the path is written in integer form
+(`…tool_calls.1…`). `{m}` and `{n}` are array positions.
 
-The client MUST encrypt every request string at these locations, and every
-non-null whole-content value. The service decrypts every string at them, so a
-plaintext one fails with `e2ee_decryption_failed`. A `null` or absent value is
-skipped. A value of another type at a string location, such as token ids in
-`prompt`, `input`, or a non-string `arguments`, passes through unencrypted, as
-in §5; it is readable. Unlike v2, a v2.1 request need not contain an encrypted
-field: the request key already binds the body, so a token-id prompt is valid.
+**Plaintext.** Every v2.1 plaintext is the compact JSON encoding of the
+location's value, whatever its type: the text `hello` is sealed as `"hello"`,
+an `arguments` object or a content array as that object or array. The
+receiver restores the value by parsing that JSON, so a value of an unexpected
+type is neither refused nor left readable, and text that looks like JSON stays
+text. A plaintext that is not JSON fails with `e2ee_decryption_failed` in a
+request and fails the response at the client.
 
-A whole-content plaintext (`messages.{m}.content`, `prediction.content`) is the
-JSON encoding of the value: a JSON string for text, a JSON array for structured
-content. The service restores the value by parsing that JSON and fails with
-`e2ee_decryption_failed` when it is not JSON. V2.1 has no per-part form, so a
-whole-content location that holds anything but a ciphertext string or `null`
-fails the same way. Text that happens to look like a JSON array therefore
-stays text, unlike v2's restoration rule (§5).
+**Token ids.** In `prompt` and `input`, the whole value or an array item that
+is a number or an array of numbers is token ids. It stays readable and unsealed,
+as in §5; every other item, such as text or a multimodal object, is sealed.
+
+The client MUST seal every present, non-null value at these locations, and the
+service seals every one in a response. A `null` or absent value is skipped.
+The service fails a request with `e2ee_decryption_failed` when a location
+holds anything but a ciphertext string or `null`, for example a string or
+parts in clear. Unlike v2, a v2.1 request need not contain an encrypted field:
+the request key already binds the body, so a token-id prompt is valid.
 
 #### Readable members
 
@@ -432,9 +442,9 @@ Everything else in a v2.1 request is sent as the client wrote it, so a v2.1
 request can carry every member a plaintext request can: sampling parameters,
 `tools` and `functions`, `response_format`, `metadata`, `user`,
 `prompt_cache_key`, `cache_salt`, `chat_template_kwargs`, `thinking`,
-`modalities` and `audio`, `provider`, vendor extensions, and members a reply
-echoes back as history, such as `annotations` or `audio: {"id": …}`. The
-service forwards them unchanged.
+`modalities` and `audio`, `provider`, vendor extensions, and the readable
+parts of history a reply echoes back, such as a tool call's `id` and `name` or
+`audio: {"id": …}`. The service forwards them unchanged.
 
 Readable members are visible to every intermediary, but the body digest
 (§10.3) binds them: none can be added, removed, or changed without
@@ -467,7 +477,7 @@ The client MUST, for each response object:
    before this one, then remove it;
 4. require `choices` and `data`, when present, to be arrays;
 5. in a stream, require every event's `id` to equal the first event's;
-6. decrypt every §5 and §10.5 location that is present.
+6. decrypt every §10.5 location that is present.
 
 In a stream, the client passes `data: [DONE]` through, ignores SSE comment
 lines, and rejects any other line and any event after `[DONE]`. Error
@@ -486,8 +496,8 @@ failure, before any upstream request:
    (`e2ee_invalid_payload_model`).
 6. `X-E2EE-Request-Key` opens under the §10.3 AAD and holds 64 bytes:
    `e2ee_decryption_failed`.
-7. The body is I-JSON, with no integer beyond ±2^53, and the sealed digest
-   equals `SHA-256(JCS(body))` of the received body: `e2ee_body_mismatch`.
+7. The sealed digest equals the §10.3 digest of the received body:
+   `e2ee_body_mismatch`.
 8. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
 9. The replay tuple is unused (§7): `e2ee_replay_detected`.
 
@@ -504,10 +514,12 @@ Receipts follow §8 unchanged.
   repeated, and reordered events, but not truncation. The receipt's
   `response.returned.body_hash` covers the exact stream (§8), so detecting
   truncation takes a receipt check over the raw bytes received.
-- Request members outside §5 and §10.5 stay readable (§10.5, Readable
-  members).
-- Response members outside §5 and §10.5 that an upstream adds stay readable;
-  the MAC stops changes to them.
+- Request members outside §10.5 stay readable (§10.5, Readable
+  members), and so do token ids in `prompt` and `input`.
+- Response members outside §10.5 stay readable; the MAC stops changes to
+  them. They include a tool call's `name` and `id`, `audio.id`, a choice's
+  `finish_reason` and in-band `error`, and members an upstream adds that the
+  service does not know.
 - An intermediary can still drop or delay requests.
 - Replay state lives in the service process. A service restart inside the
   timestamp window lets an earlier request run again. The intermediary still
@@ -540,5 +552,4 @@ Normative for this compatibility protocol:
 - RFC 5869: HKDF.
 - NIST SP 800-38D: AES-GCM.
 - RFC 8785: JSON Canonicalization Scheme (JCS).
-- RFC 7493: The I-JSON Message Format.
 - RFC 2104: HMAC.
