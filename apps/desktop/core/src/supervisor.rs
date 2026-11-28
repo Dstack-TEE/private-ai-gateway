@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 #[cfg(any(
     target_os = "linux",
     all(target_os = "macos", not(feature = "mac-app-store"))
@@ -287,6 +289,108 @@ pub fn unregister() -> Result<(), String> {
 /// Whether the service manager starts this installation's backend.
 pub fn enabled() -> bool {
     running_pid().is_ok_and(|pid| pid.is_some())
+}
+
+#[derive(Serialize)]
+pub struct LoginServiceStatus {
+    enabled: bool,
+    active: bool,
+    reason: Option<LoginServiceReason>,
+    detail: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LoginServiceReason {
+    DisabledByUser,
+    SkippedEnvironmentOverrides,
+    AutomaticRegistrationUnavailable,
+    PathOverrides,
+    Unsupported,
+    ServiceManagerUnavailable,
+    InspectionFailed,
+}
+
+impl LoginServiceStatus {
+    fn unavailable(reason: LoginServiceReason, detail: impl Into<String>) -> Self {
+        Self {
+            enabled: false,
+            active: false,
+            reason: Some(reason),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Read-only diagnosis of this installation's login service.
+pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> LoginServiceStatus {
+    use LoginServiceReason as Reason;
+
+    if relocated() {
+        return LoginServiceStatus::unavailable(
+            Reason::PathOverrides,
+            "Unavailable with PAP path overrides",
+        );
+    }
+    if !supported() {
+        return LoginServiceStatus::unavailable(
+            Reason::Unsupported,
+            "Unavailable for this installation",
+        );
+    }
+    if !user_service_manager_available() {
+        return LoginServiceStatus::unavailable(
+            Reason::ServiceManagerUnavailable,
+            "Unavailable because no user service manager is running",
+        );
+    }
+    #[cfg(target_os = "linux")]
+    let registration = platform::inspect_login_service();
+    #[cfg(not(target_os = "linux"))]
+    let registration =
+        platform::running_pid().map(|pid| (pid.is_some(), pid.is_some_and(|pid| pid != 0)));
+    let (enabled, active) = match registration {
+        Ok(status) => status,
+        Err(error) => {
+            return LoginServiceStatus::unavailable(
+                Reason::InspectionFailed,
+                format!("Cannot inspect login service: {error}"),
+            )
+        }
+    };
+    let (reason, detail) = match (enabled, active) {
+        (true, true) => (None, "Enabled (active)".into()),
+        (true, false) => (None, "Enabled (inactive)".into()),
+        (false, true) => (None, "Active (disabled at login)".into()),
+        (false, false) => match automatic_blockers_for(
+            &process_environment(agent_environment_overrides.to_vec()),
+            declined().is_some_and(|marker| marker.exists()),
+            installation_supports_automatic_supervision(),
+        ) {
+            AutomaticBlockers::Eligible => (None, "Disabled".into()),
+            AutomaticBlockers::Declined => (
+                Some(Reason::DisabledByUser),
+                "Disabled by pap service disable".into(),
+            ),
+            AutomaticBlockers::Unsupported => (
+                Some(Reason::AutomaticRegistrationUnavailable),
+                "Automatic registration is unavailable for this installation".into(),
+            ),
+            AutomaticBlockers::Environment(names) => (
+                Some(Reason::SkippedEnvironmentOverrides),
+                format!(
+                    "Automatic registration skipped because of environment overrides: {}",
+                    names.join(", ")
+                ),
+            ),
+        },
+    };
+    LoginServiceStatus {
+        enabled,
+        active,
+        reason,
+        detail,
+    }
 }
 
 /// PID of the enabled, owned login service. Zero means it is idle.
@@ -677,7 +781,7 @@ mod platform {
             let output = systemctl(&[
                 "show",
                 "--all",
-                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState,MainPID",
+                "--property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload,UnitFileState,ActiveState,MainPID",
                 UNIT,
             ])?;
             let text = String::from_utf8_lossy(&output.stdout);
@@ -705,8 +809,10 @@ mod platform {
                         return Err(format!("The systemd user unit {UNIT} has an unexpected restart policy"));
                     }
                     let file_state = property("UnitFileState").ok_or("systemd did not report the unit file state")?.to_owned();
+                    let active_state = property("ActiveState").ok_or("systemd did not report the unit active state")?;
+                    let active = matches!(active_state, "active" | "reloading" | "refreshing");
                     let pid = property("MainPID").and_then(|pid| pid.parse().ok()).ok_or("systemd did not report the backend PID")?;
-                    Ok(State::Loaded(Loaded { file_state, pid }))
+                    Ok(State::Loaded(Loaded { file_state, active, pid }))
                 }
                 _ => Err(format!("The effective systemd user unit {UNIT} belongs to another installation or was customized")),
             }
@@ -721,16 +827,28 @@ mod platform {
 
     struct Loaded {
         file_state: String,
+        active: bool,
         pid: u32,
+    }
+
+    impl Loaded {
+        fn enabled(&self) -> bool {
+            matches!(self.file_state.as_str(), "enabled" | "enabled-runtime")
+        }
     }
 
     pub(super) fn running_pid() -> Result<Option<u32>, String> {
         Ok(Registration::for_installation()?
             .state()?
-            .and_then(|loaded| {
-                matches!(loaded.file_state.as_str(), "enabled" | "enabled-runtime")
-                    .then_some(loaded.pid)
-            }))
+            .and_then(|loaded| loaded.enabled().then_some(loaded.pid)))
+    }
+
+    pub(super) fn inspect_login_service() -> Result<(bool, bool), String> {
+        match Registration::for_installation()?.loaded_state()? {
+            State::Missing => Ok((false, false)),
+            State::Loaded(loaded) => Ok((loaded.enabled(), loaded.active)),
+            State::Reload => Err(format!("The systemd user unit {UNIT} has pending changes")),
+        }
     }
 
     pub(super) fn enable() -> Result<bool, String> {

@@ -33,7 +33,7 @@ use providers::*;
 pub(crate) use registry::AgentIntegration;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -72,6 +72,63 @@ const HELPER_MISSING: &str =
                               agents cannot be connected";
 const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
     Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
+
+/// Path selectors in the same precedence order as agent configuration discovery.
+pub fn config_path_sources(agent: Agent) -> &'static [&'static str] {
+    use registry::*;
+    match agent {
+        Agent::Codex => &[CODEX_HOME],
+        Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR],
+        Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME],
+        Agent::Pi => &[PI_CODING_AGENT_DIR],
+        Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR],
+        Agent::Hermes if cfg!(windows) => &[HERMES_HOME, LOCALAPPDATA],
+        Agent::Hermes => &[HERMES_HOME],
+        Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME],
+        Agent::Dsh => &[DSH_HOME],
+    }
+}
+
+/// Only variables that select a config path. Inline config and tokens can contain secrets.
+pub fn agent_path_overrides() -> BTreeMap<String, String> {
+    Agent::ALL
+        .into_iter()
+        .flat_map(config_path_sources)
+        .filter_map(|&name| {
+            env_path(name).map(|path| (name.into(), path.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// Variables that can change which configuration layers or credentials an agent uses.
+pub fn validation_sources(agent: Agent) -> &'static [&'static str] {
+    use desktop_core::paths::agent_environment::DSH_TOKEN_REF;
+    use registry::*;
+    match agent {
+        Agent::OpenCode if cfg!(windows) => {
+            &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT, PROGRAM_DATA]
+        }
+        Agent::OpenCode => &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT],
+        Agent::OhMyPi => &[OMP_PROFILE, PI_PROFILE],
+        Agent::OpenClaw => &[OPENCLAW_PROFILE, OPENCLAW_NIX_MODE],
+        Agent::Dsh => &[DSH_TOKEN_REF],
+        _ => &[],
+    }
+}
+
+/// Validation variables may contain secrets. Capture their names alone.
+pub fn agent_validation_overrides() -> BTreeSet<String> {
+    Agent::ALL
+        .into_iter()
+        .flat_map(validation_sources)
+        .filter(|name| env::var_os(name).is_some())
+        .map(|&name| name.into())
+        .collect()
+}
+
+pub fn shell_config_path(agent: Agent) -> Result<PathBuf, String> {
+    Ok(agent.config_path(&home_dir()?, true))
+}
 
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {

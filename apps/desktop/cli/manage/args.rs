@@ -112,7 +112,7 @@ pub enum Service {
     Stop,
     /// Restart the backend. Protection resumes and agents stay connected.
     Restart,
-    /// Use the service manager's environment and start the backend at login and after a crash (Linux and macOS).
+    /// Start the backend under the service manager now, at login, and after a crash, using the service manager's environment (Linux and macOS).
     Enable,
     /// Stop the backend, restore agent configurations and turn off login supervision.
     Disable {
@@ -211,6 +211,16 @@ impl From<Provider> for desktop_core::contracts::ServiceProvider {
     }
 }
 
+fn add_url_help() -> String {
+    use desktop_core::contracts::ServiceProvider;
+    let preset = |provider: ServiceProvider| provider.preset_url().unwrap_or_default();
+    format!(
+        "ACI service endpoint URL; required for --provider custom. RedPill uses {} and Phala uses {}",
+        preset(ServiceProvider::Redpill),
+        preset(ServiceProvider::Phala),
+    )
+}
+
 #[derive(Args)]
 pub struct AccountLoginOptions {
     /// Existing or new profile ID.
@@ -278,10 +288,11 @@ pub enum Profiles {
         id: String,
         #[arg(long, help = "Display name")]
         name: String,
-        #[arg(long, help = "ACI service endpoint URL")]
-        url: String,
-        #[arg(long, value_enum, default_value_t = Provider::Custom)]
-        provider: Provider,
+        #[arg(long, help = add_url_help())]
+        url: Option<String>,
+        /// Service provider. Defaults to custom with --url, or redpill without it.
+        #[arg(long, value_enum)]
+        provider: Option<Provider>,
         /// Read the credential from stdin instead of a hidden terminal prompt.
         #[arg(long)]
         key_stdin: bool,
@@ -310,7 +321,8 @@ pub enum Profiles {
         /// New display name.
         #[arg(long)]
         name: Option<String>,
-        /// New ACI service endpoint URL.
+        /// New service endpoint URL. Omit to use the selected preset URL or keep
+        /// the saved custom URL. Required when switching from a preset to custom.
         #[arg(long)]
         url: Option<String>,
         /// New service provider type.

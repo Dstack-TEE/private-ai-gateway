@@ -11,6 +11,7 @@ use desktop_core::{
     client::{CallError, Client, Watched},
     contracts::*,
     protocol::{self, export_path, rpc, NotificationKind, Preference},
+    supervisor::{self, AutomaticBlockers},
     usage::UsageQuery,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -19,6 +20,7 @@ use serde_json::{json, Map, Value};
 use crate::Global;
 
 mod account;
+mod agent_paths;
 mod args;
 mod install;
 mod output;
@@ -77,43 +79,11 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
         Action::Start { profile, timeout } => {
-            let mut state = start(&client, profile.as_deref(), *timeout)?;
-            // Protection the user turned on goes on across logins and crashes
-            // until they stop it: the backend moves under the service manager
-            // and resumes the session there.
-            let agent_environment_overrides = agent_bridge::agents::environment_overrides();
-            let blockers =
-                desktop_core::supervisor::automatic_blockers(&agent_environment_overrides);
-            let registration = blockers
-                .is_eligible()
-                .then(|| desktop_core::supervisor::enable().ok())
-                .flatten();
-            if let Some(newly_enabled) = registration {
-                let moved = client.handoff_to_supervisor()?;
-                if !global.json && (newly_enabled || moved) {
-                    eprintln!("Protection now resumes at login and after a crash using the service manager's environment (pap service disable turns that off).");
-                }
-                if moved {
-                    start(&client, profile.as_deref(), *timeout)?
-                } else {
-                    state
-                }
-            } else {
-                if matches!(
-                    &blockers,
-                    desktop_core::supervisor::AutomaticBlockers::Environment(_)
-                ) && !desktop_core::supervisor::enabled()
-                {
-                    if let Some(notice) = notice_if_unowned(blockers, false) {
-                        if let Some(notice) =
-                            apply_supervision_notice(global.json, &mut state, notice)
-                        {
-                            eprintln!("{notice}");
-                        }
-                    }
-                }
-                state
+            let mut state = start_with_supervision(&client, global, profile.as_deref(), *timeout)?;
+            if let Ok(version) = client.version() {
+                add_agent_path_warnings(&mut state, agent_paths::warnings(&client, &version));
             }
+            state
         }
         Action::Stop { offline: false } => {
             if !client.is_running()? {
@@ -130,13 +100,19 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         Action::Models {
             command: Models::List { refresh },
         } => {
+            if !client.is_running()? {
+                return Err(
+                    "Backend is not running. Run pap start to verify the service and enable protection."
+                        .into(),
+                );
+            }
             let state = if *refresh {
                 client.call(rpc::RefreshCatalog)?.state
             } else {
                 client.state()?
             };
             value(state.catalog.ok_or(
-                "No verified model catalog. Start protection and wait for verification first.",
+                "No verified model catalog. Run pap start to start and verify protection.",
             )?)?
         }
         Action::Usage {
@@ -247,13 +223,47 @@ fn apply_supervision_notice(
     }
 }
 
-fn notice_if_unowned(
-    blockers: desktop_core::supervisor::AutomaticBlockers,
-    owned_registration: bool,
-) -> Option<String> {
+fn notice_if_unowned(blockers: AutomaticBlockers, owned_registration: bool) -> Option<String> {
     (!owned_registration)
-        .then(|| desktop_core::supervisor::automatic_skip_notice(blockers))
+        .then(|| supervisor::automatic_skip_notice(blockers))
         .flatten()
+}
+
+/// Move verified protection under the login service when eligible, then wait
+/// for the session to resume there.
+fn start_with_supervision(
+    client: &Client,
+    global: &Global,
+    profile: Option<&str>,
+    timeout: u64,
+) -> Result<Value, CallError> {
+    let mut state = start(client, profile, timeout)?;
+    let blockers = supervisor::automatic_blockers(&agent_bridge::agents::environment_overrides());
+    let notice = match blockers {
+        AutomaticBlockers::Eligible => match supervisor::enable() {
+            Ok(newly_enabled) => {
+                let moved = client.handoff_to_supervisor()?;
+                if moved {
+                    state = start(client, profile, timeout)?;
+                }
+                if !global.json && (newly_enabled || moved) {
+                    eprintln!("Protection now resumes at login and after a crash using the service manager's environment (pap service disable turns that off).");
+                }
+                None
+            }
+            Err(error) => Some(format!(
+                "Could not enable the login service: {error}. Protection is running."
+            )),
+        },
+        AutomaticBlockers::Environment(_) => notice_if_unowned(blockers, supervisor::enabled()),
+        _ => None,
+    };
+    if let Some(notice) = notice {
+        if let Some(notice) = apply_supervision_notice(global.json, &mut state, notice) {
+            eprintln!("warning: {}", private_ai_proxy::safe(&notice));
+        }
+    }
+    Ok(state)
 }
 
 /// `status --watch`: the current state, then each change. Human output skips
@@ -299,21 +309,42 @@ fn watch_status(global: &Global) -> Result<(), CallError> {
 }
 
 fn status(client: &Client) -> Result<Value, CallError> {
-    Ok(if client.is_running()? {
-        json!({"backend": client.version()?, "gateway": AppStateWire::from(client.state()?)})
+    let mut status = if client.is_running()? {
+        let version = client.version()?;
+        let mut status =
+            json!({"backend": version, "gateway": AppStateWire::from(client.state()?)});
+        add_agent_path_warnings(&mut status, agent_paths::warnings(client, &version));
+        status
     } else {
         json!({"backend": null, "status": "not_running"})
-    })
+    };
+    status["loginService"] = json!(login_service_status());
+    Ok(status)
+}
+
+fn add_agent_path_warnings(status: &mut Value, warnings: Vec<String>) {
+    if !warnings.is_empty() {
+        status["agentPathWarnings"] = json!(warnings);
+    }
+}
+
+fn login_service_status() -> supervisor::LoginServiceStatus {
+    supervisor::login_service_status(&agent_bridge::agents::environment_overrides())
 }
 
 fn service(client: &Client, global: &Global, command: &Service) -> Result<Value, CallError> {
     match command {
         Service::Start => {
-            Client::ensure_service()?;
-            value(client.version()?)
+            let started = Client::start_service_if_needed()?;
+            let mut result = value(client.version()?)?;
+            if !global.json {
+                result["alreadyRunning"] = json!(!started);
+            }
+            Ok(result)
         }
         Service::Stop => {
-            if client.is_running()? {
+            let running = client.is_running()?;
+            if running {
                 confirm(
                     global,
                     "Stop the backend and restore managed agent configurations?",
@@ -326,31 +357,37 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                 )?;
                 restore_agents_offline(client)?;
             }
-            Ok(json!({"status": "stopped"}))
+            let mut result = json!({"status": "stopped"});
+            if !global.json {
+                result["alreadyStopped"] = json!(!running);
+            }
+            Ok(result)
         }
         Service::Restart => {
             client.restart_service()?;
             value(client.version()?)
         }
         Service::Enable => {
-            // The backend that runs now moves under the service manager.
-            desktop_core::supervisor::enable()?;
+            // The backend that runs now moves under the service manager, and
+            // one that is not running starts there, like `systemctl enable --now`.
+            supervisor::enable()?;
             client.handoff_to_supervisor()?;
+            Client::ensure_service()?;
             Ok(json!({"startAtLogin": true}))
         }
         Service::Disable { for_uninstall } => {
             // Windows uses the app's login item and has no backend registration.
             if cfg!(windows) {
-                return Ok(json!({"startAtLogin": false}));
+                return Ok(json!({"startAtLogin": false, "supported": false}));
             }
             let disable = if *for_uninstall {
-                desktop_core::supervisor::unregister
+                supervisor::unregister
             } else {
-                desktop_core::supervisor::disable
+                supervisor::disable
             };
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
-            if desktop_core::supervisor::enabled() && client.is_running()? {
+            if supervisor::enabled() && client.is_running()? {
                 client.shutdown_installed()?;
                 disable()?;
             } else {
@@ -404,11 +441,16 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
         return Err("No profile yet. Sign in with pap profiles login <id>, or add a service and key with pap profiles add.".into());
     }
     if !state.api_key_saved {
-        return Err(format!(
-            "The active profile has no API key. Add one with pap profiles verify {}.",
-            state.active_profile_id
-        )
-        .into());
+        if let Some(profile) = state
+            .profiles
+            .iter()
+            .find(|p| p.id == state.active_profile_id)
+        {
+            return Err(missing_profile_credential(profile).into());
+        }
+        return Err(
+            "The active profile has no saved credential. Inspect pap profiles list.".into(),
+        );
     }
     let settled = |state: &AppState| !state.configuration_verification;
     if state.status == VerificationStatus::Verified && settled(&state) {
@@ -451,6 +493,18 @@ fn start(client: &Client, profile: Option<&str>, timeout: u64) -> Result<Value, 
     }
 }
 
+fn missing_profile_credential(profile: &ConfidentialProfile) -> String {
+    let (credential, command) = if profile.auth.is_api_key() {
+        ("API key", "verify")
+    } else {
+        ("account credential", "login")
+    };
+    format!(
+        "No saved {credential} for {}. Run pap profiles {command} {}.",
+        profile.name, profile.id
+    )
+}
+
 /// Why `start` ended without verified protection: the backend's reason,
 /// typed as a verification failure when the service did not pass.
 fn unverified(state: &AppState) -> CallError {
@@ -491,6 +545,8 @@ fn restore_agents_offline(client: &Client) -> Result<Value, CallError> {
 
 fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Value, CallError> {
     const SAVE: &str = "Save this profile? This selects it as active and may restart protection.";
+    const DUPLICATE_ID: &str =
+        "Profile ID already exists. Use pap profiles verify to update its credential.";
     let find = |profiles: Vec<ConfidentialProfile>, id: &str| {
         profiles
             .into_iter()
@@ -528,21 +584,27 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             key_stdin,
             ..
         } => {
+            let default_provider = if url.is_some() {
+                Provider::Custom
+            } else {
+                Provider::Redpill
+            };
+            let provider = provider.unwrap_or(default_provider).into();
             let profile = ConfidentialProfileInput {
                 id: id.clone(),
                 name: name.clone(),
-                remote_url: url.clone(),
-                provider: (*provider).into(),
+                remote_url: profile_url(provider, url.clone(), None)?,
+                provider,
             };
             // Validate before reading a credential or making a request.
             desktop_core::config::resolve_profile(profile.clone(), None)?;
+            if desktop_core::config::load()?.profiles.contains_key(id) {
+                return Err(DUPLICATE_ID.into());
+            }
             confirm(global, SAVE)?;
             Client::ensure_service()?;
             if client.state()?.profiles.iter().any(|saved| saved.id == *id) {
-                return Err(
-                    "Profile ID already exists. Use profiles verify to update its credential."
-                        .into(),
-                );
+                return Err(DUPLICATE_ID.into());
             }
             let key = read_key(global, *key_stdin)?;
             value(client.call(rpc::Verify {
@@ -610,11 +672,16 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
         } => {
             let state = client.state()?;
             let saved = find(state.profiles, id)?;
+            let provider = provider.map_or(saved.provider, Into::into);
+            // A custom endpoint carries over only between custom profiles.
+            let kept_url = (provider.preset_url().is_none()
+                && saved.provider.preset_url().is_none())
+            .then(|| saved.remote_url.clone());
             let profile = ConfidentialProfileInput {
                 id: saved.id.clone(),
                 name: name.clone().unwrap_or(saved.name),
-                provider: provider.map_or(saved.provider, Into::into),
-                remote_url: url.clone().unwrap_or_else(|| saved.remote_url.clone()),
+                provider,
+                remote_url: profile_url(provider, url.clone(), kept_url)?,
             };
             let resolved = desktop_core::config::resolve_profile(profile.clone(), None)?;
             let target_changed =
@@ -641,6 +708,20 @@ fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Valu
             })?)
         }
     }
+}
+
+/// The endpoint for a profile: Phala and RedPill always use their service URL,
+/// as in the desktop app, and a custom provider needs one.
+fn profile_url(
+    provider: desktop_core::contracts::ServiceProvider,
+    url: Option<String>,
+    kept: Option<String>,
+) -> Result<String, String> {
+    url.or_else(|| provider.preset_url().map(str::to_owned))
+        .or(kept)
+        .ok_or_else(|| {
+            "A custom provider needs --url. RedPill and Phala profiles use their service URL: pass --provider redpill or --provider phala.".into()
+        })
 }
 
 fn agents(client: &Client, global: &Global, command: &Agents) -> Result<Value, CallError> {
@@ -705,22 +786,42 @@ fn agent_change(
     dry_run: bool,
     revision: Option<&str>,
 ) -> Result<Value, CallError> {
+    let agent = desktop_core::agents::Agent::from_id(id)?;
+    let running = connect && client.is_running()?;
+    let mut checked_backend = if running {
+        Some(agent_paths::check(client, agent)?)
+    } else {
+        None
+    };
     let options = ConnectOptions {
         default_model: model,
         ..ConnectOptions::default()
     };
     if dry_run {
-        return value(client.call(rpc::PreviewAgent {
+        let request = rpc::PreviewAgent {
             agent_id: id.into(),
             connect,
             options,
-        })?);
+        };
+        return value(if let Some(version) = &checked_backend {
+            agent_paths::warn_if_unreported(version);
+            client.call_in_instance(request, &version.instance_id)?
+        } else {
+            client.call(request)?
+        });
     }
     // The preview needs the verified catalog. Get consent to start it before
     // presenting or applying any agent configuration changes.
-    if connect && (!client.is_running()? || !client.state()?.is_protected()) {
+    let supervision_notice = if connect && (!running || !client.state()?.is_protected()) {
         confirm(global, "Start protection before connecting this agent?")?;
-        start(client, None, 90)?;
+        let state = start_with_supervision(client, global, None, 90)?;
+        checked_backend = Some(agent_paths::check(client, agent)?);
+        state.get("supervisionNotice").cloned()
+    } else {
+        None
+    };
+    if let Some(version) = &checked_backend {
+        agent_paths::warn_if_unreported(version);
     }
     let revision = match revision {
         Some(revision) => {
@@ -743,12 +844,17 @@ fn agent_change(
             preview.revision
         }
     };
-    let status = client.call(rpc::ApplyAgent {
+    let request = rpc::ApplyAgent {
         agent_id: id.into(),
         connect,
         revision,
         options,
-    })?;
+    };
+    let status = if let Some(version) = &checked_backend {
+        client.call_in_instance(request, &version.instance_id)?
+    } else {
+        client.call(request)?
+    };
     // Success would mean the agent is routed; it still uses its own provider.
     if connect && status.recorded && !status.connected {
         let next = if client.state()?.session_active {
@@ -763,7 +869,11 @@ fn agent_change(
         .into());
     }
     agent_service_hint(client, global, id);
-    value(status)
+    let mut result = value(status)?;
+    if let Some(notice) = supervision_notice {
+        result["supervisionNotice"] = notice;
+    }
+    Ok(result)
 }
 
 /// Codex's background service keeps the settings it started with. The
@@ -946,7 +1056,11 @@ fn token(client: &Client, global: &Global, command: &Token) -> Result<Value, Cal
             Ok(json!({"rotated": true}))
         }
         Token::Show => {
-            confirm(global, "Reveal the local API token on stdout?")?;
+            confirm_with_hint(
+                global,
+                "Reveal the Local API token on stdout?",
+                "Confirmation required. Pass --yes to reveal the Local API token noninteractively.",
+            )?;
             Ok(json!({"token": client.call(rpc::GetClientKey)?}))
         }
         Token::ClearCredential => {
@@ -1091,6 +1205,14 @@ fn doctor(client: &Client) -> Value {
     );
     let logs = doctor_check(&mut errors, "logs", desktop_core::paths::logs_dir());
     let mut warnings = Map::new();
+    if backend_running == true {
+        if let Ok(version) = client.version() {
+            let paths = agent_paths::warnings(client, &version);
+            if !paths.is_empty() {
+                warnings.insert("agentPaths".into(), json!(paths));
+            }
+        }
+    }
     let settings = settings_diagnostics(client, &mut errors, &mut warnings);
     // Update availability is advisory: an offline check never fails the doctor.
     let update =
@@ -1099,6 +1221,7 @@ fn doctor(client: &Client) -> Value {
         "version": desktop_core::protocol::BUILD_VERSION,
         "update": update,
         "backendRunning": backend_running,
+        "loginService": login_service_status(),
         "cli": cli,
         "backendExecutable": backend_executable,
         "endpoint": endpoint,
@@ -1191,13 +1314,10 @@ fn settings_diagnostics(
             .profiles
             .iter()
             .filter(|profile| !profile.credential_saved)
-            .map(|profile| profile.name.as_str())
+            .map(missing_profile_credential)
             .collect();
         if !missing.is_empty() {
-            warnings.insert(
-                "profileCredentials".into(),
-                json!(format!("No saved API key for: {}", missing.join(", "))),
-            );
+            warnings.insert("profileCredentials".into(), json!(missing.join(" ")));
         }
     }
     json!({ "config": config, "credentials": credentials, "error": error, "warnings": notices })
@@ -1300,11 +1420,19 @@ fn doctor_check<T: Serialize>(
 }
 
 fn confirm(global: &Global, prompt: &str) -> Result<(), String> {
+    confirm_with_hint(
+        global,
+        prompt,
+        "Confirmation required. Pass --yes for noninteractive changes.",
+    )
+}
+
+fn confirm_with_hint(global: &Global, prompt: &str, hint: &str) -> Result<(), String> {
     if global.yes {
         return Ok(());
     }
     if !global.interactive() {
-        return Err("Confirmation required. Pass --yes for noninteractive changes.".into());
+        return Err(hint.into());
     }
     eprint!("{prompt} [y/N] ");
     io::stderr()
@@ -1398,6 +1526,21 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn preset_providers_use_their_service_url_and_custom_needs_one() {
+        use desktop_core::contracts::ServiceProvider::{Custom, Redpill};
+        let preset = Redpill.preset_url().map(str::to_owned);
+        let custom = "https://gateway.example".to_string();
+        let url = |provider, url: Option<&String>, kept: Option<&String>| {
+            profile_url(provider, url.cloned(), kept.cloned()).ok()
+        };
+        assert_eq!(url(Redpill, None, None), preset);
+        assert_eq!(url(Redpill, None, Some(&custom)), preset);
+        assert_eq!(url(Custom, None, Some(&custom)), Some(custom.clone()));
+        assert_eq!(url(Custom, Some(&custom), None), Some(custom.clone()));
+        assert_eq!(url(Custom, None, None), None);
+    }
+
+    #[test]
     fn confirmations_accept_y_and_yes_without_case_sensitivity() {
         for answer in ["y", "Y", "yes", "YES", " YeS "] {
             assert!(affirmative(answer));
@@ -1465,5 +1608,28 @@ mod tests {
         let blockers =
             desktop_core::supervisor::AutomaticBlockers::Environment(vec!["HTTPS_PROXY"]);
         assert!(notice_if_unowned(blockers, true).is_none());
+    }
+
+    #[test]
+    fn missing_credentials_point_to_the_profiles_auth_method() {
+        let mut profile = desktop_core::config::resolve_profile(
+            ConfidentialProfileInput {
+                id: "work".into(),
+                name: "Work".into(),
+                provider: ServiceProvider::Redpill,
+                remote_url: ServiceProvider::Redpill.preset_url().unwrap().into(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(missing_profile_credential(&profile).contains("pap profiles verify work"));
+        profile.auth = ProfileAuth::OAuth {
+            account_id: "account".into(),
+            account_name: None,
+            images: None,
+            scope: None,
+            funding: None,
+        };
+        assert!(missing_profile_credential(&profile).contains("pap profiles login work"));
     }
 }
