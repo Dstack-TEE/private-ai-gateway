@@ -376,12 +376,36 @@ pub(super) fn os_known_good_claim(event: &UpstreamVerifiedEvent) -> Claim {
     }
 }
 
-/// Supplemental GPU check outcome, recorded as verifier-derived metadata.
-/// The Phala Direct path decodes NRAS JWTs without signature verification.
-/// These checks do not bind GPU identity to the serving CPU or establish
-/// continued use of a particular GPU.
+/// GPU attestation for Intel TDX providers. A dstack OS boot-time GPU
+/// attestation is measured into RTMR3, so the quote ties those GPUs to the
+/// serving CVM, and an attested GPU count of 0 refutes the claim. Otherwise a
+/// runtime NRAS check is recorded as verifier-derived metadata: it neither binds
+/// the GPUs to the serving CPU nor shows continued use.
 pub(super) fn gpu_attested_claim(event: &UpstreamVerifiedEvent) -> Claim {
     let claims = event.provider_claims.as_ref();
+    if let Some(devices) = claims
+        .and_then(|c| c.get("gpu_boot_attestation"))
+        .and_then(|boot| boot.get("devices"))
+        .and_then(Value::as_u64)
+    {
+        return Claim::asserted(
+            ClaimSource::HardwareProven,
+            format!(
+                "dstack OS attested {devices} NVIDIA GPU(s) at boot in confidential-computing \
+                 mode, measured into RTMR3 before system-ready"
+            ),
+        );
+    }
+    if claims
+        .and_then(|c| c.get("num_gpus"))
+        .and_then(Value::as_u64)
+        == Some(0)
+    {
+        return Claim::refuted(
+            ClaimSource::HardwareProven,
+            "the CVM has no GPU: its attested boot configuration has num_gpus 0",
+        );
+    }
     let verified = claims
         .and_then(|c| c.get("gpu_verified"))
         .and_then(Value::as_bool);
@@ -542,6 +566,22 @@ mod claim_mapping_tests {
             "../../../tests/fixtures/session_material.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn phala_direct_profiles_follow_the_attested_gpu_count() {
+        let id = "private-ai-verifier/phala-direct/v1";
+        let gpu = profiles()["phala-direct"].clone();
+        let mut cpu = gpu.clone();
+        cpu["num_gpus"] = json!(0);
+        cpu["gpu_boot_attestation"] = Value::Null;
+        assert!(reviewed_profile(Some("phala-direct"), id, &cpu));
+        let mut short = gpu.clone();
+        short["num_gpus"] = json!(3);
+        assert!(!reviewed_profile(Some("phala-direct"), id, &short));
+        let mut cpu_with_gpu = gpu;
+        cpu_with_gpu["num_gpus"] = json!(0);
+        assert!(!reviewed_profile(Some("phala-direct"), id, &cpu_with_gpu));
     }
 
     #[test]
@@ -934,6 +974,39 @@ mod claim_mapping_tests {
         let unknown =
             session_claims_for_event(&event(Some("tinfoil"), VerificationResult::Verified, None));
         assert_eq!(unknown.os_known_good.status, ClaimStatus::Unknown);
+    }
+
+    #[test]
+    fn gpu_attested_follows_the_attested_gpu_shape() {
+        // The boot-time result is measured into RTMR3, so the quote binds those
+        // GPUs to the serving CVM; it wins over the runtime NRAS outcome.
+        let claims = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({
+                "gpu_verified": false,
+                "gpu_boot_attestation": {"devices": 8, "cc_mode": "on"},
+            })),
+        ));
+        assert_eq!(claims.gpu_attested.status, ClaimStatus::Asserted);
+        assert_eq!(
+            claims.gpu_attested.source,
+            Some(ClaimSource::HardwareProven)
+        );
+        assert!(claims
+            .gpu_attested
+            .reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("attested 8 NVIDIA GPU(s) at boot"));
+
+        // An attested CPU-only CVM refutes the claim rather than leaving it unknown.
+        let cpu = session_claims_for_event(&event(
+            Some("phala-direct"),
+            VerificationResult::Verified,
+            Some(json!({ "num_gpus": 0, "gpu_boot_attestation": null })),
+        ));
+        assert_eq!(cpu.gpu_attested.status, ClaimStatus::Refuted);
     }
 
     #[test]

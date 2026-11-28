@@ -15,7 +15,13 @@ Pins:
   - a missing tls_cert_fingerprint, a broken report_data binding (swapped
     fingerprint), an app_compose that is not the RTMR3-measured compose (even with
     a self-consistent info.compose_hash), a missing measured compose hash, and a
-    dstack failure are each rejected; GPU failures are recorded, not rejected.
+    dstack failure are each rejected;
+  - GPUs follow the attested num_gpus: a CVM with GPUs needs the measured
+    boot-time GPU attestation (a missing event, a bad outcome, a device count
+    other than num_gpus, or an event emitted after system-ready is rejected);
+    a CPU-only CVM is verified without
+    it but rejected if it presents GPU evidence; runtime GPU failures are
+    recorded, not rejected.
 
 No network, no localhost:8080, no NRAS. Run: uv run python scripts/soundness_phala_direct.py
 """
@@ -27,6 +33,7 @@ import hashlib
 import io
 import json
 import os
+import struct
 import sys
 import tarfile
 import tempfile
@@ -53,6 +60,30 @@ APP_COMPOSE = "services: []"
 MEASURED_COMPOSE_HASH = hashlib.sha256(APP_COMPOSE.encode()).hexdigest()
 
 
+RUNTIME_EVENT = 0x08000001
+GOOD_GPU = {
+    "version": 3, "provider": "nvidia", "devices": 2, "cc_mode": "on", "devtools": False,
+    "dbgstat": "disabled", "secboot": True, "evidence_sha256": "cd" * 32,
+}
+
+
+def _event(name: str, payload: bytes) -> dict:
+    """A dstack v1 RTMR3 runtime event."""
+    pre = struct.pack("<I", RUNTIME_EVENT) + b":" + name.encode() + b":" + payload
+    return {
+        "imr": 3, "event_type": RUNTIME_EVENT, "digest": hashlib.sha384(pre).hexdigest(),
+        "event": name, "event_payload": payload.hex(),
+    }
+
+
+def _event_log(gpu: dict | None = GOOD_GPU, *, after_ready: bool = False) -> str:
+    gpu_events = [] if gpu is None else [_event("gpu-attestation", json.dumps(gpu).encode())]
+    events = [_event("compose-hash", bytes.fromhex(MEASURED_COMPOSE_HASH))]
+    ready = [_event("system-ready", b"")]
+    events += ready + gpu_events if after_ready else gpu_events + ready
+    return json.dumps(events)
+
+
 def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
     """A synthetic TDX v4 quote with report_data at the canonical offset, so the
     real _tdx_report_data_hex extracts it (matches scripts/soundness_report_data.py)."""
@@ -62,7 +93,7 @@ def _synthetic_quote(report_data_hex: str, debug: bool = False) -> str:
     return (b"\x00" * 48 + bytes(body) + rd + b"\x99" * 16).hex()
 
 
-def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False, app_compose: str = APP_COMPOSE) -> dict:
+def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gpu_nonce: str | None = None, debug: bool = False, app_compose: str = APP_COMPOSE, event_log: str | None = None, num_gpus: int = 2, gpu_evidence: list | None = None) -> dict:
     """Build a version-2 report for a given nonce.
 
     bind_fp    : fingerprint mixed into report_data[0:32] (genuine = FP).
@@ -78,14 +109,18 @@ def _report(nonce_hex: str, *, bind_fp: str = FP, report_fp: str | None = FP, gp
         "request_nonce": nonce_hex,
         "intel_quote": _synthetic_quote(report_data_hex, debug=debug),
         "nvidia_payload": json.dumps(
-            {"nonce": gpu_nonce or nonce_hex, "evidence_list": [{"arch": "HOPPER"}], "arch": "HOPPER"}
+            {
+                "nonce": gpu_nonce or nonce_hex,
+                "evidence_list": [{"arch": "HOPPER"}] if gpu_evidence is None else gpu_evidence,
+                "arch": "HOPPER",
+            }
         ),
         "info": {
             "compose_hash": hashlib.sha256(app_compose.encode()).hexdigest(),
             "tcb_info": {"app_compose": app_compose},
         },
-        "event_log": json.dumps({"mock": True}),
-        "vm_config": "mock_vm_config",
+        "event_log": _event_log() if event_log is None else event_log,
+        "vm_config": json.dumps({"num_gpus": num_gpus}),
         "version": 2,
     }
     if report_fp is not None:
@@ -232,6 +267,43 @@ def check() -> list[str]:
             f.append(f"genuine: unexpected verifier_id {out.get('verifier_id')!r}")
         if claims.get("compose_hash_verified") is not True:
             f.append("genuine: expected compose_hash_verified true")
+        boot = claims.get("gpu_boot_attestation") or {}
+        if boot.get("devices") != 2 or boot.get("cc_mode") != "on":
+            f.append(f"genuine: gpu_boot_attestation not surfaced ({boot!r})")
+
+    # --- the measured boot-time GPU attestation is required ---
+    gpu_cases = {
+        "gpu-event-missing": (_event_log(None), "no dstack boot-time GPU attestation"),
+        "gpu-cc-off": (_event_log({**GOOD_GPU, "cc_mode": "off"}), "confidential-computing mode"),
+        "gpu-devtools": (_event_log({**GOOD_GPU, "devtools": True}), "DevTools"),
+        "gpu-debug": (_event_log({**GOOD_GPU, "dbgstat": "enabled"}), "debug"),
+        "gpu-insecure-boot": (_event_log({**GOOD_GPU, "secboot": False}), "secure boot"),
+        "gpu-partial": (_event_log({**GOOD_GPU, "devices": 1}), "covers 1 of 2 GPUs"),
+        # An app could emit this name only after system-ready.
+        "gpu-after-ready": (_event_log(after_ready=True), "no dstack boot-time GPU attestation"),
+    }
+    for label, (log, reason) in gpu_cases.items():
+        out = _run(report_builder=lambda n, log=log: _report(n, event_log=log))
+        if out.get("result") != "failed" or reason not in (out.get("reason") or ""):
+            f.append(f"{label}: expected failure mentioning {reason!r}, got {out!r}")
+
+    # --- a CPU-only CVM: no GPU event needed, but no GPU evidence allowed ---
+    out = _run(report_builder=lambda n: _report(n, num_gpus=0, event_log=_event_log(None), gpu_evidence=[]))
+    claims = out.get("provider_claims") or {}
+    if out.get("result") != "verified" or claims.get("num_gpus") != 0 or claims.get("gpu_boot_attestation") is not None:
+        f.append(f"cpu-only: expected verified with num_gpus 0, got {out!r}")
+    def cpu_only_mode(n):  # vllm-proxy CPU_ONLY omits nvidia_payload entirely
+        report = _report(n, num_gpus=0, event_log=_event_log(None))
+        for attestation in [report, *report["all_attestations"]]:
+            attestation.pop("nvidia_payload")
+        return report
+
+    out = _run(report_builder=cpu_only_mode)
+    if out.get("result") != "verified":
+        f.append(f"cpu-only-mode: expected verified without nvidia_payload, got {out!r}")
+    out = _run(report_builder=lambda n: _report(n, num_gpus=0, event_log=_event_log(None)))
+    if out.get("result") != "failed" or "presented GPU evidence" not in (out.get("reason") or ""):
+        f.append(f"cpu-only-with-gpu-evidence: expected failure, got {out!r}")
 
     # --- swapped compose: info.compose_hash matches app_compose, but not the RTMR3 event ---
     out = _run(report_builder=lambda n: _report(n, app_compose="services: [evil]"))
