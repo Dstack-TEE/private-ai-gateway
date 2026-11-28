@@ -203,9 +203,8 @@ fn tool_output(program: &str, arguments: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn homebrew_formula(directory: &Path, prefix: &Path) -> bool {
-    let formula = prefix.join("Cellar").join(PACKAGE_NAME);
-    let formula = fs::canonicalize(&formula).unwrap_or(formula);
+fn homebrew_formula(directory: &Path, cellar: &Path) -> bool {
+    let formula = fs::canonicalize(cellar).unwrap_or_else(|_| cellar.to_owned());
     directory.strip_prefix(formula).is_ok_and(|relative| {
         relative.components().count() == 2 && relative.file_name() == Some(OsStr::new("libexec"))
     })
@@ -259,8 +258,8 @@ pub fn installation() -> Installation {
     if install == Installation::Portable
         && cfg!(any(target_os = "macos", target_os = "linux"))
         && directory.file_name() == Some(OsStr::new("libexec"))
-        && tool_output("brew", &["--prefix"])
-            .is_some_and(|prefix| homebrew_formula(directory, Path::new(&prefix)))
+        && tool_output("brew", &["--cellar", PACKAGE_NAME])
+            .is_some_and(|cellar| homebrew_formula(directory, Path::new(&cellar)))
     {
         return Installation::Homebrew;
     }
@@ -729,15 +728,12 @@ mod tests {
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
 
     #[test]
-    fn homebrew_formula_must_belong_to_the_reported_prefix() {
-        let prefix = Path::new("/custom/brew-prefix");
-        assert!(homebrew_formula(
-            &prefix.join("Cellar/private-ai-proxy/1.2.3/libexec"),
-            prefix
-        ));
+    fn homebrew_formula_must_belong_to_the_reported_cellar() {
+        let cellar = Path::new("/custom/brew-prefix/Cellar/private-ai-proxy");
+        assert!(homebrew_formula(&cellar.join("1.2.3/libexec"), cellar));
         assert!(!homebrew_formula(
             Path::new("/other/prefix/Cellar/private-ai-proxy/1.2.3/libexec"),
-            prefix
+            cellar
         ));
     }
 
