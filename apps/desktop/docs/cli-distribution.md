@@ -105,6 +105,14 @@ pauses the user-owned backend before invoking the native installer and preserves
 active session so protection can resume after fresh verification when the app
 restarts.
 
+Linux CLI archives, npm packages and CLI-only Linux packages use static musl
+executables. They do not load glibc or NSS modules. musl ignores glibc
+`nsswitch.conf` modules, so LDAP/SSSD user and home lookup and mDNS are
+unavailable. Account and home directory lookup follows the environment and
+standard library behavior, so `HOME` must be set when no passwd entry is
+available. If the home directory cannot be determined, commands fail with
+`Cannot determine the home directory`.
+
 Installed Linux desktop packages and direct macOS app bundles automatically
 register the backend with the user's service manager. On supported CLI installations the first
 successful `pap start` registers it. The backend starts at login and after a

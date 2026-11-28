@@ -97,8 +97,6 @@ export function platformManifest({ platform, arch, version }) {
     homepage: "https://github.com/Dstack-TEE/private-ai-gateway#readme",
     os: [npmPlatforms[platform]],
     cpu: [arch],
-    // The Linux binaries link against glibc 2.35+; there is no musl build.
-    ...(platform === "linux" ? { libc: ["glibc"] } : {}),
     // Yarn PnP must extract the package so the executables exist on disk.
     preferUnplugged: true,
     files: ["vendor"],

@@ -50,7 +50,7 @@ test("aliases one platform version of the same package per target", () => {
     assert.equal(manifest.bin, undefined);
     assert.deepEqual(manifest.os, [npmPlatform]);
     assert.deepEqual(manifest.cpu, [arch]);
-    assert.deepEqual(manifest.libc, platform === "linux" ? ["glibc"] : undefined);
+    assert.equal(manifest.libc, undefined);
     assert.equal(manifest.publishConfig.access, "public");
     assert.equal(manifest.scripts, undefined);
   }

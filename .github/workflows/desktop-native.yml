@@ -265,8 +265,8 @@ jobs:
           - { platform: macos-x64, os: xcode-27, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
           - { platform: windows-x64, os: windows-2025, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: x64 }
           - { platform: windows-arm64, os: windows-11-arm, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: arm64 }
-          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: x64 }
-          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: arm64 }
+          - { platform: linux-x64, os: ubuntu-22.04, target: '', musl_target: x86_64-unknown-linux-musl, bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: x64 }
+          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', musl_target: aarch64-unknown-linux-musl, bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
@@ -285,7 +285,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils musl-tools cmake
       - *install-nfpm
       - uses: ./.github/actions/desktop-node
       - name: Import optional Windows code-signing certificate
@@ -457,6 +457,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The Ubuntu 22.04 release runner resolves GLIBC_2.35 as its highest
+          # symbol version. Keep this check scoped to the desktop package.
           baseline=2.35
           scratch="$(mktemp -d "$RUNNER_TEMP/glibc-baseline.XXXXXX")"
           trap 'rm -rf "$scratch"' EXIT
@@ -484,6 +486,19 @@ jobs:
             echo "$(basename "$executable"): GLIBC_$highest"
           done
 
+      - name: Build static musl CLI
+        if: runner.os == 'Linux'
+        working-directory: apps/desktop
+        env:
+          PAP_BUILD_VERSION: ${{ env.VERSION }}
+        run: |
+          set -euo pipefail
+          target='${{ matrix.musl_target }}'
+          rustup target add "$target"
+          cargo build --locked --release --target "$target" --package private-ai-proxy --bin private-ai-proxy
+          cargo build --locked --release --target "$target" --package private-ai-proxy --bin private-ai-proxy-service
+          cargo build --locked --release --target "$target" --package private-ai-proxy-agent-bridge --bin private-ai-proxy-helper
+
       - name: Package CLI-only distribution
         working-directory: apps/desktop
         shell: bash
@@ -492,7 +507,10 @@ jobs:
           target_triple="$(rustc -vV | sed -n 's/^host: //p')"
           test -n "$target_triple"
           source_args=()
-          if [[ '${{ runner.os }}' == macOS ]]; then
+          if [[ '${{ matrix.cli_platform }}' == linux ]]; then
+            target_triple='${{ matrix.musl_target }}'
+            source_args=(--source "target/$target_triple/release")
+          elif [[ '${{ runner.os }}' == macOS ]]; then
             target_triple="$PAP_BUILD_TARGET"
             app_bundle="$(find "$PAP_BUNDLE_DIR/macos" -type d -name '*.app' -print -quit)"
             test -n "$app_bundle"
@@ -533,6 +551,28 @@ jobs:
           fi
           node scripts/cli-package-smoke.mjs "$scratch/$base" "$VERSION"
 
+          if [[ '${{ matrix.cli_platform }}' == linux ]]; then
+            for binary in private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+              executable="$scratch/$base/$binary"
+              if readelf -d "$executable" 2>&1 | grep -q 'NEEDED'; then
+                echo "$binary has dynamic dependencies" >&2
+                exit 1
+              fi
+              if readelf -l "$executable" | grep -q 'INTERP'; then
+                echo "$binary has a PT_INTERP program header" >&2
+                exit 1
+              fi
+            done
+            for image in alpine:3 almalinux:8; do
+              docker run --rm -v "$scratch/$base:/cli:ro" "$image" /bin/sh -c '
+                set -eu
+                for binary in private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+                  "/cli/$binary" --version
+                done
+              '
+            done
+          fi
+
       - name: Verify Windows installer startup gate
         if: runner.os == 'Windows'
         working-directory: apps/desktop
@@ -562,6 +602,19 @@ jobs:
           for suffix in deb rpm pkg.tar.zst; do
             extract "release/private-ai-proxy-cli-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "cli-$suffix"
             node scripts/cli-package-smoke.mjs "$scratch/cli-$suffix/usr/libexec/private-ai-proxy" "$VERSION" "$scratch/cli-$suffix/usr/bin"
+            if [[ "$suffix" == deb ]]; then
+              for binary in private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
+                executable="$scratch/cli-$suffix/usr/libexec/private-ai-proxy/$binary"
+                if readelf -d "$executable" 2>&1 | grep -q 'NEEDED'; then
+                  echo "$binary in the CLI DEB has dynamic dependencies" >&2
+                  exit 1
+                fi
+                if readelf -l "$executable" | grep -q 'INTERP'; then
+                  echo "$binary in the CLI DEB has a PT_INTERP program header" >&2
+                  exit 1
+                fi
+              done
+            fi
             test "$(readlink "$scratch/cli-$suffix/usr/bin/private-ai-proxy")" = ../libexec/private-ai-proxy/private-ai-proxy
             grep -Fx 'ExecStart=/usr/libexec/private-ai-proxy/private-ai-proxy-service --supervised' "$scratch/cli-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
             extract "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "desktop-$suffix"

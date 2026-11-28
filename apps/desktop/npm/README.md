@@ -24,9 +24,9 @@ publisher and no per-platform packages to create. Releases up to
 `0.1.7-beta.4` were published with this layout too, so upgrades from them
 replace the alias in place.
 
-Each platform version declares `os` and `cpu`, and the Linux versions also
-declare `libc: ["glibc"]`, so the package manager installs only the one that
-matches the machine. `bin/private-ai-proxy.cjs` resolves the host's alias,
+Each platform version declares `os` and `cpu`, so the package manager installs
+only the one that matches the machine. `bin/private-ai-proxy.cjs` resolves the
+host's alias,
 checks that its version is exactly `<wrapper version>-<os>-<cpu>`, then runs the
 native executable. If the platform is unsupported, the platform version is
 missing (optional dependencies omitted with `--omit=optional` or
@@ -78,13 +78,8 @@ published.
 
 ### Linux libc
 
-There is no musl build ([supported platforms](../../../docs/private-ai-proxy-install.md)).
-npm 9.6.5 and later and pnpm honor `libc`, so on musl they skip the Linux
-version and the launcher reports that musl is not supported. Bun ignores `libc`
-and installs the glibc version anyway. Running that binary on musl then fails at
-load time, and the launcher reports the same error. npm 9.6.3 and 9.6.4 could
-not detect glibc from `libc` and skip the version even on glibc systems; the
-install guide tells users to upgrade npm.
+Linux platform packages contain static musl builds. They run on both musl and
+glibc distributions, so the manifest does not declare a `libc` selector.
 
 ## Build locally
 

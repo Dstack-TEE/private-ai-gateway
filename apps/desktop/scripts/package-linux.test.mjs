@@ -206,7 +206,8 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
       assert.equal(member(rpm, "./usr/share/private-ai-proxy/package-manager"), "rpm\n");
     }
     if (available("rpmkeys")) assert.doesNotMatch(output("rpmkeys", ["-Kv", rpm]), /Signature, key ID/);
-    assert.match(pkginfo(arch), /^depend = glibc$/m);
+    assert.doesNotMatch(pkginfo(arch), /^depend = glibc$/m);
+    assert.match(pkginfo(arch), /^depend = gnupg$/m);
     assert.match(pkginfo(arch), /^arch = aarch64$/m);
     assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
   } finally {

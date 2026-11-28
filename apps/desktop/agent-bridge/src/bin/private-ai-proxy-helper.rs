@@ -22,6 +22,13 @@ fn main() -> ExitCode {
             println!("{}", usage());
             return ExitCode::SUCCESS;
         }
+        (Some("--version"), None, None) => {
+            println!(
+                "private-ai-proxy-helper {}",
+                desktop_core::protocol::BUILD_VERSION
+            );
+            return ExitCode::SUCCESS;
+        }
         (Some("--agent-token"), Some(agent), None) => agent,
         _ => {
             eprintln!("{}", usage());

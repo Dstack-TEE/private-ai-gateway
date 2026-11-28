@@ -11,8 +11,9 @@ the agent credential helper.
 npm install --global private-ai-proxy
 ```
 
-It runs on macOS, Windows, and Linux with glibc 2.35 or newer (not musl), each
-on arm64 and x64. Do not install with `--omit=optional`, and install a tag or
+It runs on macOS, Windows, and Linux on arm64 and x64. Linux uses a static
+build that supports both musl and glibc distributions. Do not install with
+`--omit=optional`, and install a tag or
 an exact version rather than a prerelease range. The
 [install guide](https://github.com/Dstack-TEE/private-ai-gateway/blob/main/docs/private-ai-proxy-install.md#npm)
 explains both and lists other ways to install, including the desktop app.

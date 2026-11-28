@@ -5,8 +5,10 @@ method below installs the CLI; Homebrew and GitHub Releases also offer the
 desktop app. [The CLI reference](../apps/desktop/docs/cli.md) describes `pap`
 and its aliases.
 
-The CLI runs on macOS, Windows, and Linux, on arm64 and x64. Linux needs glibc
-2.35 or newer; musl distributions such as Alpine are not supported.
+The CLI runs on macOS, Windows, and Linux, on arm64 and x64. Linux CLI
+archives and CLI-only packages are static musl builds and run on glibc and musl
+distributions. Desktop Linux packages include the graphical app and require
+glibc 2.35 or newer.
 
 The steps below install the stable release. `pap curl` and the key-custody
 flags (`--accept-subject` with `--accept-dstack-kms-root-public-key`) need
@@ -221,9 +223,9 @@ such as `private-ai-proxy@^0.2.0-beta.1`: it can resolve to a platform-specific
 version (for example `0.2.0-beta.2-linux-x64`) instead of the installable
 package.
 
-npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
-executables even on glibc systems. Upgrade npm if `pap` reports that they are
-missing.
+npm installs the same static Linux CLI on glibc and musl distributions. If
+`pap` reports that the native package is missing, upgrade npm and reinstall
+without `--omit=optional` or `--no-optional`.
 
 ## APT on Debian and Ubuntu
 

@@ -8,7 +8,7 @@ const path = require("node:path");
 // Each target's native binaries are a version of this package, such as
 // private-ai-proxy@1.2.3-linux-x64, installed through an optional dependency
 // alias such as private-ai-proxy-linux-x64. The package manager installs only
-// the one whose os/cpu/libc match, as for @openai/codex's bin/codex.js.
+// the one whose os/cpu match, as for @openai/codex's bin/codex.js.
 const supportedTargets = [
   "darwin-arm64",
   "darwin-x64",
@@ -17,9 +17,6 @@ const supportedTargets = [
   "win32-arm64",
   "win32-x64",
 ];
-const muslMessage =
-  "Linux builds require glibc 2.35 or newer; musl-based distributions such as Alpine are not supported";
-
 function platformPackage(platform, arch) {
   const target = `${platform}-${arch}`;
   if (!supportedTargets.includes(target)) return undefined;
@@ -45,18 +42,6 @@ function reinstallCommand(version) {
   return `npm install --global ${spec} --include=optional`;
 }
 
-// Only consulted after a failure: npm skips the glibc package on musl, and
-// package managers that ignore `libc` install a binary musl cannot load.
-function isLinuxWithoutGlibc() {
-  if (process.platform !== "linux") return false;
-  try {
-    process.report.excludeNetwork = true;
-    return !process.report.getReport().header.glibcVersionRuntime;
-  } catch {
-    return false;
-  }
-}
-
 function fail(message) {
   console.error(`private-ai-proxy: ${message}`);
   process.exitCode = 1;
@@ -78,11 +63,9 @@ function main(command) {
     manifestPath = require.resolve(`${platform.alias}/package.json`);
   } catch (error) {
     if (error?.code !== "MODULE_NOT_FOUND") throw error;
-    fail(isLinuxWithoutGlibc()
-      ? muslMessage
-      : `the native binaries for ${target} (private-ai-proxy@${expectedVersion}) are not installed. `
-        + "Optional dependencies were omitted (--omit=optional or --no-optional) or their download failed. "
-        + `Reinstall with: ${reinstallCommand(version)}`);
+    fail(`the native binaries for ${target} (private-ai-proxy@${expectedVersion}) are not installed. `
+      + "Optional dependencies were omitted (--omit=optional or --no-optional) or their download failed. "
+      + `Reinstall with: ${reinstallCommand(version)}`);
     return;
   }
 
@@ -110,13 +93,7 @@ function main(command) {
     stdio: "inherit",
     windowsHide: false,
   });
-  if (result.error) {
-    if (result.error.code === "ENOENT" && isLinuxWithoutGlibc()) {
-      fail(muslMessage);
-      return;
-    }
-    throw result.error;
-  }
+  if (result.error) throw result.error;
   if (result.signal) {
     process.kill(process.pid, result.signal);
     return;

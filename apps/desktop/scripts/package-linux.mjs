@@ -68,7 +68,7 @@ export const linuxPackages = {
     description: `${tauri.productName} command line client and user backend`,
     other: desktopName,
     provides: false,
-    depends: { deb: [], rpm: [], archlinux: ["glibc", "gnupg", "libgcc"] },
+    depends: { deb: [], rpm: [], archlinux: ["gnupg"] },
   },
 };
 
