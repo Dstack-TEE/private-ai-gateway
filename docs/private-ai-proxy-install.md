@@ -121,18 +121,28 @@ or a native package:
 
 ```sh
 pap --yes service disable
+pap --yes service stop
 pap --yes stop --offline
 ```
 
+If login supervision is unavailable, continue with `service stop` and the
+offline restore. Run the commands as the user who ran Private AI Proxy.
+
 Linux DEB, RPM, and Arch removal hooks perform the same cleanup for users they
 can reach. The hooks are non-fatal so package removal can finish when a user
-service or agent configuration is unavailable. If the package has already been
-removed, reinstall the same package or use another `pap` installation to run
-the commands above. Any failed restore record stays in the user's Private AI
-Proxy data directory and can be retried with `pap stop --offline`.
+service or agent configuration is unavailable. A CLI-to-desktop package switch
+or the reverse can trigger cleanup when the package manager removes the
+conflicting package. A dpkg replacement reported as `in-favour` of the other
+Private AI Proxy package preserves the existing user state.
 
-For an install-script CLI, remove its command links and versioned files after
-the cleanup:
+If the package has already been removed, reinstall the same package or use
+another `pap` installation to run the commands above. Any failed restore
+record stays in the user's Private AI Proxy data directory and can be
+retried with `pap stop --offline`.
+
+For a macOS or Linux script install, remove its command links and versioned
+files after the cleanup. Use the original directories if you passed custom
+installer options. The defaults are shown here:
 
 ```sh
 rm -f "$HOME/.local/bin/pap" "$HOME/.local/bin/aci" "$HOME/.local/bin/private-ai-proxy"

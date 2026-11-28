@@ -135,9 +135,10 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::Rpm
         | Installation::Pacman
         | Installation::SystemPackage
-        | Installation::Npm
-        | Installation::InstallScript => true,
-        Installation::Portable => command().is_ok_and(|(_, linked)| linked),
+        | Installation::Npm => true,
+        Installation::InstallScript | Installation::Portable => {
+            command().is_ok_and(|(_, linked)| linked)
+        }
         Installation::DesktopApp | Installation::DesktopPacman => platform::installed_desktop(),
     }
 }

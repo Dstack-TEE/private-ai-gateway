@@ -348,7 +348,7 @@ publishing stable releases to the beta feed.
 | CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
 | CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
 | npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
-| Official install script | Same | `pap update` downloads the official script and reruns it with `--channel <channel> --version <version>`; manual updates use `curl -fsSL https://redpill.ai/private-ai-proxy/install.sh \| sh -s -- --channel <channel> --version <version>` | The script stops the current backend before switching the command links |
+| Official install script (macOS and Linux) | Same | `pap update` reruns the official installer for the target version using the existing installation root and command link directory. `pap doctor` prints manual steps | `pap update` stops the backend under the update locks and restarts through the updated command link. Manual installs stop protection before switching links |
 | Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
 | Mac App Store | App Store | App Store | MAS has no feed checks |
 | AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |

@@ -2,7 +2,6 @@
 //! local API as the desktop app does.
 
 use std::{
-    fs,
     io::{self, IsTerminal, Read, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -1203,6 +1202,8 @@ fn settings_diagnostics(
 /// request, and each step is printed as it runs. The steps stop the backend,
 /// so protection that was on is started again by the installed release.
 fn update(client: &Client) -> Result<Value, CallError> {
+    use desktop_core::updates::{self, Installation};
+
     let notice = update_notice()?;
     let Some(version) = &notice.version else {
         return value(notice);
@@ -1227,20 +1228,24 @@ fn update(client: &Client) -> Result<Value, CallError> {
     // instead: agents stay pointed at the Local API, which nothing answers
     // meanwhile, the session waits, and no other command starts a backend
     // during the installation. If it fails, the previous release resumes.
+    let (command, steps) = if notice.installation == Installation::InstallScript {
+        updates::install_script_update(version)?
+    } else {
+        let command = std::env::current_exe()
+            .map_err(|error| format!("Cannot locate this command: {error}"))?;
+        let steps = notice
+            .commands
+            .iter()
+            .filter(|step| *step != updates::STOP_STEP)
+            .cloned()
+            .collect();
+        (command, steps)
+    };
+    let command = command.to_str().ok_or("This command's path is not UTF-8")?;
     let running = client.is_running()?;
     let protecting = running && client.state()?.session_active;
-    let steps: Vec<String> = notice
-        .commands
-        .iter()
-        .filter(|step| *step != desktop_core::updates::STOP_STEP)
-        .cloned()
-        .collect();
-    // Read now: package updates replace this file in place. The install script
-    // removes the old version directory, so use its stable PATH link instead.
-    let command = update_command(notice.installation)?;
-    let command = command.to_str().ok_or("This command's path is not UTF-8")?;
     client
-        .install_update(|| desktop_core::updates::run(&steps))
+        .install_update(|| updates::run(&steps))
         .map_err(|error| format!("The update was not installed: {error}"))?;
     // The installed release takes the session up again.
     if running {
@@ -1249,32 +1254,14 @@ fn update(client: &Client) -> Result<Value, CallError> {
         } else {
             &["service", "start"]
         };
-        let step = desktop_core::updates::step(&[&[command], resume].concat())?;
-        desktop_core::updates::run(&[step]).map_err(|error| {
+        let step = updates::step(&[&[command], resume].concat())?;
+        updates::run(&[step]).map_err(|error| {
             format!("Updated to {version}, but the backend did not start again: {error}.")
         })?;
     }
     let mut updated = value(&notice)?;
     updated["protectionResumed"] = json!(protecting);
     Ok(updated)
-}
-
-fn update_command(installation: desktop_core::updates::Installation) -> Result<PathBuf, String> {
-    let current =
-        std::env::current_exe().map_err(|error| format!("Cannot locate this command: {error}"))?;
-    if installation != desktop_core::updates::Installation::InstallScript {
-        return Ok(current);
-    }
-    let canonical = fs::canonicalize(&current).unwrap_or_else(|_| current.clone());
-    let Some(name) = canonical.file_name() else {
-        return Ok(current);
-    };
-    Ok(std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
-        .find(|link| fs::canonicalize(link).is_ok_and(|target| target == canonical))
-        .unwrap_or(current))
 }
 
 fn update_notice() -> Result<desktop_core::updates::UpdateNotice, String> {
