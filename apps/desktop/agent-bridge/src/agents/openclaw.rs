@@ -528,8 +528,8 @@ pub(super) fn stale_credentials(
 
 // OpenClaw pins @openclaw/fs-safe 0.8.1. Match its native basic-ACE rules:
 // https://github.com/openclaw/fs-safe/blob/v0.8.1/native/src/windows_security.rs
-// can_write (257-269), read_owner_and_dacl (354-440). Owner trust is not an
-// exec-provider requirement. Unsupported ACEs cannot be treated as empty ACLs.
+// can_write (257-269), read_owner_and_dacl (354-440).
+// Unsupported ACEs cannot be treated as empty ACLs.
 #[cfg(any(windows, test))]
 #[cfg_attr(test, derive(Deserialize))]
 #[cfg_attr(test, serde(rename_all = "camelCase", deny_unknown_fields))]
@@ -569,6 +569,12 @@ fn validate_windows_acl(acl: &WindowsAcl) -> Result<(), String> {
     {
         return Err("Cannot verify a local DACL for the OpenClaw helper".into());
     }
+    let trusted_sid =
+        |sid: &str| sid == acl.current_user_sid || matches!(sid, "S-1-5-18" | "S-1-5-32-544");
+    // Windows owners normally have implicit WRITE_DAC and can change the DACL.
+    if !trusted_sid(&acl.owner_sid) {
+        return Err("The OpenClaw helper is owned by an untrusted user or group".into());
+    }
     for ace in &acl.aces {
         if !valid_sid(&ace.sid) || !matches!(ace.kind, 0 | 1) {
             return Err("The OpenClaw helper has an unsupported ACL entry".into());
@@ -576,9 +582,7 @@ fn validate_windows_acl(acl: &WindowsAcl) -> Result<(), String> {
         if ace.flags & 0x08 != 0 || ace.kind == 1 {
             continue;
         }
-        let trusted = ace.sid == acl.current_user_sid
-            || matches!(ace.sid.as_str(), "S-1-5-18" | "S-1-5-32-544");
-        if !trusted && ace.mask & 0x500d0156 != 0 {
+        if !trusted_sid(&ace.sid) && ace.mask & 0x500d0156 != 0 {
             return Err(
                 "The OpenClaw helper ACL permits another user or group to modify it".into(),
             );
@@ -813,7 +817,7 @@ mod tests {
         let current = "S-1-5-21-100-200-300-1001";
         let acl = |aces: Value| {
             serde_json::to_vec(&json!({
-                "ownerSid":"S-1-5-21-100-200-300-9999", "currentUserSid":current,
+                "ownerSid":current, "currentUserSid":current,
                 "local":true, "daclPresent":true, "aces":aces
             }))
             .unwrap()
@@ -857,6 +861,32 @@ mod tests {
         missing["daclPresent"] = json!(false);
         assert!(validate_windows_acl(&serde_json::to_vec(&missing).unwrap()).is_err());
         assert!(validate_windows_acl(b"{}").is_err());
+    }
+
+    #[test]
+    fn windows_acl_requires_a_trusted_owner() {
+        let current = "S-1-5-21-100-200-300-1001";
+        let mut acl = WindowsAcl {
+            owner_sid: current.into(),
+            current_user_sid: current.into(),
+            local: true,
+            dacl_present: true,
+            aces: vec![WindowsAce {
+                sid: current.into(),
+                kind: 0,
+                flags: 0,
+                mask: 0x1f01ff,
+            }],
+        };
+        for owner in [current, "S-1-5-18", "S-1-5-32-544"] {
+            acl.owner_sid = owner.into();
+            assert!(validate_windows_acl(&acl).is_ok(), "owner: {owner}");
+        }
+        acl.owner_sid = "S-1-5-21-100-200-300-9999".into();
+        assert_eq!(
+            validate_windows_acl(&acl).unwrap_err(),
+            "The OpenClaw helper is owned by an untrusted user or group"
+        );
     }
 
     #[test]
