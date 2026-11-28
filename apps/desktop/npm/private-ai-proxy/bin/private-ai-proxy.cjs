@@ -106,6 +106,7 @@ function main(command) {
 
   const result = spawnSync(executable, process.argv.slice(2), {
     argv0: command,
+    env: { ...process.env, PAP_NODE_PACKAGE_ROOT: path.dirname(require.resolve("../package.json")) },
     stdio: "inherit",
     windowsHide: false,
   });

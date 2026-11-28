@@ -1331,6 +1331,9 @@ fn update(client: &Client) -> Result<Value, CallError> {
     use desktop_core::updates::{self, Installation};
 
     let notice = update_notice()?;
+    if notice.installation.delegates_updates() && !notice.commands.is_empty() {
+        return value(notice);
+    }
     let Some(version) = &notice.version else {
         return value(notice);
     };

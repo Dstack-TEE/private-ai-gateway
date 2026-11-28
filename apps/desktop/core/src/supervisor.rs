@@ -137,7 +137,12 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::Rpm
         | Installation::Pacman
         | Installation::SystemPackage
-        | Installation::Npm => true,
+        | Installation::Npm
+        | Installation::Pnpm
+        | Installation::Bun
+        | Installation::Yarn
+        | Installation::Homebrew
+        | Installation::WindowsInstallScript => true,
         Installation::InstallScript | Installation::Portable => {
             command().is_ok_and(|(_, linked)| linked)
         }

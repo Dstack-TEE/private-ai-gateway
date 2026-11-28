@@ -106,6 +106,7 @@ try {
         $Zip.Dispose()
     }
 
+    Set-Content -LiteralPath (Join-Path $StageDir ".private-ai-proxy-install") -Value "windows-script" -Encoding Ascii
     $StagedExecutable = Join-Path $StageDir "private-ai-proxy.exe"
     $ReportedVersion = (& $StagedExecutable --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $ReportedVersion -ne "private-ai-proxy $Version") {

@@ -16,6 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{self, UpdateChannel};
 
+mod node;
+use node::NodeInstallation;
+
+const PACKAGE_NAME: &str = "private-ai-proxy";
+const HOMEBREW_FORMULA: &str = "dstack-tee/private-ai/private-ai-proxy";
+
 /// The channel feed configured for release builds; development builds have none.
 pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 
@@ -149,10 +155,107 @@ pub enum Installation {
     Pacman,
     /// CLI installed by the official install script.
     InstallScript,
+    WindowsInstallScript,
     /// A native package from a release that did not record its package manager.
     SystemPackage,
+    Homebrew,
     Npm,
+    Pnpm,
+    Bun,
+    Yarn,
     Portable,
+}
+
+impl Installation {
+    pub fn delegates_updates(self) -> bool {
+        matches!(
+            self,
+            Self::Homebrew
+                | Self::Npm
+                | Self::Pnpm
+                | Self::Bun
+                | Self::Yarn
+                | Self::WindowsInstallScript
+        )
+    }
+}
+
+async fn tool_output(program: &str, arguments: &[&str]) -> Option<String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    let path = std::env::var_os("PATH")?;
+    // Ignore relative entries and resolve an absolute launcher before
+    // spawning it. In particular, cmd must never search the project directory.
+    let search: Vec<_> = std::env::split_paths(&path)
+        .filter(|entry| entry.is_absolute())
+        .collect();
+    let executable = tool_on_path(&search, program, cfg!(windows))?;
+    let directory = tempfile::tempdir().ok()?;
+    let mut child = tokio::process::Command::new(executable)
+        .args(arguments)
+        .current_dir(directory.path())
+        .env("PATH", std::env::join_paths(search).ok()?)
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?.take(1024 * 1024);
+    let mut output = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        stdout.read_to_end(&mut output).await.ok()?;
+        drop(stdout);
+        child.wait().await.ok()?.success().then_some(())?;
+        String::from_utf8(output)
+            .ok()
+            .map(|output| output.trim().to_owned())
+    })
+    .await
+    .ok()?
+}
+
+fn tool_on_path(path: &[PathBuf], program: &str, windows: bool) -> Option<PathBuf> {
+    let extensions: &[&str] = if windows {
+        &[".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    path.iter()
+        .filter(|directory| directory.is_absolute())
+        .find_map(|directory| {
+            extensions
+                .iter()
+                .map(|ext| directory.join(format!("{program}{ext}")))
+                .find(|executable| executable.is_file())
+        })
+}
+
+fn homebrew_formula(directory: &Path, cellar: &Path) -> bool {
+    let formula = fs::canonicalize(cellar).unwrap_or_else(|_| cellar.to_owned());
+    directory.strip_prefix(formula).is_ok_and(|relative| {
+        relative.components().count() == 2 && relative.file_name() == Some(OsStr::new("libexec"))
+    })
+}
+
+fn windows_script_install(directory: &Path, local_app_data: Option<&Path>) -> bool {
+    fs::read_to_string(directory.join(".private-ai-proxy-install"))
+        .is_ok_and(|marker| marker.trim() == "windows-script")
+        || (local_app_data.is_some_and(|root| {
+            fs::canonicalize(
+                root.join("Programs")
+                    .join(format!("{} CLI", crate::brand::PRODUCT_NAME)),
+            )
+            .is_ok_and(|path| path == directory)
+        }) && [
+            "pap.cmd",
+            "private-ai-proxy-service.exe",
+            "private-ai-proxy-helper.exe",
+        ]
+        .iter()
+        .all(|file| directory.join(file).is_file()))
 }
 
 /// Classifies the installation that owns the running executable.
@@ -168,11 +271,54 @@ pub fn installation() -> Installation {
         ))
         .is_file();
     let package_manager = std::fs::read_to_string(PACKAGE_MANAGER_MARKER).ok();
-    classify(
+    let install = classify(
         directory,
         desktop,
         package_manager.as_deref().map(str::trim),
-    )
+    );
+    if install == Installation::Portable
+        && cfg!(windows)
+        && windows_script_install(
+            directory,
+            std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+        )
+    {
+        return Installation::WindowsInstallScript;
+    }
+    install
+}
+
+async fn update_owner(
+    installation: Installation,
+) -> (Installation, Option<&'static NodeInstallation>) {
+    if installation == Installation::Npm {
+        let node = NodeInstallation::current().await;
+        return (node.map_or(installation, |node| node.manager), node);
+    }
+    if installation == Installation::Portable && cfg!(any(target_os = "macos", target_os = "linux"))
+    {
+        static HOMEBREW: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+        let owned = HOMEBREW
+            .get_or_init(|| async {
+                let Ok(executable) = std::env::current_exe().and_then(fs::canonicalize) else {
+                    return false;
+                };
+                let Some(directory) = executable
+                    .parent()
+                    .filter(|directory| directory.file_name() == Some(OsStr::new("libexec")))
+                else {
+                    return false;
+                };
+                tool_output("brew", &["--cellar", HOMEBREW_FORMULA])
+                    .await
+                    .is_some_and(|cellar| homebrew_formula(directory, Path::new(&cellar)))
+            })
+            .await;
+        if *owned {
+            return (Installation::Homebrew, None);
+        }
+    }
+    (installation, None)
 }
 
 fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> Installation {
@@ -310,6 +456,11 @@ pub async fn check(
         .map_err(|_| "Could not check for updates")?;
     let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
     let latest = offers_update(&current, &published, channel).then_some(published);
+    let (installation, node) = if latest.is_some() {
+        update_owner(installation).await
+    } else {
+        (installation, None)
+    };
     let script = (installation == Installation::InstallScript && latest.is_some())
         .then(ScriptInstallation::current)
         .flatten();
@@ -320,6 +471,7 @@ pub async fn check(
             &version.to_string(),
             std::env::consts::ARCH,
             script.as_ref(),
+            node,
         )?,
         None => (Vec::new(), None),
     };
@@ -449,6 +601,57 @@ fn script_steps(
     ])
 }
 
+fn powershell_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn node_steps(node: &NodeInstallation, spec: &str, windows: bool) -> Result<Vec<String>, String> {
+    let Some(words) = node.words(spec) else {
+        return Ok(Vec::new());
+    };
+    if windows {
+        return Ok(vec![
+            STOP_STEP.into(),
+            format!(
+                "{} {}",
+                words[0],
+                words[1..]
+                    .iter()
+                    .map(|word| powershell_argument(word))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ]);
+    }
+    Ok(vec![step(&words)?])
+}
+
+pub(super) fn without_windows_verbatim_prefix(value: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(network_path) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{network_path}").into()
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(value).into()
+    }
+}
+
+fn windows_install_command(directory: &Path, version: &str) -> Result<String, String> {
+    let parsed = semver::Version::parse(version).map_err(|_| "The update version is invalid")?;
+    let channel = if parsed.pre.is_empty() {
+        "stable"
+    } else {
+        "beta"
+    };
+    let directory = directory
+        .to_str()
+        .ok_or("The install directory is not UTF-8")?;
+    let directory = without_windows_verbatim_prefix(directory);
+    Ok(format!(
+        "$installer = Join-Path $env:TEMP ('pap-install-' + [guid]::NewGuid() + '.ps1'); try {{ Invoke-WebRequest 'https://redpill.ai/private-ai-proxy/install.ps1' -UseBasicParsing -OutFile $installer -ErrorAction Stop; powershell -ExecutionPolicy Bypass -File $installer -Channel {channel} -Version {} -InstallDir {} }} finally {{ Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue }}",
+        powershell_argument(version),
+        powershell_argument(&directory),
+    ))
+}
+
 /// Runs upgrade `steps` in order, in a scratch directory for what they
 /// download, and stops at the first that fails. Each step and its output go
 /// to stderr, leaving stdout to the caller's own result.
@@ -483,6 +686,7 @@ fn upgrade_steps(
     version: &str,
     architecture: &str,
     script: Option<&ScriptInstallation>,
+    node: Option<&NodeInstallation>,
 ) -> Result<(Vec<String>, Option<String>), String> {
     let platform = if cfg!(windows) {
         "windows"
@@ -552,18 +756,25 @@ fn upgrade_steps(
                 None,
             )
         }
-        Installation::Npm => (
-            vec![
-                stop,
-                command(&[
-                    "npm",
-                    "install",
-                    "--global",
-                    &format!("private-ai-proxy@{version}"),
-                ])?,
-            ],
-            None,
-        ),
+        Installation::Homebrew => (vec![format!("brew upgrade {HOMEBREW_FORMULA}")], None),
+        Installation::Npm | Installation::Pnpm | Installation::Bun | Installation::Yarn => {
+            let spec = format!("{PACKAGE_NAME}@{version}");
+            (
+                node.map(|node| node_steps(node, &spec, cfg!(windows)))
+                    .transpose()?
+                    .unwrap_or_default(),
+                None,
+            )
+        }
+        Installation::WindowsInstallScript => {
+            let executable = std::env::current_exe()
+                .and_then(fs::canonicalize)
+                .map_err(|_| "Cannot locate the installed CLI")?;
+            let directory = executable
+                .parent()
+                .ok_or("Cannot locate the installation directory")?;
+            (vec![windows_install_command(directory, version)?], None)
+        }
         Installation::InstallScript => (script_steps(version, script, false)?, None),
         Installation::Portable => (
             Vec::new(),
@@ -581,6 +792,42 @@ mod tests {
 
     const FEED: &str =
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
+
+    #[test]
+    fn windows_tool_search_uses_only_absolute_path_entries() {
+        let trusted = tempfile::tempdir().unwrap();
+        let launcher = trusted.path().join("npm.cmd");
+        fs::write(&launcher, "").unwrap();
+        let path = [PathBuf::from("."), trusted.path().to_owned()];
+        assert_eq!(tool_on_path(&path, "npm", true), Some(launcher));
+        assert_eq!(tool_on_path(&[PathBuf::from(".")], "npm", true), None);
+    }
+
+    #[test]
+    fn homebrew_formula_must_belong_to_the_reported_cellar() {
+        let cellar = Path::new("/custom/brew-prefix/Cellar/private-ai-proxy");
+        assert!(homebrew_formula(&cellar.join("1.2.3/libexec"), cellar));
+        assert!(!homebrew_formula(
+            Path::new("/other/prefix/Cellar/private-ai-proxy/1.2.3/libexec"),
+            cellar
+        ));
+    }
+
+    #[test]
+    fn windows_script_uses_its_marked_directory_and_quotes_it_in_powershell() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!windows_script_install(temp.path(), None));
+        fs::write(
+            temp.path().join(".private-ai-proxy-install"),
+            "windows-script\r\n",
+        )
+        .unwrap();
+        assert!(windows_script_install(temp.path(), None));
+        let command =
+            windows_install_command(Path::new(r"\\?\C:\O'Brien PAP"), "1.2.3-beta.1").unwrap();
+        assert!(command
+            .contains(r"-Channel beta -Version '1.2.3-beta.1' -InstallDir 'C:\O''Brien PAP'"));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -715,15 +962,19 @@ mod tests {
         let root = root.as_str();
         assert_eq!(root, "https://example.test/o/r/releases/download/");
         let upgrade_steps = |installation, root, version| {
-            super::upgrade_steps(installation, root, version, std::env::consts::ARCH, None).unwrap()
+            super::upgrade_steps(
+                installation,
+                root,
+                version,
+                std::env::consts::ARCH,
+                None,
+                None,
+            )
+            .unwrap()
         };
-        let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
-            npm,
-            [
-                "private-ai-proxy --yes service stop",
-                "npm install --global private-ai-proxy@0.1.8"
-            ]
+            upgrade_steps(Installation::Homebrew, root, "0.1.8").0,
+            ["brew upgrade dstack-tee/private-ai/private-ai-proxy"]
         );
         assert_eq!(
             upgrade_steps(Installation::InstallScript, root, "0.1.8-beta.2").0,
@@ -808,14 +1059,15 @@ mod tests {
                 Installation::DesktopPacman,
             ] {
                 assert_eq!(
-                    super::upgrade_steps(installation, FEED, "0.1.8", arch, None).unwrap(),
+                    super::upgrade_steps(installation, FEED, "0.1.8", arch, None, None).unwrap(),
                     (Vec::new(), None)
                 );
             }
         }
         for (arch, asset_arch) in [("aarch64", "arm64"), ("x86_64", "x64")] {
             let (_, url) =
-                super::upgrade_steps(Installation::Portable, FEED, "0.1.8", arch, None).unwrap();
+                super::upgrade_steps(Installation::Portable, FEED, "0.1.8", arch, None, None)
+                    .unwrap();
             assert!(url.unwrap().contains(&format!("-{asset_arch}.")));
         }
     }
