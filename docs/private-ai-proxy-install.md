@@ -147,7 +147,8 @@ gpg --show-keys --with-fingerprint private-ai-proxy-archive-keyring.gpg
 ```
 
 ```sh
-sudo install -m 0644 private-ai-proxy-archive-keyring.gpg /usr/share/keyrings/
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo install -m 0644 private-ai-proxy-archive-keyring.gpg /etc/apt/keyrings/
 curl -fsSLO https://pkg.redpill.ai/apt/private-ai-proxy.sources
 sudo install -m 0644 private-ai-proxy.sources /etc/apt/sources.list.d/
 sudo apt update
@@ -164,8 +165,9 @@ sudo apt update
 ```
 
 Run `pap update` for the APT upgrade command, or upgrade during your regular
-system updates. Each package ships the same keyring at the `Signed-By` path so
-upgrades refresh the key.
+system updates. The keyring in `/etc/apt/keyrings` remains available after
+uninstalling the package. Repeat the key setup when the repository certificate
+is rotated.
 
 ## DNF and Zypper
 
@@ -265,6 +267,17 @@ verification.
 | Desktop app | Check for updates in Settings > About. For Mac App Store installs, use the App Store. |
 
 ## Uninstall
+
+To remove a Linux package repository after uninstalling the desktop app or CLI,
+remove the source files for the channels you enabled.
+
+- APT: Remove `/etc/apt/sources.list.d/private-ai-proxy.sources` and, if enabled,
+  `/etc/apt/sources.list.d/private-ai-proxy-beta.sources`. Then remove
+  `/etc/apt/keyrings/private-ai-proxy-archive-keyring.gpg` and run `sudo apt update`.
+- DNF: Remove `/etc/yum.repos.d/private-ai-proxy.repo` and, if enabled,
+  `/etc/yum.repos.d/private-ai-proxy-beta.repo`.
+- Zypper: Run `sudo zypper removerepo private-ai-proxy` and, if enabled,
+  `sudo zypper removerepo private-ai-proxy-beta`.
 
 Before removing a CLI installation without a removal hook, quit the desktop
 app if open and run the following as the user who ran Private AI Proxy. If

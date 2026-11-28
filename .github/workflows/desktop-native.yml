@@ -1044,6 +1044,10 @@ jobs:
     uses: ./.github/workflows/linux-repos.yml
     with:
       tag: ${{ github.ref_name }}
+    secrets:
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+      PKG_REPO_R2_ACCESS_KEY_ID: ${{ secrets.PKG_REPO_R2_ACCESS_KEY_ID }}
+      PKG_REPO_R2_SECRET_ACCESS_KEY: ${{ secrets.PKG_REPO_R2_SECRET_ACCESS_KEY }}
 
   # Beta releases skip the App Store job, and a job whose `if` has no status
   # check function inherits success(), which is false after any skipped

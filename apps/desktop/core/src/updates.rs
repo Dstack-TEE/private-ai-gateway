@@ -276,8 +276,6 @@ enum LinuxRepository {
     Zypper,
 }
 
-const DESKTOP_PACKAGE: &str = "private-ai-proxy";
-
 impl LinuxRepository {
     fn detect(root: &Path, manager: &str) -> Option<(Self, UpdateChannel)> {
         let repositories: &[(Self, &str, &str)] = match manager {
@@ -294,26 +292,28 @@ impl LinuxRepository {
                 let directory = root.join(directory);
                 let enabled = |suffix: &str| {
                     fs::read_to_string(
-                        directory.join(format!("{DESKTOP_PACKAGE}{suffix}.{extension}")),
+                        directory.join(format!("{PACKAGE_NAME}{suffix}.{extension}")),
                     )
                     .is_ok_and(|contents| {
+                        let (separator, source_key) = if manager == Self::Apt {
+                            (':', "uris")
+                        } else {
+                            ('=', "baseurl")
+                        };
                         let mut configured = false;
-                        for line in contents.lines().map(str::trim) {
-                            if manager == Self::Apt {
-                                if let Some((key, value)) = line.split_once(':') {
-                                    if key.eq_ignore_ascii_case("enabled")
-                                        && value.trim().eq_ignore_ascii_case("no")
-                                    {
-                                        return false;
-                                    }
-                                    configured |= key.eq_ignore_ascii_case("uris");
-                                }
-                            } else if let Some((key, value)) = line.split_once('=') {
-                                if key.trim() == "enabled" && value.trim() == "0" {
-                                    return false;
-                                }
-                                configured |= key.trim() == "baseurl";
+                        for (key, value) in contents
+                            .lines()
+                            .map(str::trim)
+                            .filter_map(|line| line.split_once(separator))
+                        {
+                            if key.trim().eq_ignore_ascii_case("enabled")
+                                && ["false", "0", "no"]
+                                    .iter()
+                                    .any(|disabled| value.trim().eq_ignore_ascii_case(disabled))
+                            {
+                                return false;
                             }
+                            configured |= key.trim().eq_ignore_ascii_case(source_key);
                         }
                         configured
                     })
@@ -330,9 +330,9 @@ impl LinuxRepository {
 
     fn upgrade(self, installation: Installation) -> String {
         let package = if installation == Installation::DesktopLinuxRepo {
-            DESKTOP_PACKAGE.to_owned()
+            PACKAGE_NAME.to_owned()
         } else {
-            format!("{DESKTOP_PACKAGE}-cli")
+            format!("{PACKAGE_NAME}-cli")
         };
         match self {
             Self::Apt => format!("sudo apt update && sudo apt install --only-upgrade {package}"),
@@ -347,28 +347,8 @@ fn linux_repository() -> Option<(LinuxRepository, UpdateChannel)> {
     if !cfg!(target_os = "linux") {
         return None;
     }
-    let etc = Path::new("/etc");
-    if let Ok(marker) = fs::read_to_string(PACKAGE_MANAGER_MARKER) {
-        return LinuxRepository::detect(etc, marker.trim());
-    }
-    // Desktop DEBs and RPMs from before the marker can still opt in to the repo.
-    let executable = std::env::current_exe().and_then(fs::canonicalize).ok()?;
-    for (manager, program, arguments) in [
-        ("deb", "dpkg-query", &["--search", "--"][..]),
-        ("rpm", "rpm", &["-qf", "--"][..]),
-    ] {
-        if let Some(repository) = LinuxRepository::detect(etc, manager) {
-            if std::process::Command::new(program)
-                .args(arguments)
-                .arg(&executable)
-                .output()
-                .is_ok_and(|result| result.status.success())
-            {
-                return Some(repository);
-            }
-        }
-    }
-    None
+    let marker = fs::read_to_string(PACKAGE_MANAGER_MARKER).ok()?;
+    LinuxRepository::detect(Path::new("/etc"), marker.trim())
 }
 
 /// The command to show to a user whose configured repository owns upgrades.
@@ -428,7 +408,6 @@ pub fn installation() -> Installation {
         install
     }
 }
-
 
 async fn update_owner(
     installation: Installation,
@@ -987,21 +966,20 @@ mod tests {
         let etc = temp.path();
         fs::create_dir_all(etc.join("apt/sources.list.d")).unwrap();
         fs::create_dir_all(etc.join("zypp/repos.d")).unwrap();
-        let source = |suffix| {
-            etc.join(format!(
-                "apt/sources.list.d/{DESKTOP_PACKAGE}{suffix}.sources"
-            ))
-        };
+        let source =
+            |suffix| etc.join(format!("apt/sources.list.d/{PACKAGE_NAME}{suffix}.sources"));
         fs::write(source(""), "URIs: https://example.test/apt\n").unwrap();
-        fs::write(
-            source("-beta"),
-            "URIs: https://example.test/apt\nEnabled: no\n",
-        )
-        .unwrap();
-        assert_eq!(
-            LinuxRepository::detect(etc, "deb"),
-            Some((LinuxRepository::Apt, UpdateChannel::Stable))
-        );
+        for disabled in ["no", "false", "0"] {
+            fs::write(
+                source("-beta"),
+                format!("URIs: https://example.test/apt\nEnabled: {disabled}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                LinuxRepository::detect(etc, "deb"),
+                Some((LinuxRepository::Apt, UpdateChannel::Stable))
+            );
+        }
         fs::write(
             source("-beta"),
             "URIs: https://example.test/apt\nEnabled: yes\n",

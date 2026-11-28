@@ -18,6 +18,7 @@ const architectures = {
   arm64: { deb: "arm64", rpm: "aarch64" },
 };
 const name = linuxPackages.desktop.name;
+const aptKeyring = path.basename(`${archiveKeyring}.gpg`);
 const pool = `pool/main/${name[0]}/${name}`;
 const tauri = JSON.parse(await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url)));
 
@@ -123,13 +124,13 @@ export async function buildRepos({ root, baseUrl, downloads, releases, publicKey
   const base = url.href.replace(/\/$/, "");
   await mkdir(root);
   await copyFile(publicKey, path.join(root, "key.asc"));
-  await copyFile(keyring, path.join(root, path.basename(`${archiveKeyring}.gpg`)));
+  await copyFile(keyring, path.join(root, aptKeyring));
   for (const [channel, versions] of Object.entries(releases)) {
     const id = channel === "stable" ? name : `${name}-${channel}`;
     await writeApt(root, channel, versions, downloads, sign);
     await writeRpm(root, channel, versions, downloads, sign);
     await writeFile(path.join(root, "apt", `${id}.sources`),
-      `Types: deb\nURIs: ${base}/apt\nSuites: ${channel}\nComponents: main\nSigned-By: ${archiveKeyring}.gpg\n`);
+      `Types: deb\nURIs: ${base}/apt\nSuites: ${channel}\nComponents: main\nSigned-By: /etc/apt/keyrings/${aptKeyring}\n`);
     // DNF and libzypp both expand $basearch.
     await writeFile(path.join(root, "rpm", `${id}.repo`), [
       `[${id}]`, `name=${tauri.productName} ${channel}`, `baseurl=${base}/rpm/${channel}/$basearch`,

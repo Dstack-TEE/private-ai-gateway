@@ -39,8 +39,8 @@ function upload(verb, patterns, cache) {
 const longCache = "public, max-age=31536000, immutable";
 upload("sync", ["apt/pool/*", "rpm/*/*.rpm"], longCache);
 upload("sync", ["*/by-hash/*", "*/repodata/*-*"], longCache);
-upload("cp", ["key.asc", "*.gpg", "*/Packages*", "*/repomd.xml.key"], "no-cache");
-upload("cp", ["*/Release", "*/repomd.xml", "*/repomd.xml.asc"], "no-cache");
+upload("cp", ["key.asc", "*-archive-keyring.gpg", "*/Packages*", "*/repomd.xml.key"], "no-cache");
+upload("cp", ["*/Release", "*/Release.gpg", "*/repomd.xml", "*/repomd.xml.asc"], "no-cache");
 upload("cp", ["*/InRelease", "apt/*.sources", "rpm/*.repo"], "no-cache");
 
 const current = files.filter(immutable);

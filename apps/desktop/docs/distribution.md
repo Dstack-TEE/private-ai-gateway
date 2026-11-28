@@ -477,10 +477,11 @@ generation so clients already reading its metadata can finish their update.
 A fresh request during the RPM metadata and detached-signature update can be
 rejected and succeed on retry.
 
-APT packages carry the same keyring they use for `Signed-By`, so an upgrade
-refreshes the distribution key. Publish a certificate with both the old and
-new signing subkeys and ship it to clients under the old key before switching
-signers for a planned rotation.
+The APT source uses a keyring installed by the administrator under
+`/etc/apt/keyrings` so the repository stays valid after removing either
+package. During a planned rotation, publish the certificate with both signing
+subkeys and ask APT users to refresh their repository keyring before the
+signer changes.
 
 #### Signing key rotation
 

@@ -6,6 +6,13 @@ on:
       tag:
         type: string
         required: true
+    secrets:
+      LINUX_SIGNING_KEY:
+        required: false
+      PKG_REPO_R2_ACCESS_KEY_ID:
+        required: false
+      PKG_REPO_R2_SECRET_ACCESS_KEY:
+        required: false
   workflow_dispatch:
 
 permissions:
@@ -52,6 +59,8 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.PKG_REPO_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.PKG_REPO_R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: node scripts/publish-linux-repos.mjs "$RUNNER_TEMP/pap-repos/repo"
       - name: Remove Linux signing material
         if: always()
