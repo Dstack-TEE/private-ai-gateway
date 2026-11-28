@@ -72,8 +72,8 @@ try {
     }
     const installer = {
       Architecture: arch, InstallerUrl: asset.browser_download_url, InstallerSha256: digest.toUpperCase(),
-      // The CLI and the desktop installer's CLI registration hook load VCRUNTIME140.dll.
-      Dependencies: { PackageDependencies: [{ PackageIdentifier: `Microsoft.VCRedist.2015+.${arch}` }] },
+      // Pre-transition releases with legacy checksums shipped dynamically linked sidecars.
+      ...(legacy ? { Dependencies: { PackageDependencies: [{ PackageIdentifier: `Microsoft.VCRedist.2015+.${arch}` }] } } : {}),
     };
     if (cli) {
       const directory = path.basename(name, ".zip");

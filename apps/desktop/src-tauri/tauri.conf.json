@@ -8,7 +8,10 @@
     "devUrl": "http://127.0.0.1:1420",
     "beforeDevCommand": "npm run dev:renderer",
     "beforeBuildCommand": "npm run build",
-    "removeUnusedCommands": true
+    "removeUnusedCommands": true,
+    "windows": {
+      "staticVCRuntime": false
+    }
   },
   "app": {
     "withGlobalTauri": false,
