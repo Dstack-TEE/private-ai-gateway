@@ -81,6 +81,21 @@ PowerShell parameters:
 The default installation directory is
 `%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
 
+## Windows with WinGet
+
+Use WinGet to install the desktop app or the standalone CLI. Both packages
+track stable releases.
+
+```powershell
+winget install --id DstackTEE.PrivateAIProxy --exact
+# For the CLI without the desktop app:
+winget install --id DstackTEE.PrivateAIProxy.CLI --exact
+```
+
+The desktop app can update from Settings > About. For the standalone CLI,
+close any running proxy processes before running the upgrade command that
+`pap update` prints.
+
 ## Homebrew
 
 Install the CLI Formula, or the Cask with the desktop app for macOS, directly

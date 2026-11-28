@@ -148,7 +148,7 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::Yarn
         | Installation::Homebrew
         | Installation::WindowsInstallScript => true,
-        Installation::InstallScript | Installation::Portable => {
+        Installation::InstallScript | Installation::Portable | Installation::Winget => {
             command().is_ok_and(|(_, linked)| linked)
         }
         Installation::DesktopApp

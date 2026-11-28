@@ -170,10 +170,25 @@ pub enum Installation {
     Pnpm,
     Bun,
     Yarn,
+    Winget,
     Portable,
 }
 
 impl Installation {
+    pub fn winget_update(self) -> Option<UpdateNotice> {
+        if self != Self::Winget {
+            return None;
+        }
+        Some(UpdateNotice {
+            installation: self,
+            channel: UpdateChannel::Stable,
+            current_version: crate::protocol::BUILD_VERSION.into(),
+            version: None,
+            commands: vec![winget_upgrade()],
+            package_url: None,
+            download_url: None,
+        })
+    }
     pub fn delegates_updates(self) -> bool {
         matches!(
             self,
@@ -387,6 +402,40 @@ pub fn linux_repo_update(installation: Installation) -> Option<UpdateNotice> {
     })
 }
 
+// Uses the same publisher and product name as the manifests in package-winget.mjs.
+fn winget_cli_identifier() -> String {
+    let compact = |name: &str| {
+        name.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+    };
+    format!(
+        "{}.{}.CLI",
+        compact(crate::brand::ORGANIZATION_NAME),
+        compact(crate::brand::PRODUCT_NAME)
+    )
+}
+
+fn winget_upgrade() -> String {
+    format!("winget upgrade --id {} --exact", winget_cli_identifier())
+}
+
+fn winget_package_directory(directory: &Path) -> bool {
+    // WinGet's portable ZIP installer extracts the archive to a directory
+    // named <PackageIdentifier>_<SourceIdentifier>. The ZIP adds one level.
+    let Some(product_code) = directory
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+    else {
+        return false;
+    };
+    let Some((identifier, source)) = product_code.split_once('_') else {
+        return false;
+    };
+    !source.is_empty() && identifier.eq_ignore_ascii_case(&winget_cli_identifier())
+}
+
 /// Classifies the installation that owns the running executable.
 pub fn installation() -> Installation {
     let Some(executable) = std::env::current_exe().and_then(std::fs::canonicalize).ok() else {
@@ -473,6 +522,9 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
             Some("aur") => Installation::DesktopAur,
             _ => Installation::DesktopApp,
         };
+    }
+    if cfg!(windows) && winget_package_directory(directory) {
+        return Installation::Winget;
     }
     if cfg!(any(target_os = "linux", target_os = "macos"))
         && script_install_root(directory).is_some()
@@ -598,7 +650,7 @@ pub async fn check(
     current_version: &str,
     installation: Installation,
 ) -> Result<UpdateNotice, String> {
-    let channel = if installation.aur_package().is_some() {
+    let channel = if installation.aur_package().is_some() || installation == Installation::Winget {
         UpdateChannel::Stable
     } else {
         channel
@@ -923,6 +975,7 @@ fn upgrade_steps(
                 None,
             )
         }
+        Installation::Winget => (vec![winget_upgrade()], None),
         Installation::Homebrew => (vec![format!("brew upgrade {HOMEBREW_FORMULA}")], None),
         Installation::Npm | Installation::Pnpm | Installation::Bun | Installation::Yarn => {
             let spec = format!("{PACKAGE_NAME}@{version}");
@@ -1042,6 +1095,27 @@ mod tests {
             LinuxRepository::Zypper.upgrade(Installation::LinuxRepo),
             "sudo zypper refresh && sudo zypper update private-ai-proxy-cli"
         );
+    }
+
+    #[test]
+    fn detects_winget_cli_with_its_source_suffix() {
+        let packages = Path::new("Microsoft/WinGet/Packages");
+        let directory = packages
+            .join(format!("{}_source", winget_cli_identifier()))
+            .join("private-ai-proxy-cli-1.2.3-windows-x64");
+        assert!(winget_package_directory(&directory));
+        assert!(!winget_package_directory(
+            &packages.join("private-ai-proxy-cli-1.2.3-windows-x64")
+        ));
+        assert!(!winget_package_directory(
+            &packages.join("DstackTEE.PrivateAIProxy_source").join("app")
+        ));
+        let notice = Installation::Winget.winget_update().unwrap();
+        assert_eq!(
+            notice.commands,
+            ["winget upgrade --id DstackTEE.PrivateAIProxy.CLI --exact"]
+        );
+        assert!(notice.download_url.is_none());
     }
 
     #[cfg(unix)]

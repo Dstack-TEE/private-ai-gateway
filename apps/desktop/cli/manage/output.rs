@@ -131,7 +131,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             WebUiPassword::Rotate => "Web UI password rotated.".into(),
         },
         Action::Diagnostics { .. } => exported(value),
-        Action::Update if matches!(value["installation"].as_str(), Some("linuxRepo" | "desktopLinuxRepo" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "windowsInstallScript")) && value["commands"][0].is_string() => {
+        Action::Update if matches!(value["installation"].as_str(), Some("winget" | "linuxRepo" | "desktopLinuxRepo" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "windowsInstallScript")) && value["commands"][0].is_string() => {
             value["commands"].as_array().into_iter().flatten().map(text).collect::<Vec<_>>().join("\n")
         }
         Action::Update if value["packageUrl"].is_string() => {

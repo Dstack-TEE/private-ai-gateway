@@ -185,7 +185,7 @@ revision: number, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
-export type Installation = "desktopApp" | "desktopPacman" | "desktopLinuxRepo" | "desktopAur" | "deb" | "rpm" | "pacman" | "linuxRepo" | "aur" | "installScript" | "windowsInstallScript" | "systemPackage" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "portable";
+export type Installation = "desktopApp" | "desktopPacman" | "desktopLinuxRepo" | "desktopAur" | "deb" | "rpm" | "pacman" | "linuxRepo" | "aur" | "installScript" | "windowsInstallScript" | "systemPackage" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "winget" | "portable";
 export type UpdateNotice = { installation: Installation, channel: UpdateChannel, currentVersion: string,
 /**
  * A newer release in the selected channel.
