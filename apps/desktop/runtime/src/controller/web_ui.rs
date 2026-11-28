@@ -48,9 +48,12 @@ impl DesktopRuntime {
                 .and_then(|()| {
                     settings_config::validate_web_ui(config, self.state().local_api.port)
                 })
-                .and_then(|listen| self.web_ui.start(self.clone(), &listen));
+                .and_then(|listen| self.web_ui.start(self.clone(), listen));
             match started {
-                Ok(url) => status.url = Some(url),
+                Ok(bound) => {
+                    status.port = bound.bind.port();
+                    status.url = Some(bound.endpoint);
+                }
                 Err(error) => status.error = Some(error),
             }
         }

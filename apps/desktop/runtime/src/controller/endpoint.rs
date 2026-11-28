@@ -1,5 +1,11 @@
 use super::*;
 
+pub(super) fn bind_local_api(listen: &mut ResolvedListen) -> Result<std::net::TcpListener, String> {
+    let listener = proxy::bind_std(listen.bind)?;
+    listen.record_bound_port(&listener)?;
+    Ok(listener)
+}
+
 impl DesktopRuntime {
     pub fn client_key(&self) -> Result<String, Error> {
         self.credentials.token()
@@ -98,11 +104,11 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         config: ListenConfig,
         current: ResolvedListen,
-        resolved: ResolvedListen,
+        mut resolved: ResolvedListen,
     ) -> Result<AppState, Error> {
         let needs_bind = current.bind != resolved.bind || self.state().proxy_url.is_none();
         if !needs_bind {
-            let resolved = self.save_local_api(config)?;
+            self.save_local_api(config)?;
             self.manager
                 .set_endpoint(resolved.config, Ok(resolved.endpoint));
             return Ok(self.state());
@@ -110,24 +116,21 @@ impl DesktopRuntime {
 
         // Different ports can be reserved without releasing the working listener.
         // Same-port address changes must release the original socket first.
-        let prepared = if current.bind.port() != resolved.bind.port() {
-            Some(proxy::bind_std(resolved.bind).map_err(Error::invalid_state)?)
+        let prepared = if current.bind.port() != resolved.bind.port() || resolved.bind.port() == 0 {
+            Some(bind_local_api(&mut resolved).map_err(Error::invalid_state)?)
         } else {
             None
         };
         self.endpoint.stop().await?;
         let listener = match prepared {
             Some(listener) => listener,
-            None => proxy::bind_std(resolved.bind)
+            None => bind_local_api(&mut resolved)
                 .map_err(|error| self.restore_after(&current, Error::invalid_state(error)))?,
         };
-        let resolved = match self.save_local_api(config) {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                drop(listener);
-                return Err(self.restore_after(&current, error));
-            }
-        };
+        if let Err(error) = self.save_local_api(config) {
+            drop(listener);
+            return Err(self.restore_after(&current, error));
+        }
         self.endpoint
             .start(
                 self.manager.clone(),
@@ -144,13 +147,13 @@ impl DesktopRuntime {
         Ok(self.state())
     }
 
-    fn save_local_api(&self, config: ListenConfig) -> Result<ResolvedListen, Error> {
+    fn save_local_api(&self, config: ListenConfig) -> Result<(), Error> {
         let resolved = settings_config::resolve_local_api(config)?;
         self.update_config(|settings| {
             settings.local_api = resolved.config.clone();
             Ok(())
         })?;
-        Ok(resolved)
+        Ok(())
     }
 
     /// Rebinds the previous listener after `error`, which it returns, with
@@ -170,7 +173,8 @@ impl DesktopRuntime {
         self: &Arc<Self>,
         previous: &ResolvedListen,
     ) -> Result<(), Error> {
-        let listener = proxy::bind_std(previous.bind).map_err(|error| {
+        let mut resolved = previous.clone();
+        let listener = bind_local_api(&mut resolved).map_err(|error| {
             format!(
                 "The new Local API settings failed and the previous listener could not be restored: {error}"
             )
@@ -179,8 +183,11 @@ impl DesktopRuntime {
             self.manager.clone(),
             self.proxy.clone(),
             listener,
-            previous.config.clone(),
-        )
+            resolved.config.clone(),
+        )?;
+        self.manager
+            .set_endpoint(resolved.config, Ok(resolved.endpoint));
+        Ok(())
     }
 
     pub async fn reset_settings(self: &Arc<Self>) -> Result<AppState, Error> {

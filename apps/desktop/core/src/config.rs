@@ -593,7 +593,7 @@ pub fn validate(config: &mut Config) -> Result<(), Invalid> {
 
 /// The Local API port range policy plus the shared listener rules.
 pub fn resolve_local_api(config: ListenConfig) -> Result<ResolvedListen, String> {
-    if config.port < 1024 {
+    if config.port < 1024 && !(config.port == 0 && cfg!(feature = "test-ephemeral-ports")) {
         return Err("Port must be between 1024 and 65535".to_string());
     }
     listen::resolve(config)
@@ -607,10 +607,10 @@ pub fn validate_web_ui(
     local_api_port: u16,
 ) -> Result<ResolvedListen, String> {
     let port = config.port;
-    if port == 0 {
+    if port == 0 && !cfg!(feature = "test-ephemeral-ports") {
         return Err("Web UI port must be between 1 and 65535".into());
     }
-    if port == local_api_port {
+    if port != 0 && port == local_api_port {
         return Err(format!(
             "Web UI port {port} is used by the Local API; choose another port"
         ));
@@ -992,7 +992,16 @@ auth = { kind = "oauth", account-id = "user_1", scope = { organization-id = "org
                 .endpoint,
             "http://127.0.0.1:4182"
         );
-        assert!(validate_web_ui(&config(0), 4180).is_err());
+        let ephemeral = cfg!(feature = "test-ephemeral-ports");
+        assert_eq!(validate_web_ui(&config(0), 0).is_ok(), ephemeral);
+        assert_eq!(
+            resolve_local_api(ListenConfig {
+                port: 0,
+                ..ListenConfig::default()
+            })
+            .is_ok(),
+            ephemeral
+        );
         assert!(validate_web_ui(&config(4180), 4180).is_err());
         assert!(validate_web_ui(&config(5000), 5000).is_err());
     }

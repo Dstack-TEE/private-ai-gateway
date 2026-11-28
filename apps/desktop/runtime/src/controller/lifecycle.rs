@@ -107,8 +107,6 @@ impl DesktopRuntime {
             if state.endpoint_error.is_some() {
                 let resolved = settings_config::resolve_local_api(state.local_api)?;
                 self.restore_endpoint(&resolved)?;
-                self.manager
-                    .set_endpoint(resolved.config, Ok(resolved.endpoint));
             }
             self.start_inner(state.config)
         })();
@@ -136,10 +134,7 @@ impl DesktopRuntime {
         let state = self.state();
         if state.endpoint_error.is_some() {
             let resolved = settings_config::resolve_local_api(state.local_api)?;
-            if self.restore_endpoint(&resolved).is_ok() {
-                self.manager
-                    .set_endpoint(resolved.config, Ok(resolved.endpoint));
-            }
+            let _ = self.restore_endpoint(&resolved);
         }
         self.start_inner(config)
     }

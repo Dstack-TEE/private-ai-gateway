@@ -66,7 +66,7 @@ const MAX_CONNECTIONS: usize = 64;
 
 pub(super) fn start(
     runtime: Arc<DesktopRuntime>,
-    listen: &ResolvedListen,
+    listen: &mut ResolvedListen,
     auth: Arc<Auth>,
     throttle: Arc<Throttle>,
     shutdown: CancellationToken,
@@ -77,6 +77,7 @@ pub(super) fn start(
     }
     let address = listen.bind;
     let listener = bind(address)?;
+    listen.record_bound_port(&listener)?;
     let router = api::router(Api {
         backend: ServiceBackend(runtime.clone()),
         host: ServiceHost::default(),
