@@ -116,8 +116,10 @@ is reported as skipped because it requires a release signed for the build
 under test.
 
 Desktop live E2E uses the shared desktop packaging workflow to build its
-Linux x64 packages. A manual dispatch on a branch other than `main` verifies
-the artifact download and runs selected systemd rows with `--skip-request`.
+Linux x64 packages for the native systemd rows. The install-script and nvm/npm
+rows use the latest published stable desktop release and are skipped if GitHub
+has no published stable desktop release. A manual dispatch on a branch other
+than `main` runs selected systemd rows with `--skip-request`.
 
 ## Versions
 
