@@ -24,9 +24,12 @@ jobs:
         id: credential
         env:
           WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_FORK_OWNER: ${{ vars.WINGET_FORK_OWNER }}
         run: |
           if [[ -z "$WINGET_TOKEN" ]]; then
             echo "WINGET_TOKEN is absent. Skipping WinGet submission."
+          elif [[ -z "$WINGET_FORK_OWNER" ]]; then
+            echo "WINGET_FORK_OWNER is absent. Skipping WinGet submission."
           else
             echo 'available=true' >> "$GITHUB_OUTPUT"
           fi
@@ -57,8 +60,18 @@ jobs:
             "https://github.com/russellbanks/Komac/releases/download/v$version/$asset"
           echo "b03b020eec98acfb0b53e284a6e21815b884be33de6785b97e7a120f0e748966  $asset" | sha256sum --check
           tar -xzf "$asset" komac
-      - name: Open WinGet pull requests
+      - name: Validate WinGet manifests with Komac
         if: steps.credential.outputs.available == 'true'
         env:
-          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
-        run: '"$RUNNER_TEMP/komac" submit --all --yes "$RUNNER_TEMP/winget-manifests"'
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar
+          for installer in "$RUNNER_TEMP"/winget-manifests/manifests/**/*.installer.yaml; do
+            "$RUNNER_TEMP/komac" submit --dry-run --yes "$(dirname -- "$installer")"
+          done
+      - name: Open WinGet pull requests from the organization fork
+        if: steps.credential.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_FORK_OWNER: ${{ vars.WINGET_FORK_OWNER }}
+        run: bash apps/desktop/scripts/submit-winget.sh "$RUNNER_TEMP/winget-manifests" "$WINGET_FORK_OWNER"

@@ -319,11 +319,21 @@ service and helper executables next to it. When bootstrapping from a release tha
 `--legacy` to `scripts/package-winget.mjs`. This also verifies each downloaded
 installer against the asset SHA-256 recorded by GitHub.
 
-The maintainer submits the first manifests to
-[microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). Configure
-a fork and a classic PAT with `public_repo` as `WINGET_TOKEN` in the
-`desktop-release` environment for subsequent releases. The workflow skips
-when that credential is absent. WinGet maintainers review each submission.
+The maintainer creates an organization-owned fork of
+[`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs). Set
+`WINGET_FORK_OWNER` to that organization and `WINGET_TOKEN` to a classic PAT
+with `public_repo` and write access to the fork. Set both in the
+`desktop-release` environment. The workflow logs a skip when either is absent.
+It uses Komac for a dry run and opens one pull request per package using
+GitHub’s [documented `head` and `head_repo` fields](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request).
+Microsoft maintainers review each submission.
+
+Use the same script for the first submission, with GitHub CLI authenticated
+as a maintainer of the organization fork. For the selected `redpill-ai` fork:
+
+```sh
+bash apps/desktop/scripts/submit-winget.sh /tmp/pap-winget-manifests/desktop-v0.11.1 redpill-ai
+```
 
 ## Updates by installation
 
