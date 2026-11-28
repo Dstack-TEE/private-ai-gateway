@@ -253,10 +253,40 @@ struct GatewayGpuCheck {
     _accepted: bool,
 }
 
+/// dstack OS's boot-time GPU attestation (RTMR3 `gpu-attestation`).
+#[derive(Deserialize)]
+struct GpuBootAttestation {
+    devices: u64,
+    cc_mode: String,
+    devtools: bool,
+    dbgstat: String,
+    secboot: bool,
+    #[serde(rename = "evidence_sha256")]
+    _evidence_sha256: Hex<32>,
+}
+
+/// A CVM with GPUs carries an accepted boot attestation of all of them; a CVM
+/// without GPUs carries none.
+fn gpu_shape_ok(num_gpus: u64, boot: Option<&GpuBootAttestation>) -> bool {
+    match boot {
+        None => num_gpus == 0,
+        Some(boot) => {
+            num_gpus > 0
+                && boot.devices == num_gpus
+                && boot.cc_mode == "on"
+                && !boot.devtools
+                && boot.dbgstat == "disabled"
+                && boot.secboot
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct PhalaDirectMaterial {
     #[serde(flatten)]
     tdx: TdxMaterial,
+    num_gpus: u64,
+    gpu_boot_attestation: Option<GpuBootAttestation>,
     trust_boundary: String,
     evidence_scope: String,
     canonical_model_id: String,
@@ -379,6 +409,7 @@ pub(crate) fn valid_profile(provider: &str, claims: &Value) -> bool {
                 && m.report_data_nonce_matched
                 && m.compose_hash_verified
                 && !m.tdx_debug_mode
+                && gpu_shape_ok(m.num_gpus, m.gpu_boot_attestation.as_ref())
         }),
         "chutes" => parse(claims, |m: ChutesMaterial| {
             m.tdx.valid(&claims["tdx_report"])

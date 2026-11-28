@@ -73,9 +73,18 @@
     "compose_hash_verified": true,
     "evidence_scope": "model_instance",
     "gpu_arch": "HOPPER",
+    "gpu_boot_attestation": {
+      "cc_mode": "on",
+      "dbgstat": "disabled",
+      "devices": 2,
+      "devtools": false,
+      "evidence_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "secboot": true
+    },
     "gpu_evidence_nonce_matched": true,
     "gpu_evidence_present": true,
     "gpu_verified": true,
+    "num_gpus": 2,
     "os_image_hash": "0e09f2bcb510c682b461d16b97192c710886db582852991e05146291063f890b",
     "os_image_is_dev": true,
     "os_image_version": "0.5.9",

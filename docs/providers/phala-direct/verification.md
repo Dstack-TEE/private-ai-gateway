@@ -32,12 +32,27 @@ For each verification, the adapter:
 3. Rejects a debug TD: the TUD byte of `TD_ATTRIBUTES` (quote offset 168) must be zero.
 4. Sends the quote, event log, and VM configuration to the dstack verifier and requires `is_valid: true`. The dstack verifier replays the event log against the quote's RTMRs.
 5. Requires `app_compose` and checks that `SHA256(UTF8(app_compose))` equals the `compose-hash` event in the verified event log. If configured, also requires the hash to match a [compose pin](#compose-pins).
-6. Parses `report_data` from the verified quote and checks the signing-address, TLS-fingerprint, and nonce layout above.
-7. Sends available NVIDIA evidence to NRAS and records the nonce-matched result as supplemental metadata.
-8. Resolves the attested dstack OS-image hash as described in [How the OS image is classified](#how-the-os-image-is-classified).
-9. Emits the report's TLS fingerprint as the channel binding.
+6. Checks the CVM's [GPUs](#gpus) against its attested GPU count.
+7. Parses `report_data` from the verified quote and checks the signing-address, TLS-fingerprint, and nonce layout above.
+8. Sends available NVIDIA evidence to NRAS and records the nonce-matched result as supplemental metadata.
+9. Resolves the attested dstack OS-image hash as described in [How the OS image is classified](#how-the-os-image-is-classified).
+10. Emits the report's TLS fingerprint as the channel binding.
 
-Steps 1 through 6 and 9 gate the result. The bridge records GPU verification, TCB status, and OS classification as supplemental evidence.
+Steps 1 through 7 and 10 gate the result. The bridge records the runtime GPU check, TCB status, and OS classification as supplemental evidence.
+
+## GPUs
+
+The dstack verifier rebuilds the boot measurements from `vm_config`, including `num_gpus`, so the quote binds the CVM's GPU count. dstack reads a missing `num_gpus` as 0.
+
+A CVM with GPUs must carry dstack OS's boot-time GPU attestation. dstack OS attests every attached NVIDIA GPU with `nvattest`, stops the boot before key provisioning if that fails, and records the outcome as the RTMR3 runtime event `gpu-attestation`:
+
+```json
+{"version":3,"provider":"nvidia","devices":8,"cc_mode":"on","devtools":false,"dbgstat":"disabled","secboot":true,"evidence_sha256":"<sha256 of the nvattest output>"}
+```
+
+The adapter takes the first such event before `system-ready`, which apps cannot emit; the dstack verifier has replayed its payload into RTMR3. It requires `provider` `nvidia`, `devices` equal to `num_gpus`, `cc_mode` `on`, `devtools` `false`, `dbgstat` `disabled`, and `secboot` `true`. A missing event fails verification, which covers `requirements.gpu_policy.attest_gpu: false` and a dstack OS too old to record it.
+
+A CVM without GPUs (`num_gpus` 0) needs no GPU attestation. Its report must carry no GPU evidence, because any evidence would come from another machine. dstack-vllm-proxy's `CPU_ONLY=1` produces such a report.
 
 ## Channel binding and forwarding
 
@@ -76,7 +91,9 @@ The attested-session layer reads these `provider_claims` keys, so their names an
 | `os_image_version` | The resolved image version, or `null`. |
 | `os_image_is_dev` | The resolved `is_dev` flag, or `null`. |
 | `production_os_image` | `true` for a production image, `false` for a development image, `null` when the hash cannot be resolved. |
-| `gpu_verified` | `true` only when NRAS accepts the evidence and the GPU nonce matches. |
+| `num_gpus` | The attested GPU count. |
+| `gpu_boot_attestation` | The accepted boot-time result (`devices`, `cc_mode`, `devtools`, `dbgstat`, `secboot`, `evidence_sha256`), or `null` for a CPU-only CVM. |
+| `gpu_verified` | `true` only when NRAS accepts the runtime evidence and the GPU nonce matches. |
 | `gpu_evidence_present` | Whether the report carried NVIDIA evidence. |
 | `gpu_evidence_nonce_matched` | Whether the GPU evidence nonce equals the request nonce, or `null` without evidence. |
 | `gpu_arch` | The GPU architecture from the evidence. |
@@ -88,7 +105,7 @@ The attested-session layer reads these `provider_claims` keys, so their names an
 | `tee_attested` | Asserted as hardware-proven from the verified TDX quote and bound TLS channel. |
 | `tcb_up_to_date` | Hardware-proven from the dstack verifier's TCB status: asserted for `UpToDate`, refuted for any other reported status, unknown when absent. |
 | `os_known_good` | Verifier-derived: asserted for a resolved production dstack image, refuted for a resolved development image, unknown when resolution fails. |
-| `gpu_attested` | Asserted as verifier-derived only when NRAS succeeds and the GPU nonce matches. This does not prove that GPU served this request or is bound to the CPU TEE. |
+| `gpu_attested` | Hardware-proven: asserted from the boot-time GPU attestation, which the quote binds to the serving CVM, and refuted for a CPU-only CVM. It does not show which GPU served a request. |
 | `serving_software_known_good` | Unknown. Compose pins identify the measured compose bytes. A pinned compose can still refer to mutable image tags. |
 | `model_weights_provenance` | Unknown. |
 
@@ -118,7 +135,7 @@ The adapter records the classification and does not enforce it. A relying party 
 - Production-versus-development OS classification is recorded rather than enforced, so a verified channel can carry a session that refutes `os_known_good`.
 - Compose pins cover the measured compose bytes. Individual container images are outside the pin check.
 - The measured production Compose exports container and kernel logs outside the CVM with credential-only redaction. Whether the exported logs carry request content is outside the scope of adapter verification.
-- GPU evidence is an online existence and nonce check. It is not hardware-bound to the serving CPU TEE and does not prove which GPU served a request.
+- The boot-time GPU attestation describes the GPUs at boot. The runtime NRAS check is an online existence and nonce check that is not bound to the serving CVM. Neither proves which GPU served a request.
 - Model weights are not measured into the accepted identity.
 - The producer (PIG or dstack-vllm-proxy) and the external dstack verifier are additional trust and availability dependencies.
 
@@ -144,6 +161,10 @@ It runs `scripts/soundness_phala_direct.py`, which stubs the HTTP fetch, dstack 
 | `accepted_subjects` contains only an `app-id:` entry | Verified without Compose pinning. |
 | Mixed list and the measured compose hash matches a compose pin | Verified. |
 | Mixed list and the measured compose hash misses every compose pin | Rejected. |
+| GPU CVM without a `gpu-attestation` event, or with one emitted after `system-ready` | Rejected. |
+| `gpu-attestation` with CC mode off, DevTools on, debug enabled, secure boot off, or a device count other than `num_gpus` | Rejected. |
+| CPU-only CVM without GPU evidence | Verified with `gpu_boot_attestation: null`. |
+| CPU-only CVM with GPU evidence | Rejected. |
 | GPU nonce mismatch | Verified with `gpu_evidence_nonce_matched: false` and `gpu_verified: false`. |
 | NRAS failure | Verified with `gpu_verified: false`. |
 | Unresolvable OS image | Verified with `production_os_image: null`. |

@@ -50,13 +50,91 @@ def _phala_direct_compose_hash_ok(
     return True, ""
 
 
+DSTACK_RUNTIME_EVENT_TYPE = 0x08000001
+
+
+def _dstack_boot_gpu_attestation(event_log: Any) -> tuple[dict[str, Any] | None, str]:
+    """dstack OS's boot-time GPU attestation: the first `gpu-attestation` RTMR3
+    runtime event before `system-ready`, which apps cannot emit. The dstack
+    verifier replayed the event payloads into the quote's RTMR3."""
+    try:
+        events = json.loads(event_log) if isinstance(event_log, str) else event_log
+    except json.JSONDecodeError:
+        return None, "PhalaDirect event log is not JSON"
+    if not isinstance(events, list):
+        return None, "PhalaDirect event log is not an event list"
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("imr") != 3 or event.get("event_type") != DSTACK_RUNTIME_EVENT_TYPE:
+            continue
+        if event.get("event") == "system-ready":
+            break
+        if event.get("event") != "gpu-attestation":
+            continue
+        try:
+            result = json.loads(bytes.fromhex(str(event["event_payload"])))
+        except (ValueError, KeyError):
+            return None, "dstack gpu-attestation event payload is malformed"
+        return (result, "") if isinstance(result, dict) else (None, "dstack gpu-attestation payload is not an object")
+    return None, "no dstack boot-time GPU attestation before system-ready"
+
+
+def _attested_gpu_count(vm_config: Any) -> int | None:
+    """The CVM's GPU count. The dstack verifier rebuilt the boot measurements
+    from this vm_config, so the quote binds it; dstack reads a missing field as 0."""
+    try:
+        config = json.loads(vm_config or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    count = config.get("num_gpus", 0) if isinstance(config, dict) else None
+    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else None
+
+
+def _has_gpu_evidence(nvidia_payload: Any) -> bool:
+    if not nvidia_payload:
+        return False
+    try:
+        payload = json.loads(nvidia_payload) if isinstance(nvidia_payload, str) else nvidia_payload
+    except json.JSONDecodeError:
+        return True
+    return not (isinstance(payload, dict) and not payload.get("evidence_list"))
+
+
+def _check_gpus(num_gpus: int, event_log: Any, nvidia_payload: Any) -> tuple[dict[str, Any] | None, str]:
+    """Return (boot attestation, rejection reason). A CVM with GPUs needs dstack's
+    boot attestation of every one of them; a CVM without GPUs must present no GPU
+    evidence, since it could only have come from another machine."""
+    if num_gpus == 0:
+        if _has_gpu_evidence(nvidia_payload):
+            return None, "PhalaDirect CVM has no GPUs (num_gpus 0) but presented GPU evidence"
+        return None, ""
+    result, reason = _dstack_boot_gpu_attestation(event_log)
+    if result is None:
+        return None, reason
+    checks = [
+        (result.get("provider") == "nvidia", "provider is not nvidia"),
+        (result.get("devices") == num_gpus, f"it covers {result.get('devices')!r} of {num_gpus} GPUs"),
+        (result.get("cc_mode") == "on", "confidential-computing mode is not on"),
+        (result.get("devtools") is False, "DevTools is enabled"),
+        (result.get("dbgstat") == "disabled", "GPU debug is not disabled"),
+        (result.get("secboot") is True, "GPU secure boot is not on"),
+    ]
+    for ok, problem in checks:
+        if not ok:
+            return None, f"dstack boot-time GPU attestation rejected: {problem}"
+    return result, ""
+
+
 async def verify_phala_direct(request: dict[str, Any]) -> None:
     """Verify a Phala Inference Guard or dstack-vllm-proxy endpoint directly.
 
     Verify the version 2 report's TDX quote, report_data binding (signing
-    address, request nonce and custom-domain TLS SPKI), and measured compose.
-    Return the attested TLS SPKI for the forwarding backend to pin. Record
-    GPU evidence, TCB status and OS classification as supplemental claims.
+    address, request nonce and custom-domain TLS SPKI), measured compose, and
+    GPUs: dstack's boot-time attestation of every attested GPU, or no GPU
+    evidence from a CPU-only CVM. Return the attested TLS SPKI
+    for the forwarding backend to pin. Record the runtime GPU evidence, TCB
+    status and OS classification as supplemental claims.
     """
     import requests
 
@@ -249,7 +327,29 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
-    # 3. report_data binding: nonce + signing address + TLS SPKI. Parse
+    # 3. GPUs, keyed off the attested GPU count.
+    num_gpus = _attested_gpu_count(vm_config)
+    if num_gpus is None:
+        failed(
+            provider,
+            "PhalaDirect vm_config has no valid num_gpus",
+            failure="evidence_invalid",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
+        return
+    gpu_boot, gpu_reason = _check_gpus(num_gpus, event_log, nvidia_payload)
+    if gpu_reason:
+        failed(
+            provider,
+            gpu_reason,
+            failure="policy_rejected",
+            evidence=evidence,
+            verifier_id=verifier_id,
+        )
+        return
+
+    # 4. report_data binding: nonce + signing address + TLS SPKI. Parse
     # report_data from the quote bytes the dstack verifier just proved authentic
     # (it does not surface report_data itself).
     report_data_hex = dstack_result.get("report_data") or _tdx_report_data_hex(intel_quote)
@@ -278,12 +378,9 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
         )
         return
 
-    # 4. GPU (NVIDIA confidential computing) evidence — SUPPLEMENTAL, never a gate.
-    # The NVIDIA path decodes JWTs without signature verification. Its outcome
-    # does not authenticate GPU identity or prove continued use of any device.
-    # The CPU TEE quote + report_data binding + compose integrity above are the
-    # trust gate. Record the supplemental GPU outcome and nonce matching as
-    # metadata; neither establishes binding to the serving CPU or request.
+    # 5. Runtime GPU evidence — supplemental to the boot-time gate above. NRAS
+    # is called directly over TLS, so its verdict is NVIDIA's; the per-request
+    # nonce shows the evidence is fresh but not which machine it came from.
     gpu_evidence_present = False
     gpu_evidence_nonce_matched: bool | None = None
     gpu_attested = False
@@ -356,7 +453,13 @@ async def verify_phala_direct(request: dict[str, Any]) -> None:
                 "os_image_version": os_image_version,
                 "os_image_is_dev": os_image_is_dev,
                 "production_os_image": production_os_image,
-                # GPU is supplemental metadata, not part of the trust gate.
+                # The attested GPU count and boot-time GPU attestation are the
+                # gate; the runtime NRAS outcome below is supplemental.
+                "num_gpus": num_gpus,
+                "gpu_boot_attestation": gpu_boot and {
+                    key: gpu_boot.get(key)
+                    for key in ("devices", "cc_mode", "devtools", "dbgstat", "secboot", "evidence_sha256")
+                },
                 "gpu_verified": gpu_attested,
                 "gpu_evidence_present": gpu_evidence_present,
                 "gpu_evidence_nonce_matched": gpu_evidence_nonce_matched,
