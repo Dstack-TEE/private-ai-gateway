@@ -495,7 +495,9 @@ They record `aur` as their package manager.
 
 The AUR account must own or co-maintain both pkgbases and have a dedicated
 SSH key. Add the private key as `AUR_SSH_PRIVATE_KEY` in `desktop-release`.
-The publication job skips when the secret is absent. Validate any
+The publication job skips when the secret is absent. For packaging-only
+fixes, dispatch the workflow with the existing stable tag and a higher
+`pkgrel`. Validate any
 [host key change](https://aur.archlinux.org/) before updating the pinned key.
 The AUR maintainer owns monitoring package comments and handling changes to
 Arch dependencies.

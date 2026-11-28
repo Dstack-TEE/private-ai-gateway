@@ -1069,6 +1069,8 @@ jobs:
     uses: ./.github/workflows/desktop-aur.yml
     with:
       tag: ${{ github.ref_name }}
+    secrets:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
   publish-npm:
     needs: update-feed

@@ -199,7 +199,10 @@ impl Installation {
     }
 
     pub fn desktop_package_managed(self) -> bool {
-        matches!(self, Self::DesktopPacman | Self::DesktopLinuxRepo | Self::DesktopAur)
+        matches!(
+            self,
+            Self::DesktopPacman | Self::DesktopLinuxRepo | Self::DesktopAur
+        )
     }
 
     pub fn linux_repo_managed(self) -> bool {

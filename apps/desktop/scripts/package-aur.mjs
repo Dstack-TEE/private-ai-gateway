@@ -3,13 +3,13 @@ import { execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { linuxPackages, markerDirectory, releaseVersionParts } from "./package-linux.mjs";
+import { linuxPackages, maintainer, markerDirectory, releaseVersionParts } from "./package-linux.mjs";
 import { artifactName, releaseChecksumAssets } from "./release-artifacts.mjs";
 import { publishedRelease } from "./release-channel.mjs";
 
-const [output, repository, tag] = process.argv.slice(2);
-if (!output || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "")) {
-  throw new Error("Usage: package-aur.mjs OUTPUT OWNER/REPOSITORY RELEASE_TAG");
+const [output, repository, tag, pkgrel = "1"] = process.argv.slice(2);
+if (!output || !/^[\w.-]+\/[\w.-]+$/.test(repository ?? "") || !/^[1-9][0-9]*$/.test(pkgrel)) {
+  throw new Error("Usage: package-aur.mjs OUTPUT OWNER/REPOSITORY RELEASE_TAG [PACKAGE_RELEASE]");
 }
 const { tag_name: publishedTag, draft, prerelease, assets } = JSON.parse(execFileSync("gh", [
   "api", `repos/${repository}/releases/tags/${publishedRelease(tag, false).tag}`,
@@ -62,9 +62,10 @@ for (const [kind, definition] of Object.entries(linuxPackages)) {
     version, platform: "linux", arch, suffix: ".pkg.tar.zst", cli: kind === "cli",
   })]);
   const lines = [
+    `# Maintainer: ${maintainer}`,
     `pkgname=${pkgname}`,
     `pkgver=${pkgver}`,
-    "pkgrel=1",
+    `pkgrel=${pkgrel}`,
     `pkgdesc=${quote(definition.description.split("\n")[0])}`,
     `arch=${array(Object.keys(architectures))}`,
     `url=${quote(app.bundle.homepage)}`,

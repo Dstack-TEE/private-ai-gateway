@@ -6,6 +6,20 @@ on:
       tag:
         required: true
         type: string
+    secrets:
+      AUR_SSH_PRIVATE_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable desktop release tag
+        required: true
+        type: string
+      pkgrel:
+        description: New AUR package release number
+        required: true
+        type: string
+        default: '1'
 
 permissions:
   contents: read
@@ -43,15 +57,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          AUR_PKGREL: ${{ inputs.pkgrel || '1' }}
         working-directory: apps/desktop
         run: |
           npm ci --ignore-scripts
-          node scripts/package-aur.mjs "$RUNNER_TEMP/aur" "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+          node scripts/package-aur.mjs "$RUNNER_TEMP/aur" "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$AUR_PKGREL"
       - name: Verify and build with makepkg
         if: steps.credential.outputs.available == 'true'
         run: |
           docker run --rm --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repo,readonly" \
-            --mount "type=bind,src=$RUNNER_TEMP/aur,dst=/packages" archlinux:base-devel \
+            --mount "type=bind,src=$RUNNER_TEMP/aur,dst=/packages" archlinux:base-devel@sha256:949ecb1661609ab7e8f6854ba03efd62792e7a796313738e94b040c095c20d91 \
             bash /repo/apps/desktop/scripts/verify-aur.sh "$(id -u)"
       - name: Publish PKGBUILDs
         if: steps.credential.outputs.available == 'true'
