@@ -115,6 +115,10 @@ command links and restores the OpenCode configuration. The signed-update step
 is reported as skipped because it requires a release signed for the build
 under test.
 
+Desktop live E2E uses the shared desktop packaging workflow to build its
+Linux x64 packages. A manual dispatch on a branch other than `main` verifies
+the artifact download and runs selected systemd rows with `--skip-request`.
+
 ## Versions
 
 `versions.env` defaults Node.js, Bun and every agent to `latest`, one line

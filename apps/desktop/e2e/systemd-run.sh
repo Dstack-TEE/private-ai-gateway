@@ -130,7 +130,8 @@ elif [[ -n "$run_id" ]]; then
   }
   workflow_name="$(jq -r .workflowName <<<"$run_json")"
   [[ "$workflow_name" == "Desktop Tauri" ]] || { echo "Workflow run $run_id is not Desktop Tauri" >&2; exit 1; }
-  if ! jq -e 'any(.jobs[]; .name == "Package (linux-x64)" and .conclusion == "success")' <<<"$run_json" >/dev/null; then
+  if ! jq -e 'any(.jobs[]; .conclusion == "success" and
+      (.name == "Package (linux-x64)" or (.name | endswith(" / Package (linux-x64)"))))' <<<"$run_json" >/dev/null; then
     echo "Workflow run $run_id has no successful Package (linux-x64) job" >&2
     exit 1
   fi

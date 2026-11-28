@@ -1,18 +1,41 @@
-name: Desktop Package
+name: Desktop packages
 
 on:
   workflow_call:
     inputs:
+      version:
+        description: Resolved version for the native workflow. Leave empty to read the committed version.
+        type: string
+      channel:
+        description: Release channel. Empty for unsigned test packages.
+        type: string
       package_only:
-        description: Build without verification jobs
-        required: false
-        default: true
+        description: Include checksums with Linux test packages.
         type: boolean
       linux_x64_only:
-        description: Build only the Linux x64 package matrix entry
-        required: false
-        default: false
+        description: Build only the Linux x64 package.
         type: boolean
+    secrets:
+      APPLE_API_ISSUER:
+        required: false
+      APPLE_API_KEY:
+        required: false
+      APPLE_API_PRIVATE_KEY:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      LINUX_SIGNING_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -20,17 +43,70 @@ permissions:
 env:
   CARGO_BUILD_JOBS: 2
   CARGO_TARGET_DIR: ${{ github.workspace }}/apps/desktop/target
-  PAP_RUST_CACHE_NAMESPACE: ubuntu-24.04
-
-concurrency:
-  group: desktop-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  verify:
-    if: ${{ inputs.package_only != true }}
+  prepare:
+    name: Resolve package matrix
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.include }}
+      version: ${{ inputs.version || steps.version.outputs.version }}
+    steps:
+      - id: matrix
+        shell: bash
+        env:
+          LINUX_X64_ONLY: ${{ inputs.linux_x64_only }}
+        run: |
+          include="$(jq -c --arg linuxOnly "$LINUX_X64_ONLY" '
+            if $linuxOnly == "true" then map(select(.platform == "linux-x64")) else . end
+          ' <<'JSON'
+          [
+            {"platform":"macos-arm64",   "os":"xcode-27",        "target":"aarch64-apple-darwin", "bundle_dir":"aarch64-apple-darwin/release/bundle", "bundles":"app,dmg", "cli_platform":"macos",   "cli_arch":"arm64"},
+            {"platform":"macos-x64",     "os":"xcode-27",        "target":"x86_64-apple-darwin",  "bundle_dir":"x86_64-apple-darwin/release/bundle",  "bundles":"app,dmg", "cli_platform":"macos",   "cli_arch":"x64"},
+            {"platform":"windows-x64",   "os":"windows-2025",    "target":"",                    "bundle_dir":"release/bundle",                   "bundles":"nsis",    "cli_platform":"windows", "cli_arch":"x64"},
+            {"platform":"windows-arm64", "os":"windows-11-arm",  "target":"",                    "bundle_dir":"release/bundle",                   "bundles":"nsis",    "cli_platform":"windows", "cli_arch":"arm64"},
+            {"platform":"linux-x64",     "os":"ubuntu-22.04",    "target":"",                    "bundle_dir":"release/bundle",                   "bundles":"deb,rpm", "cli_platform":"linux",   "cli_arch":"x64"},
+            {"platform":"linux-arm64",   "os":"ubuntu-22.04-arm","target":"",                    "bundle_dir":"release/bundle",                   "bundles":"deb,rpm", "cli_platform":"linux",   "cli_arch":"arm64"}
+          ]
+          JSON
+          )"
+          printf 'include=%s\n' "$include" >> "$GITHUB_OUTPUT"
+      - if: inputs.version == ''
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - if: inputs.version == ''
+        uses: ./.github/actions/desktop-node
+        with:
+          ignore-scripts: true
+      - id: version
+        name: Resolve the committed test version
+        if: inputs.version == ''
+        working-directory: apps/desktop
+        env:
+          PACKAGE_ONLY: "true"
+        run: node scripts/release-request.mjs desktop
+
+  package:
+    name: Package (${{ matrix.platform }})
+    needs: prepare
+    environment:
+      name: ${{ inputs.channel != '' && 'desktop-release' || 'desktop-build' }}
+    env:
+      # Empty for test packages.
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PAP_BUILD_TARGET: ${{ matrix.target }}
+      PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/target/${{ matrix.bundle_dir }}
+      PAP_RUST_CACHE_NAMESPACE: ${{ matrix.os }}
+      TAURI_UPDATER_PUBLIC_KEY: ${{ inputs.channel && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
+      TAURI_UPDATER_ENDPOINT: ${{ inputs.channel && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', inputs.channel) || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -39,9 +115,7 @@ jobs:
         id: rust
         with:
           toolchain: stable
-          components: rustfmt, clippy
-      - &restore-rust-cache
-        name: Restore Rust dependencies
+      - name: Restore Rust dependencies
         id: rust-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -58,191 +132,6 @@ jobs:
           restore-keys: |
             pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-${{ hashFiles('apps/desktop/Cargo.lock', 'apps/desktop/Cargo.toml', 'apps/desktop/cli/Cargo.toml', 'apps/desktop/core/Cargo.toml', 'apps/desktop/agent-bridge/Cargo.toml', 'apps/desktop/runtime/Cargo.toml', 'apps/desktop/src-tauri/Cargo.toml', 'crates/aci-protocol/Cargo.toml', 'crates/aci-verify/Cargo.toml') }}-partial-
             pap-rust-v2-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.PAP_RUST_CACHE_NAMESPACE }}-${{ env.PAP_BUILD_TARGET || 'host' }}-${{ steps.rust.outputs.cachekey }}-
-      - name: Install Linux desktop dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 libsecret-tools rpm libarchive-tools
-      # nfpm (GoReleaser's packager) builds every Linux package.
-      - &install-nfpm
-        name: Install nfpm
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          NFPM_VERSION: 2.49.0
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64) asset="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" digest=2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7 ;;
-            aarch64) asset="nfpm_${NFPM_VERSION}_Linux_arm64.tar.gz" digest=d4eee71839e92c68cbd3b101640bad32d2856fc551acae0635be9118e48c9d9c ;;
-            *) echo "Unsupported nfpm runner architecture $(uname -m)" >&2; exit 1 ;;
-          esac
-          directory="$RUNNER_TEMP/nfpm"
-          mkdir -p "$directory"
-          curl -fsSL -o "$directory/$asset" "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/$asset"
-          printf '%s  %s\n' "$digest" "$directory/$asset" | sha256sum -c -
-          tar -xzf "$directory/$asset" -C "$directory" nfpm
-          rm "$directory/$asset"
-          echo "$directory" >> "$GITHUB_PATH"
-      - uses: ./.github/actions/desktop-node
-      - name: Verify renderer
-        working-directory: apps/desktop
-        run: |
-          npm run check
-          npm run build:web
-          npm run test:release
-      - name: Stage Tauri sidecars
-        working-directory: apps/desktop
-        run: npm run build:sidecars:debug
-      # Desktop Mac App Store (desktop-mac-app-store.yml) checks the
-      # mac-app-store feature on macOS, and CI (ci.yml) tests aci-protocol and aci-verify.
-      - name: Verify Rust sources
-        working-directory: apps/desktop
-        run: |
-          cargo fmt --all -- --check
-          cargo clippy --locked --workspace --all-targets -- -D warnings
-          cargo test --locked --workspace
-      # CycloneDX SBOMs that the release job attests. They are generated on
-      # every run so that a tool change fails here rather than on a release
-      # tag. `--target all` covers every platform's dependencies.
-      - name: Generate SBOMs
-        working-directory: apps/desktop
-        env:
-          CARGO_CYCLONEDX_VERSION: 0.5.9
-        run: |
-          set -euo pipefail
-          asset=cargo-cyclonedx-x86_64-unknown-linux-gnu.tar.xz
-          directory="$RUNNER_TEMP/cargo-cyclonedx"
-          mkdir -p "$directory" "$RUNNER_TEMP/sbom"
-          curl -fsSL -o "$directory/$asset" "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-${CARGO_CYCLONEDX_VERSION}/$asset"
-          printf '%s  %s\n' fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8 "$directory/$asset" | sha256sum -c -
-          tar -xJf "$directory/$asset" -C "$directory" --strip-components=1 cargo-cyclonedx-x86_64-unknown-linux-gnu/cargo-cyclonedx
-          PATH="$directory:$PATH" cargo cyclonedx --format json --spec-version 1.5 --target all
-          mv cli/private-ai-proxy.cdx.json src-tauri/private-ai-proxy-desktop.cdx.json "$RUNNER_TEMP/sbom/"
-          npm sbom --omit dev --sbom-format cyclonedx --sbom-type application > "$RUNNER_TEMP/sbom/private-ai-proxy-renderer.cdx.json"
-      - name: Upload SBOMs
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        with:
-          name: desktop-sbom
-          if-no-files-found: error
-          retention-days: 14
-          path: ${{ runner.temp }}/sbom/
-      - &save-rust-cache
-        name: Save Rust dependencies
-        if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: *rust-cache-paths
-          key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
-
-  # Native Linux arm64 library tests: libc constants and syscall behaviour
-  # differ from x86_64, and nothing else runs these crates' tests on arm64.
-  verify-linux-arm64:
-    name: Verify libraries (linux-arm64)
-    if: ${{ inputs.package_only != true }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: rust
-        with:
-          toolchain: stable
-      - *restore-rust-cache
-      - name: Test desktop libraries
-        working-directory: apps/desktop
-        run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
-      - *save-rust-cache
-
-  # Native Windows library tests on every change: the ACL, named-pipe and
-  # file-replacement code only compiles and runs there. Packages build after
-  # it; the windows-arm64 package job runs the same tests on arm64.
-  verify-windows-x64:
-    name: Verify libraries (windows-x64)
-    if: ${{ inputs.package_only != true }}
-    runs-on: windows-2025
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: rust
-        with:
-          toolchain: stable
-          components: clippy
-      - *restore-rust-cache
-      - name: Test desktop libraries
-        working-directory: apps/desktop
-        run: cargo test --locked --package private-ai-proxy-core --package private-ai-proxy-runtime --package private-ai-proxy-agent-bridge --lib
-      # The CLI and the desktop shell have Windows-only code too. Checking the
-      # shell needs no staged sidecars: TAURI_CONFIG merges an empty
-      # externalBin, which only bundling uses.
-      - name: Lint the CLI and the desktop shell
-        working-directory: apps/desktop
-        env:
-          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
-        run: cargo clippy --locked --all-targets --package private-ai-proxy --package private-ai-proxy-desktop -- -D warnings
-      - *save-rust-cache
-
-  version:
-    name: Resolve version
-    if: ${{ inputs.package_only == true || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')) }}
-    runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      channel: ${{ steps.version.outputs.channel }}
-      app_store_build_number: ${{ steps.version.outputs.app_store_build_number }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/desktop-node
-        with:
-          ignore-scripts: true
-      - id: version
-        name: Resolve the committed version and release channel
-        working-directory: apps/desktop
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PACKAGE_ONLY: ${{ inputs.package_only }}
-        run: node scripts/release-request.mjs desktop
-
-  # Stable releases also upload the App Store build, in parallel with the
-  # Direct packages; the release job publishes only after both succeed. The
-  # upload cannot be undone and uses up its build number, so it waits for
-  # every verification job the packages wait for.
-  package:
-    name: Package (${{ matrix.platform }})
-    needs: [verify, verify-linux-arm64, verify-windows-x64, version]
-    if: ${{ always() && !cancelled() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
-    environment:
-      name: ${{ needs.version.outputs.channel != '' && 'desktop-release' || 'desktop-build' }}
-    env:
-      # Empty for test packages.
-      RELEASE_CHANNEL: ${{ needs.version.outputs.channel }}
-      VERSION: ${{ needs.version.outputs.version }}
-      PAP_BUILD_TARGET: ${{ matrix.target }}
-      PAP_BUNDLE_DIR: ${{ github.workspace }}/apps/desktop/target/${{ matrix.bundle_dir }}
-      PAP_RUST_CACHE_NAMESPACE: ${{ matrix.os }}
-      TAURI_UPDATER_PUBLIC_KEY: ${{ needs.version.outputs.channel && vars.TAURI_UPDATER_PUBLIC_KEY || '' }}
-      TAURI_UPDATER_ENDPOINT: ${{ needs.version.outputs.channel && format('https://github.com/Dstack-TEE/private-ai-gateway/releases/download/desktop-updates-{0}/latest.json', needs.version.outputs.channel) || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.linux_x64_only && '[{"platform":"linux-x64","os":"ubuntu-22.04","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"x64"}]' || '[{"platform":"macos-arm64","os":"xcode-27","target":"aarch64-apple-darwin","bundle_dir":"aarch64-apple-darwin/release/bundle","bundles":"app,dmg","cli_platform":"macos","cli_arch":"arm64"},{"platform":"macos-x64","os":"xcode-27","target":"x86_64-apple-darwin","bundle_dir":"x86_64-apple-darwin/release/bundle","bundles":"app,dmg","cli_platform":"macos","cli_arch":"x64"},{"platform":"windows-x64","os":"windows-2025","target":"","bundle_dir":"release/bundle","bundles":"nsis","cli_platform":"windows","cli_arch":"x64"},{"platform":"windows-arm64","os":"windows-11-arm","target":"","bundle_dir":"release/bundle","bundles":"nsis","cli_platform":"windows","cli_arch":"arm64"},{"platform":"linux-x64","os":"ubuntu-22.04","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"x64"},{"platform":"linux-arm64","os":"ubuntu-22.04-arm","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"arm64"}]') }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-        id: rust
-        with:
-          toolchain: stable
-      - *restore-rust-cache
       - name: Install macOS target
         if: runner.os == 'macOS'
         run: rustup target add "$PAP_BUILD_TARGET"
@@ -251,7 +140,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev gnome-keyring dbus-x11 binutils libarchive-tools xvfb x11-utils
-      - *install-nfpm
+      - name: Install nfpm
+        if: runner.os == 'Linux'
+        run: bash apps/desktop/scripts/install-nfpm.sh
       - uses: ./.github/actions/desktop-node
       - name: Import optional Windows code-signing certificate
         if: runner.os == 'Windows' && env.RELEASE_CHANNEL != ''
@@ -300,8 +191,8 @@ jobs:
         working-directory: apps/desktop
         shell: bash
         env: &updater-signing
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: |
           set -euo pipefail
           test -n "$TAURI_UPDATER_PUBLIC_KEY"
@@ -342,8 +233,8 @@ jobs:
         working-directory: apps/desktop
         env:
           TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
-          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.version.outputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ inputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ inputs.channel && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -369,8 +260,7 @@ jobs:
         shell: bash
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
-        run: |
-          bash apps/desktop/scripts/prepare-linux-signing.sh apps/desktop/packaging/linux-signing-key.asc >> "$GITHUB_ENV"
+        run: bash apps/desktop/scripts/prepare-linux-signing.sh apps/desktop/packaging/linux-signing-key.asc >> "$GITHUB_ENV"
 
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
       # the stable release. nfpm uses Tauri's Linux payload and RPM-specific
@@ -474,12 +364,7 @@ jobs:
       - name: Remove Linux signing material
         if: always() && runner.os == 'Linux' && env.RELEASE_CHANNEL != ''
         shell: bash
-        run: |
-          signing="$RUNNER_TEMP/pap-linux-signing"
-          if [[ -d "$signing/gnupg" ]]; then
-            gpgconf --homedir "$signing/gnupg" --kill gpg-agent || true
-          fi
-          rm -rf -- "$signing"
+        run: bash apps/desktop/scripts/remove-linux-signing.sh
 
       - name: Check CLI-only archive without UI
         working-directory: apps/desktop
@@ -906,4 +791,9 @@ jobs:
           if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PATH)) {
             Remove-Item $env:WINDOWS_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue
           }
-      - *save-rust-cache
+      - name: Save Rust dependencies
+        if: always() && !cancelled() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: *rust-cache-paths
+          key: ${{ job.status == 'success' && steps.rust-cache.outputs.cache-primary-key || format('{0}-partial-{1}-{2}', steps.rust-cache.outputs.cache-primary-key, github.run_id, github.run_attempt) }}
