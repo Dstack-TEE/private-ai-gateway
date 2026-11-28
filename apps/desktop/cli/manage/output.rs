@@ -134,6 +134,9 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         Action::Update if matches!(value["installation"].as_str(), Some("linuxRepo" | "desktopLinuxRepo" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "windowsInstallScript")) && value["commands"][0].is_string() => {
             value["commands"].as_array().into_iter().flatten().map(text).collect::<Vec<_>>().join("\n")
         }
+        Action::Update if value["packageUrl"].is_string() => {
+            format!("Update with your AUR helper. {}", text(&value["packageUrl"]))
+        }
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
                 "Updated {} → {}.{}",

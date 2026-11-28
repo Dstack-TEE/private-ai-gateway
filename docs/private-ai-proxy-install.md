@@ -202,6 +202,24 @@ betas, enable both repositories by repeating the repository setup with
 command. Remove or disable the beta repository to return to stable. Your
 package manager will upgrade when a newer stable version is available.
 
+## Arch User Repository
+
+Install [private-ai-proxy-bin](https://aur.archlinux.org/packages/private-ai-proxy-bin)
+for the desktop app or [private-ai-proxy-cli-bin](https://aur.archlinux.org/packages/private-ai-proxy-cli-bin)
+for the CLI. The AUR tracks stable releases. Before installing, import the
+upstream OpenPGP certificate into your user's GnuPG keyring. Verify its
+primary fingerprint against the value in [Verify Linux packages](#verify-linux-packages).
+
+```sh
+curl -fsSLo linux-signing-key.asc https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc
+gpg --show-keys --with-fingerprint linux-signing-key.asc
+gpg --import linux-signing-key.asc
+```
+
+Install and upgrade the package with your usual AUR helper. You can also
+follow [Arch’s manual AUR build instructions](https://wiki.archlinux.org/title/Arch_User_Repository#Installing_and_upgrading_packages)
+to build the package with `makepkg`.
+
 ## Desktop app and native packages
 
 Signed desktop app installers, portable CLI archives, and Linux DEB, RPM, and

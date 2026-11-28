@@ -75,7 +75,10 @@ fn service_manager_platform_supported() -> bool {
 fn command() -> Result<(PathBuf, bool), String> {
     if matches!(
         installation(),
-        Installation::DesktopApp | Installation::DesktopPacman | Installation::DesktopLinuxRepo
+        Installation::DesktopApp
+            | Installation::DesktopPacman
+            | Installation::DesktopLinuxRepo
+            | Installation::DesktopAur
     ) {
         return Ok((
             crate::launch::sibling_executable("private-ai-proxy")?,
@@ -137,6 +140,7 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::Rpm
         | Installation::LinuxRepo
         | Installation::Pacman
+        | Installation::Aur
         | Installation::SystemPackage
         | Installation::Npm
         | Installation::Pnpm
@@ -147,9 +151,10 @@ fn installation_supports_automatic_supervision() -> bool {
         Installation::InstallScript | Installation::Portable => {
             command().is_ok_and(|(_, linked)| linked)
         }
-        Installation::DesktopApp | Installation::DesktopPacman | Installation::DesktopLinuxRepo => {
-            platform::installed_desktop()
-        }
+        Installation::DesktopApp
+        | Installation::DesktopPacman
+        | Installation::DesktopLinuxRepo
+        | Installation::DesktopAur => platform::installed_desktop(),
     }
 }
 

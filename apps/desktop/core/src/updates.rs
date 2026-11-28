@@ -151,12 +151,15 @@ pub enum Installation {
     DesktopPacman,
     /// Desktop app configured to update through its Linux repository.
     DesktopLinuxRepo,
+    /// Desktop app managed by the Arch User Repository.
+    DesktopAur,
     /// CLI-only native packages.
     Deb,
     Rpm,
     Pacman,
     /// CLI-only package configured to update through its Linux repository.
     LinuxRepo,
+    Aur,
     /// CLI installed by the official install script.
     InstallScript,
     WindowsInstallScript,
@@ -182,8 +185,24 @@ impl Installation {
                 | Self::WindowsInstallScript
         )
     }
+    pub fn aur_package_url(self) -> Option<String> {
+        self.aur_package()
+            .map(|name| format!("https://aur.archlinux.org/packages/{name}"))
+    }
+
+    pub fn aur_package(self) -> Option<&'static str> {
+        match self {
+            Self::DesktopAur => Some("private-ai-proxy-bin"),
+            Self::Aur => Some("private-ai-proxy-cli-bin"),
+            _ => None,
+        }
+    }
+
     pub fn desktop_package_managed(self) -> bool {
-        matches!(self, Self::DesktopPacman | Self::DesktopLinuxRepo)
+        matches!(
+            self,
+            Self::DesktopPacman | Self::DesktopLinuxRepo | Self::DesktopAur
+        )
     }
 
     pub fn linux_repo_managed(self) -> bool {
@@ -363,6 +382,7 @@ pub fn linux_repo_update(installation: Installation) -> Option<UpdateNotice> {
         current_version: crate::protocol::BUILD_VERSION.into(),
         version: None,
         commands: vec![manager.upgrade(installation)],
+        package_url: None,
         download_url: None,
     })
 }
@@ -448,10 +468,10 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
             || directory == Path::new("/usr/libexec/private-ai-proxy"));
     let package_manager = package_manager.filter(|_| packaged);
     if desktop {
-        return if package_manager == Some("pacman") && directory == Path::new("/usr/bin") {
-            Installation::DesktopPacman
-        } else {
-            Installation::DesktopApp
+        return match package_manager.filter(|_| directory == Path::new("/usr/bin")) {
+            Some("pacman") => Installation::DesktopPacman,
+            Some("aur") => Installation::DesktopAur,
+            _ => Installation::DesktopApp,
         };
     }
     if cfg!(any(target_os = "linux", target_os = "macos"))
@@ -463,6 +483,7 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
         Some("deb") => Installation::Deb,
         Some("rpm") => Installation::Rpm,
         Some("pacman") => Installation::Pacman,
+        Some("aur") => Installation::Aur,
         _ if packaged => Installation::SystemPackage,
         _ if directory
             .components()
@@ -535,6 +556,9 @@ pub struct UpdateNotice {
     pub version: Option<String>,
     /// Shell steps that install `version`, when the installation has them.
     pub commands: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub package_url: Option<String>,
     /// Portable archive to extract into a fresh directory.
     pub download_url: Option<String>,
 }
@@ -546,6 +570,10 @@ pub struct UpdateInfo {
     pub enabled: bool,
     pub system_managed: bool,
     pub package_manager_channel: bool,
+    /// A package page for update instructions from its owning repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub package_url: Option<String>,
     pub current_version: String,
     pub channel: UpdateChannel,
     pub version: Option<String>,
@@ -570,6 +598,11 @@ pub async fn check(
     current_version: &str,
     installation: Installation,
 ) -> Result<UpdateNotice, String> {
+    let channel = if installation.aur_package().is_some() {
+        UpdateChannel::Stable
+    } else {
+        channel
+    };
     let repository = installation
         .linux_repo_managed()
         .then(linux_repository)
@@ -609,6 +642,7 @@ pub async fn check(
         current_version: current_version.into(),
         version: latest.map(|version| version.to_string()),
         commands,
+        package_url: installation.aur_package_url(),
         download_url,
     })
 }
@@ -842,7 +876,9 @@ fn upgrade_steps(
         Installation::DesktopApp
         | Installation::SystemPackage
         | Installation::DesktopLinuxRepo
-        | Installation::LinuxRepo => (Vec::new(), None),
+        | Installation::LinuxRepo
+        | Installation::DesktopAur
+        | Installation::Aur => (Vec::new(), None),
         Installation::DesktopPacman | Installation::Pacman => {
             let file = name(installation == Installation::Pacman, ".pkg.tar.zst");
             let signature = format!("{file}.sig");

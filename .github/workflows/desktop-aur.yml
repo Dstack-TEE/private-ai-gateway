@@ -1,0 +1,75 @@
+name: Publish Arch User Repository packages
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      AUR_SSH_PRIVATE_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable desktop release tag
+        required: true
+        type: string
+      pkgrel:
+        description: New AUR package release number
+        required: true
+        type: string
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-aur
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    timeout-minutes: 30
+    steps:
+      - name: Check AUR credential
+        id: credential
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$AUR_SSH_PRIVATE_KEY" ]]; then
+            echo "AUR_SSH_PRIVATE_KEY is absent. Skipping AUR publication."
+          else
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.credential.outputs.available == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.credential.outputs.available == 'true'
+        with:
+          node-version: 24
+      - name: Generate PKGBUILDs
+        if: steps.credential.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          AUR_PKGREL: ${{ inputs.pkgrel || '1' }}
+        working-directory: apps/desktop
+        run: |
+          npm ci --ignore-scripts
+          node scripts/package-aur.mjs "$RUNNER_TEMP/aur" "$GITHUB_REPOSITORY" "$RELEASE_TAG" "$AUR_PKGREL"
+      - name: Verify and build with makepkg
+        if: steps.credential.outputs.available == 'true'
+        run: |
+          docker run --rm --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/repo,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/aur,dst=/packages" archlinux:base-devel@sha256:949ecb1661609ab7e8f6854ba03efd62792e7a796313738e94b040c095c20d91 \
+            bash /repo/apps/desktop/scripts/verify-aur.sh "$(id -u)"
+      - name: Publish PKGBUILDs
+        if: steps.credential.outputs.available == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: bash apps/desktop/scripts/publish-aur.sh "$RUNNER_TEMP/aur" apps/desktop/packaging/aur/known_hosts

@@ -1061,6 +1061,17 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
+  publish-aur:
+    needs: [version, release]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.version.outputs.channel == 'stable' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-aur.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
   publish-npm:
     needs: update-feed
     if: ${{ !cancelled() && needs.update-feed.result == 'success' }}
