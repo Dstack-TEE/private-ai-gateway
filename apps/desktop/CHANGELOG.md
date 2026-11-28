@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.12.0-beta.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.11.1...desktop-v0.12.0-beta.1) (2026-11-28)
+
+
+### Features
+
+* **desktop:** publish signed APT and RPM package repositories ([c755477](https://github.com/Dstack-TEE/private-ai-gateway/commit/c7554773d029d8bb8aea601bf9cbab10ce10a4d8))
+* **desktop:** publish signed APT and RPM package repositories ([0964924](https://github.com/Dstack-TEE/private-ai-gateway/commit/0964924a6c2a96a5d25e4a143a076c9548201fcf))
+* **desktop:** publish stable Arch User Repository packages ([2e9d32a](https://github.com/Dstack-TEE/private-ai-gateway/commit/2e9d32a8ef8d86cbac0d13e208897f9ee5d17d87))
+* **desktop:** publish stable Arch User Repository packages ([a5a2b8a](https://github.com/Dstack-TEE/private-ai-gateway/commit/a5a2b8a2fb342a011263cbb05ee7c53bb4ce4457))
+* **desktop:** publish stable WinGet manifests ([1596a0b](https://github.com/Dstack-TEE/private-ai-gateway/commit/1596a0b07ee3cf955bad5afc7870ef0a587dc35b))
+* **desktop:** publish stable WinGet manifests ([24f54bd](https://github.com/Dstack-TEE/private-ai-gateway/commit/24f54bdc095a8dfa2237e345402b1b08f268d9b6))
+
+
+### Bug Fixes
+
+* **desktop:** adapt the settings watcher to notify-debouncer-mini 0.8 ([2bf1c95](https://github.com/Dstack-TEE/private-ai-gateway/commit/2bf1c955d81de97a4af56dbc91a934971a898682))
+* **desktop:** apply the client environment without delaying startup ([7ea3670](https://github.com/Dstack-TEE/private-ai-gateway/commit/7ea3670157b12fede19c950126961b6e4eceb854))
+* **desktop:** bound silent NSIS CLI registration ([8faad71](https://github.com/Dstack-TEE/private-ai-gateway/commit/8faad71ae706a0035c97993de08b126d710e5890))
+* **desktop:** check agent validation overrides across environments ([b9e5f8f](https://github.com/Dstack-TEE/private-ai-gateway/commit/b9e5f8fe3a2e4ac20c7e4da0156c124d5d6895af))
+* **desktop:** declare WinGet runtime dependencies and portable scope ([c9d0286](https://github.com/Dstack-TEE/private-ai-gateway/commit/c9d0286151a7b3e6aa4cd0944eb5af14e68f9840))
+* **desktop:** declare WinGet runtime dependencies and portable scope ([e2c10a0](https://github.com/Dstack-TEE/private-ai-gateway/commit/e2c10a062b9b5f87f640363cf09511b0b71379bd))
+* **desktop:** detect the package manager that owns CLI installs ([f13e98d](https://github.com/Dstack-TEE/private-ai-gateway/commit/f13e98d803993d83db1e12a18d1c228e3ef2ff3e))
+* **desktop:** detect the package manager that owns CLI installs ([b33f4de](https://github.com/Dstack-TEE/private-ai-gateway/commit/b33f4deb5e9b83b3cb8b3a0f62998030f866c7a9))
+* **desktop:** find OpenCode outside the service PATH ([d9f2aaf](https://github.com/Dstack-TEE/private-ai-gateway/commit/d9f2aaffae8c4e5d2c39b70774618741e828fd80))
+* **desktop:** finish NSIS install when CLI registration fails ([d76d7c0](https://github.com/Dstack-TEE/private-ai-gateway/commit/d76d7c03704491cb1e4321d1a9ee7e8152557211))
+* **desktop:** honor the Homebrew formula cellar ([aadd4df](https://github.com/Dstack-TEE/private-ai-gateway/commit/aadd4df2724b3efbe82f6af592bd4d679af816b2))
+* **desktop:** import the Linux signing key before RPM upgrades ([c4c4f41](https://github.com/Dstack-TEE/private-ai-gateway/commit/c4c4f4134893fb8b9482ecbb5e64dc9d8acc4f52))
+* **desktop:** import the signing key before in-app RPM updates ([7f3b60a](https://github.com/Dstack-TEE/private-ai-gateway/commit/7f3b60ae5e93d7f153110c2c6e98976898affdc5))
+* **desktop:** isolate package-manager probes to update checks ([4b27d5d](https://github.com/Dstack-TEE/private-ai-gateway/commit/4b27d5de16b17d54478fc1c6299449b910db5466))
+* **desktop:** keep APT trust independent of installed packages ([e772364](https://github.com/Dstack-TEE/private-ai-gateway/commit/e77236407d7ec2ed3ad27871307865076f6e7891))
+* **desktop:** let test backends bind OS-assigned ports ([83d5f85](https://github.com/Dstack-TEE/private-ai-gateway/commit/83d5f854358322d5ec23b3c67cdfe5cdf2bb948a))
+* **desktop:** let test backends bind OS-assigned ports ([dc85b77](https://github.com/Dstack-TEE/private-ai-gateway/commit/dc85b7717a997a21e26e096b6d0099ab4c78b551))
+* **desktop:** link the Windows CRT statically ([10c064f](https://github.com/Dstack-TEE/private-ai-gateway/commit/10c064f2e1e6c882a648054d9e36f5ba722b40fc))
+* **desktop:** link the Windows CRT statically ([809b2d9](https://github.com/Dstack-TEE/private-ai-gateway/commit/809b2d97c88b85f86314e448d571c49a0d6cb382))
+* **desktop:** link to the AUR package from update settings ([f01e927](https://github.com/Dstack-TEE/private-ai-gateway/commit/f01e92732105898b638eca16b5373d6f9d5536f6))
+* **desktop:** make Windows helper ACL denial test deterministic ([98ddf97](https://github.com/Dstack-TEE/private-ai-gateway/commit/98ddf97825dfc09e74214f66f6a51c292a8ebb1a))
+* **desktop:** pass AUR credentials and support package revisions ([f6aeb2a](https://github.com/Dstack-TEE/private-ai-gateway/commit/f6aeb2a64f35a1e78adc99de71d1393584dd2a3c))
+* **desktop:** persist the OpenCode path from the client ([597a7dd](https://github.com/Dstack-TEE/private-ai-gateway/commit/597a7dd9b1de3bd0577be63bd49eee85495cb7d8))
+* **desktop:** preserve login preference on package removal ([eab622d](https://github.com/Dstack-TEE/private-ai-gateway/commit/eab622daf7902fa6890c341b5ba157dce8bf7ecb))
+* **desktop:** preserve script installations across updates ([c83bcfd](https://github.com/Dstack-TEE/private-ai-gateway/commit/c83bcfd994dfae9e8a9aadc38d7ae5a6776ab6ea))
+* **desktop:** reject mismatched CLI agent config paths ([f2961b6](https://github.com/Dstack-TEE/private-ai-gateway/commit/f2961b632513b83d8f1df80635ed53e03ce506ac))
+* **desktop:** remove races in shell and web UI tests ([26872ac](https://github.com/Dstack-TEE/private-ai-gateway/commit/26872ace7d93f3c11cd44ac199f88c16235ca618))
+* **desktop:** remove races in shell and web UI tests ([2e1793c](https://github.com/Dstack-TEE/private-ai-gateway/commit/2e1793cde1266958a89df4ef92f6baf608905045))
+* **desktop:** require a trusted Windows OpenClaw helper owner ([18f682c](https://github.com/Dstack-TEE/private-ai-gateway/commit/18f682cdfc83bba33edb3b9e2779b354f8587633))
+* **desktop:** reserve the golden test's refused port ([21a66aa](https://github.com/Dstack-TEE/private-ai-gateway/commit/21a66aa49cdc7175ced78fc3c5acaa5799c4e33b))
+* **desktop:** resolve the account shell when SHELL is unset ([8e1fa43](https://github.com/Dstack-TEE/private-ai-gateway/commit/8e1fa437bbb3cca770f73730acceb8fe9ea23deb))
+* **desktop:** seed WinGet submission branches through GitHub ([7879a5f](https://github.com/Dstack-TEE/private-ai-gateway/commit/7879a5fad97b7a4952a125af514783f694931fef))
+* **desktop:** select the shell resolver on supported platforms ([d553d4b](https://github.com/Dstack-TEE/private-ai-gateway/commit/d553d4b9c0e2dd782666f81b24439d0223f4fee6))
+* **desktop:** separate login service state and clarify start hints ([945bae8](https://github.com/Dstack-TEE/private-ai-gateway/commit/945bae8684411baa2be00f617e81eb52d6cf5b49))
+* **desktop:** smooth pap first-run setup ([2fd56f9](https://github.com/Dstack-TEE/private-ai-gateway/commit/2fd56f9e1c09e87c84056389a03ee640e9a40c41))
+* **desktop:** smooth pap first-run setup ([66ce50a](https://github.com/Dstack-TEE/private-ai-gateway/commit/66ce50a054dbbd8a5349f1f5320e7f120aa6fa96))
+* **desktop:** stabilize login service diagnostics ([4847a7d](https://github.com/Dstack-TEE/private-ai-gateway/commit/4847a7de64c05e39cf877470b45484a0a5e15a16))
+* **desktop:** submit WinGet manifests from an organization fork ([6477e2c](https://github.com/Dstack-TEE/private-ai-gateway/commit/6477e2cbe267342f344c68bfbb63b6f4964a4ab8))
+* **desktop:** update script installs and clean Linux removal ([7c39714](https://github.com/Dstack-TEE/private-ai-gateway/commit/7c39714924aad56b43228d76e6faa382f02a892f))
+* **desktop:** update script installs and clean Linux removal ([617b80d](https://github.com/Dstack-TEE/private-ai-gateway/commit/617b80d18be9db9f61d5a40fc838d26adfe3bad8))
+* **desktop:** use the client's agent environment ([3224de8](https://github.com/Dstack-TEE/private-ai-gateway/commit/3224de8fc1219ea3662e13814d7f91aa9bf45886))
+* **desktop:** use the client's agent environment ([5e8c538](https://github.com/Dstack-TEE/private-ai-gateway/commit/5e8c538b2e948ec785560e5474ff9952458ba8d0))
+* **desktop:** use the installed OpenCode config shape ([971aacb](https://github.com/Dstack-TEE/private-ai-gateway/commit/971aacbfd2e0248698f006f094afd69cdc7ae818))
+* **desktop:** use the installed OpenCode config shape ([2962281](https://github.com/Dstack-TEE/private-ai-gateway/commit/296228161ba98dbed3fb0b55ede071cb4c91b6b0))
+* **desktop:** use the WinGet locale manifest filename ([16ba329](https://github.com/Dstack-TEE/private-ai-gateway/commit/16ba32959c5c7003dfc31c9e92ca7c41c5b507fe))
+* **desktop:** use the WinGet locale manifest filename ([7623c83](https://github.com/Dstack-TEE/private-ai-gateway/commit/7623c834c11ce9e3252a20fcea1423ecbf0e387c))
+* **desktop:** validate WinGet retries without fetching blobs ([8ea7ea0](https://github.com/Dstack-TEE/private-ai-gateway/commit/8ea7ea012cb34474452265c9b6b8595ec72e0854))
+* **desktop:** verify Linux updates with installed release keys ([ecf0357](https://github.com/Dstack-TEE/private-ai-gateway/commit/ecf0357c0348f5de9e1cc73ebc291c2dc69669a6))
+* harden uninstall fallback cleanup ([1f04f1c](https://github.com/Dstack-TEE/private-ai-gateway/commit/1f04f1cf167478a84727cbf7af217986740d590f))
+* purge PAP providers during uninstall cleanup ([9064b3b](https://github.com/Dstack-TEE/private-ai-gateway/commit/9064b3b52d010f1ef03d5a989f672eddb92826a0))
+* purge PAP providers during uninstall cleanup ([b7cd0bb](https://github.com/Dstack-TEE/private-ai-gateway/commit/b7cd0bbeda7ceeaf9f4be0275453e67d091a5a4e))
+
 ## [0.11.1](https://github.com/Dstack-TEE/private-ai-gateway/compare/desktop-v0.11.0...desktop-v0.11.1) (2026-11-26)
 
 Private AI Proxy 0.11.1 configures each coding agent with the reasoning efforts, limits and capabilities RedPill lists for every model.
