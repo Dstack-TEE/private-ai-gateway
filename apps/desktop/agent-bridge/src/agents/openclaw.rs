@@ -569,9 +569,8 @@ fn validate_windows_acl(acl: &WindowsAcl) -> Result<(), String> {
     {
         return Err("Cannot verify a local DACL for the OpenClaw helper".into());
     }
-    let trusted_sid = |sid: &str| {
-        sid == acl.current_user_sid || matches!(sid, "S-1-5-18" | "S-1-5-32-544")
-    };
+    let trusted_sid =
+        |sid: &str| sid == acl.current_user_sid || matches!(sid, "S-1-5-18" | "S-1-5-32-544");
     // Windows owners normally have implicit WRITE_DAC and can change the DACL.
     if !trusted_sid(&acl.owner_sid) {
         return Err("The OpenClaw helper is owned by an untrusted user or group".into());
