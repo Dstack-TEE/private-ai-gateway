@@ -27,7 +27,7 @@ const OUTAGE_PHASES = ["reconnecting", "interrupted"];
 const HOME = os.homedir();
 // The key reaches pap, so pap and node run from root-owned paths. Only agents
 // search the installer-writable directories in AGENT_PATH.
-const PAP = "/usr/bin/pap";
+const PAP = process.env.PAP_E2E_PAP || "/usr/bin/pap";
 const AGENT_ENV = { ...process.env, PATH: `${process.env.AGENT_PATH}:${process.env.PATH}` };
 const TOKENS = path.join(HOME, ".local/share/org.dstack.private-ai-proxy/agent-tokens");
 
@@ -569,7 +569,7 @@ test("recovers when the network returns", async () => {
   });
 });
 
-test("stop restores every agent and revokes every token", async () => {
+test("stop restores every agent and revokes every token", { skip: process.env.PAP_E2E_KEEP_SERVICE === "1" }, async () => {
   const agents = passed().filter((agent) => connected.has(agent.id));
   assert.ok(agents.length > 0, "no agent is connected");
   await step(session, "stop restores", async () => {

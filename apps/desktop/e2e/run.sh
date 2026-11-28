@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: apps/desktop/e2e/run.sh [--tag desktop-vX.Y.Z | --deb PATH]
                                [--agents ID,...] [--opencode-v2]
+                               [--systemd [--matrix ROW] [--tag TAG | --run RUN_ID | --packages DIR] [--skip-request]]
 
 Installs the Linux x64 desktop package in a fresh ubuntu:24.04 container,
 connects every supported coding agent to a live RedPill profile, and checks
@@ -15,6 +16,8 @@ replies, usage records, fail-closed behavior, restoration and token revocation.
   --deb PATH     Test a local package; PATH's directory must hold its SHA256SUMS.
   --agents IDS   Install and test only these comma-separated agent ids.
   --opencode-v2  Install OpenCode 2 (OPENCODE_V2_VERSION) instead of OpenCode 1.
+  --systemd       Run the systemd user-service installation matrix in containers.
+  --matrix ROW    Select one systemd row (see --systemd --help).
 
 Environment:
   PAP_E2E_API_KEY  RedPill API key (required). It reaches only the stdin of
@@ -31,16 +34,41 @@ tag=""
 deb=""
 agents=""
 opencode_v2=false
+systemd_mode=false
+matrix=""
+run_id=""
+packages_dir=""
+skip_request=false
 while (($#)); do
   case "$1" in
     --tag) tag="${2:?--tag needs a value}"; shift 2 ;;
     --deb) deb="${2:?--deb needs a value}"; shift 2 ;;
     --agents) agents="${2:?--agents needs a value}"; shift 2 ;;
     --opencode-v2) opencode_v2=true; shift ;;
+    --systemd) systemd_mode=true; shift ;;
+    --matrix) matrix="${2:?--matrix needs a value}"; shift 2 ;;
+    --run) run_id="${2:?--run needs a workflow run id}"; shift 2 ;;
+    --packages) packages_dir="${2:?--packages needs a directory}"; shift 2 ;;
+    --skip-request) skip_request=true; shift ;;
     -h | --help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
 done
+if [[ "$systemd_mode" == true ]]; then
+  [[ -z "$deb" ]] || { echo "--deb cannot be combined with --systemd" >&2; exit 2; }
+  e2e_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  args=()
+  [[ -n "$tag" ]] && args+=(--tag "$tag")
+  [[ -n "$matrix" ]] && args+=(--matrix "$matrix")
+  [[ -n "${run_id:-}" ]] && args+=(--run "$run_id")
+  [[ -n "${packages_dir:-}" ]] && args+=(--packages "$packages_dir")
+  [[ "${skip_request:-false}" == true ]] && args+=(--skip-request)
+  exec "$e2e_dir/systemd-run.sh" "${args[@]}"
+fi
+if [[ -n "$run_id" || -n "$packages_dir" ]]; then
+  echo "--run and --packages require --systemd" >&2
+  exit 2
+fi
 if [[ -n "$tag" && -n "$deb" ]]; then
   echo "Pass --tag or --deb, not both" >&2
   exit 2

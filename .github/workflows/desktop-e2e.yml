@@ -13,8 +13,13 @@ on:
         description: Desktop release tag to test; empty tests the newest desktop-v* release
         required: false
         type: string
+      matrix:
+        description: Systemd matrix row to run; empty runs every row
+        required: false
+        type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -22,6 +27,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  package:
+    name: Build current Linux packages
+    uses: ./.github/workflows/desktop-package.yml
+    with:
+      package_only: true
+      linux_x64_only: true
+
   agents:
     name: ${{ matrix.name }}
     environment: desktop-e2e
@@ -41,7 +53,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Check version overrides
-        run: node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo node:24 \
+            node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
       - name: Run the live end-to-end test
         env:
           GH_TOKEN: ${{ github.token }}
@@ -52,3 +66,60 @@ jobs:
         run: |
           read -ra args <<<"$ARGS"
           apps/desktop/e2e/run.sh ${TAG:+--tag "$TAG"} "${args[@]}"
+
+  systemd:
+    name: Systemd ${{ matrix.row }}
+    needs: package
+    environment: desktop-e2e
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - row: ubuntu-deb-opencode
+            source: package
+          - row: fedora-rpm-bun
+            source: package
+          - row: arch-pacman-opencode
+            source: package
+          - row: ubuntu-script-npm
+            source: tag
+          - row: ubuntu-npm-nvm
+            source: tag
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check version overrides
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo node:24 \
+            node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
+      - name: Download current Linux package artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: desktop-package-linux-x64
+          path: ${{ runner.temp }}/pap-packages
+      - name: Run systemd installation matrix row
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PAP_E2E_API_KEY: ${{ secrets.PAP_E2E_API_KEY }}
+          TAG: ${{ inputs.tag }}
+          FILTER: ${{ inputs.matrix }}
+          MATRIX: ${{ matrix.row }}
+          SOURCE: ${{ matrix.source }}
+        run: |
+          if [[ -n "$FILTER" && "$FILTER" != "$MATRIX" ]]; then
+            echo "SKIPPED row $MATRIX because matrix filter is $FILTER"
+            exit 0
+          fi
+          if [[ "$SOURCE" == tag && -z "$TAG" ]]; then
+            echo "SKIPPED $MATRIX: this row requires --tag"
+            exit 0
+          fi
+          if [[ -n "$TAG" ]]; then
+            apps/desktop/e2e/run.sh --systemd --matrix "$MATRIX" --tag "$TAG"
+          else
+            apps/desktop/e2e/run.sh --systemd --matrix "$MATRIX" --packages "$RUNNER_TEMP/pap-packages"
+          fi

@@ -74,9 +74,8 @@ node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.te
 
 ## Run locally
 
-Requirements: Node.js 22+, Docker, `sha256sum`, and the GitHub CLI for release downloads.
-Nothing is built: the container is removed afterwards, and only the
-`ubuntu:24.04` image stays.
+Requirements: Node.js 22+, Docker, `sha256sum`, `jq`, and the GitHub CLI for release or workflow-artifact downloads.
+Nothing is built. Containers are removed afterwards.
 
 ```sh
 export PAP_E2E_API_KEY=...          # a RedPill API key
@@ -84,6 +83,8 @@ apps/desktop/e2e/run.sh             # the newest desktop-v* release
 apps/desktop/e2e/run.sh --tag desktop-v0.2.0-beta.11
 apps/desktop/e2e/run.sh --deb path/to/private-ai-proxy-0.2.0-linux-x64.deb
 apps/desktop/e2e/run.sh --agents opencode --opencode-v2   # OpenCode 2 only
+apps/desktop/e2e/run.sh --systemd --matrix ubuntu-deb-opencode
+apps/desktop/e2e/run.sh --systemd --run 46130472381 --matrix arch-pacman-opencode
 unset PAP_E2E_API_KEY
 ```
 
@@ -99,6 +100,15 @@ written outside the container. The processes that see it (`node` and `pap`)
 run from root-owned absolute paths with the system `PATH`; only the agents
 search the directories their installers write to (`AGENT_PATH`). A run
 takes about 10 minutes and sends about a dozen tiny prompts.
+
+`--systemd` runs the supervised-user-service matrix in disposable systemd
+containers. Use `--packages DIR` with a package-only artifact downloaded by
+CI, or `--run` for a completed `desktop-native.yml` package-only workflow run.
+Both paths verify `SHA256SUMS` or the GitHub artifact digest before
+installation. Keep `--tag` for a published release. The install-script and
+nvm/npm rows are tag-only because package-only artifacts do not contain the
+published install script or npm package. The signed-update step is reported
+as skipped because it requires a release signed for the build under test.
 
 ## Versions
 

@@ -3,6 +3,17 @@ name: Desktop Tauri
 on:
   # Desktop release (desktop-release.yml) calls this workflow for release tags.
   workflow_call:
+    inputs:
+      package_only:
+        description: Skip full verification for a non-release package smoke build
+        required: false
+        default: false
+        type: boolean
+      linux_x64_only:
+        description: Build only the Linux x64 package matrix entry
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       package_only:
@@ -207,7 +218,7 @@ jobs:
 
   version:
     name: Resolve version
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')) }}
+    if: ${{ inputs.package_only == true || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')) }}
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -245,7 +256,7 @@ jobs:
   package:
     name: Package (${{ matrix.platform }})
     needs: [verify, verify-linux-arm64, verify-windows-x64, version]
-    if: ${{ !cancelled() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
+    if: ${{ always() && !cancelled() && needs.version.result == 'success' && ((needs.verify.result == 'success' && needs.verify-linux-arm64.result == 'success' && needs.verify-windows-x64.result == 'success') || inputs.package_only == true) }}
     environment:
       name: ${{ needs.version.outputs.channel != '' && 'desktop-release' || 'desktop-build' }}
     env:
@@ -260,13 +271,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { platform: macos-arm64, os: xcode-27, target: aarch64-apple-darwin, bundle_dir: aarch64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: arm64 }
-          - { platform: macos-x64, os: xcode-27, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
-          - { platform: windows-x64, os: windows-2025, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: x64 }
-          - { platform: windows-arm64, os: windows-11-arm, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: arm64 }
-          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: x64 }
-          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: arm64 }
+        include: ${{ fromJSON(inputs.linux_x64_only && '[{"platform":"linux-x64","os":"ubuntu-22.04","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"x64"}]' || '[{"platform":"macos-arm64","os":"xcode-27","target":"aarch64-apple-darwin","bundle_dir":"aarch64-apple-darwin/release/bundle","bundles":"app,dmg","cli_platform":"macos","cli_arch":"arm64"},{"platform":"macos-x64","os":"xcode-27","target":"x86_64-apple-darwin","bundle_dir":"x86_64-apple-darwin/release/bundle","bundles":"app,dmg","cli_platform":"macos","cli_arch":"x64"},{"platform":"windows-x64","os":"windows-2025","target":"","bundle_dir":"release/bundle","bundles":"nsis","cli_platform":"windows","cli_arch":"x64"},{"platform":"windows-arm64","os":"windows-11-arm","target":"","bundle_dir":"release/bundle","bundles":"nsis","cli_platform":"windows","cli_arch":"arm64"},{"platform":"linux-x64","os":"ubuntu-22.04","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"x64"},{"platform":"linux-arm64","os":"ubuntu-22.04-arm","target":"","bundle_dir":"release/bundle","bundles":"deb,rpm","cli_platform":"linux","cli_arch":"arm64"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
@@ -903,6 +908,12 @@ jobs:
           base="private-ai-proxy-${VERSION}-windows-${{ matrix.cli_arch }}"
           cp "${installers[0]}" "release/$base.exe"
           if [[ -n "$RELEASE_CHANNEL" ]]; then cp "${installers[0]}.sig" "release/$base.exe.sig"; fi
+      - name: Checksum package-only artifacts
+        if: inputs.package_only == true && runner.os == 'Linux'
+        working-directory: apps/desktop/release
+        shell: bash
+        run: sha256sum -- private-ai-proxy-* > SHA256SUMS
+
       # Every package is staged under its public name; the release job
       # publishes the directory as is.
       - name: Upload desktop package
@@ -911,7 +922,9 @@ jobs:
           name: desktop-package-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 14
-          path: apps/desktop/release/private-ai-proxy-*
+          path: |
+            apps/desktop/release/private-ai-proxy-*
+            apps/desktop/release/SHA256SUMS
 
       - name: Remove Apple notarization key
         if: always() && runner.os == 'macOS' && env.RELEASE_CHANNEL != ''
