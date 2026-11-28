@@ -138,7 +138,7 @@ case "$row" in
   ubuntu-npm-nvm) expected_command_path="$(dirname "$pap")/private-ai-proxy" ;;
 esac
 jq -e --arg expected "$expected_command_path" '.cli.installed == true and .cli.commandPath == $expected' <<<"$doctor_json" >/dev/null || { echo "doctor did not identify the expected command installation path $expected_command_path" >&2; printf '%s\n' "$doctor_json" >&2; exit 1; }
-echo "Doctor does not expose a package-manager installation-kind field; verified cli.commandPath instead." 
+echo "Doctor does not expose a package-manager installation-kind field; verified cli.commandPath instead."
 if jq -e '.settings.warnings | tostring | test("environment mismatch|path"; "i")' <<<"$doctor_json" >/dev/null; then
   echo "doctor reported an environment mismatch" >&2
   exit 1

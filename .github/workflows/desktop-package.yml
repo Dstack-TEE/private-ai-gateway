@@ -907,4 +907,3 @@ jobs:
             Remove-Item $env:WINDOWS_CERTIFICATE_PATH -Force -ErrorAction SilentlyContinue
           }
       - *save-rust-cache
-
