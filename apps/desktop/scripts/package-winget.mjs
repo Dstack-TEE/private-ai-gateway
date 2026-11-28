@@ -95,7 +95,7 @@ try {
       `# yaml-language-server: $schema=https://aka.ms/winget-manifest.${kind}.${manifestVersion}.schema.json\n`
         + dump({ PackageIdentifier: id, PackageVersion: version, ...contents, ManifestType: kind, ManifestVersion: manifestVersion }, { lineWidth: -1 }));
     await write("version", "", { DefaultLocale: locale });
-    await write("defaultLocale", `.${locale}`, {
+    await write("defaultLocale", `.locale.${locale}`, {
       PackageLocale: locale, Publisher: publisher, PublisherUrl: homepage,
       PublisherSupportUrl: `${web}/issues`, PackageName: cli ? `${app.productName} CLI` : app.productName,
       PackageUrl: web, License: license, LicenseUrl: `${web}/blob/${tag}/LICENSE`,
