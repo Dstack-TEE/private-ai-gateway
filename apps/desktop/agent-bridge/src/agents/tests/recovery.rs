@@ -1132,12 +1132,11 @@ fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
         for root in &roots {
             assert!(!restored.contains(&refs(root)), "{}", agent.id());
         }
-        assert!(uninstall
+        assert!(!uninstall
             .projector
             .load_store()
             .unwrap()
-            .get(agent.id())
-            .is_none());
+            .contains_key(agent.id()));
 
         let mut offline = sandbox(&format!("uninstall-disconnected-{}", agent.id()));
         let config = agent.config_path(&offline.home, &ToolEnvironment::Disabled);
@@ -1166,12 +1165,11 @@ fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
         disconnect(&offline, agent);
         offline.projector.mark_uninstall().unwrap();
         offline.projector.reconcile(None).unwrap();
-        assert!(offline
+        assert!(!offline
             .projector
             .load_store()
             .unwrap()
-            .get(agent.id())
-            .is_none());
+            .contains_key(agent.id()));
     }
     for agent in [Agent::ClaudeCode, Agent::Dsh] {
         let sandbox = sandbox(&format!("uninstall-no-provider-{}", agent.id()));
@@ -1183,12 +1181,11 @@ fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
         if agent == Agent::Dsh {
             assert!(!config.with_file_name(dsh::CREDENTIALS_FILE).exists());
         }
-        assert!(sandbox
+        assert!(!sandbox
             .projector
             .load_store()
             .unwrap()
-            .get(agent.id())
-            .is_none());
+            .contains_key(agent.id()));
     }
 }
 
@@ -1236,12 +1233,11 @@ fn stop_then_uninstall_purges_retained_provider_and_created_file() {
     sandbox.projector.mark_uninstall().unwrap();
     sandbox.projector.reconcile(None).unwrap();
     assert!(!path.exists());
-    assert!(sandbox
+    assert!(!sandbox
         .projector
         .load_store()
         .unwrap()
-        .get(agent.id())
-        .is_none());
+        .contains_key(agent.id()));
 }
 
 #[test]
