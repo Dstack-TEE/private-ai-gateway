@@ -189,22 +189,15 @@ verification.
 
 ## Update
 
-Homebrew formula and global Node package installs use the upgrade command
-printed by `pap update`. The Windows CLI install script prints a PowerShell
-command that reuses the original installation directory. Older installations
-to a custom Windows directory can rerun the original script with
-`-InstallDir` once to record the installation method.
-
-
 | Installation | How to update |
 | --- | --- |
 | macOS or Linux install script | Run `pap update`. If a managed command link is missing from PATH, rerun the [installer](#macos-and-linux) with the original directories. |
 | Linux DEB package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the APT commands. |
 | Linux RPM package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the RPM commands. The updater [reuses the registered key, imports the local certificate, or checks the fingerprint of a downloaded certificate](../apps/desktop/docs/distribution.md#linux-release-signing) before `rpm -U`. Older desktop RPMs may need a [manual upgrade](#verify-linux-packages) first. |
 | Linux Arch package | Follow Settings > About for desktop installs or run `pap update` for CLI-only installs. Download the package and detached signature, verify the signature with `gpgv` against the shipped keyring, then install the local file with `pacman -U`. For older packages without a keyring, follow [Verify Linux packages](#verify-linux-packages). |
-| npm | Run `pap update` on macOS or Linux. On Windows, stop the backend with `pap --yes service stop` and rerun the [npm install command](#npm). |
-| Homebrew | Run `brew upgrade dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
-| Windows PowerShell installer | Rerun the [installer](#windows) with the same `-InstallDir` if customized. |
+| npm, pnpm, Bun, or Yarn Classic | Run `pap update` and follow the command for your package manager. The npm command uses the prefix where this copy is installed. |
+| Homebrew | For the CLI, run `pap update` to see the formula upgrade command. For the app, run `brew upgrade --cask dstack-tee/private-ai/private-ai-proxy`. |
+| Windows PowerShell installer | Run `pap update` to get a command that reuses the installation directory. For an older install in a custom directory, rerun the [installer](#windows) once with that `-InstallDir` to record the install method. |
 | Desktop app | Check for updates in Settings > About. For Mac App Store installs, use the App Store. |
 
 ## Uninstall
