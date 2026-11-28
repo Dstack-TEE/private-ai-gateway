@@ -9,7 +9,10 @@
 //!   `{"error": Error}` with the status of its [`ErrorCode`].
 //! - `GET /api/events` streams server-sent `ui_api::Event`s, starting with a
 //!   full state snapshot.
-use std::{collections::BTreeMap, ffi::OsString, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,7 +51,13 @@ pub struct Version {
     pub executable: String,
     /// Configuration path selectors honored by this backend. Local IPC only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_path_overrides: Option<BTreeMap<String, OsString>>,
+    pub agent_path_overrides: Option<BTreeMap<String, String>>,
+    /// Names of configuration validation overrides. Values can contain secrets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_validation_overrides: Option<BTreeSet<String>>,
+    /// Whether this backend was launched for supervision by the OS service manager.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervised: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]

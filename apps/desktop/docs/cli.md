@@ -59,15 +59,18 @@ The backend may see different agent configuration paths than your shell.
 For example, exporting `CODEX_HOME` after the backend has started can point
 Codex at a different file. `pap agents connect` compares the paths for the
 selected agent and refuses a connection when its config path override points
-the two processes at different files. `pap start`, `pap status`, and
-`pap doctor` warn about these differences for connected agents.
+the two processes at different files. It also checks whether the same
+validation variables are set in both environments. For example, setting
+`OMP_PROFILE` only in the shell can make Oh My Pi read a different profile.
+`pap start`, `pap status`, and `pap doctor` warn about these differences for
+connected agents.
 
-Match the variable in the service manager's environment, then run
-`pap service restart`. On Linux, set it in `environment.d` or with
-`systemctl --user set-environment`. On macOS, use `launchctl setenv`. To run
-the backend under the current shell's environment, run `pap service disable`
-and retry from that shell. With a compatible older backend that lacks path
-metadata, `pap agents connect` prints a warning and continues.
+For a supervised backend, match the variable in the service manager's
+environment, then run `pap service restart`. On Linux, use `environment.d` or
+`systemctl --user set-environment`. On macOS, use `launchctl setenv`. For a
+detached backend, run `pap service restart` from a shell with the desired
+settings. With a compatible older backend that lacks override metadata,
+`pap agents connect` prints a warning and continues.
 
 See [Standalone CLI](cli-distribution.md#standalone-cli).
 
@@ -746,7 +749,9 @@ not a parsing contract.
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). The local version response can also include
-`agentPathOverrides` with the backend's config path selectors. `pap start
+`agentPathOverrides` as an object mapping selector names to path strings,
+`agentValidationOverrides` as an array of variable names, and a `supervised`
+boolean. `pap start
 --json` and `pap status --json` include `agentPathWarnings` when applicable.
 `pap doctor --json` reports the same warnings under `warnings.agentPaths`.
 The `pap status --json` and `pap doctor --json`

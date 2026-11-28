@@ -86,6 +86,8 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
         });
         if reports_paths {
             version["agentPathOverrides"] = json!({});
+            version["agentValidationOverrides"] = json!([]);
+            version["supervised"] = json!(true);
         }
         let version = version.to_string();
         let check_legacy_connect = json && environment_override && !reports_paths;
@@ -104,7 +106,14 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                 "authorized": true,
             }
         });
-        let agents = json!({"result": [&applied["result"]]}).to_string();
+        let agents = json!({
+            "result": [&applied["result"], &json!({
+                "id": "oh-my-pi", "name": "Oh My Pi",
+                "configPath": home.join(".omp/agent/models.yml"),
+                "installed": true, "recorded": true, "connected": true, "authorized": true,
+            })]
+        })
+        .to_string();
         let applied = applied.to_string();
         let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -186,6 +195,9 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
             if environment_override {
                 command.env("CODEX_HOME", &custom);
             }
+            if reports_paths {
+                command.env("OMP_PROFILE", "work");
+            }
             command.output().unwrap()
         };
         let args: &[&str] = if json {
@@ -216,6 +228,14 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                     warning.contains(custom.join("config.toml").to_str().unwrap()),
                     "{warning}"
                 );
+                assert!(
+                    warning.contains("systemctl --user set-environment"),
+                    "{warning}"
+                );
+                assert!(value["agentPathWarnings"][1]
+                    .as_str()
+                    .unwrap()
+                    .contains("OMP_PROFILE"));
             }
         } else {
             assert_eq!(
@@ -263,7 +283,7 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
             let warning = String::from_utf8_lossy(&outcome.stderr);
             assert_eq!(warning.lines().count(), 1);
             assert!(
-                warning.contains("does not report agent path overrides"),
+                warning.contains("does not report all agent overrides"),
                 "{warning}"
             );
         }
@@ -280,6 +300,10 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                 warning.contains(home.join(".codex/config.toml").to_str().unwrap()),
                 "{warning}"
             );
+            assert!(report["agentPathWarnings"][1]
+                .as_str()
+                .unwrap()
+                .contains("OMP_PROFILE"));
         }
         server.join().unwrap();
     }
@@ -553,6 +577,7 @@ fn agents_connect_checks_the_shell_path_before_starting_protection() {
         custom.join("config.toml").to_str().unwrap(),
         default.join("config.toml").to_str().unwrap(),
         "pap service restart",
+        "from a shell with the desired CODEX_HOME setting",
     ] {
         assert!(error.contains(text), "{error}");
     }
@@ -576,6 +601,30 @@ fn agents_connect_checks_the_shell_path_before_starting_protection() {
     );
     let unrelated = run(&["agents", "connect", "claude-code", "--dry-run"], &custom);
     assert_success(&unrelated);
+
+    let alias = home.join("codex-alias");
+    std::os::unix::fs::symlink(&default, &alias).unwrap();
+    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
+    fs::remove_file(default.join("config.toml")).unwrap();
+    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
+}
+
+#[test]
+fn agents_connect_rejects_shell_only_validation_overrides() {
+    let backend = Backend::start();
+    let output = backend
+        .command(&["agents", "connect", "oh-my-pi", "--yes"])
+        .env("OMP_PROFILE", "work")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("OMP_PROFILE is set in one environment only"),
+        "{error}"
+    );
+    assert!(error.contains("pap service restart"), "{error}");
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
 }
 
 #[cfg(unix)]

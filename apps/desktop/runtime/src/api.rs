@@ -52,6 +52,8 @@ const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) fn version() -> &'static Version {
     static VERSION: OnceLock<Version> = OnceLock::new();
     VERSION.get_or_init(|| {
+        let tool_env = !cfg!(all(target_os = "macos", feature = "mac-app-store"))
+            && desktop_core::paths::env_path(desktop_core::paths::HOME_OVERRIDE_ENV).is_none();
         let started = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|elapsed| elapsed.as_nanos())
@@ -66,15 +68,16 @@ pub(crate) fn version() -> &'static Version {
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             agent_path_overrides: Some(
-                if cfg!(all(target_os = "macos", feature = "mac-app-store"))
-                    || desktop_core::paths::env_path(desktop_core::paths::HOME_OVERRIDE_ENV)
-                        .is_some()
-                {
-                    Default::default()
-                } else {
-                    agent_bridge::agents::agent_path_overrides()
-                },
+                tool_env
+                    .then(agent_bridge::agents::agent_path_overrides)
+                    .unwrap_or_default(),
             ),
+            agent_validation_overrides: Some(
+                tool_env
+                    .then(agent_bridge::agents::agent_validation_overrides)
+                    .unwrap_or_default(),
+            ),
+            supervised: None,
         }
     })
 }
@@ -121,7 +124,7 @@ impl Host for ServiceHost {
 #[derive(Clone)]
 pub(crate) enum Listener {
     /// The local endpoint: peers were authenticated when accepted.
-    Local,
+    Local { supervised: bool },
     /// The web UI: browsers with a session, on an allowed host and origin.
     #[cfg(feature = "web-ui")]
     Web(Arc<crate::web_ui::Gate>),
@@ -157,7 +160,13 @@ pub(crate) fn router<B: Backend>(api: Api<B>) -> Router {
     // The process identity (PID, executable path) is for local clients only;
     // the web UI reads its version from `/api/bootstrap`.
     let routes = match &api.listener {
-        Listener::Local => routes.route(protocol::VERSION_PATH, get(version_handler)),
+        Listener::Local { supervised } => {
+            let supervised = *supervised;
+            routes.route(
+                protocol::VERSION_PATH,
+                get(move || version_handler(supervised)),
+            )
+        }
         #[cfg(feature = "web-ui")]
         Listener::Web(_) => crate::web_ui::routes(routes),
     };
@@ -181,7 +190,7 @@ async fn authorize<B: Backend>(
     next: Next,
 ) -> Response {
     let mut response = match &api.listener {
-        Listener::Local => {
+        Listener::Local { .. } => {
             request.extensions_mut().insert(Caller::Owner);
             next.run(request).await
         }
@@ -194,8 +203,10 @@ async fn authorize<B: Backend>(
     response
 }
 
-async fn version_handler() -> Json<&'static Version> {
-    Json(version())
+async fn version_handler(supervised: bool) -> Json<Version> {
+    let mut version = version().clone();
+    version.supervised = Some(supervised);
+    Json(version)
 }
 
 /// Resolves the command from the decoded name, so every spelling of a path
@@ -378,7 +389,7 @@ mod tests {
             host: ServiceHost::default(),
             states: receiver,
             shutdown: CancellationToken::new(),
-            listener: Listener::Local,
+            listener: Listener::Local { supervised: false },
         });
         (router, recorder, states)
     }
@@ -408,6 +419,31 @@ mod tests {
 
     #[tokio::test]
     async fn version_names_this_backend() {
+        use desktop_core::paths::{
+            agent_environment::{CODEX_HOME, OPENCODE_CONFIG_CONTENT},
+            HOME_OVERRIDE_ENV,
+        };
+        const CHILD: &str = "PAP_TEST_VERSION_AGENT_ENV";
+        const VALIDATION_VALUE: &str = "inline-config-value-for-the-version-test";
+        let checks_environment = !cfg!(all(target_os = "macos", feature = "mac-app-store"));
+        if checks_environment && std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::tests::version_names_this_backend"])
+                .env(CHILD, "1")
+                .env("HOME", home.path())
+                .env_remove(HOME_OVERRIDE_ENV)
+                .env(CODEX_HOME, home.path().join("codex"))
+                .env(OPENCODE_CONFIG_CONTENT, VALIDATION_VALUE)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{output:?}"
+            );
+            return;
+        }
         let (router, _, _) = local();
         let (status, body) = call(&router, "GET", protocol::VERSION_PATH, "").await;
         assert_eq!(status, StatusCode::OK);
@@ -423,8 +459,22 @@ mod tests {
             "processId",
             "executable",
             "agentPathOverrides",
+            "agentValidationOverrides",
+            "supervised",
         ] {
             assert!(body.get(field).is_some(), "{field}");
+        }
+        assert_eq!(body["supervised"], false);
+        if checks_environment {
+            assert_eq!(
+                body["agentPathOverrides"][CODEX_HOME],
+                std::env::var(CODEX_HOME).unwrap()
+            );
+            assert!(body["agentValidationOverrides"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(OPENCODE_CONFIG_CONTENT)));
+            assert!(!body.to_string().contains(VALIDATION_VALUE));
         }
     }
 

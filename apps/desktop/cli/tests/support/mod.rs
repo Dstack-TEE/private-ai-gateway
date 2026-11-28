@@ -24,6 +24,18 @@ const FAILURE: &str = "sandbox teardown failed: ";
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn isolate_agent_environment(command: &mut Command, home: &Path) {
+    for name in agent_bridge::agents::environment_overrides() {
+        command.env_remove(name);
+    }
+    command
+        .env_remove(desktop_core::paths::XDG_CONFIG_HOME)
+        .env("HOME", home)
+        .env(desktop_core::paths::HOME_OVERRIDE_ENV, home);
+    #[cfg(windows)]
+    command.env("USERPROFILE", home);
+}
+
 pub struct Sandbox {
     root: PathBuf,
     /// Closing this pipe starts teardown.
@@ -364,8 +376,9 @@ impl Backend {
             )
             .unwrap();
         }
-        let child = Command::new(binary("private-ai-proxy-service"))
-            .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+        let mut command = Command::new(binary("private-ai-proxy-service"));
+        isolate_agent_environment(&mut command, &home);
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
@@ -409,10 +422,8 @@ impl Backend {
     }
     pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
-        command.args(args).env(
-            desktop_core::paths::HOME_OVERRIDE_ENV,
-            self.directory.path().join("home"),
-        );
+        isolate_agent_environment(&mut command, &self.directory.path().join("home"));
+        command.args(args);
         command
     }
     pub fn run(&self, args: &[&str]) -> Value {
