@@ -132,7 +132,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         },
         Action::Diagnostics { .. } => exported(value),
         Action::Update if matches!(value["installation"].as_str(), Some("homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "windowsInstallScript")) && value["commands"][0].is_string() => {
-            text(&value["commands"][0])
+            value["commands"].as_array().into_iter().flatten().map(text).collect::<Vec<_>>().join("\n")
         }
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
@@ -532,6 +532,18 @@ fn label(key: &str) -> String {
 mod tests {
     use super::*;
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn delegated_update_prints_every_command_in_order() {
+        let value = serde_json::json!({
+            "installation": "npm",
+            "commands": ["private-ai-proxy --yes service stop", "npm install --global private-ai-proxy"],
+        });
+        assert_eq!(
+            render(&Action::Update, &value),
+            "private-ai-proxy --yes service stop\nnpm install --global private-ai-proxy"
+        );
+    }
 
     #[test]
     fn doctor_omits_empty_errors_and_warnings() {

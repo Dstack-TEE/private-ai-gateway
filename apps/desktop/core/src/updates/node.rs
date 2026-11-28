@@ -1,31 +1,40 @@
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
+use tokio::sync::OnceCell;
 
-use super::{tool_output, Installation, PACKAGE_NAME};
+use super::{tool_output, without_windows_verbatim_prefix, Installation, PACKAGE_NAME};
 
 /// Global Node installations can replace their own launcher. Show the command
 /// for the manager that owns its wrapper, which may differ from the one on PATH.
 #[derive(Debug)]
 pub(super) struct NodeInstallation {
     pub(super) manager: Installation,
-    prefix: Option<PathBuf>,
+    prefix: Option<String>,
 }
 
 impl NodeInstallation {
-    pub(super) fn current() -> Option<&'static Self> {
-        static INSTALLATION: OnceLock<Option<NodeInstallation>> = OnceLock::new();
+    pub(super) async fn current() -> Option<&'static Self> {
+        static INSTALLATION: OnceCell<Option<NodeInstallation>> = OnceCell::const_new();
         INSTALLATION
-            .get_or_init(|| {
-                let wrapper = fs::canonicalize(std::env::var_os("PAP_NODE_PACKAGE_ROOT")?).ok()?;
-                Self::discover(&wrapper, tool_output)
+            .get_or_init(|| async {
+                let executable = std::env::current_exe().and_then(fs::canonicalize).ok()?;
+                let wrapper = wrapper_directory(
+                    &executable,
+                    std::env::var_os("PAP_NODE_PACKAGE_ROOT").as_deref(),
+                )?;
+                Self::discover(&wrapper, tool_output).await
             })
+            .await
             .as_ref()
     }
 
-    fn discover(wrapper: &Path, output: impl Fn(&str, &[&str]) -> Option<String>) -> Option<Self> {
+    async fn discover(
+        wrapper: &Path,
+        output: impl AsyncFn(&str, &[&str]) -> Option<String>,
+    ) -> Option<Self> {
         let matches = |directory: &Path| {
             fs::canonicalize(directory).is_ok_and(|directory| directory == wrapper)
         };
@@ -33,6 +42,7 @@ impl NodeInstallation {
         // pnpm's isolated global store can place the resolved package outside
         // its global root. Its dependency listing gives the path to resolve.
         if let Some(path) = output("pnpm", &["list", "--global", "--json"])
+            .await
             .as_deref()
             .and_then(pnpm_package_path)
         {
@@ -44,6 +54,7 @@ impl NodeInstallation {
             }
         }
         if output("bun", &["pm", "ls", "--global"])
+            .await
             .and_then(|output| {
                 let (root, _) = output.lines().next()?.rsplit_once(" node_modules (")?;
                 Some(global_wrapper(Path::new(root)))
@@ -55,7 +66,10 @@ impl NodeInstallation {
                 prefix: None,
             });
         }
-        if output("yarn", &["global", "dir"]).is_some_and(|root| global_wrapper(Path::new(&root))) {
+        if output("yarn", &["global", "dir"])
+            .await
+            .is_some_and(|root| global_wrapper(Path::new(&root)))
+        {
             return Some(Self {
                 manager: Installation::Yarn,
                 prefix: None,
@@ -68,15 +82,17 @@ impl NodeInstallation {
         let prefix = npm_prefix(wrapper)?;
         if cfg!(windows)
             && !prefix.join("npm.cmd").is_file()
-            && !output("npm", &["prefix", "--global"]).is_some_and(|active| {
-                matches(&Path::new(&active).join("node_modules").join(PACKAGE_NAME))
-            })
+            && !output("npm", &["prefix", "--global"])
+                .await
+                .is_some_and(|active| {
+                    matches(&Path::new(&active).join("node_modules").join(PACKAGE_NAME))
+                })
         {
             return None;
         }
         Some(Self {
             manager: Installation::Npm,
-            prefix: Some(prefix.to_owned()),
+            prefix: Some(without_windows_verbatim_prefix(prefix.to_str()?).into_owned()),
         })
     }
 
@@ -90,13 +106,27 @@ impl NodeInstallation {
                 "install",
                 "--global",
                 "--prefix",
-                self.prefix.as_deref()?.to_str()?,
+                self.prefix.as_deref()?,
                 "--include=optional",
                 spec,
             ],
             _ => return None,
         })
     }
+}
+
+fn wrapper_directory(executable: &Path, launcher_root: Option<&OsStr>) -> Option<PathBuf> {
+    if let Some(wrapper) = launcher_root.and_then(|root| fs::canonicalize(root).ok()) {
+        return Some(wrapper);
+    }
+    // A login service runs the native sidecar directly. npm installs the
+    // native package either under the wrapper or alongside it when hoisted.
+    executable
+        .ancestors()
+        .filter(|directory| directory.file_name() == Some(OsStr::new("node_modules")))
+        .map(|modules| modules.join(PACKAGE_NAME))
+        .find(|wrapper| wrapper.join("package.json").is_file())
+        .and_then(|wrapper| fs::canonicalize(wrapper).ok())
 }
 
 fn pnpm_package_path(output: &str) -> Option<PathBuf> {
@@ -127,8 +157,8 @@ fn npm_prefix(wrapper: &Path) -> Option<&Path> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn manager_listing_owns_only_its_package_location() {
+    #[tokio::test]
+    async fn manager_listing_owns_only_its_package_location() {
         let temporary = tempfile::tempdir().unwrap();
         let global = temporary.path();
         let wrapper = global.join("node_modules").join(PACKAGE_NAME);
@@ -163,9 +193,10 @@ mod tests {
                 vec!["yarn", "global", "add"],
             ),
         ] {
-            let install = NodeInstallation::discover(&wrapper, |program, _| {
+            let install = NodeInstallation::discover(&wrapper, async |program, _| {
                 (tool == program).then(|| response.clone())
             })
+            .await
             .unwrap();
             assert_eq!(install.manager, manager);
             assert_eq!(
@@ -176,12 +207,13 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn npm_upgrades_the_running_prefix_even_when_another_node_is_active() {
+    #[tokio::test]
+    async fn npm_upgrades_the_running_prefix_even_when_another_node_is_active() {
         let wrapper = Path::new("/example/nvm/versions/node/v22/lib/node_modules/private-ai-proxy");
-        let install = NodeInstallation::discover(wrapper, |program, _| {
+        let install = NodeInstallation::discover(wrapper, async |program, _| {
             (program == "npm").then(|| "/example/nvm/versions/node/v24".into())
         })
+        .await
         .unwrap();
         assert_eq!(install.manager, Installation::Npm);
         assert_eq!(
@@ -198,8 +230,37 @@ mod tests {
         );
         assert!(NodeInstallation::discover(
             Path::new("/example/project/node_modules/private-ai-proxy"),
-            |_, _| None
+            async |_, _| None
         )
+        .await
         .is_none());
+    }
+    #[test]
+    fn login_service_recovers_hoisted_npm_wrapper() {
+        let temp = tempfile::tempdir().unwrap();
+        let modules = temp.path().join("lib/node_modules");
+        let wrapper = modules.join(PACKAGE_NAME);
+        fs::create_dir_all(&wrapper).unwrap();
+        fs::write(wrapper.join("package.json"), "{}").unwrap();
+        let executable = modules.join("private-ai-proxy-linux-x64/vendor/private-ai-proxy-service");
+        assert_eq!(
+            wrapper_directory(&executable, None),
+            Some(fs::canonicalize(wrapper).unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn windows_upgrade_stops_before_replacing_node_binaries() {
+        let node = NodeInstallation {
+            manager: Installation::Npm,
+            prefix: Some(without_windows_verbatim_prefix(r"\\?\C:\Node Prefix").into_owned()),
+        };
+        assert_eq!(
+            super::super::node_steps(&node, "private-ai-proxy@1.1.0", true).unwrap(),
+            [
+                super::super::STOP_STEP,
+                r"npm 'install' '--global' '--prefix' 'C:\Node Prefix' '--include=optional' 'private-ai-proxy@1.1.0'",
+            ]
+        );
     }
 }
