@@ -352,10 +352,10 @@ helper's DACL may grant modification rights only to those principals.
   or disconnecting an agent restores its own configuration. Quitting the app
   from the tray or menu leaves the backend running and the agents pointed at
   it. A backend that is not running cannot restore agents;
-  `pap stop --offline` restores them without it, and the Windows uninstaller
-  runs it.
+  `pap stop --offline` restores them without it. The Windows uninstaller runs
+  `pap stop --offline --for-uninstall`.
   Before removing a supervised app on macOS or Linux, turn off **Run in
-  background at login** in Settings or run `pap service disable`. If you
+  background at login** in Settings or run `pap service disable --for-uninstall`. If you
   turned it off in Settings, choose Stop All and Quit to stop the detached
   backend before removing the app. Mac App Store users can use Stop All and Quit.
 

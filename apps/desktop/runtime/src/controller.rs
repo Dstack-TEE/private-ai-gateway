@@ -607,7 +607,10 @@ impl DesktopRuntime {
 /// through the same projector, apply lock and restoration journal until
 /// protection is started again. The instance lock is held throughout, so no
 /// backend starts meanwhile. `None` while a backend runs: stop through it.
-pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentStatus>>, String> {
+pub fn restore_agents_offline(
+    helper_path: PathBuf,
+    purge_provider: bool,
+) -> Result<Option<Vec<AgentStatus>>, String> {
     if cfg!(all(target_os = "macos", feature = "mac-app-store")) {
         return Err(
             "The Mac App Store build restores agents only through the app: choose Stop All and Quit"
@@ -633,6 +636,9 @@ pub fn restore_agents_offline(helper_path: PathBuf) -> Result<Option<Vec<AgentSt
     local_state.set_importing(crate::settings::legacy::secrets_pending(&data_dir));
     // Restoring never depends on the Local API endpoint.
     let projector = Projector::new(helper_path, "", Arc::new(local_state))?;
+    if purge_provider {
+        projector.mark_uninstall()?;
+    }
     all_applied(projector.reconcile(None)?)?;
     session?;
     Ok(Some(projector.scan(None)?.0))

@@ -391,9 +391,9 @@ app if open and run the following as the user who ran Private AI Proxy. If
 login supervision is unavailable, continue with the stop and offline restore.
 
 ```sh
-pap --yes service disable
+pap --yes service disable --for-uninstall
 pap --yes service stop
-pap --yes stop --offline
+pap --yes stop --offline --for-uninstall
 ```
 
 | Installation | How to remove it |
@@ -412,6 +412,6 @@ cleanup.
 
 If you already removed the CLI and an agent still points to the Local API,
 reinstall the same package or use another `pap` installation to retry
-`pap stop --offline` with the original user data. If you explicitly disabled
+`pap stop --offline --for-uninstall` with the original user data. If you explicitly disabled
 login supervision before uninstalling, `pap service enable` turns it back on
 after reinstalling.

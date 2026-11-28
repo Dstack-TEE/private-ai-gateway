@@ -150,17 +150,49 @@ impl Projector {
         })
     }
 
+    /// Records that the next restoration is part of uninstall cleanup.
+    /// The intent is kept in each connection record so an offline restore can
+    /// finish the same cleanup if the backend exits before it does.
+    pub fn mark_uninstall(&self) -> Result<(), String> {
+        lock::with_apply_lock(&self.data_dir, || {
+            let mut store = self.load_store()?;
+            let mut changed = false;
+            for record in store.values_mut() {
+                if !record.purge_provider {
+                    record.purge_provider = true;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.save_store(&store)?;
+            }
+            Ok(())
+        })
+    }
+
     /// Reconcile saved links with protection. All edits use the same lock and
     /// restoration journal as explicit connect/disconnect operations.
     pub fn reconcile(&self, catalog: Option<&Catalog>) -> Result<Vec<(String, String)>, String> {
         lock::with_apply_lock(&self.data_dir, || {
             let mut store = self.load_store()?;
+            if catalog.is_some() {
+                let mut cleared = false;
+                for record in store.values_mut() {
+                    if record.purge_provider {
+                        record.purge_provider = false;
+                        cleared = true;
+                    }
+                }
+                if cleared {
+                    self.save_store(&store)?;
+                }
+            }
             let mut failures = Vec::new();
             for agent in Agent::ALL {
                 let Some(mut record) = store.get(agent.id()).cloned() else {
                     continue;
                 };
-                if record.disconnected() {
+                if record.disconnected() && !record.purge_provider {
                     continue;
                 }
                 let status = self.status(agent, &store, catalog);
@@ -334,7 +366,7 @@ impl Projector {
         let Some(record) = store.get_mut(agent.id()) else {
             return Ok(());
         };
-        if record.restored() {
+        if record.restored() && !record.purge_provider {
             return Ok(());
         }
         record.suspended = true;
@@ -394,8 +426,9 @@ impl Projector {
         };
         if !edit.changes.is_empty() {
             let restored = doc.render().map_err(|_| AgentError::RestorationFailed)?;
-            // A list that was empty returns to exactly what it held, not `[]`.
-            let empty = ConfigDoc::parse(Format::YamlList, "")
+            // An empty config returns to exactly what it held, not a generated
+            // empty document.
+            let empty = ConfigDoc::parse(agent.format(), "")
                 .and_then(|empty| empty.render())
                 .map_err(|_| AgentError::Internal)?;
             match &record.empty_original {
@@ -416,9 +449,13 @@ impl Projector {
         }
         if let Some(record) = store.get_mut(agent.id()) {
             let fields = record.fields.clone();
-            record
-                .fields
-                .retain(|field| retain_provider_field(field, &fields));
+            if record.purge_provider {
+                record.fields.clear();
+            } else {
+                record
+                    .fields
+                    .retain(|field| retain_provider_field(field, &fields));
+            }
             for field in &mut record.fields {
                 let inactive = inactive_provider_value(field);
                 if doc.get_value(&refs(&field.path)) == inactive {
@@ -427,6 +464,12 @@ impl Projector {
             }
             record.options.default_model = default_model;
             record.selection = None;
+        }
+        if store
+            .get(agent.id())
+            .is_some_and(|record| record.purge_provider && record.fields.is_empty())
+        {
+            store.remove(agent.id());
         }
         self.save_store(store)
             .map_err(|_| AgentError::RecordUnavailable)
@@ -478,7 +521,6 @@ impl Projector {
         next_record.catalog_model_ids = catalog_model_ids(agent, Some(catalog));
         next_record.endpoint = Some(self.endpoint.clone());
         next_record.empty_original = match &text {
-            _ if agent.format() != Format::YamlList => None,
             None => Some(EmptyOriginal::Absent),
             Some(text) if text.trim().is_empty() => Some(EmptyOriginal::Blank(text.clone())),
             Some(_) => self

@@ -274,7 +274,9 @@ case "$2" in
   start)
     "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
     printf '%s\n' "$!" >"$HOME/managed-pid" ;;
-  disable) /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
+  disable)
+    [ "${PAP_FAIL_DISABLE:-}" = 1 ] && exit 7
+    /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
   *) exit 2 ;;
 esac
 "#;
@@ -298,6 +300,20 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
             .unwrap();
         assert_success(&output);
     };
+    let run_with_unavailable_supervisor = |args: &[&str]| {
+        let output = Command::new(&cli)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PAP_FIXTURE_BACKEND", &backend)
+            .env("PAP_FAIL_DISABLE", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        output
+    };
     let uninstall = ["--yes", "service", "disable", "--for-uninstall"];
     run(&["service", "enable"]);
     run(&["--yes", "service", "disable"]);
@@ -308,6 +324,7 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
     run(&["service", "enable"]);
     assert!(unit.is_file());
     assert!(!marker.exists());
+    run_with_unavailable_supervisor(&["--yes", "service", "disable", "--for-uninstall"]);
     run(&uninstall);
     assert!(!unit.exists());
     assert!(!home.join("enabled").exists());
@@ -2177,4 +2194,97 @@ fn a_legacy_backend_is_stopped_over_its_own_protocol() {
             },
         })
     );
+}
+
+/// An older backend rejects the uninstall shutdown mode, so the client falls
+/// back to its normal shutdown before doing the offline uninstall restore.
+#[cfg(unix)]
+#[test]
+fn an_old_backend_falls_back_during_uninstall_cleanup() {
+    use std::process::Command;
+    use std::{
+        io::{BufRead, BufReader},
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        sync::{Arc, Mutex},
+    };
+    use support::{executable, install, Sandbox};
+
+    let sandbox = Sandbox::new();
+    let root = sandbox.path();
+    let cli = root.join(executable("private-ai-proxy"));
+    let backend = root.join(executable("private-ai-proxy-service"));
+    let helper = root.join(executable("private-ai-proxy-helper"));
+    install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
+    fs::write(&helper, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let home = root.join("home");
+    let runtime = home.join(".private-ai-proxy/runtime");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let data = home
+        .join(".local/share")
+        .join(desktop_core::brand::APP_IDENTIFIER);
+    fs::create_dir_all(&data).unwrap();
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("systemctl"), "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let listener = UnixListener::bind(runtime.join("backend.sock")).unwrap();
+    let mut process = Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = process.id();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = requests.clone();
+    let backend_path = backend.clone();
+    let server = std::thread::spawn(move || {
+        let mut attempt = 0;
+        while attempt < 2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let hello = json!({
+                "protocolVersion": 3,
+                "product": desktop_core::brand::APP_IDENTIFIER,
+                "version": "0.1.7",
+                "instanceId": "legacy-uninstall",
+                "processId": pid,
+                "executable": backend_path,
+            });
+            writeln!(stream, "{hello}").unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = String::new();
+            BufReader::new(&stream).read_line(&mut request).unwrap();
+            if request.is_empty() {
+                continue;
+            }
+            let request: Value = serde_json::from_str(&request).unwrap();
+            observed.lock().unwrap().push(request);
+            if attempt == 0 {
+                writeln!(stream, r#"{{"id":1,"outcome":{{"error":{{"code":"unsupported","message":"old backend"}}}}}}"#).unwrap();
+            } else {
+                writeln!(stream, r#"{{"id":1,"outcome":{{"result":null}}}}"#).unwrap();
+                process.kill().unwrap();
+            }
+            attempt += 1;
+        }
+        process.wait().unwrap();
+    });
+
+    let output = Command::new(&cli)
+        .args(["--yes", "service", "disable", "--for-uninstall", "--json"])
+        .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "supervisor failure should be reported"
+    );
+    server.join().unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["command"]["params"]["mode"], "uninstall");
+    assert_eq!(requests[1]["command"]["params"]["mode"], "quit");
 }

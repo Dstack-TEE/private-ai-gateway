@@ -209,6 +209,14 @@ pub(super) fn prepare(
         );
     }
     let before = read(&path)?;
+    let created = before
+        .is_none()
+        .then(|| {
+            ConfigDoc::parse(file.format(), "")
+                .and_then(|doc| doc.render())
+                .map(|text| text_digest(&text))
+        })
+        .transpose()?;
     let mut doc = ConfigDoc::parse(file.format(), before.as_deref().unwrap_or_default())?;
     let fields = match file {
         File::Pi => vec![
@@ -226,7 +234,7 @@ pub(super) fn prepare(
     let journal = Journal {
         file,
         fields: edit.record.ok_or("Missing model selection journal")?.fields,
-        created: None,
+        created,
     };
     journal.validate()?;
     Ok(Some(Edit {

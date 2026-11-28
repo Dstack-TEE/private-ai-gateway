@@ -733,6 +733,12 @@ impl Client {
         self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::Quit)
     }
 
+    /// Stops this installation for an uninstall, removing PAP-created agent
+    /// provider entries while restoring the rest of each configuration.
+    pub fn shutdown_installed_for_uninstall(&self) -> Result<(), String> {
+        self.shutdown_owned(Some(&installed_backend()?), ShutdownMode::Uninstall)
+    }
+
     /// Turns off backend login startup and gives the open app a detached
     /// backend without starting a new protection session in this operation.
     pub fn disable_login_service(&self) -> Result<(), String> {

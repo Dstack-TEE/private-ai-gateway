@@ -67,7 +67,7 @@ impl DesktopRuntime {
         let catalog = continuing
             .then(|| self.verified_catalog.lock().ok()?.clone())
             .flatten();
-        self.stop_verifier(reconnecting, !continuing)?;
+        self.stop_verifier(reconnecting, !continuing, false)?;
         let result = self.rebind_local_api(config, current, resolved).await;
         if let Some(catalog) = catalog {
             if let Err(error) = self.retarget_agents(&catalog) {

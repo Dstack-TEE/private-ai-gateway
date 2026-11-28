@@ -85,7 +85,14 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             }
             state
         }
-        Action::Stop { offline: false } => {
+        Action::Stop {
+            offline: false,
+            for_uninstall: true,
+        } => return Err("--for-uninstall requires --offline".into()),
+        Action::Stop {
+            offline: false,
+            for_uninstall: false,
+        } => {
             if !client.is_running()? {
                 return Err(
                     "Backend is not running. Run pap stop --offline to restore agents without it."
@@ -94,7 +101,10 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             }
             value(client.call(rpc::Stop)?)?
         }
-        Action::Stop { offline: true } => restore_agents_offline(&client)?,
+        Action::Stop {
+            offline: true,
+            for_uninstall,
+        } => restore_agents_offline(&client, *for_uninstall)?,
         Action::Profiles { command } => profiles(&client, global, command)?,
         Action::Agents { command } => agents(&client, global, command)?,
         Action::Models {
@@ -355,7 +365,7 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                     global,
                     "End the saved protection session and restore managed agent configurations?",
                 )?;
-                restore_agents_offline(client)?;
+                restore_agents_offline(client, false)?;
             }
             let mut result = json!({"status": "stopped"});
             if !global.json {
@@ -377,14 +387,29 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
         }
         Service::Disable { for_uninstall } => {
             // Windows uses the app's login item and has no backend registration.
-            if cfg!(windows) {
+            if cfg!(windows) && !for_uninstall {
                 return Ok(json!({"startAtLogin": false, "supported": false}));
             }
-            let disable = if *for_uninstall {
-                supervisor::unregister
-            } else {
-                supervisor::disable
-            };
+            if cfg!(windows) && *for_uninstall {
+                confirm(
+                    global,
+                    "Stop the backend and remove PAP-created agent providers?",
+                )?;
+                uninstall_cleanup(client)?;
+                return Ok(json!({"startAtLogin": false}));
+            }
+            if *for_uninstall {
+                confirm(
+                    global,
+                    "Stop the backend and remove PAP-created agent providers?",
+                )?;
+                let cleanup = uninstall_cleanup(client);
+                let supervisor = supervisor::unregister();
+                cleanup?;
+                supervisor?;
+                return Ok(json!({"startAtLogin": false}));
+            }
+            let disable = supervisor::disable;
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if supervisor::enabled() && client.is_running()? {
@@ -395,7 +420,7 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                 if client.is_running()? {
                     client.shutdown_installed()?;
                 } else {
-                    restore_agents_offline(client)?;
+                    restore_agents_offline(client, false)?;
                 }
             }
             Ok(json!({"startAtLogin": false}))
@@ -419,6 +444,33 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Err(format!("Run {} directly", backend.display()).into())
         }
         Service::Status => status(client),
+    }
+}
+
+fn uninstall_cleanup(client: &Client) -> Result<(), CallError> {
+    if !client.is_running()? {
+        restore_agents_offline(client, true)?;
+        return Ok(());
+    }
+    match client.shutdown_installed_for_uninstall() {
+        Ok(()) => Ok(()),
+        Err(uninstall_error) => {
+            if client.is_running()? {
+                client.shutdown_installed().map_err(|fallback_error| {
+                    format!(
+                        "Uninstall shutdown failed: {uninstall_error}; fallback shutdown failed: {fallback_error}"
+                    )
+                })?;
+            }
+            restore_agents_offline(client, true)
+                .map(|_| ())
+                .map_err(|fallback_error| {
+                format!(
+                    "Uninstall shutdown failed: {uninstall_error}; offline purge failed: {fallback_error}"
+                )
+                .into()
+            })
+        }
     }
 }
 
@@ -530,7 +582,7 @@ fn unverified(state: &AppState) -> CallError {
 
 /// `stop --offline`: restores what `stop` restores when no backend runs, such
 /// as before uninstalling after an update that was not relaunched.
-fn restore_agents_offline(client: &Client) -> Result<Value, CallError> {
+fn restore_agents_offline(client: &Client, purge_provider: bool) -> Result<Value, CallError> {
     const RUNNING: &str =
         "The backend is running; restore the agents through it with `stop` or `service stop`.";
     if client.is_running()? {
@@ -540,7 +592,10 @@ fn restore_agents_offline(client: &Client) -> Result<Value, CallError> {
         .and_then(std::fs::canonicalize)
         .map_err(|_| "Cannot locate the application executable")?
         .with_file_name(agent_bridge::agents::helper_binary_name());
-    value(desktop_runtime::controller::restore_agents_offline(helper)?.ok_or(RUNNING)?)
+    value(
+        desktop_runtime::controller::restore_agents_offline(helper, purge_provider)?
+            .ok_or(RUNNING)?,
+    )
 }
 
 fn profiles(client: &Client, global: &Global, command: &Profiles) -> Result<Value, CallError> {

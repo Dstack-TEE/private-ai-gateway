@@ -37,10 +37,10 @@ pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
 /// The human rendering of `action`'s result `value`; details by default.
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
-        Action::Status { .. } | Action::Start { .. } | Action::Stop { offline: false } => {
+        Action::Status { .. } | Action::Start { .. } | Action::Stop { offline: false, .. } => {
             status(value)
         }
-        Action::Stop { offline: true } => agents(value),
+        Action::Stop { offline: true, .. } => agents(value),
         Action::Service { command } => match command {
             Service::Start if value["alreadyRunning"] == true => "Backend is already running.".into(),
             Service::Start => "Backend started.".into(),

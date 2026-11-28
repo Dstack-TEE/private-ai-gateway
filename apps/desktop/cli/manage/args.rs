@@ -34,6 +34,9 @@ pub enum Action {
         /// Refused while a backend is running; use `stop` or `service stop` instead.
         #[arg(long)]
         offline: bool,
+        /// Purge PAP-created provider entries as part of uninstall cleanup.
+        #[arg(long, requires = "offline", hide = true)]
+        for_uninstall: bool,
     },
     /// Manage the local backend process. Starting it may start protection when Protect on launch (`connect-on-launch`) is on.
     Service {

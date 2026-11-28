@@ -68,6 +68,7 @@ pub struct Version {
 pub enum ShutdownMode {
     Quit,
     UpdateRestart,
+    Uninstall,
 }
 
 /// A management request bound to the response the service answers it with.

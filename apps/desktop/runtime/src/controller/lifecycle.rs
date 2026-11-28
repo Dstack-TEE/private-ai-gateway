@@ -176,15 +176,19 @@ impl DesktopRuntime {
     /// withdraws their tokens. A restart keeps them pointed at the Local API,
     /// which refuses them until protection is verified again.
     pub(super) fn stop_with_reconnect(&self, reconnecting: bool) -> Result<AppState, Error> {
-        self.stop_verifier(reconnecting, !reconnecting)
+        self.stop_verifier(reconnecting, !reconnecting, false)
     }
 
     pub(super) fn stop_verifier(
         &self,
         reconnecting: bool,
         restore_agents: bool,
+        purge_provider: bool,
     ) -> Result<AppState, Error> {
         let _guard = self.lock_agents()?;
+        if self.instance.is_some() && restore_agents && purge_provider && self.agent_configuration {
+            self.current_projector()?.mark_uninstall()?;
+        }
         let result = self.manager.stop_with_reconnect(reconnecting);
         self.proxy.set_api_key(None);
         if self.instance.is_some() && restore_agents {
@@ -211,7 +215,11 @@ impl DesktopRuntime {
         self.recovery.cancel();
         let preserve_session = mode == ShutdownMode::UpdateRestart && self.state().session_active;
         tracing::info!("Shutdown: stopping protection");
-        let restored = self.stop_with_reconnect(preserve_session);
+        let restored = self.stop_verifier(
+            preserve_session,
+            !preserve_session,
+            mode == ShutdownMode::Uninstall,
+        );
         // Outside the Mac App Store, a client's shutdown that ends the session
         // never leaves agents pointing at a stopped Local API: a failed
         // restore keeps the backend running. An update restart or a supervised

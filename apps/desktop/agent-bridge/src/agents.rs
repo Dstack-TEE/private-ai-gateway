@@ -161,6 +161,9 @@ struct Connection {
     empty_original: Option<EmptyOriginal>,
     /// The agent is not authorized (disconnect in progress).
     disabled: bool,
+    /// An uninstall requested removal of provider fields PAP created.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    purge_provider: bool,
     /// A disconnect started; the record stays until token, parked secrets,
     /// and config are all cleaned up, so a retry is idempotent.
     cleanup_pending: bool,
