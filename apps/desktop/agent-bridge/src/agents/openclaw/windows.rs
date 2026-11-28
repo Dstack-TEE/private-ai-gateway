@@ -114,7 +114,7 @@ mod tests {
         let current = current_user_sid().unwrap();
         let private = format!("(A;;FA;;;{current})");
         // FW includes READ_CONTROL. Deny only FILE_WRITE_DATA when exercising
-        // policy on a readable ACL; separately deny the inspector's read rights.
+        // policy on a readable ACL.
         for (name, acl, allowed) in [
             ("private", format!("D:P{private}"), true),
             (
@@ -125,11 +125,6 @@ mod tests {
             ("read", format!("D:P{private}(A;;FR;;;WD)"), true),
             ("write", format!("D:P{private}(A;;FW;;;WD)"), false),
             ("deny", format!("D:P(D;;0x00000002;;;WD){private}"), true),
-            (
-                "deny-inspection",
-                format!("D:P(D;;FRFW;;;WD){private}"),
-                false,
-            ),
             (
                 "deny-and-allow",
                 format!("D:P(D;;0x00000002;;;WD){private}(A;;0x00000002;;;WD)"),
@@ -149,14 +144,6 @@ mod tests {
                     "{result:?}"
                 );
             }
-            if name == "deny-inspection" {
-                assert!(
-                    result
-                        .as_ref()
-                        .is_err_and(|error| error.contains("Cannot open")),
-                    "{result:?}"
-                );
-            }
         }
     }
 
@@ -164,7 +151,15 @@ mod tests {
     fn native_file_checks_refuse_directories_reparse_points_and_missing_files() {
         let temp = tempfile::tempdir().unwrap();
         assert!(validate_helper(temp.path()).is_err());
-        assert!(validate_helper(&temp.path().join("absent")).is_err());
+        // Whether a DACL can block inspection depends on the caller's backup
+        // privileges. A missing file tests the failed-open path on any runner.
+        let missing = validate_helper(&temp.path().join("absent"));
+        assert!(
+            missing
+                .as_ref()
+                .is_err_and(|error| error.contains("Cannot open")),
+            "{missing:?}"
+        );
         let target = temp.path().join("target");
         fixture(
             &target,
