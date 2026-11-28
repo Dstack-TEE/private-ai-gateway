@@ -81,15 +81,20 @@ test("only release tags publish, after every package, in order", async () => {
   assert.ok(sign.indexOf(' --detach-sign "$package"') < sign.indexOf("create-update-manifest.mjs"));
   assert.ok(sign.indexOf("create-update-manifest.mjs") < sign.indexOf("sha256sum --"));
   assert.ok(sign.indexOf("sha256sum --") < sign.indexOf("--armor --detach-sign release/SHA256SUMS"));
+  const stageInstallers = steps.findIndex((run) => run.includes("cp scripts/install-private-ai-proxy.sh scripts/install-private-ai-proxy.ps1 release/"));
+  assert.ok(stageInstallers >= 0 && stageInstallers < gate);
   const upload = steps.findIndex((run) => run.includes("gh release upload"));
   assert.ok(gate < upload);
   // Provenance and SBOM attestations exist before any asset is public.
   const attestations = direct.jobs.release.steps.flatMap((step, index) => (step.uses?.startsWith("actions/attest@") ? [{ index, ...step.with }] : []));
   for (const attestation of attestations) assert.ok(gate < attestation.index && attestation.index < upload);
+  assert.ok(attestations.some((attestation) => attestation["subject-checksums"] === "release/SHA256SUMS"));
   // The download links join the notes after the assets they link are
   // attached, and before the release is public.
   const notes = steps.findIndex((run) => run.includes("release-notes.mjs"));
   const publish = steps.findIndex((run) => run.includes("--draft=false"));
+  const verifyInstallers = steps.findIndex((run) => run.includes('gh release download "$TAG"') && run.includes('git show "$GITHUB_SHA:scripts/$installer" | cmp'));
+  assert.ok(upload < verifyInstallers && verifyInstallers < publish);
   assert.ok(upload < notes && notes < publish);
 
   // The release job attests exactly the SBOMs that verify (which also runs

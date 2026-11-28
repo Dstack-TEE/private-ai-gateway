@@ -81,6 +81,80 @@ PowerShell parameters:
 The default installation directory is
 `%LOCALAPPDATA%\Programs\Private AI Proxy CLI`.
 
+### Verify and install a pinned release
+
+Choose a `desktop-v` tag on [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases)
+that lists the installer assets. Set the version below to that release's
+version without the `desktop-v` prefix. For a beta such as `X.Y.Z-beta.1`, set
+the channel to `beta`. Run the commands in a fresh directory with `gpg` and
+`gpgv` available.
+
+Download the installer, the signed checksum list, and the public key from the
+same tag. Before continuing, confirm that the key file shows a single primary
+key with fingerprint `1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140`.
+
+#### macOS and Linux release asset
+
+The checksum command uses `shasum`.
+
+```sh
+version='X.Y.Z'
+channel=stable
+repo=https://github.com/Dstack-TEE/private-ai-gateway
+tag="desktop-v$version"
+(
+  set -e
+  for file in install-private-ai-proxy.sh SHA256SUMS SHA256SUMS.asc; do
+    curl -fsSLo "$file" "$repo/releases/download/$tag/$file"
+  done
+  curl -fsSLo linux-signing-key.asc "$repo/raw/$tag/apps/desktop/packaging/linux-signing-key.asc"
+  gpg --show-keys --with-fingerprint linux-signing-key.asc
+)
+```
+
+After confirming the fingerprint, verify the signature and checksum before
+running the installer with the same version.
+
+```sh
+gpg --dearmor --output release-keyring.gpg linux-signing-key.asc &&
+  gpgv --keyring "$PWD/release-keyring.gpg" SHA256SUMS.asc SHA256SUMS &&
+  awk '$2 == "install-private-ai-proxy.sh"' SHA256SUMS | shasum -a 256 -c &&
+  sh ./install-private-ai-proxy.sh --channel "$channel" --version "$version"
+```
+
+#### Windows release asset
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$version = 'X.Y.Z'
+$channel = 'stable'
+$repo = 'https://github.com/Dstack-TEE/private-ai-gateway'
+$tag = "desktop-v$version"
+foreach ($file in 'install-private-ai-proxy.ps1', 'SHA256SUMS', 'SHA256SUMS.asc') {
+    Invoke-WebRequest -UseBasicParsing "$repo/releases/download/$tag/$file" -OutFile $file
+}
+Invoke-WebRequest -UseBasicParsing "$repo/raw/$tag/apps/desktop/packaging/linux-signing-key.asc" -OutFile linux-signing-key.asc
+gpg --show-keys --with-fingerprint linux-signing-key.asc
+```
+
+After confirming the fingerprint, run the following in the same PowerShell session.
+
+```powershell
+gpg --dearmor --output release-keyring.gpg linux-signing-key.asc
+if ($LASTEXITCODE -ne 0) { throw 'Could not create the release keyring' }
+gpgv --keyring (Join-Path $PWD.Path 'release-keyring.gpg') SHA256SUMS.asc SHA256SUMS
+if ($LASTEXITCODE -ne 0) { throw 'Invalid SHA256SUMS signature' }
+$entries = @(Get-Content SHA256SUMS | Where-Object { $_ -cmatch '^[0-9a-f]{64}  install-private-ai-proxy\.ps1$' })
+if ($entries.Count -ne 1) { throw 'Expected one installer checksum' }
+$actual = (Get-FileHash -Algorithm SHA256 .\install-private-ai-proxy.ps1).Hash
+if ($actual -ne $entries[0].Substring(0, 64)) { throw 'Installer checksum mismatch' }
+powershell -ExecutionPolicy Bypass -File .\install-private-ai-proxy.ps1 -Channel $channel -Version $version
+```
+
+You can also verify GitHub build provenance with `gh attestation verify`.
+Pass the local installer path, `--repo Dstack-TEE/private-ai-gateway`, and
+`--source-ref refs/tags/desktop-vX.Y.Z` with your exact release tag.
+
 ## Windows with WinGet
 
 Use WinGet to install the desktop app or the standalone CLI. Both packages

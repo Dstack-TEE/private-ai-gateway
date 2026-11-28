@@ -958,6 +958,10 @@ jobs:
       - name: Install release tooling
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
+      - name: Stage the CLI install scripts
+        shell: bash
+        run: |
+          cp scripts/install-private-ai-proxy.sh scripts/install-private-ai-proxy.ps1 release/
       - name: Prepare Linux signing
         shell: bash
         env: *linux-signing-secret
@@ -972,7 +976,7 @@ jobs:
             "${signer[@]}" --detach-sign "$package"
           done
           # The manifest consumes only Tauri signatures. SHA256SUMS also covers
-          # the detached Arch signatures that are published alongside packages.
+          # the detached Arch signatures and the CLI install scripts.
           node apps/desktop/scripts/create-update-manifest.mjs release "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
           (cd release && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
           mv "$RUNNER_TEMP/SHA256SUMS" release/SHA256SUMS
@@ -1018,6 +1022,18 @@ jobs:
           set -euo pipefail
           test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true
           gh release upload "$TAG" release/* --clobber
+      - name: Verify the attached CLI install scripts against the tagged source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          directory=$(mktemp -d "$RUNNER_TEMP/attached-installers.XXXXXX")
+          gh release download "$TAG" --dir "$directory" \
+            --pattern install-private-ai-proxy.sh --pattern install-private-ai-proxy.ps1
+          for installer in install-private-ai-proxy.sh install-private-ai-proxy.ps1; do
+            git show "$GITHUB_SHA:scripts/$installer" | cmp - "$directory/$installer"
+          done
       # Download links (and the App Store for stable versions) go above the
       # changelog and integrity details below it; a rerun replaces both.
       - name: Add download links to the release notes

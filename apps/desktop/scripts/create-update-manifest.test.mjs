@@ -35,7 +35,7 @@ for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]
     try {
       const published = releaseAssetNames(version);
       const staged = published.filter((name) => !releaseChecksumAssets.includes(name));
-      assert.equal(published.length, 31);
+      assert.equal(published.length, 33);
       assert.ok(published.includes("SHA256SUMS.asc"));
       const assets = staged.filter((name) => name !== "latest.json");
       for (const file of assets) await writeFile(path.join(directory, file), "fixture");
@@ -52,6 +52,12 @@ for (const [channel, version] of [["stable", "0.1.2"], ["beta", "0.1.2-beta.10"]
       await rm(archSignature);
       await assert.rejects(run, /Missing: private-ai-proxy-cli-.*-linux-arm64\.pkg\.tar\.zst\.sig/);
       await writeFile(archSignature, "Arch signature");
+      for (const name of ["install-private-ai-proxy.sh", "install-private-ai-proxy.ps1"]) {
+        const installer = path.join(directory, name);
+        await rm(installer);
+        await assert.rejects(run, (error) => error.stderr.includes(`Missing: ${name}`));
+        await writeFile(installer, "fixture");
+      }
       const rpmSignature = path.join(directory, `private-ai-proxy-${version}-linux-x64.rpm.sig`);
       const rpmSignatureText = await readFile(rpmSignature);
       await rm(rpmSignature);
