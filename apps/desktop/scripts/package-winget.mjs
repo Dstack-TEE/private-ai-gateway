@@ -72,6 +72,8 @@ try {
     }
     const installer = {
       Architecture: arch, InstallerUrl: asset.browser_download_url, InstallerSha256: digest.toUpperCase(),
+      // The CLI and the desktop installer's CLI registration hook load VCRUNTIME140.dll.
+      Dependencies: { PackageDependencies: [{ PackageIdentifier: `Microsoft.VCRedist.2015+.${arch}` }] },
     };
     if (cli) {
       const directory = path.basename(name, ".zip");
@@ -103,8 +105,9 @@ try {
       Description: longDescription, ReleaseNotesUrl: release.html_url,
     });
     await write("installer", ".installer", {
-      InstallerType: cli ? "zip" : "nullsoft", Scope: cli || app.bundle.windows.nsis.installMode === "currentUser" ? "user" : "machine",
+      InstallerType: cli ? "zip" : "nullsoft",
       ...(cli ? { NestedInstallerType: "portable", Commands: [aliases[0]] } : {
+        Scope: app.bundle.windows.nsis.installMode === "currentUser" ? "user" : "machine",
         ProductCode: app.productName,
         AppsAndFeaturesEntries: [{ DisplayName: app.productName, Publisher: publisher, ProductCode: app.productName }],
       }),
