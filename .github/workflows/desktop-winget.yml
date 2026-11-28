@@ -1,0 +1,80 @@
+name: Submit WinGet manifests
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      WINGET_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-winget
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    runs-on: ubuntu-24.04
+    environment: desktop-release
+    timeout-minutes: 15
+    steps:
+      - name: Check WinGet credential
+        id: credential
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_FORK_OWNER: ${{ vars.WINGET_FORK_OWNER }}
+        run: |
+          if [[ -z "$WINGET_TOKEN" ]]; then
+            echo "WINGET_TOKEN is absent. Skipping WinGet submission."
+          elif [[ -z "$WINGET_FORK_OWNER" ]]; then
+            echo "WINGET_FORK_OWNER is absent. Skipping WinGet submission."
+          else
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: steps.credential.outputs.available == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: steps.credential.outputs.available == 'true'
+        with:
+          node-version: 24
+      - name: Generate manifests
+        if: steps.credential.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        working-directory: apps/desktop
+        run: |
+          npm ci --ignore-scripts
+          node scripts/package-winget.mjs "$RUNNER_TEMP/winget-manifests" "$GITHUB_REPOSITORY" "$RELEASE_TAG"
+      - name: Install Komac
+        if: steps.credential.outputs.available == 'true'
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=2.17.2
+          asset="komac-$version-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$asset" \
+            "https://github.com/russellbanks/Komac/releases/download/v$version/$asset"
+          echo "b03b020eec98acfb0b53e284a6e21815b884be33de6785b97e7a120f0e748966  $asset" | sha256sum --check
+          tar -xzf "$asset" komac
+      - name: Validate WinGet manifests with Komac
+        if: steps.credential.outputs.available == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar
+          for installer in "$RUNNER_TEMP"/winget-manifests/manifests/**/*.installer.yaml; do
+            "$RUNNER_TEMP/komac" submit --dry-run --yes "$(dirname -- "$installer")"
+          done
+      - name: Open WinGet pull requests from the organization fork
+        if: steps.credential.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          WINGET_FORK_OWNER: ${{ vars.WINGET_FORK_OWNER }}
+        run: bash apps/desktop/scripts/submit-winget.sh "$RUNNER_TEMP/winget-manifests" "$WINGET_FORK_OWNER"

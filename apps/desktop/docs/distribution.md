@@ -309,6 +309,35 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
    ([Submit and rollback](mac-app-store.md#submit-and-rollback)).
 5. Ship the fix as `<next-patch>` with the promotion steps above.
 
+## WinGet
+
+[Submit WinGet manifests](../../../.github/workflows/desktop-winget.yml) runs
+after stable desktop releases. It derives the package identifiers from the
+Tauri publisher and product name and uses the released x64 and ARM64 NSIS
+installers and CLI ZIPs. The portable manifest exposes `pap` and retains the
+service and helper executables next to it. When bootstrapping from a release that predates signed checksums, pass
+`--legacy` to `scripts/package-winget.mjs`. This also verifies each downloaded
+installer against the asset SHA-256 recorded by GitHub.
+
+The maintainer creates an organization-owned fork of
+[`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs). Set
+`WINGET_FORK_OWNER` to that organization and `WINGET_TOKEN` to a classic PAT
+with `public_repo` and write access to the fork. Set both in the
+`desktop-release` environment. The workflow logs a skip when either is absent.
+It uses Komac for a dry run and opens one pull request per package using
+GitHub’s [documented `head` and `head_repo` fields](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request).
+GitHub syncs the fork when needed, then creates the submission branch on the
+server at the upstream commit before the workflow pushes the new manifest.
+Commits use the authenticated maintainer's GitHub identity. Microsoft
+maintainers review each submission.
+
+Use the same script for the first submission, with GitHub CLI authenticated
+as a maintainer of the organization fork. For the selected `redpill-ai` fork:
+
+```sh
+bash apps/desktop/scripts/submit-winget.sh /tmp/pap-winget-manifests/desktop-v0.11.1 redpill-ai
+```
+
 ## Updates by installation
 
 Direct installations with an in-app updater follow the saved update channel (the desktop app's
@@ -343,6 +372,8 @@ publishing stable releases to the beta feed.
 | Installation | Update key or source | How it updates | Backend and restart |
 | --- | --- | --- | --- |
 | macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first. The relaunched app starts the new backend using the same LaunchAgent when enabled |
+| Windows desktop via WinGet | WinGet or the signed NSIS updater | Upgrade with WinGet or in the desktop app | Close the app for package manager upgrades |
+| Windows CLI via WinGet | WinGet stable package | `pap update` prints the WinGet upgrade command | Existing processes must close before upgrading |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
 | Linux packages with an APT, DNF, or Zypper repository | Enabled stable and beta repositories | `pap update` and Settings > About show the package manager’s upgrade command | The next launch starts the new backend |
 | Linux desktop DEB without its repository | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |

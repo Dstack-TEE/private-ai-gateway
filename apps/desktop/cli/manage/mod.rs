@@ -1337,6 +1337,9 @@ fn update(client: &Client) -> Result<Value, CallError> {
     if let Some(package_url) = installation.aur_package_url() {
         return Ok(json!({ "packageUrl": package_url }));
     }
+    if let Some(notice) = installation.winget_update() {
+        return value(notice);
+    }
     let notice = update_notice()?;
     if notice.installation.delegates_updates() && !notice.commands.is_empty() {
         return value(notice);

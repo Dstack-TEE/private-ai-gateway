@@ -1072,6 +1072,17 @@ jobs:
     secrets:
       AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
 
+  submit-winget:
+    needs: [version, release]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.version.outputs.channel == 'stable' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-winget.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+
   publish-npm:
     needs: update-feed
     if: ${{ !cancelled() && needs.update-feed.result == 'success' }}
