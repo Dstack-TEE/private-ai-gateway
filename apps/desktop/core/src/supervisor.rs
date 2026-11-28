@@ -156,13 +156,19 @@ struct EnvironmentOverrides {
     xdg_data: bool,
 }
 
-fn process_environment(agent: Vec<&'static str>) -> EnvironmentOverrides {
+fn process_environment() -> EnvironmentOverrides {
     let is_set = |name: &str| std::env::var_os(name).is_some();
     let proxy = PROXY_ENVIRONMENT
         .iter()
         .copied()
         .filter(|name| is_set(name))
         .collect();
+    let mut agent = crate::paths::agent_environment::supervision_overrides();
+    // On Linux this variable also selects PAP's own settings directory.
+    if cfg!(target_os = "linux") && crate::paths::xdg_home_overridden(crate::paths::XDG_CONFIG_HOME)
+    {
+        agent.push(crate::paths::XDG_CONFIG_HOME);
+    }
     EnvironmentOverrides {
         agent,
         proxy,
@@ -212,17 +218,12 @@ fn automatic_blockers_for(
     }
 }
 
-pub fn automatic_blockers(agent_environment_overrides: &[&'static str]) -> AutomaticBlockers {
+pub fn automatic_blockers() -> AutomaticBlockers {
     automatic_blockers_for(
-        &process_environment(agent_environment_overrides.to_vec()),
+        &process_environment(),
         declined().is_some_and(|marker| marker.exists()),
         automatic_supervision_supported(),
     )
-}
-
-/// Whether the desktop shell or `pap start` turns this on by itself.
-pub fn automatic(agent_environment_overrides: &[&'static str]) -> bool {
-    automatic_blockers(agent_environment_overrides).is_eligible()
 }
 
 impl AutomaticBlockers {
@@ -323,7 +324,7 @@ impl LoginServiceStatus {
 }
 
 /// Read-only diagnosis of this installation's login service.
-pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> LoginServiceStatus {
+pub fn login_service_status() -> LoginServiceStatus {
     use LoginServiceReason as Reason;
 
     if relocated() {
@@ -363,7 +364,7 @@ pub fn login_service_status(agent_environment_overrides: &[&'static str]) -> Log
         (true, false) => (None, "Enabled (inactive)".into()),
         (false, true) => (None, "Active (disabled at login)".into()),
         (false, false) => match automatic_blockers_for(
-            &process_environment(agent_environment_overrides.to_vec()),
+            &process_environment(),
             declined().is_some_and(|marker| marker.exists()),
             installation_supports_automatic_supervision(),
         ) {
@@ -1383,9 +1384,7 @@ mod desktop_tests {
         if std::env::var_os(CHILD).is_some() {
             let cli = PathBuf::from(std::env::var_os("PAP_TEST_CANONICAL_COMMAND").unwrap());
             assert_eq!(command().unwrap(), (cli, false));
-            assert!(!automatic(
-                &crate::paths::agent_environment::environment_overrides()
-            ));
+            assert!(!automatic_blockers().is_eligible());
             return;
         }
         let temp = tempfile::tempdir().unwrap();

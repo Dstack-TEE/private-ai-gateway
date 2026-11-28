@@ -13,7 +13,7 @@ use std::{
     future::Future,
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -29,14 +29,20 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::{
-    agents::{AgentPreview, ConnectOptions},
+    agents::{Agent, AgentPreview, ConnectOptions},
     contracts::AppState,
+    paths::agent_environment::{self, ClientEnvironment},
     protocol::{self, rpc, Call, Command, ErrorCode, ShutdownMode, Version},
     sse::DataLines,
     transport,
 };
 
 mod legacy;
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", not(feature = "mac-app-store"))
+))]
+mod shell_environment;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Bounds the initial version handshake, including response headers and body.
@@ -122,6 +128,8 @@ impl From<CallError> for String {
 pub struct Client {
     states: watch::Sender<AppState>,
     expected_shutdown: Mutex<Option<String>>,
+    resolve_agent_environment: fn() -> ClientEnvironment,
+    agent_environment: OnceLock<ClientEnvironment>,
 }
 
 impl Default for Client {
@@ -153,6 +161,8 @@ impl Client {
         Self {
             states,
             expected_shutdown: Mutex::new(None),
+            resolve_agent_environment: || agent_environment::capture(std::env::var_os),
+            agent_environment: OnceLock::new(),
         }
     }
 
@@ -314,7 +324,16 @@ impl Client {
         handle: tokio::runtime::Handle,
         before_start: impl FnOnce(&Self) + Send + 'static,
     ) -> Arc<Self> {
-        let client = Arc::new(Self::new());
+        let client = Self::new();
+        #[cfg(any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "mac-app-store"))
+        ))]
+        let client = Self {
+            resolve_agent_environment: shell_environment::resolve,
+            ..client
+        };
+        let client = Arc::new(client);
         client
             .states
             .send_modify(|state| state.backend_connected = Some(false));
@@ -563,22 +582,27 @@ impl Client {
         mut command: Command,
         instance_id: Option<&str>,
     ) -> Result<Value, CallError> {
-        match &mut command {
+        let connecting = match &command {
             Command::PreviewAgent {
                 agent_id,
-                connect,
-                options,
+                connect: true,
+                ..
             }
             | Command::ApplyAgent {
                 agent_id,
-                connect,
-                options,
+                connect: true,
                 ..
-            } => {
-                options.supply_opencode_executable(agent_id, *connect);
             }
-            _ => {}
-        }
+            | Command::SetAgentConnection {
+                agent_id,
+                connect: true,
+            } => Some(Agent::from_id(agent_id)?),
+            _ => None,
+        };
+        let inspect = matches!(command, Command::ListAgents {});
+        // Only agent requests need the shell snapshot. Backend startup and
+        // state updates can proceed independently of the login shell.
+        let environment = (connecting.is_some() || inspect).then(|| self.agent_environment());
         block_on(async {
             let mut connection = open_current().await?;
             if instance_id.is_some_and(|expected| expected != connection.version.instance_id) {
@@ -586,40 +610,92 @@ impl Client {
                     "The backend restarted. Retry the command to check the new backend.".into(),
                 );
             }
-            if let Command::SetAgentConnection { agent_id, connect } = &command {
-                let mut options = ConnectOptions::default();
-                options.supply_opencode_executable(agent_id, *connect);
-                if options.opencode_executable.is_some() {
-                    // Use the owner-only RPCs when the local desktop has a
-                    // path to pass. Browser connections keep the single RPC.
-                    let preview = connection
-                        .call(
-                            &rpc::PreviewAgent {
-                                agent_id: agent_id.clone(),
-                                connect: *connect,
-                                options: options.clone(),
-                            }
-                            .into(),
-                        )
-                        .await?;
-                    let preview: AgentPreview = serde_json::from_value(preview).map_err(|_| {
-                        CallError::Local("Unexpected management response shape".into())
-                    })?;
+            if connection.version.accepts_agent_environment == Some(true) && inspect {
+                if let Some(environment) = environment {
+                    let environments = Agent::ALL
+                        .into_iter()
+                        .filter_map(|agent| {
+                            agent_environment::forwarded(agent, environment)
+                                .ok()
+                                .map(|values| (agent.id().to_string(), values))
+                        })
+                        .collect();
                     return connection
-                        .call(
-                            &rpc::ApplyAgent {
-                                agent_id: agent_id.clone(),
-                                connect: *connect,
-                                revision: preview.revision,
-                                options,
-                            }
-                            .into(),
-                        )
+                        .call(&rpc::InspectAgents { environments }.into())
                         .await;
+                }
+            }
+            if let Some((agent, environment)) = connecting.zip(environment) {
+                if let Some(message) = self.agent_secret_mismatch(agent, &connection.version) {
+                    return Err(message.into());
+                }
+                if connection.version.accepts_agent_environment == Some(true) {
+                    let environment = Some(agent_environment::forwarded(agent, environment)?);
+                    match &mut command {
+                        Command::PreviewAgent { options, .. }
+                        | Command::ApplyAgent { options, .. } => {
+                            options.environment = environment;
+                        }
+                        Command::SetAgentConnection { agent_id, connect } => {
+                            // These RPCs are available only on the owner transport.
+                            let options = ConnectOptions {
+                                environment,
+                                ..ConnectOptions::default()
+                            };
+                            let preview = connection
+                                .call(
+                                    &rpc::PreviewAgent {
+                                        agent_id: agent_id.clone(),
+                                        connect: *connect,
+                                        options: options.clone(),
+                                    }
+                                    .into(),
+                                )
+                                .await?;
+                            let preview: AgentPreview =
+                                serde_json::from_value(preview).map_err(|_| {
+                                    CallError::Local("Unexpected management response shape".into())
+                                })?;
+                            return connection
+                                .call(
+                                    &rpc::ApplyAgent {
+                                        agent_id: agent_id.clone(),
+                                        connect: *connect,
+                                        revision: preview.revision,
+                                        options,
+                                    }
+                                    .into(),
+                                )
+                                .await;
+                        }
+                        _ => {}
+                    }
                 }
             }
             connection.call(&command).await
         })?
+    }
+
+    fn agent_environment(&self) -> &ClientEnvironment {
+        self.agent_environment
+            .get_or_init(self.resolve_agent_environment)
+    }
+
+    pub fn agent_secret_mismatch(&self, agent: Agent, version: &Version) -> Option<String> {
+        let backend = version.agent_validation_overrides.as_ref()?;
+        let local = self.agent_environment();
+        let name = agent_environment::validation_sources(agent)
+            .iter()
+            .copied()
+            .find(|name| {
+                agent_environment::sensitive(name)
+                    && backend.contains(*name) != local.contains_key(*name)
+            })?;
+        let hint = agent_environment_hint(name, version.supervised == Some(true));
+        Some(format!(
+            "{name} is set in one environment only. PAP cannot verify that {} uses the same configuration in this session. {hint}",
+            agent.name()
+        ))
     }
 
     pub fn cached_state(&self) -> AppState {
@@ -1017,6 +1093,16 @@ fn http_error(error: hyper::Error) -> io::Error {
         source = cause.source();
     }
     io::ErrorKind::ConnectionAborted.into()
+}
+
+pub fn agent_environment_hint(name: &str, supervised: bool) -> String {
+    if supervised && cfg!(target_os = "linux") {
+        format!("Match {name} in the systemd user environment (environment.d), then run pap service restart.")
+    } else if supervised && cfg!(target_os = "macos") {
+        format!("Match {name} in the launchd environment, then run pap service restart. launchctl setenv lasts only for the current login.")
+    } else {
+        format!("Run pap service restart from a shell with the desired {name} setting, then retry.")
+    }
 }
 
 fn block_on<F: Future>(future: F) -> Result<F::Output, String> {

@@ -1,6 +1,8 @@
-use std::env;
+use std::{collections::BTreeMap, env, ffi::OsString};
 
-use super::{HOME_OVERRIDE_ENV, XDG_CONFIG_HOME};
+use crate::agents::Agent;
+
+use super::XDG_CONFIG_HOME;
 
 pub const CODEX_HOME: &str = "CODEX_HOME";
 pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
@@ -23,48 +25,95 @@ pub const PROGRAM_DATA: &str = "ProgramData";
 
 pub const DSH_TOKEN_REF: &str = "PRIVATE_AI_PROXY_DSH_TOKEN";
 
-/// Agent paths and validation depend on these process environment overrides.
-pub fn environment_overridden() -> bool {
-    !environment_overrides().is_empty()
+pub const PATH: &str = "PATH";
+
+/// Location selectors in native discovery order.
+pub fn config_path_sources(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::Codex => &[CODEX_HOME],
+        Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR],
+        Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME],
+        Agent::Pi => &[PI_CODING_AGENT_DIR],
+        Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR],
+        Agent::Hermes if cfg!(windows) => &[HERMES_HOME, LOCALAPPDATA],
+        Agent::Hermes => &[HERMES_HOME],
+        Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME],
+        Agent::Dsh => &[DSH_HOME],
+    }
 }
 
-/// Names of environment variables that move an agent's configuration away
-/// from the login service's environment.
-pub fn environment_overrides() -> Vec<&'static str> {
-    let mut names = Vec::new();
-    if super::xdg_home_overridden(XDG_CONFIG_HOME) {
-        names.push(XDG_CONFIG_HOME);
+/// Other variables that affect how the agent uses its configuration.
+pub fn validation_sources(agent: Agent) -> &'static [&'static str] {
+    match agent {
+        Agent::OpenCode if cfg!(windows) => {
+            &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT, PROGRAM_DATA]
+        }
+        Agent::OpenCode => &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT],
+        Agent::OhMyPi => &[OMP_PROFILE, PI_PROFILE],
+        Agent::OpenClaw => &[OPENCLAW_PROFILE, OPENCLAW_NIX_MODE],
+        Agent::Dsh => &[DSH_TOKEN_REF],
+        _ => &[],
     }
-    if cfg!(windows) {
-        names.extend(
-            [LOCALAPPDATA, PROGRAM_DATA]
-                .into_iter()
-                .filter(|name| env::var_os(name).is_some()),
-        );
-    }
-    names.extend(
-        [
-            CODEX_HOME,
-            CLAUDE_CONFIG_DIR,
-            OPENCODE_CONFIG,
-            PI_CODING_AGENT_DIR,
-            HERMES_HOME,
-            OPENCODE_CONFIG_DIR,
-            OPENCODE_CONFIG_CONTENT,
-            OPENCLAW_CONFIG_PATH,
-            OPENCLAW_STATE_DIR,
-            OPENCLAW_HOME,
-            OPENCLAW_PROFILE,
-            OPENCLAW_NIX_MODE,
-            PI_CONFIG_DIR,
-            OMP_PROFILE,
-            PI_PROFILE,
-            DSH_HOME,
-            HOME_OVERRIDE_ENV,
-            DSH_TOKEN_REF,
-        ]
+}
+
+pub fn sensitive(name: &str) -> bool {
+    matches!(name, OPENCODE_CONFIG_CONTENT | DSH_TOKEN_REF)
+}
+
+pub fn override_sources(agent: Agent) -> impl Iterator<Item = &'static str> {
+    config_path_sources(agent)
+        .iter()
+        .chain(validation_sources(agent))
+        .copied()
+}
+
+pub fn forwarded_sources(agent: Agent) -> impl Iterator<Item = &'static str> {
+    std::iter::once(PATH).chain(override_sources(agent).filter(|name| !sensitive(name)))
+}
+
+/// An explicit snapshot also represents variables absent from the client's shell.
+pub type AgentEnvironment = BTreeMap<String, String>;
+
+pub(crate) type ClientEnvironment = BTreeMap<String, OsString>;
+
+pub(crate) fn capture(mut read: impl FnMut(&'static str) -> Option<OsString>) -> ClientEnvironment {
+    std::iter::once(PATH)
+        .chain(Agent::ALL.into_iter().flat_map(override_sources))
+        .filter_map(|name| {
+            let value = read(name)?;
+            Some((
+                name.to_string(),
+                if sensitive(name) {
+                    OsString::new()
+                } else {
+                    value
+                },
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn forwarded(
+    agent: Agent,
+    environment: &ClientEnvironment,
+) -> Result<AgentEnvironment, String> {
+    forwarded_sources(agent)
+        .filter_map(|name| environment.get(name).map(|value| (name, value)))
+        .map(|(name, value)| {
+            value
+                .to_str()
+                .map(|value| (name.to_string(), value.to_string()))
+                .ok_or_else(|| format!("{name} must be valid Unicode to connect {}.", agent.name()))
+        })
+        .collect()
+}
+
+/// Only variables that still need to be set outside the agent connection
+/// can prevent automatic supervision.
+pub(crate) fn supervision_overrides() -> Vec<&'static str> {
+    Agent::ALL
         .into_iter()
-        .filter(|name| env::var_os(name).is_some()),
-    );
-    names
+        .flat_map(override_sources)
+        .filter(|name| sensitive(name) && env::var_os(name).is_some())
+        .collect()
 }

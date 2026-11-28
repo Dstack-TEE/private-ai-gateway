@@ -534,7 +534,7 @@ fn check(name: &str, scenarios: Vec<Golden>) {
 
 fn config(agent: Agent) -> String {
     agent
-        .config_path(Path::new(""), false)
+        .config_path(Path::new(""), &ToolEnvironment::Disabled)
         .display()
         .to_string()
 }
@@ -572,7 +572,7 @@ fn rich_catalog(completion: &str) -> Catalog {
 fn users_files(agent: Agent) -> Vec<(String, &'static str)> {
     let beside = |name: &str| {
         agent
-            .config_path(Path::new(""), false)
+            .config_path(Path::new(""), &ToolEnvironment::Disabled)
             .with_file_name(name)
             .display()
             .to_string()

@@ -120,6 +120,9 @@ pub(crate) async fn dispatch(
             respond_state::<rpc::RefreshCatalog, _>(runtime.refresh_catalog().await)
         }
         Command::ListAgents {} => respond::<rpc::ListAgents, _>(runtime.list_agents()),
+        Command::InspectAgents { environments } => {
+            respond::<rpc::InspectAgents, _>(runtime.inspect_agents(environments))
+        }
         Command::PreviewAgent {
             agent_id,
             connect,

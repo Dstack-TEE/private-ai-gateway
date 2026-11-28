@@ -282,11 +282,7 @@ export type ConnectOptions = {
  * Optional default selected from the verified catalog. The full model
  * list is discovered natively or generated from that catalog.
  */
-defaultModel?: string,
-/**
- * OpenCode executable found on the local client's PATH.
- */
-opencodeExecutable?: string, };
+defaultModel?: string, };
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
 /**
  * The desktop app's update check result for the renderer.

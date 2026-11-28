@@ -77,6 +77,7 @@ pub(crate) fn version() -> &'static Version {
                     .then(agent_bridge::agents::agent_validation_overrides)
                     .unwrap_or_default(),
             ),
+            accepts_agent_environment: Some(tool_env),
             supervised: None,
         }
     })
@@ -460,6 +461,7 @@ mod tests {
             "executable",
             "agentPathOverrides",
             "agentValidationOverrides",
+            "acceptsAgentEnvironment",
             "supervised",
         ] {
             assert!(body.get(field).is_some(), "{field}");

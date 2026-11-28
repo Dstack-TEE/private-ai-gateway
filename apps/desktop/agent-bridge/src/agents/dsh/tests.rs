@@ -37,7 +37,7 @@ struct Files {
 }
 
 fn files(sandbox: &Sandbox) -> Files {
-    let dsh_home = home_dir(&sandbox.home, false);
+    let dsh_home = home_dir(&sandbox.home, &ToolEnvironment::Disabled);
     fs::create_dir_all(&dsh_home).unwrap();
     Files {
         patch: dsh_home.join("cordis.patch.yml"),
@@ -107,7 +107,10 @@ fn connect_edits_the_users_items_and_disconnect_restores_every_byte() {
         })))
     );
     let token = sandbox.projector.tokens.read("dsh").unwrap().unwrap();
-    assert!(credential_holds(&home_dir(&sandbox.home, false), &token));
+    assert!(credential_holds(
+        &home_dir(&sandbox.home, &ToolEnvironment::Disabled),
+        &token
+    ));
     // The connection record keeps digests, never the token.
     let record = fs::read_to_string(sandbox.projector.store_path()).unwrap();
     assert!(!record.contains(&token));

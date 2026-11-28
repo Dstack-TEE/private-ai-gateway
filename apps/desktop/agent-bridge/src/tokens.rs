@@ -59,6 +59,7 @@ pub fn agent_allows(agent: &str, path: &str) -> bool {
     agent.surface() == surface
 }
 
+#[derive(Clone)]
 pub struct TokenFiles {
     dir: PathBuf,
     /// Completes the platform revocation barrier after removal (see

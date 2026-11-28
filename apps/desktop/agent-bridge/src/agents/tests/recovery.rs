@@ -4,7 +4,7 @@ use super::*;
 fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
     let sandbox = sandbox("selection-crash");
     let agent = Agent::Pi;
-    let config = agent.config_path(&sandbox.home, false);
+    let config = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, "{}");
     let defaults = config.with_file_name("settings.json");
     let original = r#"{"defaultProvider":"original","defaultModel":"native"}"#;
@@ -63,7 +63,7 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
 #[test]
 fn pi_default_model_edit_restores_when_provider_still_belongs_to_pap() {
     let sandbox = sandbox("pi-selector-restore");
-    let config = Agent::Pi.config_path(&sandbox.home, false);
+    let config = Agent::Pi.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, "{}");
     let settings = config.with_file_name("settings.json");
     write(
@@ -88,7 +88,7 @@ fn pi_default_model_edit_restores_when_provider_still_belongs_to_pap() {
 #[test]
 fn omp_default_role_edit_restores_private_model_on_disconnect() {
     let sandbox = sandbox("omp-selector-restore");
-    let config = Agent::OhMyPi.config_path(&sandbox.home, false);
+    let config = Agent::OhMyPi.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, "{}");
     let settings = config.with_file_name("config.yml");
     write(&settings, "modelRoles:\n  default: original/native\n");
@@ -111,7 +111,7 @@ fn omp_default_role_edit_restores_private_model_on_disconnect() {
 #[test]
 fn hermes_disconnect_restores_pap_model_endpoint_overrides() {
     let sandbox = sandbox("hermes-model-endpoint-restore");
-    let config = Agent::Hermes.config_path(&sandbox.home, false);
+    let config = Agent::Hermes.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, "model:\n  default: original\n");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::Hermes, &catalog, &claude_options());
@@ -131,7 +131,7 @@ fn hermes_disconnect_restores_pap_model_endpoint_overrides() {
 fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
     let sandbox = sandbox("link-restore-retry");
     let agent = Agent::ClaudeCode;
-    let config = agent.config_path(&sandbox.home, false);
+    let config = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, r#"{"model":"original"}"#);
     connect(&sandbox);
     let managed = fs::read_to_string(&config).unwrap();
@@ -164,7 +164,7 @@ fn suspended_restore_keeps_external_edits_and_retries_invalid_files() {
 fn opencode_json_comments_keep_authorization_and_survive_stop_and_disconnect() {
     let sandbox = sandbox("opencode-json-comments");
     let agent = Agent::OpenCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let catalog = catalog();
     let options = claude_options();
     let original = "{\n  \"model\": \"other/original\"\n}\n";
@@ -214,7 +214,7 @@ fn opencode_json_config_rejects_json5_only_syntax() {
 fn disconnect_restores_original_opencode_model_after_private_model_edit() {
     let sandbox = sandbox("restore-private-opencode-model");
     let agent = Agent::OpenCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"model":"other/original","provider":{"other":{"name":"User provider"}}}"#,
@@ -246,7 +246,7 @@ fn opencode_stop_and_disconnect_preserve_models_selected_from_another_provider()
         for stop in [true, false] {
             let sandbox = sandbox(&format!("keep-external-opencode-model-{name}-{stop}"));
             let agent = Agent::OpenCode;
-            let path = agent.config_path(&sandbox.home, false);
+            let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
             let original = if v2 {
                 r#"{"model":{"providerID":"other","model":"original"},"providers":{}}"#
             } else {
@@ -294,7 +294,7 @@ name  = 'User provider' # keep this spelling
     for stop_first in [false, true] {
         let sandbox = sandbox(&format!("codex-config-comments-{stop_first}"));
         let agent = Agent::Codex;
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(&path, original);
 
         assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
@@ -321,7 +321,7 @@ fn codex_keeps_comments_added_to_a_managed_model_on_stop_and_disconnect() {
 
     for stop in [false, true] {
         let sandbox = sandbox(&format!("codex-added-model-comments-{stop}"));
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(&path, "approval_policy = 'on-request'\n");
         assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
 
@@ -356,7 +356,7 @@ fn codex_stop_restores_catalog_selection_only_with_managed_routing() {
         let sandbox =
             sandbox(&format!("restore-codex-selection-{selected}-{provider}").replace('/', "-"));
         let agent = Agent::Codex;
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(&path, "model = \"native-original\"\n");
         let catalog = catalog();
         assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
@@ -396,7 +396,7 @@ fn reconcile_backfills_legacy_bare_model_journals_at_the_same_catalog_revision()
         ] {
             let sandbox = legacy_bare_model_journal(agent, case, &catalog);
             edit_bare_model(&sandbox, agent, "native-before-reconcile");
-            let path = agent.config_path(&sandbox.home, false);
+            let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
             let before = fs::read_to_string(&path).unwrap();
             assert!(sandbox
                 .projector
@@ -427,7 +427,10 @@ fn legacy_bare_model_journal(agent: Agent, case: &str, catalog: &Catalog) -> San
         Agent::ClaudeCode => r#"{"model":"native-original"}"#,
         _ => unreachable!(),
     };
-    write(&agent.config_path(&sandbox.home, false), original);
+    write(
+        &agent.config_path(&sandbox.home, &ToolEnvironment::Disabled),
+        original,
+    );
     assert!(apply_connect(&sandbox, agent, catalog, &claude_options()).authorized);
     let path = sandbox.projector.store_path();
     let mut store: serde_json::Value =
@@ -443,7 +446,7 @@ fn edit_bare_model(sandbox: &Sandbox, agent: Agent, selected: &str) {
     let mut config = doc(sandbox, agent);
     config.set_str(&["model"], selected).unwrap();
     write(
-        &agent.config_path(&sandbox.home, false),
+        &agent.config_path(&sandbox.home, &ToolEnvironment::Disabled),
         &config.render().unwrap(),
     );
 }
@@ -452,7 +455,7 @@ fn edit_bare_model(sandbox: &Sandbox, agent: Agent, selected: &str) {
 fn reconnect_after_endpoint_drift_preserves_original_value() {
     let sandbox = sandbox("reconnect-endpoint-drift");
     let agent = Agent::ClaudeCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid"}}"#,
@@ -496,7 +499,7 @@ fn recorded_paths_restore_original_files_after_location_changes() {
         let mut sandbox = sandbox(&format!("recorded-path-{}", agent.id()));
         let catalog = catalog();
         let options = claude_options();
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         let original = if agent == Agent::ClaudeCode {
             r#"{"env":{"ANTHROPIC_AUTH_TOKEN":"sk-test-original"},"model":"user-model"}"#
         } else {
@@ -512,7 +515,7 @@ fn recorded_paths_restore_original_files_after_location_changes() {
         );
         let projected = fs::read_to_string(&path).unwrap();
         sandbox.projector.home = sandbox.home.join("different-profile");
-        let foreign = agent.config_path(&sandbox.projector.home, false);
+        let foreign = agent.config_path(&sandbox.projector.home, &ToolEnvironment::Disabled);
         write(&foreign, &projected);
         let (statuses, tokens) = sandbox.projector.scan(None).unwrap();
         let status = statuses
@@ -551,7 +554,7 @@ fn recorded_paths_restore_original_files_after_location_changes() {
 #[test]
 fn claude_keeps_preexisting_gateway_flags_through_reconnect_and_disconnect() {
     let sandbox = sandbox("claude-existing-flags");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1","CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY":"1"}}"#,
@@ -905,7 +908,7 @@ fn disconnect_fails_closed_when_revocation_cannot_be_persisted() {
 fn claude_stop_restores_an_edited_owned_model_picker_and_start_regenerates_it() {
     let sandbox = sandbox("claude-stop-edited-picker");
     let agent = Agent::ClaudeCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let catalog = catalog();
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
     let mut config = doc(&sandbox, agent);
@@ -933,7 +936,7 @@ fn dsh_disconnect_removes_an_appended_entry_with_only_its_model_edited() {
     let catalog = catalog();
     let agent = Agent::Dsh;
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let config = doc(&sandbox, agent);
     let entry = EntryKey::id("agent-default-model");
     config
@@ -953,7 +956,7 @@ fn dsh_stop_removes_an_appended_entry_with_only_its_model_edited_and_start_repro
     let catalog = catalog();
     let agent = Agent::Dsh;
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let config = doc(&sandbox, agent);
     let entry = EntryKey::id("agent-default-model");
     config
@@ -982,7 +985,7 @@ fn dsh_disconnect_keeps_an_appended_entry_with_unrelated_user_edits() {
     let catalog = catalog();
     let agent = Agent::Dsh;
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let config = doc(&sandbox, agent);
     let entry = EntryKey::id("agent-default-model");
     let mut item = config.entry(&entry).unwrap().unwrap();
@@ -1024,7 +1027,7 @@ fn openclaw_disconnect_prunes_only_empty_selector_containers_created_by_pap() {
         ),
     ] {
         let sandbox = sandbox("openclaw-owned-selector-containers");
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(&path, &original.to_string());
         assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
         if edit {

@@ -50,7 +50,7 @@ fn pi_and_hermes_use_verified_model_discovery() {
     #[cfg(windows)]
     {
         let pi_token = sandbox.projector.tokens.read("pi").unwrap().unwrap();
-        let config_path = Agent::Pi.config_path(&sandbox.home, sandbox.projector.tool_env);
+        let config_path = Agent::Pi.config_path(&sandbox.home, &sandbox.projector.tool_env);
         let mut changed = provider.clone();
         changed["apiKey"] = json!(format!(
             "!{}",
@@ -124,7 +124,7 @@ fn pi_and_hermes_use_verified_model_discovery() {
     disconnect(&sandbox, Agent::Pi);
 
     let options = claude_options();
-    let path = Agent::Hermes.config_path(&sandbox.home, sandbox.projector.tool_env);
+    let path = Agent::Hermes.config_path(&sandbox.home, &sandbox.projector.tool_env);
     write(&path, "# keep this comment\ntheme: dark\n");
     let preview = sandbox
         .projector

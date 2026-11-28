@@ -3,16 +3,13 @@ use super::{
     *,
 };
 
-pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
-    if tool_env {
-        if let Some(path) = env_path(HERMES_HOME).and_then(nonblank) {
-            return path;
-        }
+pub(super) fn hermes_native_dir(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
+    if let Some(path) = tool_env.path(HERMES_HOME).and_then(nonblank) {
+        return path;
     }
     if cfg!(windows) {
         tool_env
-            .then(|| env_path(LOCALAPPDATA))
-            .flatten()
+            .path(LOCALAPPDATA)
             .and_then(nonblank)
             .unwrap_or_else(|| home.join("AppData").join("Local"))
             .join("hermes")
@@ -21,7 +18,7 @@ pub(super) fn hermes_native_dir(home: &Path, tool_env: bool) -> PathBuf {
     }
 }
 
-pub(super) fn hermes_config_path(home: &Path, tool_env: bool) -> PathBuf {
+pub(super) fn hermes_config_path(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
     let root = hermes_native_dir(home, tool_env);
     let profile = fs::read_to_string(root.join("active_profile"))
         .ok()
@@ -40,7 +37,7 @@ pub(super) fn hermes_config_path(home: &Path, tool_env: bool) -> PathBuf {
     root.join("profiles").join(profile).join("config.yaml")
 }
 
-pub(super) fn hermes_profile_valid(home: &Path, tool_env: bool) -> bool {
+pub(super) fn hermes_profile_valid(home: &Path, tool_env: &ToolEnvironment) -> bool {
     let root = hermes_native_dir(home, tool_env);
     let Ok(profile) = fs::read_to_string(root.join("active_profile")) else {
         return true;
@@ -109,7 +106,7 @@ pub(super) fn merge_opencode_config(target: &mut serde_json::Value, source: serd
 /// Unlike an executable search this does not depend on how the CLI was
 /// installed and needs neither PATH nor a login shell, so it behaves the same
 /// inside the macOS App Sandbox.
-pub(super) fn detected(agent: Agent, home: &Path, tool_env: bool) -> bool {
+pub(super) fn detected(agent: Agent, home: &Path, tool_env: &ToolEnvironment) -> bool {
     agent
         .config_path(home, tool_env)
         .parent()

@@ -31,7 +31,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
                     .join("helpers")
                     .join(helper_binary_name());
             }
-            let config = agent.config_path(&sandbox.home, false);
+            let config = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
             let original = match agent {
             Agent::Codex => "model_provider = 'original'\nmodel = 'native'\nmodel_catalog_json = 'native-catalog.json'\n",
             Agent::ClaudeCode => r#"{"env":{"ANTHROPIC_BASE_URL":"https://original.invalid","ANTHROPIC_MODEL":"native","ANTHROPIC_AUTH_TOKEN":"old-secret"},"model":"native"}"#,
@@ -234,7 +234,7 @@ fn every_agent_switches_conservatively_and_reconnects_without_namespace_conflict
 fn failed_secondary_selection_write_rolls_back_provider_and_revokes_token() {
     let sandbox = sandbox("selection-write-failure");
     let agent = Agent::Pi;
-    let config = agent.config_path(&sandbox.home, false);
+    let config = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&config, "{}");
     let target = sandbox.home.join("user-settings.json");
     write(
@@ -265,7 +265,7 @@ fn opencode_process_overrides_follow_official_merge_order() {
     const CASE: &str = "PAP_TEST_OPENCODE_MERGE_CASE";
     if let Ok(case) = env::var(CASE) {
         let mut sandbox = sandbox("opencode-env-merge");
-        sandbox.projector.tool_env = true;
+        sandbox.projector.tool_env = ToolEnvironment::Process;
         let global = env_path("XDG_CONFIG_HOME").unwrap().join("opencode");
         write(
             &global.join("opencode.jsonc"),
@@ -376,7 +376,7 @@ fn opencode_policies_use_the_last_matching_provider_rule() {
 #[test]
 fn audit_opencode_v2_projection_uses_native_provider_keys() {
     let sandbox = sandbox("audit-opencode-v2-projection");
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let path = Agent::OpenCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"providers":{"other":{"name":"User provider"}},"model":{"providerID":"other","model":"native"}}"#,
@@ -405,13 +405,83 @@ fn audit_opencode_v2_projection_uses_native_provider_keys() {
 
 #[cfg(unix)]
 #[test]
+fn client_paths_are_scoped_and_validated_before_projection() {
+    use desktop_core::paths::agent_environment::{CODEX_HOME, OPENCODE_CONFIG_CONTENT};
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut sandbox = sandbox("agent-environment");
+    sandbox.projector.tool_env = ToolEnvironment::Process;
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("codex");
+    let path = dir.join("config.toml");
+    write(&path, "model = 'native'\n");
+    let options = |name: &str, value: &str| ConnectOptions {
+        environment: Some(BTreeMap::from([(name.to_string(), value.to_string())])),
+        ..ConnectOptions::default()
+    };
+    let catalog = catalog();
+    let agent = Agent::Codex;
+    let codex_environment = options(CODEX_HOME, dir.to_str().unwrap());
+    let statuses = sandbox
+        .projector
+        .inspect(
+            None,
+            &BTreeMap::from([(
+                Agent::Codex.id().into(),
+                codex_environment.environment.clone().unwrap(),
+            )]),
+        )
+        .unwrap();
+    assert_eq!(
+        agent_status(&statuses, agent).config_path,
+        path.to_str().unwrap()
+    );
+
+    for (agent, name, value) in [
+        (Agent::Codex, CODEX_HOME, "relative"),
+        (Agent::OpenCode, OPENCODE_CONFIG_CONTENT, "inline"),
+    ] {
+        assert!(matches!(
+            sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), &options(name, value)),
+            Err(AgentError::ConfigurationConflict(_))
+        ));
+    }
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+    let invalid = sandbox
+        .projector
+        .preview(agent, true, Some(&catalog), &codex_environment);
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(invalid, Err(AgentError::ConfigurationConflict(_))));
+
+    let status = apply_connect(&sandbox, agent, &catalog, &codex_environment);
+    assert!(status.authorized);
+    assert_eq!(status.config_path, path.to_str().unwrap());
+    assert!(!sandbox.home.join(".codex").exists());
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(sandbox
+        .projector
+        .reconcile(Some(&catalog))
+        .unwrap()
+        .is_empty());
+    let (statuses, _) = sandbox.projector.scan(Some(&catalog)).unwrap();
+    assert!(agent_status(&statuses, agent).authorized);
+    assert_eq!(
+        agent_status(&statuses, agent).config_path,
+        path.to_str().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn opencode_installed_major_moves_only_the_journaled_provider() {
     const CASE: &str = "PAP_TEST_OPENCODE_VERSION";
     let Ok(location) = env::var(CASE) else {
         // The installer probe refuses executables under a world-writable
         // directory, so keep these fixtures out of /tmp.
         let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-        for location in ["path", "local-bin", "opencode-bin"] {
+        for location in ["path", "client-path"] {
             let case = root.path().join(location);
             let output = Command::new(env::current_exe().unwrap())
                 .args([
@@ -437,16 +507,15 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
     };
 
     let mut sandbox = sandbox("opencode-installed-major");
-    sandbox.projector.tool_env = true;
+    sandbox.projector.tool_env = ToolEnvironment::Process;
     sandbox.projector.home = env_path("HOME").unwrap();
     let bin = match location.as_str() {
         "path" => env_path("PATH").unwrap(),
-        "local-bin" => sandbox.projector.home.join(".local/bin"),
-        "opencode-bin" => sandbox.projector.home.join(".opencode/bin"),
+        "client-path" => sandbox.projector.home.join(".nvm/versions/node/v24/bin"),
         _ => panic!("unexpected OpenCode install location"),
     };
     let agent = Agent::OpenCode;
-    let config = agent.config_path(&sandbox.home, true);
+    let config = agent.config_path(&sandbox.home, &ToolEnvironment::Process);
     let read = || parse_jsonc(&fs::read_to_string(&config).unwrap()).unwrap();
     let install = |version| {
         // A package-manager shim needs to resolve its runtime even when its
@@ -468,7 +537,30 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
     });
     write(&config, &original.to_string());
     let catalog = catalog();
-    let options = ConnectOptions::default();
+    let shell = tempfile::tempdir().unwrap();
+    let options = ConnectOptions {
+        environment: (location == "client-path").then(|| {
+            // Some version managers expose their bin directory through a
+            // per-shell link in a shared temporary directory.
+            let shell_bin = shell.path().join("bin");
+            std::os::unix::fs::symlink(&bin, &shell_bin).unwrap();
+            BTreeMap::from([
+                ("PATH".into(), shell_bin.to_str().unwrap().into()),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    config
+                        .parent()
+                        .unwrap()
+                        .parent()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .into(),
+                ),
+            ])
+        }),
+        ..ConnectOptions::default()
+    };
     let preview = || {
         sandbox
             .projector
@@ -515,6 +607,21 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
 
     install("opencode v2.4.2");
     apply(&preview().unwrap().revision).unwrap();
+    if location == "client-path" {
+        assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+        install("1.19.6");
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert!(read()
+            .pointer("/provider/private-ai-proxy/options/apiKey")
+            .is_some());
+        assert!(read().pointer("/providers/private-ai-proxy").is_none());
+        install("opencode v2.4.2");
+        apply(&preview().unwrap().revision).unwrap();
+    }
     fs::remove_file(bin.join("opencode")).unwrap();
     assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
     assert!(read()
@@ -538,16 +645,16 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
         .note
         .contains("chose the provider shape from the config file"));
 
-    if location == "local-bin" {
+    if location == "path" {
         let supplied = sandbox.projector.home.join("version-manager/bin/opencode");
         write_executable(&supplied, "#!/bin/sh\nprintf '%s\\n' 'opencode v2.4.2'\n");
         install("1.19.6");
         let shell_bin = sandbox.projector.home.join("shell-bin");
         std::os::unix::fs::symlink(supplied.parent().unwrap(), &shell_bin).unwrap();
-        let supplied_options = ConnectOptions {
-            opencode_executable: Some(shell_bin.join("opencode")),
-            ..ConnectOptions::default()
-        };
+        let supplied_options: ConnectOptions = serde_json::from_value(json!({
+            "opencodeExecutable": shell_bin.join("opencode"),
+        }))
+        .unwrap();
         let connect = |options: &ConnectOptions| {
             let preview = sandbox
                 .projector
@@ -609,7 +716,7 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
 #[test]
 fn symlinked_agent_config_is_refused_at_preview() {
     let sandbox = sandbox("symlink-preview");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let target = path.with_file_name("target.json");
     write(&target, "{}");
     std::os::unix::fs::symlink(&target, &path).unwrap();
@@ -644,7 +751,7 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
         json!({"context":123,"output":45})
     );
     let sandbox = sandbox("hermes-default-conflict");
-    let path = Agent::Hermes.config_path(&sandbox.home, false);
+    let path = Agent::Hermes.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&path, "model:\n  default: unrelated-model\n");
     assert!(sandbox
         .projector
@@ -1079,7 +1186,7 @@ fn model_parameters_come_from_the_catalog() {
 #[test]
 fn tuning_claude_code_model_settings_keeps_the_connection() {
     let sandbox = sandbox("claude-tunables");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let original = json!({"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "50000"}});
     write(&path, &original.to_string());
     assert!(connect(&sandbox).authorized);
@@ -1128,7 +1235,7 @@ fn tuning_claude_code_model_settings_keeps_the_connection() {
 #[test]
 fn a_claude_code_model_without_limits_drops_the_previous_models_limits() {
     let sandbox = sandbox("claude-limitless");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let original = json!({"env": {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "50000"}});
     write(&path, &original.to_string());
     assert!(connect(&sandbox).authorized);

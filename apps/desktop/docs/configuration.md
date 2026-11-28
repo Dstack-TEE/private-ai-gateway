@@ -266,16 +266,19 @@ unlocked OS keychain for a process running as you.
   while keeping a default model you selected from another provider.
   PAP accepts JSON with comments and trailing commas in both OpenCode
   `opencode.json` and `opencode.jsonc` files.
-  PAP uses `providers` for OpenCode 2 and `provider` for OpenCode 1. When you
-  connect from the CLI or desktop app, PAP records the OpenCode executable
-  those clients find on their PATH and reuses it when protection resumes.
-  PAP checks the executable's ownership and permissions before probing it.
-  Without a usable recorded path, PAP searches the backend's PATH and standard
-  install locations such as `~/.opencode/bin` and `~/.local/bin`.
-  If the version is unavailable or PAP runs with a scoped
-  Agent Home, file keys `providers` and `policies` select the OpenCode 2
-  shape. Otherwise PAP uses `provider`. Reconnecting moves the PAP provider
-  entry when the shape changes and preserves other providers.
+  The CLI and desktop app supply PATH and the selected agent's configuration
+  overrides when connecting. PAP validates the paths and saves the snapshot
+  with the connection for reuse when protection resumes. Browser connections
+  use the backend's environment, including any previously saved settings.
+  The snapshot excludes inline OpenCode config and the dsh token.
+  PAP probes OpenCode on the saved PATH, then on the backend's PATH. It checks
+  executable ownership and permissions before probing. OpenCode 2 uses
+  `providers` and OpenCode 1 uses `provider`. If the version is unavailable
+  or PAP runs with a scoped Agent Home, the existing file's `providers` or
+  `policies` keys select the OpenCode 2 shape. Otherwise PAP uses `provider`.
+  Reconnecting moves the PAP entry when the shape changes and preserves
+  other providers.
+  Oh My Pi keeps its model and settings files in its native configuration tree after [`omp config init-xdg`](https://github.com/can1357/oh-my-pi/blob/49dc75e819b075b9dccdb6bce5e2100195f85a00/packages/coding-agent/src/cli/commands/init-xdg.ts).
   In Oh My Pi's companion `config.yml` or `config.yaml`, a global
   `disabledProviders` entry for Private AI Proxy pauses access. Path-scoped
   provider filters and `enabledModels` restrictions can show a notice while

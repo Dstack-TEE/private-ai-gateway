@@ -6,7 +6,7 @@ fn helper_relocation_requires_explicit_reconnect_without_scan_writes() {
         let mut sandbox = sandbox(&format!("helper-relocation-{}", agent.id()));
         let catalog = catalog();
         let options = claude_options();
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         apply_connect(&sandbox, agent, &catalog, &options);
         let current = sandbox.projector.helper_exe.clone();
         let assert_scan = |sandbox: &Sandbox, connected: bool, attention: Option<&str>| {
@@ -115,7 +115,7 @@ fn changing_a_connected_agents_model_keeps_access() {
     ] {
         let sandbox = sandbox(&format!("model-selection-{}", agent.id()));
         apply_connect(&sandbox, agent, &catalog, &claude_options());
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         let mut config = doc(&sandbox, agent);
         for selection in model_selection_paths(agent) {
             let value = if matches!(agent, Agent::OpenCode | Agent::OpenClaw) {
@@ -151,7 +151,7 @@ fn changing_a_connected_agents_model_keeps_access() {
 #[test]
 fn claude_provider_switch_flags_are_removed_and_restored() {
     let sandbox = sandbox("claude-provider-switch");
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_USE_MANTLE":"1"}}"#,
@@ -181,7 +181,7 @@ fn claude_provider_switch_flags_are_removed_and_restored() {
 #[test]
 fn openclaw_user_edit_to_entry_string_survives_disconnect() {
     let sandbox = sandbox("openclaw-entry-model");
-    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    let path = Agent::OpenClaw.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(
         &path,
         r#"{"agents":{"entries":{"main":{"model":"private-ai-proxy/openai/gpt-oss-20b"}}}}"#,
@@ -214,7 +214,7 @@ fn opencode_external_model_is_reported_as_unrouted() {
     let sandbox = sandbox("external-opencode-model");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let path = Agent::OpenCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let mut config = doc(&sandbox, Agent::OpenCode);
     config
         .set_str(&["model"], "other/provider-model#fast")
@@ -236,7 +236,7 @@ fn opencode_external_model_is_reported_as_unrouted() {
 #[test]
 fn openclaw_external_entry_object_is_attention_only() {
     let sandbox = sandbox("openclaw-external-entry-object");
-    let path = Agent::OpenClaw.config_path(&sandbox.home, false);
+    let path = Agent::OpenClaw.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&path, "{}");
     apply_connect(&sandbox, Agent::OpenClaw, &catalog(), &claude_options());
     let mut config = doc(&sandbox, Agent::OpenClaw);
@@ -283,7 +283,7 @@ fn hermes_rejects_invalid_active_profile_names() {
 #[test]
 fn omp_filters_are_read_from_companion_config() {
     let sandbox = sandbox("omp-companion-filters");
-    let models = Agent::OhMyPi.config_path(&sandbox.home, false);
+    let models = Agent::OhMyPi.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&models, "providers: {}\n");
     write(
         &models.with_file_name("config.yml"),
@@ -307,7 +307,10 @@ fn windows_projector_connects_with_only_installed_helper() {
         sandbox.secrets.clone(),
     )
     .unwrap();
-    write(&Agent::ClaudeCode.config_path(&sandbox.home, false), "{}");
+    write(
+        &Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled),
+        "{}",
+    );
     assert!(projector
         .preview(Agent::ClaudeCode, true, Some(&catalog()), &claude_options())
         .is_ok());
@@ -318,7 +321,7 @@ fn legacy_claude_journal_migrates_provider_switch_flags() {
     let sandbox = sandbox("legacy-claude-journal");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let mut config = doc(&sandbox, Agent::ClaudeCode);
     config
         .set_str(&["env", "CLAUDE_CODE_USE_BEDROCK"], "1")
@@ -363,7 +366,7 @@ fn audit_generated_catalog_edits_do_not_deauthorize() {
     let sandbox = sandbox("audit-generated-catalog");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let path = Agent::OpenCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let mut config = doc(&sandbox, Agent::OpenCode);
     config
         .set_value(
@@ -389,7 +392,7 @@ fn audit_model_routing_override_deauthorizes() {
     let sandbox = sandbox("audit-model-routing");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::OpenCode, &catalog, &claude_options());
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let path = Agent::OpenCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let mut config = doc(&sandbox, Agent::OpenCode);
     config
         .set_str(
@@ -421,7 +424,7 @@ fn audit_drift_does_not_restore_or_revoke_until_disconnect() {
     let sandbox = sandbox("audit-drift-no-suspend");
     let catalog = catalog();
     apply_connect(&sandbox, Agent::ClaudeCode, &catalog, &claude_options());
-    let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
+    let path = Agent::ClaudeCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let mut config = doc(&sandbox, Agent::ClaudeCode);
     config
         .set_str(&["env", "ANTHROPIC_BASE_URL"], "http://127.0.0.1:9999")
@@ -511,11 +514,11 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
         .unwrap();
         assert_eq!(projector.home, home);
         assert_eq!(
-            Agent::Hermes.config_path(&projector.home, projector.tool_env),
+            Agent::Hermes.config_path(&projector.home, &projector.tool_env),
             expected.join("config.yaml")
         );
         assert_eq!(
-            Agent::Pi.config_path(&projector.home, projector.tool_env),
+            Agent::Pi.config_path(&projector.home, &projector.tool_env),
             if case == "isolated" {
                 home.join(".pi").join("agent").join("models.json")
             } else {
@@ -523,22 +526,30 @@ fn hermes_paths_follow_platform_overrides_and_isolate_test_home() {
             }
         );
         if case == "isolated" {
-            assert!(!projector.tool_env);
+            assert!(!projector.tool_env.enabled());
             assert_eq!(projector.data_dir, home.join(".private-ai-proxy"));
             for agent in Agent::ALL {
                 assert!(agent
-                    .config_path(&projector.home, projector.tool_env)
+                    .config_path(&projector.home, &projector.tool_env)
                     .starts_with(&home));
             }
         }
         // Detection follows the same overrides as the config location.
         if case == "override" {
             fs::create_dir_all(root.join("custom-profile")).unwrap();
-            assert!(detected(Agent::Hermes, &projector.home, projector.tool_env));
+            assert!(detected(
+                Agent::Hermes,
+                &projector.home,
+                &projector.tool_env
+            ));
         }
         if case == "isolated" {
             fs::create_dir_all(root.join("outside-codex")).unwrap();
-            assert!(!detected(Agent::Codex, &projector.home, projector.tool_env));
+            assert!(!detected(
+                Agent::Codex,
+                &projector.home,
+                &projector.tool_env
+            ));
         }
         return;
     }
@@ -600,7 +611,7 @@ fn hermes_active_profile_selects_the_profile_config() {
     };
     write(&root.join("active_profile"), "work\n");
     assert_eq!(
-        Agent::Hermes.config_path(&sandbox.home, false),
+        Agent::Hermes.config_path(&sandbox.home, &ToolEnvironment::Disabled),
         root.join("profiles").join("work").join("config.yaml")
     );
 }
@@ -667,7 +678,7 @@ fn detection_follows_the_configuration_folder_for_every_install_method() {
         let home = root.path();
         write_executable(&home.join(cli), "launcher");
         assert!(
-            !detected(agent, home, false),
+            !detected(agent, home, &ToolEnvironment::Disabled),
             "{}: installed but never run",
             agent.id()
         );
@@ -677,7 +688,11 @@ fn detection_follows_the_configuration_folder_for_every_install_method() {
         } else {
             fs::create_dir_all(&state).unwrap();
         }
-        assert!(detected(agent, home, false), "{}", agent.id());
+        assert!(
+            detected(agent, home, &ToolEnvironment::Disabled),
+            "{}",
+            agent.id()
+        );
     }
 
     // A dotfiles-managed folder is a symlink; one left after the CLI was
@@ -688,7 +703,11 @@ fn detection_follows_the_configuration_folder_for_every_install_method() {
         let dotfiles = root.path().join("dotfiles/codex");
         fs::create_dir_all(&dotfiles).unwrap();
         std::os::unix::fs::symlink(&dotfiles, root.path().join(".codex")).unwrap();
-        assert!(detected(Agent::Codex, root.path(), false));
+        assert!(detected(
+            Agent::Codex,
+            root.path(),
+            &ToolEnvironment::Disabled
+        ));
     }
 }
 
@@ -852,7 +871,7 @@ fn omp_enabled_models_keep_the_selected_pap_model_authorized() {
     ] {
         let sandbox = sandbox("omp-enabled-models");
         let settings = Agent::OhMyPi
-            .config_path(&sandbox.home, false)
+            .config_path(&sandbox.home, &ToolEnvironment::Disabled)
             .with_file_name("config.yml");
         let filter = if pattern.is_empty() {
             "enabledModels: []\n".into()
@@ -879,7 +898,7 @@ fn omp_companion_config_yaml_can_disable_pap() {
     let agent = Agent::OhMyPi;
     let catalog = catalog();
     let settings = agent
-        .config_path(&sandbox.home, false)
+        .config_path(&sandbox.home, &ToolEnvironment::Disabled)
         .with_file_name("config.yaml");
     write(&settings, "disabledProviders: []\n");
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
@@ -917,9 +936,9 @@ fn opencode_without_program_data_keeps_the_merged_selector() {
     }
 
     let sandbox = sandbox("opencode-no-system-layer");
-    let path = Agent::OpenCode.config_path(&sandbox.home, false);
+    let path = Agent::OpenCode.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     write(&path, r#"{"model":"other/model"}"#);
-    let system_dir = validation::opencode_system_config_dir("windows");
+    let system_dir = validation::opencode_system_config_dir("windows", &ToolEnvironment::Process);
     assert_eq!(system_dir, None);
     assert_eq!(
         sandbox
@@ -955,7 +974,7 @@ fn openclaw_connect_preserves_existing_entry_objects_and_checks_fallbacks() {
     ] {
         let sandbox = sandbox("openclaw-existing-entry-object");
         let agent = Agent::OpenClaw;
-        let path = agent.config_path(&sandbox.home, false);
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(
             &path,
             &json!({"agents":{"entries":{"main":{"model":entry}}}}).to_string(),
@@ -985,7 +1004,7 @@ fn openclaw_connect_preserves_existing_entry_objects_and_checks_fallbacks() {
 fn claude_v090_model_journal_migrates_without_a_provider_switch() {
     let sandbox = sandbox("claude-v090-model-journal");
     let agent = Agent::ClaudeCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     let catalog = catalog();
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
     let mut config = doc(&sandbox, agent);
@@ -1069,7 +1088,7 @@ fn claude_current_provider_switch_drift_survives_reconcile_until_reconnect() {
     let sandbox = sandbox("claude-current-provider-switch-drift");
     let catalog = catalog();
     let agent = Agent::ClaudeCode;
-    let path = agent.config_path(&sandbox.home, false);
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
     let mut config = doc(&sandbox, agent);
     config
@@ -1121,7 +1140,7 @@ fn omp_mixed_disabled_providers_still_block_unscoped_pap() {
     let agent = Agent::OhMyPi;
     assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
     let path = agent
-        .config_path(&sandbox.home, false)
+        .config_path(&sandbox.home, &ToolEnvironment::Disabled)
         .with_file_name("config.yml");
     write(
         &path,
@@ -1145,7 +1164,7 @@ fn omp_path_scoped_filters_raise_attention_without_revoking_access() {
         let sandbox = sandbox("omp-scoped-filter-attention");
         let agent = Agent::OhMyPi;
         let catalog = catalog();
-        let path = agent.config_path(&sandbox.home, false).with_file_name("config.yml");
+        let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled).with_file_name("config.yml");
         write(&path, yaml);
         let status = apply_connect(&sandbox, agent, &catalog, &claude_options());
         assert!(status.authorized, "{status:?}");
@@ -1169,7 +1188,7 @@ fn omp_enabled_models_accept_thinking_suffixes_and_keep_filters_advisory() {
     for &(pattern, attention) in TEST_MODELS {
         let sandbox = sandbox("omp-advisory-selector");
         let path = agent
-            .config_path(&sandbox.home, false)
+            .config_path(&sandbox.home, &ToolEnvironment::Disabled)
             .with_file_name("config.yml");
         write(&path, &format!("enabledModels: ['{pattern}']\n"));
         let applied = apply_connect(&sandbox, agent, &catalog, &claude_options());
@@ -1206,7 +1225,7 @@ fn omp_enabled_models_treat_non_chat_matches_as_advisory() {
     .unwrap();
     let agent = Agent::OhMyPi;
     let path = agent
-        .config_path(&sandbox.home, false)
+        .config_path(&sandbox.home, &ToolEnvironment::Disabled)
         .with_file_name("config.yml");
     write(&path, "enabledModels: [vendor/image]\n");
     let status = apply_connect(

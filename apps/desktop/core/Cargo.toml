@@ -45,6 +45,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+tokio = { version = "1", features = ["process"] }
 socket2 = { version = "0.6", features = ["all"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1218,6 +1218,9 @@ mod tests {
             "shutdown",
             "sh%75tdown",
             "export_profiles",
+            "inspect_agents",
+            "preview_agent",
+            "apply_agent",
             "clear_usage",
             "notACommand",
         ] {
@@ -1238,6 +1241,16 @@ mod tests {
         )
         .await;
         assert_eq!(version.status(), StatusCode::NOT_FOUND);
+        let invalid = call(
+            "set_agent_connection",
+            json!({
+                "agentId": "opencode", "connect": true,
+                "options": {"environment": {"PATH": "/opt/shims"}}
+            }),
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(invalid).await["error"]["code"], "invalid_request");
         let invalid = call("activate_profile", json!({ "profile_id": "p" })).await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         assert_eq!(json_body(invalid).await["error"]["code"], "invalid_request");

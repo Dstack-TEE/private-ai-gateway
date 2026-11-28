@@ -5,7 +5,6 @@ use super::*;
 use desktop_core::agents::{is_opencode_executable, OPENCODE_EXECUTABLE_NAMES};
 use std::{
     io::{Read, Seek},
-    iter,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -18,12 +17,11 @@ pub(super) enum OpenCodeVersion {
 }
 
 impl OpenCodeVersion {
-    fn detect(user_home: &Path, recorded: Option<&Path>) -> Option<Self> {
-        let path = env::var_os("PATH").unwrap_or_default();
-        let path_dirs = || env::split_paths(&path).filter(|dir| dir.is_absolute());
+    fn detect(environment: &ToolEnvironment, recorded: Option<&Path>) -> Option<Self> {
+        let paths: Vec<_> = environment.search_paths().collect();
         let executable = recorded.map(Path::to_path_buf).or_else(|| {
-            path_dirs()
-                .chain(opencode_install_dirs(user_home))
+            paths
+                .iter()
                 .flat_map(|dir| {
                     OPENCODE_EXECUTABLE_NAMES
                         .iter()
@@ -31,9 +29,8 @@ impl OpenCodeVersion {
                 })
                 .find_map(|candidate| validate_opencode_executable(&candidate).ok())
         })?;
-        let child_path =
-            env::join_paths(iter::once(executable.parent()?.to_path_buf()).chain(path_dirs()))
-                .ok()?;
+        let legacy_dir = recorded.and_then(Path::parent).map(Path::to_path_buf);
+        let child_path = env::join_paths(legacy_dir.into_iter().chain(paths)).ok()?;
 
         // Both releases initialize OpenCode directories even for --version.
         let home = tempfile::Builder::new()
@@ -96,143 +93,19 @@ impl OpenCodeVersion {
 }
 
 fn validate_opencode_executable(path: &Path) -> io::Result<PathBuf> {
-    let invalid = || io::Error::from(io::ErrorKind::PermissionDenied);
-    if !path.is_absolute() {
-        return Err(invalid());
-    }
-    let resolved = path.canonicalize()?;
+    environment::trusted_path(path, true)?;
     if !is_opencode_executable(path) {
-        return Err(invalid());
+        return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let parent = path.parent().ok_or_else(invalid)?.canonicalize()?;
-    let normalized = parent.join(path.file_name().ok_or_else(invalid)?);
-    let paths = [path, resolved.as_path(), normalized.as_path()];
+    // Keep the command name and adjacent runtime, including npm shims.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions.
-        let user = unsafe { libc::geteuid() };
-        let file = fs::metadata(&resolved)?;
-        if (file.uid() != user && file.uid() != 0) || file.mode() & 0o002 != 0 {
-            return Err(invalid());
-        }
-        for dir in paths.into_iter().flat_map(|path| path.ancestors().skip(1)) {
-            if fs::metadata(dir)?.mode() & 0o002 != 0 {
-                return Err(invalid());
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        use desktop_core::windows_acl;
-        use windows_sys::Win32::{
-            Foundation::{GENERIC_ALL, GENERIC_WRITE},
-            Storage::FileSystem::{
-                DELETE, FILE_ADD_FILE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_WRITE_DATA,
-                WRITE_DAC, WRITE_OWNER,
-            },
-        };
-        let acl = |path: &Path| {
-            windows_acl::read(&windows_acl::open_for_inspection(path)?).map_err(|_| invalid())
-        };
-        let trusted = |acl: &windows_acl::Acl, sid: &str| {
-            sid == acl.current_user_sid || windows_acl::TRUSTED_SIDS.contains(&sid)
-        };
-        let writes = |acl: &windows_acl::Acl, mask, check_sid: &dyn Fn(&str) -> bool| {
-            // ACEs marked inherit-only do not apply to this entry.
-            acl.aces.iter().any(|ace| {
-                ace.kind == 0
-                    && ace.flags & 0x08 == 0
-                    && ace.mask & mask != 0
-                    && check_sid(&ace.sid)
-            })
-        };
-        const COMMON_WRITE: u32 = GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER;
-        let file = acl(&resolved)?;
-        if !trusted(&file, &file.owner_sid)
-            || writes(
-                &file,
-                COMMON_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA,
-                &|sid| !trusted(&file, sid),
-            )
-        {
-            return Err(invalid());
-        }
-        for dir in paths.into_iter().flat_map(|path| path.ancestors().skip(1)) {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            if writes(
-                &acl(dir)?,
-                COMMON_WRITE | FILE_ADD_FILE | FILE_DELETE_CHILD,
-                &|sid| {
-                    matches!(
-                        sid,
-                        "S-1-1-0" | "S-1-5-11" | "S-1-5-32-545" | "S-1-5-32-546"
-                    )
-                },
-            ) {
-                return Err(invalid());
-            }
-        }
-    }
-    // Keep the command name and adjacent runtime, while dropping temporary
-    // directory symlinks such as a version manager's per-shell bin directory.
-    #[cfg(unix)]
-    return Ok(normalized);
+    return Ok(path
+        .parent()
+        .ok_or(io::ErrorKind::InvalidInput)?
+        .canonicalize()?
+        .join(path.file_name().ok_or(io::ErrorKind::InvalidInput)?));
     #[cfg(windows)]
     Ok(path.to_path_buf())
-}
-
-fn opencode_install_dirs(home: &Path) -> Vec<PathBuf> {
-    let configured = |key| env_path(key).map(|dir| home.join(dir));
-    // Both current curl installers use ~/.opencode/bin. The v1 README and
-    // older v2 README also document OPENCODE_INSTALL_DIR, XDG_BIN_DIR and ~/bin.
-    let mut dirs: Vec<_> = ["OPENCODE_INSTALL_DIR", "XDG_BIN_DIR", "XDG_BIN_HOME"]
-        .into_iter()
-        .filter_map(configured)
-        .collect();
-    dirs.extend(["bin", ".opencode/bin", ".local/bin"].map(|dir| home.join(dir)));
-
-    // npm links global commands into its prefix on Windows and prefix/bin on Unix.
-    if let Some(prefix) =
-        configured("npm_config_prefix").or_else(|| configured("NPM_CONFIG_PREFIX"))
-    {
-        dirs.push(if cfg!(windows) {
-            prefix
-        } else {
-            prefix.join("bin")
-        });
-    }
-    dirs.extend(configured("BUN_INSTALL").map(|dir| dir.join("bin")));
-    dirs.push(home.join(".bun/bin"));
-
-    #[cfg(target_os = "macos")]
-    dirs.push(PathBuf::from("/opt/homebrew/bin"));
-    #[cfg(not(windows))]
-    dirs.push(PathBuf::from("/usr/local/bin"));
-    #[cfg(target_os = "linux")]
-    dirs.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
-    #[cfg(windows)]
-    {
-        let app_data = configured("APPDATA").unwrap_or_else(|| home.join("AppData/Roaming"));
-        let local_app_data =
-            configured("LOCALAPPDATA").unwrap_or_else(|| home.join("AppData/Local"));
-        dirs.push(app_data.join("npm"));
-        dirs.push(local_app_data.join("Microsoft/WinGet/Links"));
-        dirs.extend(configured("ProgramFiles").map(|dir| dir.join("WinGet/Links")));
-        dirs.push(
-            configured("SCOOP")
-                .unwrap_or_else(|| home.join("scoop"))
-                .join("shims"),
-        );
-        dirs.extend(
-            configured("ChocolateyInstall")
-                .or_else(|| configured("ProgramData").map(|dir| dir.join("chocolatey")))
-                .map(|dir| dir.join("bin")),
-        );
-    }
-    dirs
 }
 
 #[derive(Clone, Copy)]
@@ -251,8 +124,8 @@ impl Projector {
     ) -> Option<ConnectionCatalog<'a>> {
         catalog.map(|catalog| ConnectionCatalog {
             catalog,
-            opencode_version: (agent == Agent::OpenCode && connect && self.tool_env)
-                .then(|| OpenCodeVersion::detect(&self.home, executable))
+            opencode_version: (agent == Agent::OpenCode && connect && self.tool_env.enabled())
+                .then(|| OpenCodeVersion::detect(&self.tool_env, executable))
                 .flatten(),
         })
     }
@@ -264,7 +137,11 @@ impl Projector {
         requested: &ConnectOptions,
         prior: Option<&Connection>,
     ) -> Result<Option<PathBuf>, AgentError> {
-        if agent != Agent::OpenCode || !connect || !self.tool_env {
+        if agent != Agent::OpenCode
+            || !connect
+            || !self.tool_env.enabled()
+            || requested.environment.is_some()
+        {
             return Ok(None);
         }
         if let Some(path) = &requested.opencode_executable {

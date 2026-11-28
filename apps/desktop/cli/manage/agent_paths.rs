@@ -11,12 +11,18 @@ use agent_bridge::agents::{
 };
 use desktop_core::{
     agents::{Agent, AgentStatus},
-    client::{CallError, Client},
+    client::{agent_environment_hint, CallError, Client},
     protocol::{rpc, Version},
 };
 
 pub(super) fn check(client: &Client, agent: Agent) -> Result<Version, CallError> {
     let version = client.version()?;
+    if let Some(message) = client.agent_secret_mismatch(agent, &version) {
+        return Err(message.into());
+    }
+    if version.accepts_agent_environment == Some(true) {
+        return Ok(version);
+    }
     let supervised = version.supervised == Some(true);
     match ShellEnvironment::read().difference(agent, &version) {
         Some(Difference::Validation(source)) => {
@@ -46,6 +52,27 @@ pub(super) fn warn_if_unreported(version: &Version) {
 }
 
 pub(super) fn warnings(client: &Client, version: &Version) -> Vec<String> {
+    if version.accepts_agent_environment == Some(true) {
+        let warnings: BTreeMap<_, _> = Agent::ALL
+            .into_iter()
+            .filter_map(|agent| {
+                client
+                    .agent_secret_mismatch(agent, version)
+                    .map(|warning| (agent.id(), warning))
+            })
+            .collect();
+        if warnings.is_empty() {
+            return Vec::new();
+        }
+        return match client.call_in_instance(rpc::ListAgents, &version.instance_id) {
+            Ok(statuses) => statuses
+                .iter()
+                .filter(|status| status.connected)
+                .filter_map(|status| warnings.get(status.id.as_str()).cloned())
+                .collect(),
+            Err(error) => vec![format!("Cannot check connected agent paths: {error}")],
+        };
+    }
     let local = ShellEnvironment::read();
     if !Agent::ALL
         .into_iter()
@@ -141,7 +168,7 @@ fn path_mismatch(
     {
         return Ok(None);
     }
-    let fix = fix_hint(source, supervised);
+    let fix = agent_environment_hint(source, supervised);
     Ok(Some(format!(
         "{source} selects a different config for {}. Your shell's agent reads {shell:?}. PAP uses {backend:?}. {fix}",
         agent.name()
@@ -158,21 +185,9 @@ fn canonical_config_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn validation_mismatch(agent: Agent, source: &str, supervised: bool) -> String {
-    let fix = fix_hint(source, supervised);
+    let fix = agent_environment_hint(source, supervised);
     format!(
         "{source} is set in one environment only. PAP cannot verify that {} uses the same configuration in this shell. {fix}",
         agent.name()
     )
-}
-
-fn fix_hint(source: &str, supervised: bool) -> String {
-    if supervised && cfg!(target_os = "linux") {
-        format!("Match {source} in the systemd user environment (environment.d or systemctl --user set-environment), then run pap service restart.")
-    } else if supervised && cfg!(target_os = "macos") {
-        format!("Match {source} in the launchd environment (launchctl setenv), then run pap service restart.")
-    } else {
-        format!(
-            "Run pap service restart from a shell with the desired {source} setting, then retry."
-        )
-    }
 }

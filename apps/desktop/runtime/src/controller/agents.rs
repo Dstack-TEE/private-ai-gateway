@@ -108,6 +108,28 @@ impl DesktopRuntime {
     }
 
     pub fn list_agents(&self) -> Result<Vec<AgentStatus>, Error> {
+        self.list_agents_in(None)
+    }
+
+    pub fn inspect_agents(
+        &self,
+        environments: std::collections::BTreeMap<
+            String,
+            desktop_core::paths::agent_environment::AgentEnvironment,
+        >,
+    ) -> Result<Vec<AgentStatus>, Error> {
+        self.list_agents_in(Some(&environments))
+    }
+
+    fn list_agents_in(
+        &self,
+        environments: Option<
+            &std::collections::BTreeMap<
+                String,
+                desktop_core::paths::agent_environment::AgentEnvironment,
+            >,
+        >,
+    ) -> Result<Vec<AgentStatus>, Error> {
         if self.agent_access_error.is_some() || !self.agent_configuration {
             let _guard = self.lock_agents()?;
             self.withdraw_agent_tokens()?;
@@ -124,17 +146,18 @@ impl DesktopRuntime {
         let session = self.proxy.session();
         let catalog = session.verified.then_some(session.catalog).flatten();
         let projector = self.current_projector()?;
-        let (mut statuses, _tokens) = projector.scan(catalog.as_ref())?;
+        let mut statuses = match environments {
+            Some(environments) => projector.inspect(catalog.as_ref(), environments)?,
+            None => projector.scan(catalog.as_ref())?.0,
+        };
         if !self.state().is_protected() || !session.verified {
             for status in &mut statuses {
                 status.authorized = false;
             }
         }
-        if self.instance.is_none() {
+        if environments.is_none() {
             self.report_agents(&statuses);
-            return Ok(statuses);
         }
-        self.report_agents(&statuses);
         Ok(statuses)
     }
 
@@ -160,7 +183,7 @@ impl DesktopRuntime {
     ) -> Result<AgentPreview, crate::Error> {
         self.require_agent_access()?;
         let agent = Agent::from_id(&agent_id)?;
-        let catalog = self.connection_catalog(agent, connect)?;
+        let catalog = self.connection_catalog(agent, connect, &options)?;
         Ok(self
             .current_projector()?
             .preview(agent, connect, catalog.as_ref(), &options)?)
@@ -183,7 +206,7 @@ impl DesktopRuntime {
             return Err("Another app instance owns the agent configurations".into());
         }
         let agent = Agent::from_id(&agent_id)?;
-        let catalog = self.connection_catalog(agent, connect)?;
+        let catalog = self.connection_catalog(agent, connect, &options)?;
         let projector = self.current_projector()?;
         if !connect {
             self.proxy
@@ -230,7 +253,7 @@ impl DesktopRuntime {
             .into());
         }
         self.require_agent_access()?;
-        Ok(self.current_projector()?.codex_service())
+        Ok(self.current_projector()?.codex_service()?)
     }
 
     pub fn disconnect_all_agents(&self) -> Result<Vec<AgentStatus>, Error> {
@@ -330,20 +353,16 @@ impl DesktopRuntime {
         &self,
         agent: Agent,
         connect: bool,
+        options: &ConnectOptions,
     ) -> Result<Option<Catalog>, Error> {
         if !connect {
             return Ok(None);
         }
-        if !self
-            .current_projector()?
-            .scan(None)?
-            .0
-            .iter()
-            .any(|status| status.id == agent.id() && status.installed)
+        if !self.state().is_protected()
+            || !self
+                .current_projector()?
+                .connection_installed(agent, options)?
         {
-            return Ok(None);
-        }
-        if !self.state().is_protected() {
             return Ok(None);
         }
         let session = self.proxy.session();
