@@ -6,10 +6,12 @@ use std::{
     io::{self, IsTerminal},
     mem::MaybeUninit,
     os::unix::ffi::OsStringExt,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Stdio,
     time::Duration,
 };
+
+use tokio::process::Command;
 
 use crate::paths::agent_environment::{capture, ClientEnvironment};
 
@@ -20,7 +22,7 @@ pub(super) fn resolve() -> ClientEnvironment {
             .filter(|shell| shell.is_absolute())
             .or_else(account_shell);
         if let Some(shell) = shell {
-            match super::block_on(read(&shell, Duration::from_secs(10))) {
+            match super::block_on(read(Command::new(shell), Duration::from_secs(10))) {
                 Ok(Ok(values)) => return values,
                 Ok(Err(error)) => {
                     tracing::warn!("Cannot read the login shell environment: {}", error.kind())
@@ -64,16 +66,12 @@ fn account_shell() -> Option<PathBuf> {
     shell.is_absolute().then_some(shell)
 }
 
-async fn read(shell: &Path, timeout: Duration) -> io::Result<ClientEnvironment> {
-    if !shell.is_absolute() {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-
+async fn read(mut shell: Command, timeout: Duration) -> io::Result<ClientEnvironment> {
     // Delimit the NUL-separated environment so profile output is harmless.
     let marker = uuid::Uuid::new_v4().simple().to_string();
     let print_marker = format!("printf '\\000{marker}\\000'");
     let command = format!("{print_marker}; env -0 && {print_marker}");
-    let child = tokio::process::Command::new(shell)
+    let child = shell
         .args(["-ilc", &command])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -121,26 +119,34 @@ async fn read(shell: &Path, timeout: Duration) -> io::Result<ClientEnvironment> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn shell_script(script: &str) -> Command {
+        // A concurrent fork can inherit a freshly written script's writable
+        // descriptor and make executing the script fail with ETXTBSY.
+        let mut shell = Command::new("/bin/sh");
+        shell.args(["-c", script, "test-shell"]);
+        shell
+    }
 
     #[tokio::test]
     async fn resolves_multiline_environment_amid_shell_output() {
-        let home = tempfile::tempdir().unwrap();
-        let shell = home.path().join("shell");
-        fs::write(&shell, "#!/bin/sh\nprintf 'profile output\\n'\nexport CODEX_HOME='first\nsecond=third'\nexport OPENCODE_CONFIG_CONTENT=private\neval \"$2\"\nprintf 'more output\\n'\n").unwrap();
-        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
-        let values = read(&shell, Duration::from_secs(2)).await.unwrap();
+        let shell = shell_script(
+            r#"printf 'profile output\n'
+export CODEX_HOME='first
+second=third'
+export OPENCODE_CONFIG_CONTENT=private
+eval "$2"
+printf 'more output\n'"#,
+        );
+        let values = read(shell, Duration::from_secs(2)).await.unwrap();
         assert_eq!(values["CODEX_HOME"], "first\nsecond=third");
         assert!(values["OPENCODE_CONFIG_CONTENT"].is_empty());
     }
 
     #[tokio::test]
     async fn gives_up_when_shell_startup_hangs() {
-        let home = tempfile::tempdir().unwrap();
-        let shell = home.path().join("shell");
-        fs::write(&shell, "#!/bin/sh\nsleep 30\n").unwrap();
-        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
-        let error = read(&shell, Duration::from_millis(100)).await.unwrap_err();
+        let shell = shell_script("sleep 30");
+        let error = read(shell, Duration::from_millis(100)).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 }

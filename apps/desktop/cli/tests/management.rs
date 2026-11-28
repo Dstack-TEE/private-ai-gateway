@@ -1,6 +1,7 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
 mod support;
 
+use desktop_core::config::WEB_UI_DEFAULT_PORT;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -1318,6 +1319,7 @@ const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
 fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
+    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
     let status = &backend.run(&["status"])["gateway"]["webUi"];
     assert_eq!(status["enabled"], false);
@@ -1386,9 +1388,7 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
         assert!(!text.contains(&password), "{name} contains the password");
     }
 
-    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = occupied.local_addr().unwrap().port().to_string();
-    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
+    let occupied = TcpListener::bind(("127.0.0.1", WEB_UI_DEFAULT_PORT)).unwrap();
     // --yes enables the web UI through the same setting; the bind conflict stays in state.
     let failed = backend.web(&["app", "open", "--web", "--yes", "--json"]);
     assert!(!failed.status.success());
@@ -1399,18 +1399,18 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
         // Development builds without `npm run build:web` report this instead of serving.
         return;
     }
-    assert_eq!(error, format!("Port {port} is already in use on 127.0.0.1"));
+    assert_eq!(
+        error,
+        format!("Port {WEB_UI_DEFAULT_PORT} is already in use on 127.0.0.1")
+    );
     drop(occupied);
 
-    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
-    let url = format!("http://127.0.0.1:{port}");
-    assert_eq!(state["webUi"]["url"], url);
+    let authority = backend.enable_web_ui().unwrap();
     let opened = backend.web(&["app", "open", "--web", "--json"]);
     assert_success(&opened);
     let opened: Value = serde_json::from_slice(&opened.stdout).unwrap();
     // The address carries no secret.
-    assert_eq!(opened["url"], url);
-    let authority = format!("127.0.0.1:{port}");
+    assert_eq!(opened["url"], format!("http://{authority}"));
     let wrong = json!({ "password": "wrong horse battery staple" }).to_string();
     assert_eq!(
         http(&authority, "POST", "/api/session", None, &wrong).0,
@@ -1491,6 +1491,7 @@ const LEGACY_HASH: &str =
 
 #[test]
 fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
+    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend =
         Backend::start_with_credentials(&format!("[web-ui]\npassword-hash = \"{LEGACY_HASH}\"\n"));
     // Only the hash is known, so there is nothing to show.
@@ -1500,19 +1501,9 @@ fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
         .unwrap();
     assert!(!hidden.status.success());
     assert!(String::from_utf8_lossy(&hidden.stderr).contains("pap web-ui password rotate"));
-    let port = {
-        let free = TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port().to_string()
-    };
-    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
-    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
-    if state["webUi"]["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("assets are not built"))
-    {
+    let Some(authority) = backend.enable_web_ui() else {
         return;
-    }
-    let authority = format!("127.0.0.1:{port}");
+    };
     let token = web_session(&authority, WEB_PASSWORD);
 
     backend.run(&["web-ui", "password", "rotate", "--yes"]);
@@ -1602,12 +1593,8 @@ fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
 #[cfg(target_os = "linux")]
 #[test]
 fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
+    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
-    let port = {
-        let free = TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port().to_string()
-    };
-    backend.run(&["settings", "set", "web-ui.port", &port, "--yes"]);
     let set = |key: &str, value: &str| {
         backend
             .command(&["settings", "set", key, value, "--yes", "--json"])
@@ -1623,14 +1610,9 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
     assert_success(&set("web-ui.allow-network-access", "false"));
 
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
-    if state["webUi"]["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("assets are not built"))
-    {
+    let Some(first) = backend.enable_web_ui() else {
         return;
-    }
-    let first = format!("127.0.0.1:{port}");
+    };
     let token = web_session(&first, WEB_PASSWORD);
     assert_eq!(
         http(&first, "GET", "/api/bootstrap", Some(&token), "").0,
@@ -1644,7 +1626,7 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
         "127.0.0.2",
         "--yes",
     ]);
-    let second = format!("127.0.0.2:{port}");
+    let second = format!("127.0.0.2:{WEB_UI_DEFAULT_PORT}");
     assert_eq!(state["webUi"]["url"], format!("http://{second}"));
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(&first).is_ok() {
@@ -1670,24 +1652,15 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
 /// the browser request that asked for it.
 #[test]
 fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
+    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
-    let port = {
-        let free = TcpListener::bind("127.0.0.1:0").unwrap();
-        free.local_addr().unwrap().port()
-    };
-    backend.run(&["settings", "set", "web-ui.port", &port.to_string(), "--yes"]);
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
-    let state = backend.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
-    if state["webUi"]["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("assets are not built"))
-    {
+    let Some(authority) = backend.enable_web_ui() else {
         return;
-    }
-    let authority = format!("127.0.0.1:{port}");
+    };
     let token = web_session(&authority, WEB_PASSWORD);
     let config = json!({
-        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": port }
+        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": WEB_UI_DEFAULT_PORT }
     });
     let started = Instant::now();
     let (status, body) = http(
@@ -1726,6 +1699,21 @@ fn web_session(authority: &str, password: &str) -> String {
 }
 
 impl Backend {
+    /// Enables the listener and returns its authority when the assets are built.
+    fn enable_web_ui(&self) -> Option<String> {
+        let state = self.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
+        let web_ui = &state["webUi"];
+        if web_ui["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("assets are not built"))
+        {
+            return None;
+        }
+        let authority = format!("127.0.0.1:{WEB_UI_DEFAULT_PORT}");
+        assert_eq!(web_ui["url"], format!("http://{authority}"), "{web_ui}");
+        Some(authority)
+    }
+
     /// Runs as a remote shell so no browser is launched.
     fn web(&self, args: &[&str]) -> Output {
         self.command(args)
@@ -1810,7 +1798,7 @@ fn exchange(
 #[test]
 fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     // Declared first so it is released only after the backend has stopped.
-    let _default_port = default_port_lock();
+    let _default_port = port_lock(4180);
     let backend = Backend::start();
     let backup = backend.directory.path().join("profiles-reset.json");
     fs::write(&backup, r#"{"version":1,"profiles":[{"name":"Work","provider":"phala","remoteUrl":"https://inference.phala.com"}]}"#).unwrap();
@@ -1858,11 +1846,11 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_ne!(backend.web_ui_password(), WEB_PASSWORD);
 }
 
-/// Reset moves the Local API to its fixed default port, which every test
-/// process on this host shares; hold this while a test backend may bind it.
-fn default_port_lock() -> fs::File {
-    let lock =
-        fs::File::create(std::env::temp_dir().join("private-ai-proxy-test-4180.lock")).unwrap();
+/// Use fixed ports to avoid racing ephemeral binds. The file lock coordinates
+/// test processes sharing a port and must outlive the backend.
+fn port_lock(port: u16) -> fs::File {
+    let path = std::env::temp_dir().join(format!("private-ai-proxy-test-{port}.lock"));
+    let lock = fs::File::create(path).unwrap();
     lock.lock().unwrap();
     lock
 }
