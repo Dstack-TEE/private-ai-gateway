@@ -1,29 +1,64 @@
 name: Desktop live E2E
 
-# Connects every supported coding agent, and separately OpenCode 2, to the live
-# RedPill service through a published desktop package (apps/desktop/e2e). It
-# needs the desktop-e2e environment's API key, which only main can use, so it
-# never runs on PRs.
+# Exercises live agent connections and systemd installs (apps/desktop/e2e).
+# It uses the desktop-e2e environment's API key only on main. A manual run on
+# another branch can exercise systemd installation without a key.
 on:
   schedule:
     - cron: "17 11 * * *" # nightly, 4:17 AM PDT
   workflow_dispatch:
     inputs:
       tag:
-        description: Desktop release tag to test; empty tests the newest desktop-v* release
+        description: Override the release used by live agents and native systemd rows
+        required: false
+        type: string
+      matrix:
+        description: Systemd matrix row to run; empty runs every row
         required: false
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
-  group: desktop-e2e
+  group: ${{ github.ref == 'refs/heads/main' && 'desktop-e2e' || format('desktop-e2e-{0}', github.ref) }}
   cancel-in-progress: false
 
 jobs:
+  package:
+    name: Build current Linux packages
+    if: inputs.matrix != 'ubuntu-script-npm' && inputs.matrix != 'ubuntu-npm-nvm' && inputs.tag == ''
+    uses: ./.github/workflows/desktop-package.yml
+    with:
+      package_only: true
+      linux_x64_only: true
+
+  stable-release:
+    name: Resolve the latest stable desktop release
+    if: inputs.matrix == '' || inputs.matrix == 'ubuntu-script-npm' || inputs.matrix == 'ubuntu-npm-nvm'
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 100 \
+            --json tagName,publishedAt \
+            --jq 'map(select(.tagName | startswith("desktop-v"))) | max_by(.publishedAt).tagName // empty')"
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          if [[ -n "$tag" ]]; then
+            echo "Testing stable release $tag"
+          else
+            echo "No published stable desktop release exists"
+          fi
+
   agents:
     name: ${{ matrix.name }}
+    if: github.ref == 'refs/heads/main'
     environment: desktop-e2e
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -41,7 +76,9 @@ jobs:
         with:
           persist-credentials: false
       - name: Check version overrides
-        run: node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo node:24 \
+            node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
       - name: Run the live end-to-end test
         env:
           GH_TOKEN: ${{ github.token }}
@@ -52,3 +89,69 @@ jobs:
         run: |
           read -ra args <<<"$ARGS"
           apps/desktop/e2e/run.sh ${TAG:+--tag "$TAG"} "${args[@]}"
+
+  systemd:
+    name: Systemd ${{ matrix.row }}
+    needs: package
+    if: >-
+      !cancelled() && inputs.matrix != 'ubuntu-script-npm' && inputs.matrix != 'ubuntu-npm-nvm'
+      && (needs.package.result == 'success' || (needs.package.result == 'skipped' && inputs.tag != ''))
+    environment: ${{ github.ref == 'refs/heads/main' && 'desktop-e2e' || 'desktop-build' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TAG: ${{ inputs.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJSON(inputs.matrix == '' && '["ubuntu-deb-opencode","fedora-rpm-bun","arch-pacman-opencode"]' || format('[{0}]', toJSON(inputs.matrix))) }}
+    steps:
+      - &checkout-systemd
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - &check-systemd-versions
+        name: Check version overrides
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro" --workdir /repo node:24 \
+            node --test apps/desktop/e2e/resolve-versions.test.mjs apps/desktop/e2e/reply.test.mjs
+      - name: Download current Linux package artifact
+        if: inputs.tag == ''
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: desktop-package-linux-x64
+          path: ${{ runner.temp }}/pap-packages
+      - &run-systemd
+        name: Run systemd installation matrix row
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PAP_E2E_API_KEY: ${{ github.ref == 'refs/heads/main' && secrets.PAP_E2E_API_KEY || '' }}
+          MATRIX: ${{ matrix.row }}
+        run: |
+          args=(--systemd --matrix "$MATRIX")
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then args+=(--skip-request); fi
+          if [[ -n "$TAG" ]]; then
+            args+=(--tag "$TAG")
+          else
+            args+=(--packages "$RUNNER_TEMP/pap-packages")
+          fi
+          apps/desktop/e2e/run.sh "${args[@]}"
+
+  systemd-published:
+    name: Systemd ${{ matrix.row }}
+    needs: stable-release
+    if: needs.stable-release.outputs.tag != ''
+    environment: ${{ github.ref == 'refs/heads/main' && 'desktop-e2e' || 'desktop-build' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TAG: ${{ needs.stable-release.outputs.tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        row: ${{ fromJSON(inputs.matrix == '' && '["ubuntu-script-npm","ubuntu-npm-nvm"]' || format('[{0}]', toJSON(inputs.matrix))) }}
+    steps:
+      - *checkout-systemd
+      - *check-systemd-versions
+      - *run-systemd

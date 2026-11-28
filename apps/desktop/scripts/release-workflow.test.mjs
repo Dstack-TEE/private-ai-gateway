@@ -282,7 +282,7 @@ test("release-please drafts and tags the releases the release workflows build", 
 
 test("desktop workflows keep their artifact names", async () => {
   const uploads = [];
-  for (const workflow of ["desktop-native.yml", "desktop-mac-app-store.yml", "private-ai-proxy-npm.yml"]) {
+  for (const workflow of ["desktop-native.yml", "desktop-package.yml", "desktop-mac-app-store.yml", "private-ai-proxy-npm.yml"]) {
     for (const job of Object.values((await readWorkflow(workflow)).jobs)) {
       uploads.push(...(job.steps ?? []).filter((step) => step.uses?.startsWith("actions/upload-artifact@")).map((step) => step.with.name));
     }
