@@ -321,6 +321,10 @@ MSVC CRT statically. Windows packaging checks the CLI ZIP and the installed NSIS
 payload for Redistributable DLL imports. The Windows npm packages repack the
 same verified CLI binaries.
 
+The NSIS post-install hook gives CLI registration 30 seconds to complete. It
+suppresses Windows loader dialogs, releases the startup lock on failure, and
+returns a nonzero installer status if registration fails.
+
 When bootstrapping from a release that predates signed checksums, pass
 `--legacy` to `scripts/package-winget.mjs`. It retains the legacy installers'
 Redistributable dependency and verifies each downloaded installer against the
