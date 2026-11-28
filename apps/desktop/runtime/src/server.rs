@@ -108,7 +108,7 @@ pub async fn serve(
         host: ServiceHost::default(),
         states: runtime.subscribe(),
         shutdown: stopped.clone(),
-        listener: api::Listener::Local,
+        listener: api::Listener::Local { supervised },
     })
     .layer(GlobalConcurrencyLimitLayer::new(MAX_REQUESTS));
     let signal = stopped.clone().cancelled_owned();

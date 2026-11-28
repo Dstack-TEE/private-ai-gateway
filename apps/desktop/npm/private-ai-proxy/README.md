@@ -21,15 +21,17 @@ explains both and lists other ways to install, including the desktop app.
 
 ```sh
 pap --help
-pap service start
-pap service status
+pap profiles login work
+pap start
+pap status
 ```
 
 `pap` is the preferred command. `private-ai-proxy` and the legacy `aci` run the
 same CLI.
 
 The service can also serve its management UI to a browser on `127.0.0.1`. It is
-off by default:
+off by default. To set it up before enabling protection, start the management
+backend with `pap service start`.
 
 ```sh
 pap settings set web-ui.enabled true

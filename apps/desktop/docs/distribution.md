@@ -99,9 +99,12 @@ does for existing Mac apps.
 
 Once every package and App Store build processing have succeeded, the run:
 
-1. attaches the signed assets, `latest.json` and `SHA256SUMS` to the draft.
+1. attaches the signed assets, `latest.json`, `SHA256SUMS` and
+   `SHA256SUMS.asc` to the draft.
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`).
+   `SHA256SUMS.asc` is the OpenPGP signature on the checksum list and has no
+   provenance attestation of its own.
    Each package also gets CycloneDX SBOM attestations (add
    `--predicate-type https://cyclonedx.org/bom`): every package for the CLI
    crates and the web UI renderer's runtime npm dependencies, which the CLI
@@ -342,19 +345,20 @@ publishing stable releases to the beta feed.
 | macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first. The relaunched app starts the new backend using the same LaunchAgent when enabled |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
 | Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
-| Linux desktop RPM | `linux-<arch>-rpm` | In-app: `pkexec rpm -U` with the same fallbacks | As DEB |
-| Arch desktop package | Version from `latest.json` | Settings > About shows the release and the steps: quit the app, `private-ai-proxy --yes service stop`, `sudo pacman -U <release package URL>` | The next launch starts the new backend |
+| Linux desktop RPM | `linux-<arch>-rpm` | In-app: [reuse the registered key, import the local certificate, or verify a downloaded certificate's fingerprint](#linux-release-signing), then run `rpm -U`. Privileged operations use `pkexec` with the same fallbacks as DEB | As DEB |
+| Arch desktop package | Version from `latest.json` | Settings > About shows how to stop the service, download the package and signature, verify with `gpgv` against the shipped keyring, and install with `sudo pacman -U ./<file>` | The next launch starts the new backend |
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
-| CLI-only RPM | Same | As above with `sudo rpm -U <URL>` | As above |
-| CLI-only Arch | Same | As above with `sudo pacman -U <URL>` | As above |
+| CLI-only RPM | Same | `pap update` [uses the same key selection as the desktop updater](#linux-release-signing), then runs `sudo rpm -U <package URL>` | As above |
+| CLI-only Arch | Same | `pap update` downloads the package and signature, verifies with `gpgv` against the shipped keyring, and runs `sudo pacman -U ./<file>` | As above |
 | npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
+| Official install script (macOS and Linux) | Same | `pap update` reruns the official installer for the target version using the existing installation root and command link directory. `pap doctor` prints manual steps | `pap update` stops the backend under the update locks and restarts through the updated command link. Manual installs stop protection before switching links |
 | Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
 | Mac App Store | App Store | App Store | MAS has no feed checks |
 | AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
 
-Package-manager installs never modify themselves: they announce the release and
-print exact commands built from the compiled feed location and the validated
-version. Linux CLI and Arch packages record their owner in
+For package-manager updates, the app and CLI build commands from the compiled
+feed location and validated version. `pap doctor` prints the CLI commands and
+`pap update` runs them. Linux CLI and Arch packages record their owner in
 `/usr/share/private-ai-proxy/package-manager` (`deb`, `rpm` or `pacman`); the
 desktop app disables in-app installation only when that marker says `pacman`. CLI
 packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
@@ -362,12 +366,14 @@ system package without commands.
 
 Native package versions keep prereleases ordered before their stable release:
 DEB and RPM `x.y.z~beta.n` (RPM release `1`, no epoch) and Arch `x.y.zbeta.n`.
-Tauri writes the SemVer string verbatim, so the package job builds the desktop
-DEB, RPM and Arch packages from the payload of Tauri's DEB with
-[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager, as it builds the
-CLI packages (`scripts/package-linux.mjs`), then signs the final DEB and RPM for
-the updater before the manifest is created. nfpm writes a SemVer prerelease
-with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
+Tauri writes the SemVer string verbatim, so the package job repackages the
+Tauri DEB payload as DEB, RPM and Arch packages with
+[nfpm](https://nfpm.goreleaser.com/), GoReleaser's packager. It uses the
+executable from Tauri's RPM in the RPM package so Tauri selects the right
+update format. Older desktop RPMs that shipped the DEB executable need a
+one-time [manual RPM upgrade](../../../docs/private-ai-proxy-install.md#verify-linux-packages).
+nfpm also builds the CLI packages (`scripts/package-linux.mjs`). It writes a
+SemVer prerelease with a tilde, which sorts before the release in dpkg (Debian Policy 5.6.12) and
 rpm (Fedora versioning guidelines). Its archlinux packager drops the
 prerelease from `pkgver`, so Arch packages get the pacman form instead, which
 sorts a trailing letter segment before the release (`vercmp`). Every earlier package sorts before
@@ -382,21 +388,94 @@ command restarts a backend from another build. Run `pap --yes service stop` as
 the owning user to switch at once. Package metadata (name,
 maintainer, homepage and the desktop description) comes from the brand
 configuration, as Tauri's does, and every entry carries the commit time (or
-`SOURCE_DATE_EPOCH`), so builds are reproducible and pacman's file checks match.
+`SOURCE_DATE_EPOCH`), so pacman's file checks match.
 
-Packages up to 0.1.7-beta.n refuse removal while a Private AI Proxy process
-other than the updating app runs. Only DEB upgrades met that: dpkg runs the old
-package's `prerm upgrade` before unpacking. The DEBs therefore carry one
-maintainer script, a `prerm` that succeeds for `failed-upgrade`, which dpkg runs
-when the old `prerm` fails (Debian Policy 6.6) and which lets the upgrade
-continue. rpm runs the old `%preun` only after the new files are installed, and
-pacman runs only the new package's scripts on upgrade.
+Package pre-removal hooks run only for an actual removal. They disable the
+per-user login service, stop the backend, and restore managed agent settings for
+users reachable from the package script. Upgrade hooks remain no-ops, so an
+upgrade can replace files while a backend is running. Cleanup failures are
+reported and do not block removal. See [Uninstall](../../../docs/private-ai-proxy-install.md#uninstall)
+for recovery steps when a user service is unavailable.
 
-### Planned removals (0.3)
+### Linux release signing
 
-The packaging compatibility code for installations of 0.1.x (the DEB `prerm`
-for `failed-upgrade`, the Windows `.cmd` shim migration) is listed with every
-other 0.3 removal in [Removal in 0.3](configuration.md#removal-in-03).
+Stable and beta releases use the same OpenPGP v4 RSA-4096 signing subkey.
+Use SHA-512 for key self-signatures. Keep the certify-only primary key offline
+with an offline backup and revocation certificate. Release workflows triggered
+by tags fail until the armored public certificate is committed as
+`apps/desktop/packaging/linux-signing-key.asc` and `LINUX_SIGNING_KEY` is set in
+the GitHub `desktop-release` environment to the unprotected armored export of
+just the signing subkey. Keep the primary secret key out of CI. The Linux jobs
+verify the subkey against the public certificate and clean up their temporary
+signing files. Test packages from `desktop-build` remain unsigned.
+
+RPM updaters skip import when the key is already registered and use the
+installed certificate at `/usr/share/keyrings/private-ai-proxy-archive-keyring.asc`
+when available. Older packages may need the
+[public certificate on GitHub `raw/main`](https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc).
+The updater verifies its pinned primary fingerprint with GnuPG before
+importing a downloaded certificate. Keep the permanent fallback URL when
+rotating the key.
+
+The primary key fingerprint is
+`1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140`. The install guide and
+release notes publish the same fingerprint.
+
+The canonical key material is in Infisical project `private-ai-gateway`,
+environment `prod`, at `/linux-package-signing`.
+
+- `LINUX_SIGNING_PRIMARY_KEY` holds the protected primary key.
+- `LINUX_SIGNING_PRIMARY_PASSPHRASE` holds its passphrase.
+- `LINUX_SIGNING_REVOCATION_CERT` holds the primary revocation certificate.
+- `LINUX_SIGNING_KEY` holds the CI signing subkey export.
+- `LINUX_SIGNING_PUBLIC_KEY` holds the public certificate.
+
+1. nfpm signs each RPM while building it. The desktop repackager then
+   generates Tauri updater signatures over the final desktop DEB and RPM.
+   RPMs ship the armored certificate for local import. DEBs and Arch
+   packages ship the binary keyring at
+   `/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg` for APT metadata
+   or Arch detached signature verification.
+2. The release job creates a detached `.pkg.tar.zst.sig` for each Arch
+   package. Arch upgrades verify the detached signature with `gpgv` before
+   local installation. The release job embeds the Tauri signatures in
+   `latest.json` and removes those signature files.
+3. It hashes the published files, including the Arch signatures, into
+   `SHA256SUMS`, then signs that file as `SHA256SUMS.asc` before attesting
+   and uploading the release.
+
+The OpenPGP signatures carry signing timestamps. Signed RPMs are
+not bit-reproducible even when package entry times are fixed.
+The [install guide](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
+shows how to verify release assets.
+
+#### Signing key rotation
+
+The current signing subkey has fingerprint
+`123A 6774 08C8 9182 3AF9 1461 E90A 5EC3 7B79 2504`. It expires on
+November 26, 2029 at 11:14 p.m. PST (November 27, 2029 at 07:14 UTC in
+GnuPG's expiry record).
+
+In the second year of the three-year signing subkey's lifetime, use the offline
+primary to extend it in place. With both fingerprints from the offline keyring,
+run `gpg --cert-digest-algo SHA512 --quick-set-expire "$primary_fpr" 3y "$subkey_fpr"`. Export
+the updated public certificate and a fresh signing-subkey-only secret export.
+Update the public certificate and subkey export in Infisical, then update the
+committed certificate, the recorded expiry above, and the GitHub environment
+secret before tagging the next release. This keeps both fingerprints stable.
+Tell RPM users to refresh the imported certificate so their RPM keyring sees
+the extended expiry or a new subkey.
+
+If a subkey is compromised, use the offline primary to revoke it and issue a
+new signing subkey. Replace the environment secret, publish the updated public
+certificate with the revocation, and tell users to refresh their trusted key
+before upgrading. Older RPM versions may require removing the stored copy
+before importing the updated certificate. If the primary is compromised,
+publish its revocation and announce and distribute the replacement primary
+fingerprint through an authenticated channel. Update the pinned fingerprint
+and RPM key package identifier in `core/src/updates.rs`, plus the fingerprint
+in this guide, the install guide, and `scripts/release-notes.mjs`. Each release
+links to the certificate from its build commit for historical verification.
 
 A feed advances only after its release is public and every manifest URL
 responds, so a feed never names an unpublished asset. Assets are replaced one

@@ -247,7 +247,7 @@ Global Options:
     let script = pap().args(["completions", "bash"]).output().unwrap().stdout;
     snapbox::assert_data_eq!(
         hex::encode(Sha256::digest(&script)),
-        str!["daa56af8be17ffe9ed9c450d3fc56e2d1ffa78515a8108628fc4e442b54a496f"]
+        str!["9ddd578300356e30a95678c5e6ac9e1d0883e47a3f0bbb21e20d61807c7112cd"]
     );
 }
 
@@ -568,7 +568,7 @@ fn management_without_a_backend() {
         .assert()
         .success()
         .stdout_eq(str![[r#"
-{"backend":null,"status":"not_running"}
+{"backend":null,"status":"not_running","loginService":{"enabled":false,"active":false,"reason":"path_overrides","detail":"Unavailable with PAP path overrides"}}
 
 "#]]);
     fails(1, &["status", "--watch"]).stderr_eq(str![[r#"
@@ -579,6 +579,15 @@ error: Backend is not running. Run pap service start.
 {"error":{"code":"command_failed","message":"Backend is not running. Run pap service start."}}
 
 "#]]);
+    for args in [
+        &["models", "list", "--json"][..],
+        &["models", "list", "--refresh", "--json"][..],
+    ] {
+        fails(1, args).stderr_eq(str![[r#"
+{"error":{"code":"command_failed","message":"Backend is not running. Run pap start to verify the service and enable protection."}}
+
+"#]]);
+    }
     fails(
         1,
         &[
@@ -597,7 +606,7 @@ warning: --require-production-os is deprecated and has no effect; clients no lon
 
 "#]]);
     fails(1, &["token", "show"]).stderr_eq(str![[r#"
-error: Confirmation required. Pass --yes for noninteractive changes.
+error: Confirmation required. Pass --yes to reveal the Local API token noninteractively.
 
 "#]]);
     let add = ["profiles", "add", "--id", "t", "--name", "T", "--url"];
@@ -615,14 +624,25 @@ error: Confirmation required. Pass --yes for noninteractive changes.
 error: Gateway URL must be a valid HTTP or HTTPS URL
 
 "#]]);
+    fails(1, &["profiles", "add", "--id", "t", "--name", "T"]).stderr_eq(str![[r#"
+error: Confirmation required. Pass --yes for noninteractive changes.
+
+"#]]);
+    fails(1, &["profiles", "add", "--id", "t", "--name", "T", "--provider", "custom"]).stderr_eq(str![[r#"
+error: A custom provider needs --url. RedPill and Phala profiles use their service URL: pass --provider redpill or --provider phala.
+
+"#]]);
     fails(2, &["profiles", "add", "--id", "test"]).stderr_eq(str![[r#"
 error: the following required arguments were not provided:
   --name <NAME>
-  --url <URL>
 
-Usage: private-ai-proxy profiles add --id <ID> --name <NAME> --url <URL>
+Usage: private-ai-proxy profiles add --id <ID> --name <NAME>
 
 For more information, try '--help'.
+
+"#]]);
+    fails(1, &["agents", "connect", "no-such-agent", "--yes"]).stderr_eq(str![[r#"
+error: Unknown agent ID. Supported IDs: claude-code, codex, dsh, hermes, pi, oh-my-pi, opencode, openclaw.
 
 "#]]);
     fails(
@@ -668,6 +688,19 @@ error: Pass the web UI password with --value-stdin or at the hidden prompt, not 
 "#]]);
     // Nothing started a backend or saved a credential, even the refused `profiles add`.
     assert!(fs::read_dir(home.path()).unwrap().next().is_none());
+
+    let settings = home.path().join(".private-ai-proxy/Config");
+    fs::create_dir_all(&settings).unwrap();
+    fs::write(
+        settings.join("config.toml"),
+        "[profiles.t]\nname = \"T\"\nprovider = \"redpill\"\nremote-url = \"https://tee.redpill.ai\"\n",
+    )
+    .unwrap();
+    fails(1, &["profiles", "add", "--id", "t", "--name", "T"]).stderr_eq(str![[r#"
+error: Profile ID already exists. Use pap profiles verify to update its credential.
+
+"#]]);
+    assert!(!settings.join("credentials.toml").exists());
 }
 
 #[test]
@@ -810,7 +843,7 @@ error: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
     fails(1, &["models", "list", "--json"]).stderr_eq(str![[r#"
-{"error":{"code":"command_failed","message":"No verified model catalog. Start protection and wait for verification first."}}
+{"error":{"code":"command_failed","message":"No verified model catalog. Run pap start to start and verify protection."}}
 
 "#]]);
     json(&["token", "rotate", "--yes"]).stdout_eq(str![[r#"
@@ -839,7 +872,7 @@ error: The operation could not complete. Check the protection status and supplie
 
 "#]]);
     fails(1, &["agents", "connect", "no-such-agent", "--dry-run"]).stderr_eq(str![[r#"
-error: The operation could not complete. Check the protection status and supplied configuration before retrying.
+error: Unknown agent ID. Supported IDs: claude-code, codex, dsh, hermes, pi, oh-my-pi, opencode, openclaw.
 
 "#]]);
     fails(1, &["stop", "--offline"]).stderr_eq(str![[r#"
@@ -850,12 +883,26 @@ error: The backend is running; restore the agents through it with `stop` or `ser
 error: Confirmation required. Pass --yes for noninteractive changes.
 
 "#]]);
+    pap(&["service", "start"])
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+Backend is already running.
+
+"#]]);
     json(&["service", "stop", "--yes"]).stdout_eq(str![[r#"
 {"status":"stopped"}
 
 "#]]);
     json(&["service", "status"]).stdout_eq(str![[r#"
-{"backend":null,"status":"not_running"}
+{"backend":null,"status":"not_running","loginService":{"enabled":false,"active":false,"reason":"path_overrides","detail":"Unavailable with PAP path overrides"}}
+
+"#]]);
+    pap(&["service", "stop", "--yes"])
+        .assert()
+        .success()
+        .stdout_eq(str![[r#"
+Backend was not running.
 
 "#]]);
 }

@@ -19,8 +19,13 @@ fn sandbox_teardown_watchdog() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn start_reports_skipped_supervision_once_in_human_and_json_output() {
-    for json in [false, true] {
+fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
+    for (json, environment_override, reports_paths) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
         let sandbox = support::Sandbox::new();
         let root = sandbox.path();
         let home = root.join("home");
@@ -49,146 +54,402 @@ fn start_reports_skipped_supervision_once_in_human_and_json_output() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let state = desktop_core::contracts::AppState {
-            backend_connected: Some(true),
-            status: desktop_core::contracts::VerificationStatus::Verified,
-            config: desktop_core::contracts::StartConfig {
-                remote_url: "http://127.0.0.1".into(),
-            },
-            profiles: vec![desktop_core::contracts::ConfidentialProfile {
-                id: "test".into(),
-                name: "Test".into(),
-                provider: desktop_core::contracts::ServiceProvider::Custom,
-                remote_url: "http://127.0.0.1".into(),
-                auth: desktop_core::contracts::ProfileAuth::ApiKey,
-                credential_saved: true,
-                credential_ref: None,
-                verified_at: None,
-            }],
-            active_profile_id: "test".into(),
-            api_key_saved: true,
-            ..Default::default()
+        let version_metadata = if reports_paths {
+            json!({"agentPathOverrides": {}, "agentValidationOverrides": [], "supervised": true})
+        } else {
+            json!({})
         };
-        let state =
-            serde_json::to_string(&desktop_core::contracts::AppStateWire::from(state)).unwrap();
-        let version = serde_json::json!({
-            "apiVersion": desktop_core::protocol::API_VERSION,
-            "product": desktop_core::brand::APP_IDENTIFIER,
-            "version": desktop_core::protocol::BUILD_VERSION,
-            "instanceId": "test-instance",
-            "processId": std::process::id(),
-            "executable": cli,
+        let check_legacy_connect = json && environment_override && !reports_paths;
+        let expected_requests = if reports_paths {
+            18
+        } else if check_legacy_connect {
+            14
+        } else {
+            8
+        };
+        let applied = json!({
+            "result": {
+                "id": "codex", "name": "Codex",
+                "configPath": home.join(".codex/config.toml"),
+                "installed": true, "recorded": true, "connected": true,
+                "authorized": true,
+            }
+        });
+        let agents = json!({
+            "result": [&applied["result"], &json!({
+                "id": "oh-my-pi", "name": "Oh My Pi",
+                "configPath": home.join(".omp/agent/models.yml"),
+                "installed": true, "recorded": true, "connected": true, "authorized": true,
+            })]
         })
         .to_string();
-        let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut requests = 0;
-            while requests < 6 && Instant::now() < deadline {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(100)))
-                    .unwrap();
-                loop {
-                    let mut request = Vec::new();
-                    let mut byte = [0; 1];
-                    while !request.ends_with(b"\r\n\r\n") {
-                        if stream.read_exact(&mut byte).is_err() {
-                            break;
-                        }
-                        request.push(byte[0]);
-                    }
-                    if request.is_empty() || !request.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                    let request = String::from_utf8_lossy(&request);
-                    let body_length = request
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then_some(value.trim())
-                        })
-                        .and_then(|length| length.parse::<usize>().ok())
-                        .unwrap_or(0);
-                    let mut body = vec![0; body_length];
-                    stream.read_exact(&mut body).unwrap();
-                    let path = request
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap();
-                    let response_body = if path == desktop_core::protocol::VERSION_PATH {
-                        version.clone()
-                    } else {
-                        format!("{{\"result\":{state}}}")
-                    };
-                    let body = response_body.as_bytes();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(body).unwrap();
-                    requests += 1;
-                    if requests >= 6 {
-                        break;
-                    }
-                }
-            }
-            assert_eq!(requests, 6);
-        });
+        let applied = applied.to_string();
+        let server = verified_backend_fixture(
+            socket_path,
+            &cli,
+            expected_requests,
+            version_metadata,
+            &[
+                ("/api/rpc/apply_agent", applied),
+                ("/api/rpc/list_agents", agents),
+            ],
+        );
 
-        let run = |extra: &[&str]| {
-            let mut args = vec!["start"];
-            args.extend_from_slice(extra);
+        let custom = home.join("custom");
+        let run = |args: &[&str]| {
             let mut command = std::process::Command::new(&cli);
             command
-                .args(&args)
+                .args(args)
                 .env_clear()
                 .env("HOME", &home)
                 .env("XDG_RUNTIME_DIR", &runtime)
-                .env("CODEX_HOME", "/custom")
-                .env("PATH", &bin)
-                .output()
-                .unwrap()
+                .env("PATH", &bin);
+            if environment_override {
+                command.env("CODEX_HOME", &custom);
+            }
+            if reports_paths {
+                command.env("OMP_PROFILE", "work");
+            }
+            command.output().unwrap()
         };
-        let first_args = if json { vec!["--json"] } else { Vec::new() };
-        let first = run(&first_args);
+        let args: &[&str] = if json {
+            &["start", "--json"]
+        } else {
+            &["start"]
+        };
+        let first = run(args);
         assert_eq!(first.status.code(), Some(0), "{first:?}");
         let first_stderr = String::from_utf8_lossy(&first.stderr);
         if json {
             let value: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-            assert!(value["supervisionNotice"]
-                .as_str()
-                .unwrap()
-                .contains("CODEX_HOME"));
+            assert_eq!(value["status"], "verified");
+            let notice = value["supervisionNotice"].as_str().unwrap();
+            if environment_override {
+                assert!(notice.contains("CODEX_HOME"), "{notice}");
+            } else {
+                assert!(
+                    notice.contains("Could not enable the login service"),
+                    "{notice}"
+                );
+            }
             assert!(first_stderr.is_empty(), "{first_stderr}");
+            if reports_paths {
+                let warning = value["agentPathWarnings"][0].as_str().unwrap();
+                assert!(warning.contains("CODEX_HOME"), "{warning}");
+                assert!(
+                    warning.contains(custom.join("config.toml").to_str().unwrap()),
+                    "{warning}"
+                );
+                assert!(
+                    warning.contains("systemctl --user set-environment"),
+                    "{warning}"
+                );
+                assert!(value["agentPathWarnings"][1]
+                    .as_str()
+                    .unwrap()
+                    .contains("OMP_PROFILE"));
+            }
         } else {
+            assert_eq!(
+                String::from_utf8_lossy(&first.stdout),
+                concat!(
+                    "Protected\n",
+                    "Profile: Test (test)\n",
+                    "Service: custom | http://127.0.0.1\n",
+                    "Service credential: Saved (credentials.toml)\n",
+                    "Local API: Not listening\n",
+                    "Network access: Loopback only\n",
+                    "Models: No verified catalog\n",
+                )
+            );
             assert!(first_stderr.contains("CODEX_HOME"), "{first_stderr}");
             assert!(
                 first_stderr.contains("environment first, then run `pap service enable`"),
                 "{first_stderr}"
             );
         }
-        let second_args = if json { vec!["--json"] } else { Vec::new() };
-        let second = run(&second_args);
+        let second = run(args);
         assert_eq!(second.status.code(), Some(0), "{second:?}");
         if json {
             let value: serde_json::Value = serde_json::from_slice(&second.stdout).unwrap();
-            assert!(value.get("supervisionNotice").is_none());
+            assert_eq!(
+                value.get("supervisionNotice").is_none(),
+                environment_override
+            );
         } else {
             assert!(!String::from_utf8_lossy(&second.stderr).contains("CODEX_HOME"));
         }
+        if check_legacy_connect {
+            let outcome = run(&[
+                "agents",
+                "connect",
+                "codex",
+                "--revision",
+                "test-preview",
+                "--yes",
+                "--json",
+            ]);
+            assert_success(&outcome);
+            let report: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+            assert_eq!(report["connected"], true);
+            let warning = String::from_utf8_lossy(&outcome.stderr);
+            assert_eq!(warning.lines().count(), 1);
+            assert!(
+                warning.contains("does not report all agent overrides"),
+                "{warning}"
+            );
+        }
+        if reports_paths {
+            let outcome = run(&["status", "--json"]);
+            assert_success(&outcome);
+            let report: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+            let warning = report["agentPathWarnings"][0].as_str().unwrap();
+            assert!(
+                warning.contains(custom.join("config.toml").to_str().unwrap()),
+                "{warning}"
+            );
+            assert!(
+                warning.contains(home.join(".codex/config.toml").to_str().unwrap()),
+                "{warning}"
+            );
+            assert!(report["agentPathWarnings"][1]
+                .as_str()
+                .unwrap()
+                .contains("OMP_PROFILE"));
+        }
         server.join().unwrap();
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn package_uninstall_preserves_the_login_preference_and_allows_enrollment_again() {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
+    let sandbox = support::Sandbox::new();
+    let root = sandbox.path();
+    let home = root.join("home");
+    let bin = root.join("bin");
+    let runtime = root.join("runtime");
+    let cli = root.join("private-ai-proxy");
+    let backend = root.join("private-ai-proxy-service");
+    let data = home
+        .join(".local/share")
+        .join(desktop_core::brand::APP_IDENTIFIER);
+    let marker = data.join("login-service-off");
+    let unit = home.join(".config/systemd/user/private-ai-proxy.service");
+    for directory in [&bin, &runtime, &data] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    let config = home.join(".config/private-ai-proxy");
+    fs::create_dir_all(&config).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        config.join("config.toml"),
+        format!("[local-api]\nport = {port}\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
+    support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
+    std::os::unix::fs::symlink(&cli, bin.join("private-ai-proxy")).unwrap();
+    let systemctl = r#"#!/bin/sh
+set -eu
+[ "$1" = --user ]
+unit="$HOME/.config/systemd/user/private-ai-proxy.service"
+case "$2" in
+  show-environment|daemon-reload) ;;
+  show)
+    if [ -f "$unit" ]; then
+      state=disabled
+      [ ! -f "$HOME/enabled" ] || state=enabled
+      pid=0
+      active=inactive
+      if [ -f "$HOME/managed-pid" ]; then
+        read -r pid <"$HOME/managed-pid"
+        active=active
+      fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nActiveState=%s\nMainPID=%s\n' "$unit" "$state" "$active" "$pid"
+    else
+      printf 'LoadState=not-found\nDropInPaths=\n'
+    fi ;;
+  enable) : > "$HOME/enabled" ;;
+  start)
+    "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
+    printf '%s\n' "$!" >"$HOME/managed-pid" ;;
+  disable) /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
+  *) exit 2 ;;
+esac
+"#;
+    let busctl = r#"#!/bin/sh
+printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{"data":[[],[]]}'
+"#;
+    for (name, script) in [("systemctl", systemctl), ("busctl", busctl)] {
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        let output = Command::new(&cli)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PAP_FIXTURE_BACKEND", &backend)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_success(&output);
+    };
+    let uninstall = ["--yes", "service", "disable", "--for-uninstall"];
+    run(&["service", "enable"]);
+    run(&["--yes", "service", "disable"]);
+    assert!(marker.is_file());
+    run(&uninstall);
+    assert!(marker.is_file());
+
+    run(&["service", "enable"]);
+    assert!(unit.is_file());
+    assert!(!marker.exists());
+    run(&uninstall);
+    assert!(!unit.exists());
+    assert!(!home.join("enabled").exists());
+    assert!(!marker.exists());
+
+    let socket_path = desktop_core::transport::endpoint_path_for(&data, &runtime).unwrap();
+    let socket_dir = socket_path.parent().unwrap();
+    fs::create_dir_all(socket_dir).unwrap();
+    fs::set_permissions(socket_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    // Exercise re-enrollment with a verified backend and no live provider.
+    fs::write(
+        home.join("managed-pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+    let server = verified_backend_fixture(socket_path, &backend, 5, json!({}), &[]);
+    run(&["start"]);
+    assert!(unit.is_file());
+    assert!(home.join("enabled").exists());
+    server.join().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn verified_backend_fixture(
+    socket_path: std::path::PathBuf,
+    cli: &std::path::Path,
+    expected_requests: usize,
+    version_metadata: Value,
+    additional_responses: &[(&'static str, String)],
+) -> std::thread::JoinHandle<()> {
+    let state = desktop_core::contracts::AppState {
+        backend_connected: Some(true),
+        status: desktop_core::contracts::VerificationStatus::Verified,
+        config: desktop_core::contracts::StartConfig {
+            remote_url: "http://127.0.0.1".into(),
+        },
+        profiles: vec![desktop_core::contracts::ConfidentialProfile {
+            id: "test".into(),
+            name: "Test".into(),
+            provider: desktop_core::contracts::ServiceProvider::Custom,
+            remote_url: "http://127.0.0.1".into(),
+            auth: desktop_core::contracts::ProfileAuth::ApiKey,
+            credential_saved: true,
+            credential_ref: None,
+            verified_at: None,
+        }],
+        active_profile_id: "test".into(),
+        api_key_saved: true,
+        ..Default::default()
+    };
+    let state = serde_json::to_string(&desktop_core::contracts::AppStateWire::from(state)).unwrap();
+    let mut version = json!({
+        "apiVersion": desktop_core::protocol::API_VERSION,
+        "product": desktop_core::brand::APP_IDENTIFIER,
+        "version": desktop_core::protocol::BUILD_VERSION,
+        "instanceId": "test-instance",
+        "processId": std::process::id(),
+        "executable": cli,
+    });
+    let mut extra = version_metadata;
+    version
+        .as_object_mut()
+        .unwrap()
+        .append(extra.as_object_mut().unwrap());
+    let version = version.to_string();
+    let state = format!("{{\"result\":{state}}}");
+    let mut responses = additional_responses.to_vec();
+    responses.extend([
+        (desktop_core::protocol::VERSION_PATH, version),
+        ("/api/rpc/get_state", state),
+    ]);
+    let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut requests = 0;
+        while requests < expected_requests && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            loop {
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    if stream.read_exact(&mut byte).is_err() {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                if request.is_empty() || !request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+                let request = String::from_utf8_lossy(&request);
+                let body_length = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .and_then(|length| length.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let mut body = vec![0; body_length];
+                stream.read_exact(&mut body).unwrap();
+                let path = request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                let response_body = responses
+                    .iter()
+                    .find_map(|(route, response)| (*route == path).then_some(response))
+                    .unwrap_or_else(|| panic!("unexpected request {path}"));
+                let body = response_body.as_bytes();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+                requests += 1;
+                if requests >= expected_requests {
+                    break;
+                }
+            }
+        }
+        assert_eq!(requests, expected_requests);
+    })
 }
 
 #[cfg(windows)]
@@ -197,7 +458,7 @@ fn service_disable_succeeds_without_a_windows_backend_login_service() {
     let backend = Backend::start();
     assert_eq!(
         backend.run(&["service", "disable", "--yes"]),
-        json!({"startAtLogin": false})
+        json!({"startAtLogin": false, "supported": false})
     );
     assert!(backend.run(&["service", "status"])["backend"].is_object());
 }
@@ -231,13 +492,90 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
     assert!(error["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("has no API key"));
+        .contains("Run pap profiles verify "));
     assert!(backend
         .run(&["agents", "list"])
         .as_array()
         .unwrap()
         .iter()
         .all(|agent| agent["recorded"] == false));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agents_connect_checks_the_shell_path_before_starting_protection() {
+    let backend = Backend::start();
+    let home = backend.directory.path().join("home");
+    let default = home.join(".codex");
+    let custom = home.join("custom-codex");
+    for directory in [&default, &custom] {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(directory.join("config.toml"), "model = 'native'\n").unwrap();
+    }
+    let run = |args: &[&str], path: &std::path::Path| {
+        backend
+            .command(args)
+            .env("HOME", &home)
+            .env("CODEX_HOME", path)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["agents", "connect", "codex", "--yes"], &custom);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    for text in [
+        "CODEX_HOME",
+        custom.join("config.toml").to_str().unwrap(),
+        default.join("config.toml").to_str().unwrap(),
+        "pap service restart",
+        "from a shell with the desired CODEX_HOME setting",
+    ] {
+        assert!(error.contains(text), "{error}");
+    }
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
+    for directory in [&default, &custom] {
+        assert_eq!(
+            fs::read_to_string(directory.join("config.toml")).unwrap(),
+            "model = 'native'\n"
+        );
+    }
+
+    let preview = run(
+        &["agents", "connect", "codex", "--dry-run", "--json"],
+        &default,
+    );
+    assert_success(&preview);
+    let report: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(
+        report["agent"]["configPath"],
+        default.join("config.toml").to_str().unwrap()
+    );
+    let unrelated = run(&["agents", "connect", "claude-code", "--dry-run"], &custom);
+    assert_success(&unrelated);
+
+    let alias = home.join("codex-alias");
+    std::os::unix::fs::symlink(&default, &alias).unwrap();
+    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
+    fs::remove_file(default.join("config.toml")).unwrap();
+    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
+}
+
+#[test]
+fn agents_connect_rejects_shell_only_validation_overrides() {
+    let backend = Backend::start();
+    let output = backend
+        .command(&["agents", "connect", "oh-my-pi", "--yes"])
+        .env("OMP_PROFILE", "work")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("OMP_PROFILE is set in one environment only"),
+        "{error}"
+    );
+    assert!(error.contains("pap service restart"), "{error}");
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
 }
 
 #[cfg(unix)]
@@ -721,13 +1059,18 @@ set -eu
 unit="$HOME/.config/systemd/user/private-ai-proxy.service"
 shift
 case "$1" in
+  show-environment) ;;
   show)
     if [ -f "$unit" ]; then
       unit_state=disabled
       [ ! -e "$HOME/enabled" ] || unit_state=enabled
       pid=0
-      if [ -f "$HOME/managed-pid" ]; then read -r pid <"$HOME/managed-pid"; fi
-      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$pid"
+      active_state=inactive
+      if [ -f "$HOME/managed-pid" ]; then
+        read -r pid <"$HOME/managed-pid"
+        active_state=active
+      fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nActiveState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$active_state" "$pid"
     else
       printf 'LoadState=not-found\nDropInPaths=\n'
     fi ;;
@@ -788,9 +1131,41 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
         }
     };
 
+    // Enabling starts the backend under the service manager, which resumes the
+    // saved session. Stop it and save the session again so a detached backend
+    // can start with it while the manager is unavailable.
     run(&["service", "enable"]);
+    assert!(home.join("managed-pid").exists());
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"enabled": true, "active": true, "reason": null, "detail": "Enabled (active)"})
+    );
+    // Disabling a systemd unit does not stop a running service.
+    fs::remove_file(home.join("enabled")).unwrap();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"enabled": false, "active": true, "reason": null, "detail": "Active (disabled at login)"})
+    );
+    fs::write(home.join("enabled"), "").unwrap();
+    drop(wait_for_verification());
+    run(&["service", "stop", "--yes"]);
+    fs::remove_file(home.join("managed-pid")).unwrap();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"enabled": true, "active": false, "reason": null, "detail": "Enabled (inactive)"})
+    );
+    usage.save_active_session("handoff-session", 1).unwrap();
     fs::write(home.join("no-bus"), "").unwrap();
     let detached = run(&["service", "start"])["processId"].clone();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({
+            "enabled": false,
+            "active": false,
+            "reason": "service_manager_unavailable",
+            "detail": "Unavailable because no user service manager is running",
+        })
+    );
     let verifying = wait_for_verification();
     fs::remove_file(home.join("no-bus")).unwrap();
 

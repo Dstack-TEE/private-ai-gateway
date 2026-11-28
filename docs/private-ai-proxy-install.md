@@ -142,3 +142,92 @@ Signed desktop app installers, portable CLI archives, and Linux DEB, RPM, and
 Arch packages are published on the
 [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases)
 page. Native package managers own upgrades and removal for their installations.
+
+### Verify Linux packages
+
+Download `SHA256SUMS` and `SHA256SUMS.asc` alongside the packages. Download the
+Linux public key as `linux-signing-key.asc` from the build commit linked in
+the release notes. Verify that its primary fingerprint matches
+`1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140` before using it.
+
+```bash
+gpg --show-keys --with-fingerprint linux-signing-key.asc
+gpg --dearmor --output private-ai-proxy-archive-keyring.gpg linux-signing-key.asc
+gpgv --keyring "$PWD/private-ai-proxy-archive-keyring.gpg" SHA256SUMS.asc SHA256SUMS &&
+  sha256sum --ignore-missing --check SHA256SUMS
+```
+
+For an RPM, import the trusted key and verify the embedded package signature.
+Set `rpm_file` to the desktop or CLI filename you downloaded.
+
+```bash
+sudo rpm --import linux-signing-key.asc
+rpmkeys -Kv "$rpm_file"
+```
+
+Confirm that the signature reports `OK`, then run `sudo rpm -U "$rpm_file"`.
+
+For an Arch package, set `arch_file` to the downloaded package basename.
+Save its matching `.pkg.tar.zst.sig` as `$arch_file.sig.download` so pacman
+leaves verification to `gpgv`. Use the shipped keyring. For a first install or
+an upgrade from an older package without a keyring, use the keyring you created
+above from the verified public certificate.
+
+```bash
+keyring=/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg
+if [ ! -f "$keyring" ]; then
+  keyring="$PWD/private-ai-proxy-archive-keyring.gpg"
+fi
+gpgv --keyring "$keyring" "$arch_file.sig.download" "./$arch_file" &&
+  sudo pacman -U "./$arch_file"
+```
+
+The commands use the default Arch policy that permits local installs after
+external verification. Use the signed checksum list to verify downloaded
+DEBs. DEBs also ship the binary keyring for APT repository metadata
+verification.
+
+## Update
+
+| Installation | How to update |
+| --- | --- |
+| macOS or Linux install script | Run `pap update`. If a managed command link is missing from PATH, rerun the [installer](#macos-and-linux) with the original directories. |
+| Linux DEB package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the APT commands. |
+| Linux RPM package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the RPM commands. The updater [reuses the registered key, imports the local certificate, or checks the fingerprint of a downloaded certificate](../apps/desktop/docs/distribution.md#linux-release-signing) before `rpm -U`. Older desktop RPMs may need a [manual upgrade](#verify-linux-packages) first. |
+| Linux Arch package | Follow Settings > About for desktop installs or run `pap update` for CLI-only installs. Download the package and detached signature, verify the signature with `gpgv` against the shipped keyring, then install the local file with `pacman -U`. For older packages without a keyring, follow [Verify Linux packages](#verify-linux-packages). |
+| npm | Run `pap update` on macOS or Linux. On Windows, stop the backend with `pap --yes service stop` and rerun the [npm install command](#npm). |
+| Homebrew | Run `brew upgrade dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
+| Windows PowerShell installer | Rerun the [installer](#windows) with the same `-InstallDir` if customized. |
+| Desktop app | Check for updates in Settings > About. For Mac App Store installs, use the App Store. |
+
+## Uninstall
+
+Before removing a CLI installation without a removal hook, quit the desktop
+app if open and run the following as the user who ran Private AI Proxy. If
+login supervision is unavailable, continue with the stop and offline restore.
+
+```sh
+pap --yes service disable
+pap --yes service stop
+pap --yes stop --offline
+```
+
+| Installation | How to remove it |
+| --- | --- |
+| macOS or Linux install script | Delete the `pap`, `aci`, and `private-ai-proxy` links from the [installer's bin directory](#macos-and-linux) and remove its versioned installation directory. |
+| Linux DEB, RPM, or Arch package | Remove `private-ai-proxy-cli` or `private-ai-proxy` with the package manager. Current packages attempt the cleanup above automatically while preserving the login preference. |
+| npm | Run `npm uninstall --global private-ai-proxy`. |
+| Homebrew | Run `brew uninstall dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
+| Windows PowerShell installer | Run `pap --yes cli uninstall` to remove its PATH registration, then delete the [CLI install directory](#windows). |
+| Desktop app | On Windows, use **Settings > Apps > Installed apps**. On macOS, choose **Stop All and Quit**, turn off login supervision as described in [CLI distribution](../apps/desktop/docs/cli-distribution.md) if enabled, then move the app to Trash. |
+
+Linux package removal continues if a cleanup step fails. Package switches may
+trigger cleanup if the package manager removes the conflicting package. A dpkg
+replacement reported as `in-favour` of the other Private AI Proxy package skips
+cleanup.
+
+If you already removed the CLI and an agent still points to the Local API,
+reinstall the same package or use another `pap` installation to retry
+`pap stop --offline` with the original user data. If you explicitly disabled
+login supervision before uninstalling, `pap service enable` turns it back on
+after reinstalling.

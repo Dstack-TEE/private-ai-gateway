@@ -42,11 +42,16 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         }
         Action::Stop { offline: true } => agents(value),
         Action::Service { command } => match command {
+            Service::Start if value["alreadyRunning"] == true => "Backend is already running.".into(),
             Service::Start => "Backend started.".into(),
+            Service::Stop if value["alreadyStopped"] == true => "Backend was not running.".into(),
             Service::Stop => "Backend stopped.".into(),
             Service::Restart => "Backend restarted.".into(),
-            Service::Enable => "The backend starts at login and after a crash using the service manager's environment.".into(),
-            Service::Disable => "The backend no longer starts at login.".into(),
+            Service::Enable => "Backend running. It also starts at login and after a crash using the service manager's environment.".into(),
+            Service::Disable { .. } if value["supported"] == false => {
+                "Manage login startup through Open at Login in the desktop app.".into()
+            }
+            Service::Disable { .. } => "The backend no longer starts at login.".into(),
             Service::Run => String::new(),
             Service::Status => status(value),
         },
@@ -78,7 +83,11 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             ),
             Profiles::Remove { id } => format!("Deleted profile: {}", safe(id)),
             Profiles::Add { .. } | Profiles::Verify { .. } | Profiles::Edit { .. } => {
-                format!("Profile verified and saved.\n{}", status(value))
+                let mut result = format!("Profile verified and saved.\n{}", status(value));
+                if value["sessionActive"] != true {
+                    result.push_str("\nStart protection with pap start.");
+                }
+                result
             }
             Profiles::Show { .. } | Profiles::Import { .. } => details(value),
         },
@@ -112,7 +121,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
         },
         Action::Token { command } => match command {
             Token::Show => text(&value["token"]),
-            Token::Rotate => "Client key rotated.".into(),
+            Token::Rotate => "Local API token rotated.".into(),
             Token::ClearCredential => "Profile credential removed.".into(),
         },
         Action::WebUi {
@@ -135,7 +144,14 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             ),
             None => format!("Up to date ({}).", text(&value["currentVersion"])),
         },
-        Action::Cli { .. } | Action::Doctor | Action::Completions { .. } => details(value),
+        Action::Doctor => field_details(
+            value.as_object().into_iter().flatten().filter_map(|(key, value)| match key.as_str() {
+                "loginService" => Some((key, &value["detail"])),
+                "errors" | "warnings" if value.as_object().is_some_and(|fields| fields.is_empty()) => None,
+                _ => Some((key, value)),
+            }),
+        ),
+        Action::Cli { .. } | Action::Completions { .. } => details(value),
     }
 }
 
@@ -189,8 +205,16 @@ fn agents(value: &Value) -> String {
 }
 
 fn status(value: &Value) -> String {
+    let login_service = value["loginService"]["detail"].as_str().map(safe);
     if value["status"] == "not_running" {
-        return "Backend not running. Agents connected through it cannot reach the Local API.\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start".into();
+        let mut result =
+            "Backend not running. Agents connected through it cannot reach the Local API."
+                .to_string();
+        if let Some(status) = login_service {
+            result.push_str(&format!("\nLogin service: {status}"));
+        }
+        result.push_str("\nStart protection: pap start\nStart management backend (resumes saved protection): pap service start\nRestore agents without it: pap stop --offline");
+        return result;
     }
     let state = value.get("gateway").unwrap_or(value);
     let status = match state["status"].as_str() {
@@ -220,6 +244,12 @@ fn status(value: &Value) -> String {
             text(&backend["processId"]),
             text(&backend["version"])
         ));
+    }
+    if let Some(status) = login_service {
+        lines.push(format!("Login service: {status}"));
+    }
+    for warning in value["agentPathWarnings"].as_array().into_iter().flatten() {
+        lines.push(format!("Warning: {}", text(warning)));
     }
     let profile = state["profiles"].as_array().and_then(|profiles| {
         profiles
@@ -441,30 +471,33 @@ fn list(value: &Value, columns: &[&str], empty: &str) -> String {
 // Keep uncommon diagnostic and nested settings fields readable without losing them.
 pub(super) fn details(value: &Value) -> String {
     match value {
-        Value::Object(fields) => fields
-            .iter()
-            .filter(|(_, value)| !value.is_null())
-            .map(|(key, value)| {
-                if value.is_object() || value.is_array() {
-                    format!(
-                        "{}:\n{}",
-                        label(key),
-                        details(value)
-                            .lines()
-                            .map(|line| format!("  {line}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )
-                } else {
-                    format!("{}: {}", label(key), text(value))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Value::Object(fields) => field_details(fields.iter()),
         Value::Array(items) if items.is_empty() => "None".into(),
         Value::Array(items) => items.iter().map(details).collect::<Vec<_>>().join("\n\n"),
         _ => text(value),
     }
+}
+
+fn field_details<'a>(fields: impl Iterator<Item = (&'a String, &'a Value)>) -> String {
+    fields
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, value)| {
+            if value.is_object() || value.is_array() {
+                format!(
+                    "{}:\n{}",
+                    label(key),
+                    details(value)
+                        .lines()
+                        .map(|line| format!("  {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            } else {
+                format!("{}: {}", label(key), text(value))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn text(value: &Value) -> String {
@@ -496,6 +529,19 @@ fn label(key: &str) -> String {
 mod tests {
     use super::*;
     use desktop_core::contracts::{AppState, AppStateWire, VerificationCheck, VerificationStatus};
+
+    #[test]
+    fn doctor_omits_empty_errors_and_warnings() {
+        let value = serde_json::json!({
+            "loginService": {"enabled": true, "active": true, "reason": null, "detail": "Enabled (active)"},
+            "errors": {},
+            "warnings": {},
+        });
+        assert_eq!(
+            render(&Action::Doctor, &value),
+            "Login service: Enabled (active)"
+        );
+    }
 
     #[test]
     fn management_fields_cannot_inject_output_lines() {

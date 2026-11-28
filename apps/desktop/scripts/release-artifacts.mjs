@@ -29,18 +29,19 @@ export function artifactName({ version, platform, arch, suffix = "", cli = false
   return `private-ai-proxy${cli ? "-cli" : ""}-${version}-${platform}-${arch}${suffix}`;
 }
 
-// Every file a desktop release publishes besides SHA256SUMS: the updater
-// packages, disk images, Arch desktop packages, CLI archives and packages, and
-// latest.json.
+export const releaseChecksumAssets = ["SHA256SUMS", "SHA256SUMS.asc"];
+
+// Every published file, including the checksum list and its signature.
 export function releaseAssetNames(version) {
-  const names = [...desktopPackages.map((entry) => artifactName({ version, ...entry })), "latest.json"];
+  const names = [...desktopPackages.map((entry) => artifactName({ version, ...entry })), "latest.json", ...releaseChecksumAssets];
   for (const arch of ["arm64", "x64"]) {
     names.push(
       artifactName({ version, platform: "macos", arch, suffix: ".dmg" }),
       artifactName({ version, platform: "linux", arch, suffix: ".pkg.tar.zst" }),
+      artifactName({ version, platform: "linux", arch, suffix: ".pkg.tar.zst.sig" }),
       artifactName({ version, platform: "macos", arch, suffix: ".tar.gz", cli: true }),
       artifactName({ version, platform: "windows", arch, suffix: ".zip", cli: true }),
-      ...[".tar.gz", ".deb", ".rpm", ".pkg.tar.zst"].map((suffix) => artifactName({ version, platform: "linux", arch, suffix, cli: true })),
+      ...[".tar.gz", ".deb", ".rpm", ".pkg.tar.zst", ".pkg.tar.zst.sig"].map((suffix) => artifactName({ version, platform: "linux", arch, suffix, cli: true })),
     );
   }
   return names.sort();

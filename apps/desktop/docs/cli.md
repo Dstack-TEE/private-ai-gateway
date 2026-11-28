@@ -21,22 +21,28 @@ pap agents list                # the coding agents found on this machine
 pap agents connect codex       # route one through the Local API
 ```
 
-`pap agents connect` starts protection first when it is off, so the agent is
-routed when the command succeeds; if protection cannot start, it exits `1` with
-the reason before saving the connection. `--dry-run` previews against the
-running backend without starting the backend or protection.
+`pap agents connect` checks the agent ID before starting protection or saving
+the connection. When protection is off, the command starts it first and exits
+`1` if it cannot verify the service. `--dry-run` previews against the running
+backend without starting the backend or protection.
 
 With an API key instead of an account, replace the first step with
-`pap profiles add --id work --name Work --url <service URL>`, which asks for
-the key at a hidden prompt. `pap status` shows what protection is doing and why
-at any time.
+`pap profiles add --id work --name Work`, which asks for
+the key at a hidden prompt. RedPill and Phala profiles always use their
+service URLs (`https://tee.redpill.ai` and `https://inference.phala.com`).
+Omitting `--provider` uses RedPill with no `--url` and a custom provider when
+`--url` is supplied. To explicitly select Phala, use `--provider phala`.
+`pap status` shows what protection is doing and why at any time.
 
 On supported Linux and macOS CLI installations, `pap start` registers the
-backend with systemd or launchd. Protection resumes after login and crashes.
-Automatic registration skips shells with agent or proxy overrides. When that
-happens, the first `pap start` names the variables and shows `pap service enable`
-as the opt-in. Configure those variables in the service manager's environment
-first, then run `pap service enable`. PAP path overrides keep automatic supervision
+backend with systemd or launchd, as does `pap agents connect` when it starts
+protection. Protection resumes after login and crashes. Both commands report
+automatic registration failures as advisory warnings once protection is
+verified. Automatic registration skips shells with agent or proxy overrides.
+The first notice names the variables and gives the `pap service enable`
+command. Configure those variables in the service manager's environment
+first, then run `pap service enable`, which also starts the backend under the
+service manager now. PAP path overrides keep automatic supervision
 off and require the default PAP paths for `pap service enable`. If the backend
 started directly while the manager was unavailable, `pap start` or
 `pap service enable` can move it under its already enabled login service.
@@ -44,7 +50,28 @@ started directly while the manager was unavailable, `pap start` or
 supervision. The Linux and direct macOS app uses this same registration for
 **Run in background at login**. **Open at Login** opens the app in the tray.
 On Windows it starts on by default once, and opening the tray starts the
-backend. You can also run `pap service start` after restarting the machine.
+backend. You can also run `pap start` to turn on protection after restarting
+the machine.
+`pap status` and `pap doctor` show the login service state and explain why
+automatic registration is skipped when applicable.
+
+The backend may see different agent configuration paths than your shell.
+For example, exporting `CODEX_HOME` after the backend has started can point
+Codex at a different file. `pap agents connect` compares the paths for the
+selected agent and refuses a connection when its config path override points
+the two processes at different files. It also checks whether the same
+validation variables are set in both environments. For example, setting
+`OMP_PROFILE` only in the shell can make Oh My Pi read a different profile.
+`pap start`, `pap status`, and `pap doctor` warn about these differences for
+connected agents.
+
+For a supervised backend, match the variable in the service manager's
+environment, then run `pap service restart`. On Linux, use `environment.d` or
+`systemctl --user set-environment`. On macOS, use `launchctl setenv`. For a
+detached backend, run `pap service restart` from a shell with the desired
+settings. With a compatible older backend that lacks override metadata,
+`pap agents connect` prints a warning and continues.
+
 See [Standalone CLI](cli-distribution.md#standalone-cli).
 
 ## Discover Commands
@@ -683,7 +710,8 @@ pap profiles import profiles.json --yes
 ```
 
 Adding, editing and verifying a profile use the backend's verification and
-credential-storage policy. Verification can change the active profile and
+credential-storage policy. `profiles add` requires an unused profile ID.
+Verification can change the active profile and
 restart protection; it is not a read-only probe. `profiles verify` on the
 profile that is protecting, without a new key, attests the service again where
 it runs and, for an unchanged service, keeps its requests and streams; with a new key or another profile it says that
@@ -694,7 +722,8 @@ reports it. Verification attests the service and reads its model list; a
 service that lists models without authentication does not reject a wrong key
 there, so a bad key first shows as `service_key_rejected` on a request.
 Replace a saved key with `pap profiles verify <id> --replace-key` (hidden
-prompt) or `--key-stdin`. Credentials use a hidden prompt
+prompt) or `--key-stdin`. To restore an account credential, run
+`pap profiles login <id>`. Credentials use a hidden prompt
 or explicit `--key-stdin`. Never pass a credential as an argument. Changing a
 service URL requires a credential for that destination, not implicit forwarding
 of the old one. Exported profiles do not contain credentials.
@@ -719,7 +748,23 @@ not a parsing contract.
 `pap status --json` and `pap service start --json` report the backend as the
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
-field `protocolVersion`). A command that fails prints
+field `protocolVersion`). The local version response can also include
+`agentPathOverrides` as an object mapping selector names to path strings,
+`agentValidationOverrides` as an array of variable names, and a `supervised`
+boolean. `pap start
+--json` and `pap status --json` include `agentPathWarnings` when applicable.
+`pap doctor --json` reports the same warnings under `warnings.agentPaths`.
+The `pap status --json` and `pap doctor --json`
+reports include a `loginService` object. Its `enabled` and `active` booleans
+report login registration and current activity independently. They describe
+the login service managed by the OS. The `reason` field is `null` for an
+ordinary state, or one of `disabled_by_user`, `skipped_environment_overrides`,
+`automatic_registration_unavailable`, `path_overrides`, `unsupported`,
+`service_manager_unavailable`, or `inspection_failed`. When PAP cannot inspect
+the service, both booleans are false and the reason explains why. The
+`detail` field contains human-readable text. `pap start --json` and
+`pap agents connect --json` include `supervisionNotice` when they produce an
+automatic registration warning. A command that fails prints
 `{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is
 the backend's stable error code, such as `invalid_state`, `busy` or
 `revision_conflict`, or `command_failed` for a failure the CLI reports itself;
@@ -763,8 +808,9 @@ prints the partial report on stdout and exits nonzero; the `errors` object
 identifies failed checks. `settings` names the settings files; an invalid file
 is an error. `warnings` lists problems that do not fail `doctor`: a
 `credentials.toml` other users can read (`credentials`), profiles without a
-saved API key (`profileCredentials`) and settings files left where macOS and
-Windows builds up to 0.2.0-beta.8 kept them (`legacySettingsDirectory`; see
+saved credential (`profileCredentials`, with a command to replace it), and
+settings files left where macOS and Windows builds up to 0.2.0-beta.8 kept them
+(`legacySettingsDirectory`; see
 [Settings files](configuration.md#moving-from-the-earlier-macos-and-windows-location)). The `update` check is advisory: when the release
 feed is unreachable it reports an `error` inside `update` without failing
 `doctor`. `logs` is the directory of the service's log files.
@@ -784,9 +830,10 @@ directory with the home directory shown as `~`.
 
 | Core capability | CLI |
 | --- | --- |
-| Backend and protection lifecycle | `service`, `start`, `stop [--offline]`, `status --watch` |
+| Backend and protection lifecycle | `service start/stop/restart/status`, `start`, `stop [--offline]`, `status --watch` |
+| Backend supervision on Linux and macOS | `service enable/disable` |
 | Browser management UI | `settings set web-ui.enabled true`, `web-ui password show`/`rotate`, `settings set web-ui.password --value-stdin`, `web-ui.listen-address`/`web-ui.allow-network-access`/`web-ui.client-host`, `app open --web` |
-| Profile inspection, verification and selection | `profiles list/show/add/edit/verify/use/remove` |
+| Profile sign-in, inspection, verification and selection | `profiles login/list/show/add/edit/verify/use/remove` |
 | Credential replacement and removal | `profiles verify --key-stdin`, `token clear-credential` |
 | Agent configuration review and restoration | `agents list/connect/disconnect/disconnect-all` |
 | Verified model catalog | `models list --refresh` |
@@ -797,6 +844,7 @@ directory with the home directory shown as `~`.
 | Configuration backups and redacted diagnostics | `profiles import/export`, `diagnostics` |
 | CLI registration and app opening | `cli status/install/uninstall`, `app open` |
 | Installation and connection diagnostics | `doctor` |
+| Package upgrades | `update` |
 
 Usage time filters are Unix seconds. List pagination uses `--cursor` and
 `--limit`; CSV export covers all records matching its filters, not just the
@@ -811,8 +859,11 @@ reads at most 64 KiB of a receipt (the spec's test vector is under 1 KiB); a
 larger document fails the audit without being checked or saved, so `--receipt`
 reports that no receipt is saved, as it does before the audit finishes.
 
-OS login startup, notification permissions and installer-based app updates stay
-in the desktop app or the OS installer. `doctor` also reports whether the saved update
+On Linux and direct macOS installations, `service enable` starts the backend
+under the user service manager and configures it to start at login and after
+crashes. On Windows, the desktop app manages **Open at Login**. Notification
+permissions and installer-based app updates are managed by the desktop app or
+the OS installer. `doctor` also reports whether the saved update
 channel (`settings set update-channel beta|stable`) has a newer release and the
 exact upgrade steps for this installation. `pap update` runs those steps, printing each
 one, for the installations a package manager owns

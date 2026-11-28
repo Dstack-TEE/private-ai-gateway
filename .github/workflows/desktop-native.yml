@@ -87,12 +87,12 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         env:
-          NFPM_VERSION: 2.47.0
+          NFPM_VERSION: 2.49.0
         run: |
           set -euo pipefail
           case "$(uname -m)" in
-            x86_64) asset="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" digest=0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783 ;;
-            aarch64) asset="nfpm_${NFPM_VERSION}_Linux_arm64.tar.gz" digest=1c0f5f2999b9a974bfb04fdb0cc3306096de530ac5dbb25d739cc5f5219c919c ;;
+            x86_64) asset="nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" digest=2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7 ;;
+            aarch64) asset="nfpm_${NFPM_VERSION}_Linux_arm64.tar.gz" digest=d4eee71839e92c68cbd3b101640bad32d2856fc551acae0635be9118e48c9d9c ;;
             *) echo "Unsupported nfpm runner architecture $(uname -m)" >&2; exit 1 ;;
           esac
           directory="$RUNNER_TEMP/nfpm"
@@ -265,8 +265,8 @@ jobs:
           - { platform: macos-x64, os: xcode-27, target: x86_64-apple-darwin, bundle_dir: x86_64-apple-darwin/release/bundle, bundles: 'app,dmg', cli_platform: macos, cli_arch: x64 }
           - { platform: windows-x64, os: windows-2025, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: x64 }
           - { platform: windows-arm64, os: windows-11-arm, target: '', bundle_dir: release/bundle, bundles: nsis, cli_platform: windows, cli_arch: arm64 }
-          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: deb, cli_platform: linux, cli_arch: x64 }
-          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: deb, cli_platform: linux, cli_arch: arm64 }
+          - { platform: linux-x64, os: ubuntu-22.04, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: x64 }
+          - { platform: linux-arm64, os: ubuntu-22.04-arm, target: '', bundle_dir: release/bundle, bundles: 'deb,rpm', cli_platform: linux, cli_arch: arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.cli_platform == 'macos' && 90 || 60 }}
     steps:
@@ -399,9 +399,17 @@ jobs:
         env: *updater-signing
         run: npm run dist -- --bundles ${{ matrix.bundles }}
 
+      - name: Prepare Linux signing
+        if: runner.os == 'Linux' && env.RELEASE_CHANNEL != ''
+        shell: bash
+        env: &linux-signing-secret
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+        run: &prepare-linux-signing |
+          bash apps/desktop/scripts/prepare-linux-signing.sh apps/desktop/packaging/linux-signing-key.asc >> "$GITHUB_ENV"
+
       # Tauri writes SemVer prereleases verbatim, which dpkg and rpm order after
-      # the stable release. nfpm packages its payload as DEB, RPM and Arch
-      # packages with native versions; the updater signs the final DEB and RPM.
+      # the stable release. nfpm uses Tauri's Linux payload and RPM-specific
+      # executable, then signs the RPM before the updater does.
       - name: Package Linux desktop
         if: runner.os == 'Linux'
         working-directory: apps/desktop
@@ -496,6 +504,17 @@ jobs:
             --version "$VERSION" \
             --target-triple "$target_triple" \
             --output release "${source_args[@]}"
+
+      # nfpm needs the unprotected key file for both the desktop and CLI RPMs.
+      - name: Remove Linux signing material
+        if: always() && runner.os == 'Linux' && env.RELEASE_CHANNEL != ''
+        shell: bash
+        run: &remove-linux-signing |
+          signing="$RUNNER_TEMP/pap-linux-signing"
+          if [[ -d "$signing/gnupg" ]]; then
+            gpgconf --homedir "$signing/gnupg" --kill gpg-agent || true
+          fi
+          rm -rf -- "$signing"
 
       - name: Check CLI-only archive without UI
         working-directory: apps/desktop
@@ -939,17 +958,29 @@ jobs:
       - name: Install release tooling
         working-directory: apps/desktop
         run: npm ci --ignore-scripts
-      # Tauri signatures ship inside latest.json. SHA256SUMS covers every
-      # published file, as GoReleaser's checksum file does.
-      # create-update-manifest also fails unless the directory holds exactly
-      # the 25 release assets.
-      - name: Create the update manifest and checksums
+      - name: Prepare Linux signing
+        shell: bash
+        env: *linux-signing-secret
+        run: *prepare-linux-signing
+      - name: Sign Arch packages and release checksums
+        shell: bash
         run: |
           set -euo pipefail
+          gnupg="$RUNNER_TEMP/pap-linux-signing/gnupg"
+          signer=(gpg --batch --no-tty --homedir "$gnupg" --pinentry-mode loopback --passphrase '' --local-user "$PAP_LINUX_SIGNING_FINGERPRINT!")
+          for package in release/*.pkg.tar.zst; do
+            "${signer[@]}" --detach-sign "$package"
+          done
+          # The manifest consumes only Tauri signatures. SHA256SUMS also covers
+          # the detached Arch signatures that are published alongside packages.
           node apps/desktop/scripts/create-update-manifest.mjs release "$VERSION" "$GITHUB_REPOSITORY" "$CHANNEL"
-          rm release/*.sig
           (cd release && sha256sum -- * > "$RUNNER_TEMP/SHA256SUMS")
           mv "$RUNNER_TEMP/SHA256SUMS" release/SHA256SUMS
+          "${signer[@]}" --armor --detach-sign release/SHA256SUMS
+      - name: Remove Linux signing material
+        if: always()
+        shell: bash
+        run: *remove-linux-signing
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: release/SHA256SUMS
@@ -963,15 +994,21 @@ jobs:
           path: sbom
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: release/private-ai-proxy-*
+          subject-path: |
+            release/private-ai-proxy-*
+            !release/*.pkg.tar.zst.sig
           sbom-path: sbom/private-ai-proxy.cdx.json
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: release/private-ai-proxy-*
+          subject-path: |
+            release/private-ai-proxy-*
+            !release/*.pkg.tar.zst.sig
           sbom-path: sbom/private-ai-proxy-renderer.cdx.json
       - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: release/private-ai-proxy-[0-9]*
+          subject-path: |
+            release/private-ai-proxy-[0-9]*
+            !release/*.pkg.tar.zst.sig
           sbom-path: sbom/private-ai-proxy-desktop.cdx.json
       # release-please created the draft with the changelog as its notes.
       - name: Attach the assets to the draft release

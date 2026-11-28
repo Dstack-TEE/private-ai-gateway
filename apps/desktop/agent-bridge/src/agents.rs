@@ -33,7 +33,7 @@ use providers::*;
 pub(crate) use registry::AgentIntegration;
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -72,6 +72,63 @@ const HELPER_MISSING: &str =
                               agents cannot be connected";
 const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
     Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
+
+/// Path selectors in the same precedence order as agent configuration discovery.
+pub fn config_path_sources(agent: Agent) -> &'static [&'static str] {
+    use registry::*;
+    match agent {
+        Agent::Codex => &[CODEX_HOME],
+        Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR],
+        Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME],
+        Agent::Pi => &[PI_CODING_AGENT_DIR],
+        Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR],
+        Agent::Hermes if cfg!(windows) => &[HERMES_HOME, LOCALAPPDATA],
+        Agent::Hermes => &[HERMES_HOME],
+        Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME],
+        Agent::Dsh => &[DSH_HOME],
+    }
+}
+
+/// Only variables that select a config path. Inline config and tokens can contain secrets.
+pub fn agent_path_overrides() -> BTreeMap<String, String> {
+    Agent::ALL
+        .into_iter()
+        .flat_map(config_path_sources)
+        .filter_map(|&name| {
+            env_path(name).map(|path| (name.into(), path.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// Variables that can change which configuration layers or credentials an agent uses.
+pub fn validation_sources(agent: Agent) -> &'static [&'static str] {
+    use desktop_core::paths::agent_environment::DSH_TOKEN_REF;
+    use registry::*;
+    match agent {
+        Agent::OpenCode if cfg!(windows) => {
+            &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT, PROGRAM_DATA]
+        }
+        Agent::OpenCode => &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT],
+        Agent::OhMyPi => &[OMP_PROFILE, PI_PROFILE],
+        Agent::OpenClaw => &[OPENCLAW_PROFILE, OPENCLAW_NIX_MODE],
+        Agent::Dsh => &[DSH_TOKEN_REF],
+        _ => &[],
+    }
+}
+
+/// Validation variables may contain secrets. Capture their names alone.
+pub fn agent_validation_overrides() -> BTreeSet<String> {
+    Agent::ALL
+        .into_iter()
+        .flat_map(validation_sources)
+        .filter(|name| env::var_os(name).is_some())
+        .map(|&name| name.into())
+        .collect()
+}
+
+pub fn shell_config_path(agent: Agent) -> Result<PathBuf, String> {
+    Ok(agent.config_path(&home_dir()?, true))
+}
 
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {
@@ -472,11 +529,20 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
+        let prior = self.current_record(agent, store.get(agent.id()));
+        let executable = self.opencode_executable(agent, connect, options, prior)?;
+        let connection = self.connection_catalog(agent, connect, catalog, executable.as_deref());
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match self.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
-            Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
+            Ok(mut doc) => match self.edit(
+                agent,
+                &mut doc,
+                &store,
+                connection.filter(|_| connect),
+                options,
+            ) {
                 Ok(edit) => edit,
                 Err(error) if !connect && store.contains_key(agent.id()) => {
                     restore_problem = Some(error.to_string());
@@ -492,23 +558,29 @@ impl Projector {
             }
             Err(error) => return Err(error),
         };
+        let mut note = restore_problem.map_or_else(
+            || agent.note(connect).to_string(),
+            |reason| format!("Access will be revoked before restoration is attempted. {reason}"),
+        );
+        if agent == Agent::OpenCode
+            && connect
+            && self.tool_env
+            && connection.is_some_and(|connection| connection.opencode_version.is_none())
+        {
+            note.push_str(" PAP could not read the installed OpenCode version and chose the provider shape from the config file.");
+        }
         Ok(AgentPreview {
             agent: self.status(agent, &store, catalog),
             connect,
             changes: edit.changes,
-            note: restore_problem.map_or_else(
-                || agent.note(connect).to_string(),
-                |reason| {
-                    format!("Access will be revoked before restoration is attempted. {reason}")
-                },
-            ),
+            note,
             revision: revision(
                 agent,
                 connect,
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
-                catalog,
+                connection,
                 options,
             ),
         })
@@ -591,7 +663,7 @@ fn revision(
     path: Option<&Path>,
     text: Option<&str>,
     record: Option<&Connection>,
-    catalog: Option<&Catalog>,
+    connection: Option<ConnectionCatalog<'_>>,
     options: &ConnectOptions,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -616,8 +688,8 @@ fn revision(
             .as_bytes(),
     );
     part(
-        catalog
-            .map_or("", |catalog| catalog.revision.as_str())
+        connection
+            .map_or("", |connection| connection.catalog.revision.as_str())
             .as_bytes(),
     );
     part(
@@ -627,6 +699,17 @@ fn revision(
             .unwrap_or_default()
             .as_bytes(),
     );
+    if let Some(version) = connection.and_then(|connection| connection.opencode_version) {
+        part(match version {
+            OpenCodeVersion::V1 => b"1",
+            OpenCodeVersion::V2 => b"2",
+        });
+    }
+    if agent == Agent::OpenCode && connect {
+        if let Some(executable) = &options.opencode_executable {
+            part(executable.as_os_str().as_encoded_bytes());
+        }
+    }
     hex::encode(hasher.finalize())
 }
 

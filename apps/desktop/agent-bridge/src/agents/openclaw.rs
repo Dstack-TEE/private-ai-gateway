@@ -702,7 +702,8 @@ mod tests {
         assert!(validate_selection(
             &doc,
             &ConnectOptions {
-                default_model: Some("vendor/model".into())
+                default_model: Some("vendor/model".into()),
+                ..ConnectOptions::default()
             }
         )
         .is_err());
@@ -717,6 +718,7 @@ mod tests {
         }"#).unwrap();
         let options = ConnectOptions {
             default_model: Some("vendor/model".into()),
+            ..ConnectOptions::default()
         };
         validate_config(&doc, None).unwrap();
         validate_selection(&doc, &options).unwrap();

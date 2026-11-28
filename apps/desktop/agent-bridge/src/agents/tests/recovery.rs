@@ -15,10 +15,11 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
         .projector
         .edit(
             agent,
-            true,
             &mut doc,
             &Store::new(),
-            Some(&catalog),
+            sandbox
+                .projector
+                .connection_catalog(agent, true, Some(&catalog), None),
             &ConnectOptions::default(),
         )
         .unwrap();

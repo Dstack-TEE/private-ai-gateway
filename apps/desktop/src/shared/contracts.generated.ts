@@ -185,7 +185,7 @@ revision: number, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
-export type Installation = "desktopApp" | "desktopPacman" | "deb" | "rpm" | "pacman" | "systemPackage" | "npm" | "portable";
+export type Installation = "desktopApp" | "desktopPacman" | "deb" | "rpm" | "pacman" | "installScript" | "systemPackage" | "npm" | "portable";
 export type UpdateNotice = { installation: Installation, channel: UpdateChannel, currentVersion: string,
 /**
  * A newer release in the selected channel.
@@ -282,7 +282,11 @@ export type ConnectOptions = {
  * Optional default selected from the verified catalog. The full model
  * list is discovered natively or generated from that catalog.
  */
-defaultModel?: string, };
+defaultModel?: string,
+/**
+ * OpenCode executable found on the local client's PATH.
+ */
+opencodeExecutable?: string, };
 export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauthorizationRequired";
 /**
  * The desktop app's update check result for the renderer.

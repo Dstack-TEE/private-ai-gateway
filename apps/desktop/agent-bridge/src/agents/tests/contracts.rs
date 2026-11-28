@@ -405,6 +405,208 @@ fn audit_opencode_v2_projection_uses_native_provider_keys() {
 
 #[cfg(unix)]
 #[test]
+fn opencode_installed_major_moves_only_the_journaled_provider() {
+    const CASE: &str = "PAP_TEST_OPENCODE_VERSION";
+    let Ok(location) = env::var(CASE) else {
+        // The installer probe refuses executables under a world-writable
+        // directory, so keep these fixtures out of /tmp.
+        let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+        for location in ["path", "local-bin", "opencode-bin"] {
+            let case = root.path().join(location);
+            let output = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agents::tests::contracts::opencode_installed_major_moves_only_the_journaled_provider",
+                ])
+                .env_clear()
+                .env(CASE, location)
+                .env("PATH", case.join("bin"))
+                .env("HOME", case.join("home"))
+                .env("XDG_CONFIG_HOME", case.join("config"))
+                .output()
+                .unwrap();
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
+            assert!(
+                output.status.success(),
+                "{location}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    };
+
+    let mut sandbox = sandbox("opencode-installed-major");
+    sandbox.projector.tool_env = true;
+    sandbox.projector.home = env_path("HOME").unwrap();
+    let bin = match location.as_str() {
+        "path" => env_path("PATH").unwrap(),
+        "local-bin" => sandbox.projector.home.join(".local/bin"),
+        "opencode-bin" => sandbox.projector.home.join(".opencode/bin"),
+        _ => panic!("unexpected OpenCode install location"),
+    };
+    let agent = Agent::OpenCode;
+    let config = agent.config_path(&sandbox.home, true);
+    let read = || parse_jsonc(&fs::read_to_string(&config).unwrap()).unwrap();
+    let install = |version| {
+        // A package-manager shim needs to resolve its runtime even when its
+        // directory is missing from the backend's PATH.
+        write_executable(
+            &bin.join("opencode"),
+            "#!/usr/bin/env pap-opencode-version\n",
+        );
+        write_executable(
+            &bin.join("pap-opencode-version"),
+            &format!(
+                "#!/bin/sh\n[ \"$2\" = --version ] && [ \"$XDG_CONFIG_HOME\" = \"$HOME/config\" ] || exit 64\nprintf '%s\\n' '{version}'\n"
+            ),
+        );
+    };
+    let original = json!({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"custom": {"name": "User provider"}}
+    });
+    write(&config, &original.to_string());
+    let catalog = catalog();
+    let options = ConnectOptions::default();
+    let preview = || {
+        sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &options)
+    };
+    let apply = |revision: &str| {
+        sandbox
+            .projector
+            .apply(agent, true, revision, Some(&catalog), &options)
+    };
+
+    install("1.19.6");
+    apply(&preview().unwrap().revision).unwrap();
+    assert!(read().pointer("/provider/private-ai-proxy").is_some());
+    let stale = preview().unwrap();
+
+    install("opencode v2.4.2");
+    assert!(matches!(
+        apply(&stale.revision),
+        Err(AgentError::RevisionConflict)
+    ));
+    apply(&preview().unwrap().revision).unwrap();
+    let native = read();
+    assert!(native.pointer("/provider/private-ai-proxy").is_none());
+    assert_eq!(
+        native["providers"]["private-ai-proxy"]["package"],
+        "@opencode/ai/providers/openai-compatible"
+    );
+    assert_eq!(native["provider"], original["provider"]);
+
+    install("1.19.6");
+    let mut conflict = native.clone();
+    conflict["provider"]["private-ai-proxy"] = json!({"name": "Unmanaged"});
+    write(&config, &conflict.to_string());
+    assert!(matches!(
+        preview(),
+        Err(AgentError::ConfigurationConflict(_))
+    ));
+    assert_eq!(read(), conflict);
+    write(&config, &native.to_string());
+    apply(&preview().unwrap().revision).unwrap();
+    assert!(read().pointer("/providers/private-ai-proxy").is_none());
+    assert_eq!(read()["provider"]["custom"], original["provider"]["custom"]);
+
+    install("opencode v2.4.2");
+    apply(&preview().unwrap().revision).unwrap();
+    fs::remove_file(bin.join("opencode")).unwrap();
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(read()
+        .pointer("/providers/private-ai-proxy/settings/apiKey")
+        .is_none());
+    assert_eq!(read()["provider"], original["provider"]);
+    let disconnect = sandbox
+        .projector
+        .preview(agent, false, None, &options)
+        .unwrap();
+    sandbox
+        .projector
+        .apply(agent, false, &disconnect.revision, None, &options)
+        .unwrap();
+    assert_eq!(read()["provider"], original["provider"]);
+    assert!(sandbox.projector.tokens.read(agent.id()).unwrap().is_none());
+
+    install("unknown");
+    assert!(preview()
+        .unwrap()
+        .note
+        .contains("chose the provider shape from the config file"));
+
+    if location == "local-bin" {
+        let supplied = sandbox.projector.home.join("version-manager/bin/opencode");
+        write_executable(&supplied, "#!/bin/sh\nprintf '%s\\n' 'opencode v2.4.2'\n");
+        install("1.19.6");
+        let shell_bin = sandbox.projector.home.join("shell-bin");
+        std::os::unix::fs::symlink(supplied.parent().unwrap(), &shell_bin).unwrap();
+        let supplied_options = ConnectOptions {
+            opencode_executable: Some(shell_bin.join("opencode")),
+            ..ConnectOptions::default()
+        };
+        let connect = |options: &ConnectOptions| {
+            let preview = sandbox
+                .projector
+                .preview(agent, true, Some(&catalog), options)
+                .unwrap();
+            sandbox
+                .projector
+                .apply(agent, true, &preview.revision, Some(&catalog), options)
+                .unwrap();
+        };
+        connect(&supplied_options);
+        assert!(read().pointer("/providers/private-ai-proxy").is_some());
+        assert_eq!(
+            sandbox.projector.load_store().unwrap()[agent.id()]
+                .options
+                .opencode_executable
+                .as_ref(),
+            Some(&supplied)
+        );
+        fs::remove_file(shell_bin).unwrap();
+        sandbox.projector.reconcile(None).unwrap();
+        sandbox.projector.reconcile(Some(&catalog)).unwrap();
+        assert!(read()
+            .pointer("/providers/private-ai-proxy/settings/apiKey")
+            .is_some());
+        fs::remove_file(&supplied).unwrap();
+        sandbox.projector.reconcile(None).unwrap();
+        assert!(sandbox
+            .projector
+            .reconcile(Some(&catalog))
+            .unwrap()
+            .is_empty());
+        assert!(read()
+            .pointer("/provider/private-ai-proxy/options/apiKey")
+            .is_some());
+        assert!(read().pointer("/providers/private-ai-proxy").is_none());
+
+        use std::os::unix::fs::PermissionsExt;
+        write_executable(&supplied, "#!/bin/sh\nexit 1\n");
+        let writable_dir = supplied.parent().unwrap();
+        let original_permissions = fs::metadata(writable_dir).unwrap().permissions();
+        fs::set_permissions(writable_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let unsafe_options = ConnectOptions {
+            opencode_executable: Some(supplied.clone()),
+            ..ConnectOptions::default()
+        };
+        let rejected = sandbox
+            .projector
+            .preview(agent, true, Some(&catalog), &unsafe_options);
+        fs::set_permissions(writable_dir, original_permissions).unwrap();
+        assert!(matches!(
+            rejected,
+            Err(AgentError::ConfigurationConflict(_))
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn symlinked_agent_config_is_refused_at_preview() {
     let sandbox = sandbox("symlink-preview");
     let path = Agent::ClaudeCode.config_path(&sandbox.home, false);
@@ -460,7 +662,8 @@ fn opencode_limits_and_hermes_defaults_do_not_invent_metadata() {
             true,
             Some(&catalog),
             &ConnectOptions {
-                default_model: Some("complete".into())
+                default_model: Some("complete".into()),
+                ..ConnectOptions::default()
             }
         )
         .is_ok());
@@ -715,9 +918,8 @@ fn model_parameters_come_from_the_catalog() {
     .unwrap();
     let api = api_url(ENDPOINT).unwrap();
 
-    // OpenCode 1 reads efforts from `variants` and drops `capabilities`;
-    // OpenCode 2 builds variants from `capabilities.reasoning`. Either one
-    // otherwise offers low, medium and high for every model.
+    // OpenCode 1 reads efforts from `variants`; OpenCode 2 builds them from
+    // `capabilities.reasoning`.
     let provider = opencode_provider(&catalog, &api, Path::new("/data/token")).unwrap();
     assert_eq!(
         provider["models"]["glm"],
@@ -932,6 +1134,7 @@ fn a_claude_code_model_without_limits_drops_the_previous_models_limits() {
     assert!(connect(&sandbox).authorized);
     let qwen = ConnectOptions {
         default_model: Some("phala/qwen".to_string()),
+        ..ConnectOptions::default()
     };
     assert!(apply_connect(&sandbox, Agent::ClaudeCode, &catalog(), &qwen).authorized);
     let settings: serde_json::Value =

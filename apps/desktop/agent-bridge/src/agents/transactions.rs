@@ -35,6 +35,10 @@ impl Projector {
             let mut store = self
                 .load_store()
                 .map_err(|_| AgentError::RecordUnavailable)?;
+            let prior = self.current_record(agent, store.get(agent.id()));
+            let executable = self.opencode_executable(agent, connect, options, prior)?;
+            let connection =
+                self.connection_catalog(agent, connect, catalog, executable.as_deref());
             let path = self.action_path(agent, store.get(agent.id()), connect);
             let (text, read_error) = self.config_text_at(&path);
             if revision(
@@ -43,33 +47,34 @@ impl Projector {
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
-                catalog,
+                connection,
                 options,
             ) != revision_seen
             {
                 return Err(AgentError::RevisionConflict);
             }
             if connect {
+                let mut options = ConnectOptions {
+                    opencode_executable: executable,
+                    ..options.clone()
+                };
                 let path = path.map_err(AgentError::ConfigurationConflict)?;
                 if read_error.is_some() {
                     return Err(AgentError::ConfigurationRead);
                 }
-                if catalog.is_some() {
+                if let Some(connection) = connection {
                     self.require_helper()?;
-                    self.connect(agent, &mut store, text, &path, catalog, options)
+                    self.connect(agent, &mut store, text, &path, connection, &options)
                         .map_err(ConnectFailure::error)?;
                 } else {
                     if self.current_record(agent, store.get(agent.id())).is_some() {
                         self.suspend(agent, &mut store)?;
                     }
                     let prior = self.current_record(agent, store.get(agent.id()));
-                    let saved_options = if options.default_model.is_none() {
-                        prior
-                            .map(|record| record.options.clone())
-                            .unwrap_or_default()
-                    } else {
-                        options.clone()
-                    };
+                    if options.default_model.is_none() {
+                        options.default_model =
+                            prior.and_then(|record| record.options.default_model.clone());
+                    }
                     let fields = prior
                         .map(|record| record.fields.clone())
                         .unwrap_or_default();
@@ -79,7 +84,7 @@ impl Projector {
                             config_path: path,
                             fields,
                             suspended: true,
-                            options: saved_options,
+                            options,
                             ..Connection::default()
                         },
                     );
@@ -294,14 +299,20 @@ impl Projector {
         let path = self
             .action_path(agent, store.get(agent.id()), true)
             .map_err(|error| ConnectFailure::Conflict(AgentError::ConfigurationConflict(error)))?;
-        self.connect(
-            agent,
-            store,
-            text,
-            &path,
-            catalog,
-            &ConnectOptions::default(),
-        )
+        let prior = self.current_record(agent, store.get(agent.id()));
+        let options = ConnectOptions {
+            opencode_executable: self.opencode_executable(
+                agent,
+                true,
+                &ConnectOptions::default(),
+                prior,
+            )?,
+            ..ConnectOptions::default()
+        };
+        let connection = self
+            .connection_catalog(agent, true, catalog, options.opencode_executable.as_deref())
+            .ok_or(AgentError::InvalidState)?;
+        self.connect(agent, store, text, &path, connection, &options)
     }
 
     pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {
@@ -414,9 +425,10 @@ impl Projector {
         store: &mut Store,
         text: Option<String>,
         path: &Path,
-        catalog: Option<&Catalog>,
+        connection: ConnectionCatalog<'_>,
         options: &ConnectOptions,
     ) -> Result<(), ConnectFailure> {
+        let catalog = connection.catalog;
         let mut doc = self
             .parse_config(agent, text.as_deref())
             .map_err(ConnectFailure::Conflict)?;
@@ -424,7 +436,7 @@ impl Projector {
             agent,
             &doc,
             self.current_record(agent, store.get(agent.id())),
-            catalog,
+            Some(catalog),
             options,
         );
         if store.get(agent.id()).is_some_and(|record| {
@@ -438,17 +450,17 @@ impl Projector {
             )));
         }
         let edit = self
-            .edit(agent, true, &mut doc, store, catalog, &options)
+            .edit(agent, &mut doc, store, Some(connection), &options)
             .map_err(ConnectFailure::Conflict)?;
         if agent == Agent::Codex {
-            self.sync_codex_catalog(catalog.ok_or(AgentError::InvalidState)?)?;
+            self.sync_codex_catalog(catalog)?;
         }
         let previous_record = store.get(agent.id()).cloned();
         let mut next_record = edit.record.clone().ok_or(AgentError::Internal)?;
         next_record.config_path = path.to_path_buf();
         next_record.options = options.clone();
-        next_record.catalog_revision = catalog.map(|catalog| catalog.revision.clone());
-        next_record.catalog_model_ids = catalog_model_ids(agent, catalog);
+        next_record.catalog_revision = Some(catalog.revision.clone());
+        next_record.catalog_model_ids = catalog_model_ids(agent, Some(catalog));
         next_record.endpoint = Some(self.endpoint.clone());
         next_record.empty_original = match &text {
             _ if agent.format() != Format::YamlList => None,

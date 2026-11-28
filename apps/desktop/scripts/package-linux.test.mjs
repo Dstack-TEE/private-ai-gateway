@@ -66,6 +66,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     await mkdir(path.join(payload, "usr/bin"), { recursive: true });
     await mkdir(path.join(payload, "usr/share/applications"), { recursive: true });
     await writeFile(path.join(payload, "usr/bin/private-ai-proxy"), "binary", { mode: 0o755 });
+    await writeFile(path.join(payload, "usr/bin/private-ai-proxy-desktop"), "__TAURI_BUNDLE_TYPE_VAR_DEB", { mode: 0o755 });
     await writeFile(path.join(payload, "usr/share/applications/Private AI Proxy.desktop"), "entry", { mode: 0o644 });
     await writeFile(path.join(payload, "DEBIAN/control"), "Package: private-ai-proxy\nVersion: 1.2.3-beta.4\nArchitecture: amd64\nMaintainer: Test\nDescription: Test\n");
     const bundle = path.join(root, "bundle");
@@ -73,6 +74,19 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     const tauriDeb = path.join(bundle, "deb/Private AI Proxy_1.2.3-beta.4_amd64.deb");
     execFileSync("dpkg-deb", ["--build", "--root-owner-group", payload, tauriDeb], { stdio: "ignore" });
     await writeFile(`${tauriDeb}.sig`, "stale");
+    await mkdir(path.join(bundle, "rpm"), { recursive: true });
+    const rpmBinary = path.join(root, "rpm-desktop");
+    const rpmConfig = path.join(root, "tauri-rpm.json");
+    const desktopExecutable = "/usr/bin/private-ai-proxy-desktop";
+    await writeFile(rpmBinary, "__TAURI_BUNDLE_TYPE_VAR_RPM", { mode: 0o755 });
+    await writeFile(rpmConfig, JSON.stringify({
+      name: "private-ai-proxy",
+      arch: "amd64",
+      platform: "linux",
+      version: "1.2.3-beta.4",
+      contents: [{ src: rpmBinary, dst: desktopExecutable }],
+    }));
+    execFileSync("nfpm", ["package", "--config", rpmConfig, "--packager", "rpm", "--target", path.join(bundle, "rpm/tauri.rpm")], { stdio: "ignore" });
     execFileSync(process.execPath, [path.join(appRoot, "node_modules/@tauri-apps/cli/tauri.js"), "signer", "generate", "--ci", "-p", "", "-w", path.join(root, "key")], { stdio: "ignore" });
 
     const environment = { ...process.env };
@@ -97,8 +111,11 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /-rw-r--r-- root\/root .* \.\/usr\/lib\/systemd\/user\/private-ai-proxy\.service$/m);
     const expectedStart = /^ExecStart=\/usr\/bin\/private-ai-proxy-service --supervised$/m;
     const payloadTar = execFileSync("dpkg-deb", ["--fsys-tarfile", deb]);
+    assert.equal(execFileSync("bsdtar", ["-xOf", "-", `.${desktopExecutable}`], { input: payloadTar, encoding: "utf8" }), "__TAURI_BUNDLE_TYPE_VAR_DEB");
+    assert.equal(member(rpm, `.${desktopExecutable}`), "__TAURI_BUNDLE_TYPE_VAR_RPM");
+    assert.equal(member(arch, desktopExecutable.slice(1)), "__TAURI_BUNDLE_TYPE_VAR_DEB");
     assert.match(execFileSync("bsdtar", ["-xOf", "-", `./${unit}`], { input: payloadTar, encoding: "utf8" }), expectedStart);
-    assert.match(member(rpm, `/${unit}`), expectedStart);
+    assert.match(member(rpm, `./${unit}`), expectedStart);
     assert.match(member(arch, unit), expectedStart);
     assert.equal(output("dpkg-deb", ["-f", deb, "Replaces"]), "private-ai-proxy-cli");
     assert.match(debListing(deb), /-rwxr-xr-x root\/root +6 .* \.\/usr\/bin\/private-ai-proxy$/m);
@@ -113,9 +130,11 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.equal(output("dpkg-deb", ["-f", deb, "Description"]), `${tauri.bundle.shortDescription}\n ${tauri.bundle.longDescription}`);
     // Every entry carries SOURCE_DATE_EPOCH (2026-01-01), so builds are reproducible.
     assert.doesNotMatch(debListing(deb), /^(?!.* 2026-01-01 00:00 ).+$/m);
-    // The only maintainer script is the prerm that lets 0.1.x upgrades continue (Debian Policy 6.6).
+    // The pre-removal hook preserves upgrades and cleans up user services on removal.
     assert.match(output("dpkg-deb", ["-I", deb]), /^ +\d+ bytes, +\d+ lines +\* +prerm +#!\/bin\/sh$/m);
     assert.doesNotMatch(output("dpkg-deb", ["-I", deb]), /preinst|postinst|postrm/);
+    const uninstall = /run_for_user service disable --for-uninstall/;
+    assert.match(output("dpkg-deb", ["-I", deb, "prerm"]), uninstall);
     execFileSync("sh", ["-c", 'dpkg-deb -I "$1" prerm | sh -s failed-upgrade 0.1.7~beta.4', "sh", deb]);
     if (available("rpm")) {
       const query = (format) => output("rpm", ["-qp", "--qf", format, rpm]);
@@ -123,13 +142,15 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.equal(query("%{PACKAGER}"), maintainer);
       assert.equal(
         query("[%{FILENAMES}|%{FILEMODES:perms}|%{FILELINKTOS}\n]").replace(/\|l[-rwx]{9}\|/g, "|link|"),
-        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
+        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/bin/private-ai-proxy-desktop|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
       );
       assert.match(output("rpm", ["-qp", "--requires", rpm]), /^libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)$/m);
       assert.match(output("rpm", ["-qp", "--provides", rpm]), /^private-ai-proxy-cli = 1\.2\.3~beta\.4-1$/m);
       assert.equal(output("rpm", ["-qp", "--conflicts", rpm]), "private-ai-proxy-cli");
       assert.equal(output("rpm", ["-qp", "--obsoletes", rpm]), "");
-      assert.equal(output("rpm", ["-qp", "--scripts", rpm]), "");
+      const scripts = output("rpm", ["-qp", "--scripts", rpm]);
+      assert.match(scripts, /preuninstall scriptlet/);
+      assert.match(scripts, uninstall);
     }
     const info = pkginfo(arch);
     assert.match(info, new RegExp(`^packager = ${maintainer}$`, "m"));
@@ -139,7 +160,9 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(info, /^depend = webkit2gtk-4\.1$/m);
     assert.doesNotMatch(info, /^replaces/m);
     assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
-    assert.doesNotMatch(execFileSync("bsdtar", ["-tf", arch], { encoding: "utf8" }), /\.INSTALL/);
+    const archHooks = member(arch, ".INSTALL");
+    assert.match(archHooks, /function pre_remove\(\)/);
+    assert.match(archHooks, uninstall);
     for (const file of [deb, rpm]) {
       const signature = Buffer.from(await readFile(`${file}.sig`, "utf8"), "base64").toString("utf8");
       assert.match(signature, new RegExp(`trusted comment: timestamp:\\d+\\tfile:${path.basename(file).replaceAll(".", "\\.")}\\tversion:1\\.2\\.3-beta\\.4`));
@@ -163,6 +186,7 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
     assert.equal(output("dpkg-deb", ["-f", deb, "Replaces"]), "private-ai-proxy");
     assert.equal(output("dpkg-deb", ["-f", deb, "Provides"]), "");
     const listing = debListing(deb);
+    assert.doesNotMatch(listing, /private-ai-proxy-archive-keyring\.gpg/);
     assert.match(listing, /\.\/usr\/bin\/private-ai-proxy -> \.\.\/libexec\/private-ai-proxy\/private-ai-proxy$/m);
     assert.match(listing, /\.\/usr\/bin\/pap -> private-ai-proxy$/m);
     assert.match(listing, /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
@@ -177,12 +201,30 @@ test("CLI packages keep executables in libexec, alias symlinks and their package
       const files = output("rpm", ["-qp", "--qf", "[%{FILENAMES}|%{FILEMODES:perms}\n]", rpm]);
       assert.match(files, /^\/usr\/libexec\/private-ai-proxy\|drwxr-xr-x$/m);
       assert.match(files, /^\/usr\/share\/private-ai-proxy\|drwxr-xr-x$/m);
-      assert.equal(member(rpm, "/usr/share/private-ai-proxy/package-manager"), "rpm\n");
+      assert.equal(member(rpm, "./usr/share/private-ai-proxy/package-manager"), "rpm\n");
     }
+    if (available("rpmkeys")) assert.doesNotMatch(output("rpmkeys", ["-Kv", rpm]), /Signature, key ID/);
     assert.match(pkginfo(arch), /^depend = glibc$/m);
     assert.match(pkginfo(arch), /^arch = aarch64$/m);
     assert.equal(member(arch, "usr/share/private-ai-proxy/package-manager"), "pacman\n");
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Linux release packaging requires signing material before writing packages", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "pap-package-cli-linux-"));
+  const environment = { ...process.env };
+  try {
+    process.env.RELEASE_CHANNEL = "beta";
+    delete process.env.PAP_LINUX_SIGNING_KEY_FILE;
+    await assert.rejects(
+      buildLinuxPackages({ kind: "cli", version: "1.2.3-beta.1", arch: "x64", contents: [], output: root }),
+      /Missing prepared Linux release signing key/,
+    );
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    process.env = environment;
     await rm(root, { recursive: true, force: true });
   }
 });

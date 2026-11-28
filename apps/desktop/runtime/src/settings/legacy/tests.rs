@@ -710,6 +710,7 @@ fn a_disconnect_waits_for_the_credential_import_and_not_for_an_abandoned_one() {
     .unwrap();
     let options = ConnectOptions {
         default_model: Some("openai/gpt-oss-20b".into()),
+        ..ConnectOptions::default()
     };
     let apply = |connect: bool| {
         let catalog = connect.then_some(&catalog);

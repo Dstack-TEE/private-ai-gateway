@@ -5,7 +5,12 @@
 //! package manager or was installed by hand, so it only learns that a newer
 //! release exists and shows the exact steps that install it.
 
-use std::{path::Path, time::Duration};
+use std::{
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +21,49 @@ pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 
 const INVALID_FEED: &str = "Updates are not configured correctly for this build";
 const PACKAGE_MANAGER_MARKER: &str = "/usr/share/private-ai-proxy/package-manager";
+
+const ARCH_KEYRING: &str = "/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg";
+const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
+const RPM_SIGNING_FINGERPRINT: &str = "18579A1441C5278FB2B1A943060C5C651FC46140";
+const RPM_SIGNING_KEY_FILE: &str = "/usr/share/keyrings/private-ai-proxy-archive-keyring.asc";
+// RPM 4 uses the primary fingerprint's low 32 bits and the creation time in hex.
+const RPM_SIGNING_KEY_PACKAGE: &str = "gpg-pubkey-1fc46140-6b0a7f59";
+const RPM_KEY_SCRIPT: &str = include_str!("updates/rpm-key.sh");
+
+fn rpm_key_command<'a>(mode: &'a str, argument: &'a str) -> [&'a str; 10] {
+    [
+        "sh",
+        "-c",
+        RPM_KEY_SCRIPT,
+        "pap-rpm-key",
+        RPM_SIGNING_FINGERPRINT,
+        RPM_SIGNING_KEY_PACKAGE,
+        RPM_SIGNING_KEY_FILE,
+        RPM_SIGNING_KEY_URL,
+        mode,
+        argument,
+    ]
+}
+
+/// Resolve a local RPM certificate, downloading and checking it if needed.
+/// A missing result means the certificate is already in the RPM keyring.
+#[cfg(target_os = "linux")]
+pub fn prepare_rpm_signing_key(scratch: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    let scratch = scratch
+        .to_str()
+        .ok_or("The update directory is not UTF-8")?;
+    let [program, arguments @ ..] = rpm_key_command("prepare", scratch);
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|_| "Could not check the Private AI Proxy RPM signing key.")?;
+    if !output.status.success() {
+        return Err("Could not download or verify the Private AI Proxy RPM signing key.".into());
+    }
+    let path = String::from_utf8(output.stdout)
+        .map_err(|_| "Could not read the Private AI Proxy RPM signing key path.")?;
+    Ok((!path.is_empty()).then(|| path.into()))
+}
 
 pub fn channel_name(channel: UpdateChannel) -> &'static str {
     match channel {
@@ -99,6 +147,8 @@ pub enum Installation {
     Deb,
     Rpm,
     Pacman,
+    /// CLI installed by the official install script.
+    InstallScript,
     /// A native package from a release that did not record its package manager.
     SystemPackage,
     Npm,
@@ -137,6 +187,11 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
             Installation::DesktopApp
         };
     }
+    if cfg!(any(target_os = "linux", target_os = "macos"))
+        && script_install_root(directory).is_some()
+    {
+        return Installation::InstallScript;
+    }
     match package_manager {
         Some("deb") => Installation::Deb,
         Some("rpm") => Installation::Rpm,
@@ -149,6 +204,57 @@ fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> I
             Installation::Npm
         }
         _ => Installation::Portable,
+    }
+}
+
+/// The official installer keeps each release in `versions/<semver>` and
+/// points the user's command links at that directory. Canonicalizing the
+/// executable before classification makes this work with custom install and
+/// bin directories too.
+fn script_install_root(directory: &Path) -> Option<&Path> {
+    semver::Version::parse(directory.file_name()?.to_str()?).ok()?;
+    let versions = directory.parent()?;
+    if versions.file_name()? != "versions" {
+        return None;
+    }
+    versions.parent()
+}
+
+struct ScriptInstallation {
+    install_dir: PathBuf,
+    command: Option<PathBuf>,
+}
+
+impl ScriptInstallation {
+    fn current() -> Option<Self> {
+        let executable = fs::canonicalize(std::env::current_exe().ok()?).ok()?;
+        Self::discover(&executable, std::env::var_os("PATH").as_deref())
+    }
+
+    fn discover(executable: &Path, path: Option<&OsStr>) -> Option<Self> {
+        let version_dir = executable.parent()?;
+        let install_dir = script_install_root(version_dir)?.to_owned();
+        let command = path.and_then(|path| {
+            std::env::split_paths(path)
+                .filter(|directory| directory.is_absolute())
+                .flat_map(|directory| {
+                    ["private-ai-proxy", "pap", "aci"].map(|name| directory.join(name))
+                })
+                .find(|command| {
+                    fs::read_link(command).is_ok_and(|target| {
+                        target.is_absolute()
+                            && target.file_name() == Some(OsStr::new("private-ai-proxy"))
+                            && target.parent().and_then(Path::file_name) == version_dir.file_name()
+                            && target.parent().is_some_and(|parent| {
+                                fs::canonicalize(parent).is_ok_and(|path| path == version_dir)
+                            })
+                    })
+                })
+        });
+        Some(Self {
+            install_dir,
+            command,
+        })
     }
 }
 
@@ -204,12 +310,16 @@ pub async fn check(
         .map_err(|_| "Could not check for updates")?;
     let published = published_version(&client, feed_url(configured, channel)?, channel).await?;
     let latest = offers_update(&current, &published, channel).then_some(published);
+    let script = (installation == Installation::InstallScript && latest.is_some())
+        .then(ScriptInstallation::current)
+        .flatten();
     let (commands, download_url) = match &latest {
         Some(version) => upgrade_steps(
             installation,
             release_root(configured)?.as_str(),
             &version.to_string(),
             std::env::consts::ARCH,
+            script.as_ref(),
         )?,
         None => (Vec::new(), None),
     };
@@ -269,6 +379,76 @@ pub fn step(words: &[&str]) -> Result<String, String> {
 /// restores connected agents, as stopping by hand should.
 pub const STOP_STEP: &str = "private-ai-proxy --yes service stop";
 
+/// The command to restart through and the installer steps to run while the
+/// caller holds the update locks and the backend is stopped.
+pub fn install_script_update(version: &str) -> Result<(PathBuf, Vec<String>), String> {
+    script_update(version, ScriptInstallation::current().as_ref())
+}
+
+fn script_update(
+    version: &str,
+    script: Option<&ScriptInstallation>,
+) -> Result<(PathBuf, Vec<String>), String> {
+    if let Some(script) = script {
+        if let Some(command) = &script.command {
+            return Ok((command.clone(), script_steps(version, Some(script), true)?));
+        }
+    }
+    let manual = script_steps(version, script, false)?;
+    Err(format!(
+        "Cannot find a managed Private AI Proxy command link on PATH. Run these commands with the original install and bin directories:\n  {}",
+        manual.join("\n  ")
+    ))
+}
+
+fn script_steps(
+    version: &str,
+    script: Option<&ScriptInstallation>,
+    backend_stopped: bool,
+) -> Result<Vec<String>, String> {
+    let version_number =
+        semver::Version::parse(version).map_err(|_| "The update version is invalid")?;
+    let channel = if version_number.pre.is_empty() {
+        "stable"
+    } else {
+        "beta"
+    };
+    let install_dir = script.map_or(Path::new("/path/to/original/install"), |script| {
+        &script.install_dir
+    });
+    let bin_dir = script
+        .and_then(|script| script.command.as_deref())
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("/path/to/original/bin"));
+    let mut install = vec![
+        "sh",
+        "private-ai-proxy-install.sh",
+        "--channel",
+        channel,
+        "--version",
+        version,
+        "--install-dir",
+        install_dir
+            .to_str()
+            .ok_or("The install directory is not UTF-8")?,
+        "--bin-dir",
+        bin_dir.to_str().ok_or("The bin directory is not UTF-8")?,
+    ];
+    if backend_stopped {
+        install.push("--skip-service-stop");
+    }
+    Ok(vec![
+        step(&[
+            "curl",
+            "-fsSL",
+            "https://redpill.ai/private-ai-proxy/install.sh",
+            "-o",
+            "private-ai-proxy-install.sh",
+        ])?,
+        step(&install)?,
+    ])
+}
+
 /// Runs upgrade `steps` in order, in a scratch directory for what they
 /// download, and stops at the first that fails. Each step and its output go
 /// to stderr, leaving stdout to the caller's own result.
@@ -302,6 +482,7 @@ fn upgrade_steps(
     root: &str,
     version: &str,
     architecture: &str,
+    script: Option<&ScriptInstallation>,
 ) -> Result<(Vec<String>, Option<String>), String> {
     let platform = if cfg!(windows) {
         "windows"
@@ -327,32 +508,39 @@ fn upgrade_steps(
     let stop = STOP_STEP.to_string();
     Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
-        Installation::DesktopPacman => (
-            vec![
-                stop,
-                command(&[
-                    "sudo",
-                    "pacman",
-                    "-U",
-                    &asset(&name(false, ".pkg.tar.zst"))?,
-                ])?,
-            ],
-            None,
-        ),
-        Installation::Pacman => (
-            vec![
-                stop,
-                command(&["sudo", "pacman", "-U", &asset(&name(true, ".pkg.tar.zst"))?])?,
-            ],
-            None,
-        ),
-        Installation::Rpm => (
-            vec![
-                stop,
-                command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
-            ],
-            None,
-        ),
+        Installation::DesktopPacman | Installation::Pacman => {
+            let file = name(installation == Installation::Pacman, ".pkg.tar.zst");
+            let signature = format!("{file}.sig");
+            // pacman checks an adjacent .sig against its own keyring. Give the
+            // download a different name so gpgv can verify it with our keyring.
+            let detached = format!("{signature}.download");
+            (
+                vec![
+                    stop,
+                    command(&["curl", "-fLO", &asset(&file)?])?,
+                    command(&["curl", "-fL", "-o", &detached, &asset(&signature)?])?,
+                    // Keep verification and installation in one step so copied
+                    // commands also refuse to install when verification fails.
+                    command(&[
+                        "sh",
+                        "-c",
+                        r#"gpgv --keyring "$1" "$2" "$3" && sudo pacman -U "$3""#,
+                        "pap-arch-update",
+                        ARCH_KEYRING,
+                        &detached,
+                        &format!("./{file}"),
+                    ])?,
+                ],
+                None,
+            )
+        }
+        Installation::Rpm => {
+            let package = asset(&name(true, ".rpm"))?;
+            (
+                vec![stop, command(&rpm_key_command("install", &package))?],
+                None,
+            )
+        }
         Installation::Deb => {
             let file = name(true, ".deb");
             (
@@ -376,6 +564,7 @@ fn upgrade_steps(
             ],
             None,
         ),
+        Installation::InstallScript => (script_steps(version, script, false)?, None),
         Installation::Portable => (
             Vec::new(),
             Some(asset(&name(
@@ -488,6 +677,16 @@ mod tests {
             classify("/home/u/private-ai-proxy-cli-0.1.7-linux-x64", false, None),
             Installation::Portable
         );
+        if cfg!(unix) {
+            assert_eq!(
+                classify(
+                    "/home/u/.local/share/private-ai-proxy/versions/0.1.7",
+                    false,
+                    None
+                ),
+                Installation::InstallScript
+            );
+        }
         if cfg!(target_os = "linux") {
             assert_eq!(classify("/usr/bin", true, None), Installation::DesktopApp);
             assert_eq!(
@@ -516,7 +715,7 @@ mod tests {
         let root = root.as_str();
         assert_eq!(root, "https://example.test/o/r/releases/download/");
         let upgrade_steps = |installation, root, version| {
-            super::upgrade_steps(installation, root, version, std::env::consts::ARCH).unwrap()
+            super::upgrade_steps(installation, root, version, std::env::consts::ARCH, None).unwrap()
         };
         let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
@@ -527,13 +726,63 @@ mod tests {
             ]
         );
         assert_eq!(
+            upgrade_steps(Installation::InstallScript, root, "0.1.8-beta.2").0,
+            [
+                "curl -fsSL https://redpill.ai/private-ai-proxy/install.sh -o private-ai-proxy-install.sh",
+                "sh private-ai-proxy-install.sh --channel beta --version 0.1.8-beta.2 --install-dir /path/to/original/install --bin-dir /path/to/original/bin",
+            ]
+        );
+        assert_eq!(
             upgrade_steps(Installation::DesktopApp, root, "0.1.8"),
             (Vec::new(), None)
         );
         if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            for (installation, file) in [
+                (
+                    Installation::DesktopPacman,
+                    "private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst",
+                ),
+                (
+                    Installation::Pacman,
+                    "private-ai-proxy-cli-0.1.8-beta.2-linux-x64.pkg.tar.zst",
+                ),
+            ] {
+                let (commands, _) = upgrade_steps(installation, root, "0.1.8-beta.2");
+                assert_eq!(
+                    commands[..3],
+                    [
+                        STOP_STEP.to_string(),
+                        format!("curl -fLO {root}desktop-v0.1.8-beta.2/{file}"),
+                        format!("curl -fL -o {file}.sig.download {root}desktop-v0.1.8-beta.2/{file}.sig"),
+                    ]
+                );
+                let install = shlex::split(&commands[3]).unwrap();
+                assert_eq!(
+                    install[2],
+                    r#"gpgv --keyring "$1" "$2" "$3" && sudo pacman -U "$3""#
+                );
+                assert_eq!(
+                    install[4..],
+                    [
+                        ARCH_KEYRING.to_string(),
+                        format!("{file}.sig.download"),
+                        format!("./{file}")
+                    ]
+                );
+            }
+            let (rpm, _) = upgrade_steps(Installation::Rpm, root, "0.1.8");
+            let rpm = shlex::split(&rpm[1]).unwrap();
+            assert_eq!(rpm[2], RPM_KEY_SCRIPT);
             assert_eq!(
-                upgrade_steps(Installation::DesktopPacman, root, "0.1.8-beta.2").0[1],
-                "sudo pacman -U https://example.test/o/r/releases/download/desktop-v0.1.8-beta.2/private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst"
+                rpm[4..],
+                [
+                    RPM_SIGNING_FINGERPRINT,
+                    RPM_SIGNING_KEY_PACKAGE,
+                    RPM_SIGNING_KEY_FILE,
+                    RPM_SIGNING_KEY_URL,
+                    "install",
+                    "https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.rpm",
+                ]
             );
             assert_eq!(
                 upgrade_steps(Installation::Deb, root, "0.1.8").0[1..],
@@ -554,19 +803,177 @@ mod tests {
         for arch in ["arm", "i686", "riscv64"] {
             for installation in [
                 Installation::Portable,
+                Installation::InstallScript,
                 Installation::Deb,
                 Installation::DesktopPacman,
             ] {
                 assert_eq!(
-                    super::upgrade_steps(installation, FEED, "0.1.8", arch).unwrap(),
+                    super::upgrade_steps(installation, FEED, "0.1.8", arch, None).unwrap(),
                     (Vec::new(), None)
                 );
             }
         }
         for (arch, asset_arch) in [("aarch64", "arm64"), ("x86_64", "x64")] {
             let (_, url) =
-                super::upgrade_steps(Installation::Portable, FEED, "0.1.8", arch).unwrap();
+                super::upgrade_steps(Installation::Portable, FEED, "0.1.8", arch, None).unwrap();
             assert!(url.unwrap().contains(&format!("-{asset_arch}.")));
         }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn script_updates_custom_links_while_the_backend_instance_is_locked() {
+        use std::{
+            os::unix::fs::{symlink, PermissionsExt},
+            process::Command,
+        };
+
+        let temp = tempfile::Builder::new()
+            .prefix("pap-uninstall-")
+            .tempdir()
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let install = root.join("custom install");
+        let bin = root.join("custom bin");
+        let tools = root.join("tools");
+        let release = root.join("release");
+        let data = root.join("data");
+        let old = install.join("versions/0.1.7");
+        let executable = old.join("private-ai-proxy");
+        for directory in [&bin, &tools, &release, &old] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let write_script = |path: &Path, body: &str| {
+            fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_script(
+            &executable,
+            r#"test "$*" = '--yes service stop' || exit 2
+printf 'stop\n' >> "$PAP_TEST_STOP_LOG"
+flock -n "$PAP_TEST_INSTANCE_LOCK" true"#,
+        );
+        // Existing links can spell the install root through a symlink.
+        let old_root = root.join("install alias");
+        symlink(&install, &old_root).unwrap();
+        for name in ["private-ai-proxy", "pap", "aci"] {
+            symlink(
+                old_root.join("versions/0.1.7/private-ai-proxy"),
+                bin.join(name),
+            )
+            .unwrap();
+        }
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x64"
+        } else {
+            "arm64"
+        };
+        let base = format!("private-ai-proxy-cli-0.1.8-linux-{arch}");
+        let payload = release.join(&base);
+        fs::create_dir(&payload).unwrap();
+        write_script(
+            &payload.join("private-ai-proxy"),
+            "echo 'private-ai-proxy 0.1.8'",
+        );
+        for name in ["private-ai-proxy-helper", "private-ai-proxy-service"] {
+            write_script(&payload.join(name), "exit 0");
+        }
+        for name in ["pap", "aci"] {
+            symlink("private-ai-proxy", payload.join(name)).unwrap();
+        }
+        let archive = format!("{base}.tar.gz");
+        assert!(Command::new("tar")
+            .current_dir(&release)
+            .args(["-czf", &archive, &base])
+            .status()
+            .unwrap()
+            .success());
+        let checksum = Command::new("sha256sum")
+            .current_dir(&release)
+            .arg(&archive)
+            .output()
+            .unwrap();
+        assert!(checksum.status.success());
+        fs::write(release.join("SHA256SUMS"), checksum.stdout).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../scripts/install-private-ai-proxy.sh"),
+            release.join("install.sh"),
+        )
+        .unwrap();
+        write_script(
+            &tools.join("curl"),
+            r#"while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|--output) output=$2; shift ;;
+    https://*) url=$1 ;;
+  esac
+  shift
+done
+cp "$PAP_TEST_RELEASE/${url##*/}" "$output""#,
+        );
+
+        let path = std::env::join_paths(
+            [bin.clone(), tools]
+                .into_iter()
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let script = ScriptInstallation::discover(&executable, Some(&path)).unwrap();
+        let unlinked = ScriptInstallation::discover(&executable, Some(old.as_os_str())).unwrap();
+        let refusal = script_update("0.1.8", Some(&unlinked)).unwrap_err();
+        assert!(refusal.contains("--bin-dir /path/to/original/bin"));
+        assert!(refusal.contains(&step(&[install.to_str().unwrap()]).unwrap()));
+        assert!(!refusal.contains("--skip-service-stop"));
+        let (command, upgrade) = script_update("0.1.8", Some(&script)).unwrap();
+        assert_eq!(command, bin.join("private-ai-proxy"));
+
+        let stop_log = root.join("stop-log");
+        let _startup = crate::lock::startup(&data).unwrap().unwrap();
+        let _instance = crate::lock::instance(&data).unwrap().unwrap();
+        let run = |step: &str| {
+            let words = shlex::split(step).unwrap();
+            Command::new(&words[0])
+                .args(&words[1..])
+                .current_dir(&root)
+                .env("PATH", &path)
+                .env("XDG_DATA_HOME", root.join("changed XDG data home"))
+                .env("PAP_TEST_RELEASE", &release)
+                .env("PAP_TEST_STOP_LOG", &stop_log)
+                .env("PAP_TEST_INSTANCE_LOCK", data.join("instance.lock"))
+                .output()
+                .unwrap()
+        };
+        let downloaded = run(&upgrade[0]);
+        assert!(
+            downloaded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&downloaded.stderr)
+        );
+        let manual = script_steps("0.1.8", Some(&script), false).unwrap();
+        let refused = run(&manual[1]);
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("cannot stop the existing"));
+        let updated = run(&upgrade[1]);
+        assert!(
+            updated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&updated.stderr)
+        );
+        assert_eq!(fs::read_to_string(stop_log).unwrap(), "stop\n");
+        for name in ["private-ai-proxy", "pap", "aci"] {
+            assert_eq!(
+                fs::read_link(bin.join(name)).unwrap(),
+                install.join("versions/0.1.8/private-ai-proxy")
+            );
+        }
+        assert!(!old.exists());
+        assert!(!root.join("changed XDG data home").exists());
+        let restarted = Command::new(command).arg("--version").output().unwrap();
+        assert!(restarted.status.success());
+        assert_eq!(restarted.stdout, b"private-ai-proxy 0.1.8\n");
     }
 }
