@@ -265,11 +265,11 @@ fn aci_commands() {
     let service = serve_json(fs::read(&report).unwrap());
     let tls = service.replace("http:", "https:");
     let report = report.to_str().unwrap();
-    let refused = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap();
-    let refused = format!("https://{refused}");
+    // Keep the port reserved by a bound socket. Without a listener, the
+    // kernel refuses connections for the duration of the test.
+    let refused_socket = tokio::net::TcpSocket::new_v4().unwrap();
+    refused_socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+    let refused = format!("https://{}", refused_socket.local_addr().unwrap());
     let assert = redacting(&[
         ("[ROOT]", root.to_str().unwrap()),
         ("[FIXTURES]", fixtures.to_str().unwrap()),
