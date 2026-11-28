@@ -389,11 +389,17 @@ impl Settings {
 
     /// Calls `changed` after either file changes on disk, debounced.
     pub fn watch(&self, changed: impl Fn() + Send + 'static) -> Result<Watcher, String> {
-        use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
-        let mut debouncer = new_debouncer(
-            Duration::from_millis(200),
-            move |events: DebounceEventResult| match events {
-                Ok(events) => {
+        use notify_debouncer_mini::{
+            new_debouncer_opt, notify, Config, DebounceEventResult, DebouncedEventBatch,
+        };
+
+        // Keep the access events that the 0.7 watcher received.
+        let config = Config::default()
+            .with_timeout(Duration::from_millis(200))
+            .with_notify_config(notify::Config::default());
+        let mut debouncer =
+            new_debouncer_opt(config, move |events: DebounceEventResult| match events {
+                Ok(DebouncedEventBatch::Events(events)) => {
                     if events.iter().any(|event| {
                         event
                             .path
@@ -403,13 +409,14 @@ impl Settings {
                         changed();
                     }
                 }
+                Ok(DebouncedEventBatch::Rescan) => changed(),
+                Ok(_) => {}
                 Err(error) => tracing::warn!("Settings watcher error: {error}"),
-            },
-        )
-        .map_err(|error| format!("Cannot watch the settings files: {error}"))?;
+            })
+            .map_err(|error| format!("Cannot watch the settings files: {error}"))?;
         debouncer
             .watcher()
-            .watch(&self.dir, RecursiveMode::NonRecursive)
+            .watch(&self.dir, notify::RecursiveMode::NonRecursive)
             .map_err(|error| format!("Cannot watch the settings files: {error}"))?;
         Ok(debouncer)
     }
