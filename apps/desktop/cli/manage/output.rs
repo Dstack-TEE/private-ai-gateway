@@ -46,7 +46,7 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             Service::Stop => "Backend stopped.".into(),
             Service::Restart => "Backend restarted.".into(),
             Service::Enable => "The backend starts at login and after a crash using the service manager's environment.".into(),
-            Service::Disable => "The backend no longer starts at login.".into(),
+            Service::Disable { .. } => "The backend no longer starts at login.".into(),
             Service::Run => String::new(),
             Service::Status => status(value),
         },

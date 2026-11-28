@@ -338,18 +338,23 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             client.handoff_to_supervisor()?;
             Ok(json!({"startAtLogin": true}))
         }
-        Service::Disable => {
+        Service::Disable { for_uninstall } => {
             // Windows uses the app's login item and has no backend registration.
             if cfg!(windows) {
                 return Ok(json!({"startAtLogin": false}));
             }
+            let disable = if *for_uninstall {
+                desktop_core::supervisor::unregister
+            } else {
+                desktop_core::supervisor::disable
+            };
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if desktop_core::supervisor::enabled() && client.is_running()? {
                 client.shutdown_installed()?;
-                desktop_core::supervisor::disable()?;
+                disable()?;
             } else {
-                desktop_core::supervisor::disable()?;
+                disable()?;
                 if client.is_running()? {
                     client.shutdown_installed()?;
                 } else {
@@ -1202,6 +1207,8 @@ fn settings_diagnostics(
 /// request, and each step is printed as it runs. The steps stop the backend,
 /// so protection that was on is started again by the installed release.
 fn update(client: &Client) -> Result<Value, CallError> {
+    use desktop_core::updates::{self, Installation};
+
     let notice = update_notice()?;
     let Some(version) = &notice.version else {
         return value(notice);
@@ -1226,21 +1233,24 @@ fn update(client: &Client) -> Result<Value, CallError> {
     // instead: agents stay pointed at the Local API, which nothing answers
     // meanwhile, the session waits, and no other command starts a backend
     // during the installation. If it fails, the previous release resumes.
+    let (command, steps) = if notice.installation == Installation::InstallScript {
+        updates::install_script_update(version)?
+    } else {
+        let command = std::env::current_exe()
+            .map_err(|error| format!("Cannot locate this command: {error}"))?;
+        let steps = notice
+            .commands
+            .iter()
+            .filter(|step| *step != updates::STOP_STEP)
+            .cloned()
+            .collect();
+        (command, steps)
+    };
+    let command = command.to_str().ok_or("This command's path is not UTF-8")?;
     let running = client.is_running()?;
     let protecting = running && client.state()?.session_active;
-    let steps: Vec<String> = notice
-        .commands
-        .iter()
-        .filter(|step| *step != desktop_core::updates::STOP_STEP)
-        .cloned()
-        .collect();
-    // Read now: the installation replaces this file, and the release it
-    // puts at this path is the one to start, whatever `PATH` finds first.
-    let command =
-        std::env::current_exe().map_err(|error| format!("Cannot locate this command: {error}"))?;
-    let command = command.to_str().ok_or("This command's path is not UTF-8")?;
     client
-        .install_update(|| desktop_core::updates::run(&steps))
+        .install_update(|| updates::run(&steps))
         .map_err(|error| format!("The update was not installed: {error}"))?;
     // The installed release takes the session up again.
     if running {
@@ -1249,8 +1259,8 @@ fn update(client: &Client) -> Result<Value, CallError> {
         } else {
             &["service", "start"]
         };
-        let step = desktop_core::updates::step(&[&[command], resume].concat())?;
-        desktop_core::updates::run(&[step]).map_err(|error| {
+        let step = updates::step(&[&[command], resume].concat())?;
+        updates::run(&[step]).map_err(|error| {
             format!("Updated to {version}, but the backend did not start again: {error}.")
         })?;
     }

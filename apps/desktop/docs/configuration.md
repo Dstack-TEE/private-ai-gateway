@@ -437,9 +437,6 @@ lists.
   (`SettingsKey::Notifications`, its branch in `cli/manage/mod.rs`).
 - The hidden `pap send --api-key` option (`cli/args.rs`) and its warning in
   `cli/send.rs`; `--api-key-stdin` and `ACI_API_KEY` replace it.
-- The DEB `prerm` for `failed-upgrade` (`src-tauri/installer/deb-prerm.sh`),
-  which lets an upgrade continue when the `prerm` of an installed package up
-  to 0.1.7-beta refuses it because Private AI Proxy is running.
 - `pap cli install` replacing the Windows `.cmd` shims earlier releases wrote
   (`LEGACY_SCRIPT` in `cli/manage/install.rs`).
 - The move of the settings from the earlier macOS and Windows location

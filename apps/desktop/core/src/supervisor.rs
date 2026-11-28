@@ -136,7 +136,9 @@ fn installation_supports_automatic_supervision() -> bool {
         | Installation::Pacman
         | Installation::SystemPackage
         | Installation::Npm => true,
-        Installation::Portable => command().is_ok_and(|(_, linked)| linked),
+        Installation::InstallScript | Installation::Portable => {
+            command().is_ok_and(|(_, linked)| linked)
+        }
         Installation::DesktopApp | Installation::DesktopPacman => platform::installed_desktop(),
     }
 }
@@ -262,18 +264,24 @@ pub fn enable() -> Result<bool, String> {
     Ok(enabled)
 }
 
-/// Removes the login registration. The caller quits a running backend first
-/// so that launchd's signal does not preserve a session the user ended.
+/// Removes the login registration and remembers the user's opt-out.
 pub fn disable() -> Result<(), String> {
-    if !supported() {
-        return Err(UNSUPPORTED.into());
-    }
-    platform::disable()?;
+    unregister()?;
     if let Some(marker) = declined() {
         crate::private_fs::write_private_atomic(&marker, "", None)
             .map_err(|error| format!("Cannot write {}: {error}", marker.display()))?;
     }
     Ok(())
+}
+
+/// Removes the login registration without changing the user's preference.
+/// The caller quits a running backend first so that launchd does not preserve
+/// a session the user ended.
+pub fn unregister() -> Result<(), String> {
+    if !supported() {
+        return Err(UNSUPPORTED.into());
+    }
+    platform::disable()
 }
 
 /// Whether the service manager starts this installation's backend.

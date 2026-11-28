@@ -6,6 +6,7 @@ CHANNEL="stable"
 VERSION=""
 INSTALL_DIR="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}/private-ai-proxy"
 BIN_DIR="${HOME}/.local/bin"
+SKIP_SERVICE_STOP=false
 
 usage() {
   cat <<'USAGE'
@@ -15,10 +16,11 @@ Usage:
   install-private-ai-proxy.sh [options]
 
 Options:
-  --channel stable|beta  Release channel used when --version is omitted.
+  --channel stable|beta  Release channel for discovery and version validation.
   --version VERSION      Install an exact published version.
   --install-dir PATH     Versioned installation root.
   --bin-dir PATH         Directory for private-ai-proxy, pap, and aci links.
+  --skip-service-stop    Used by pap update after it stops and locks the backend.
   -h, --help             Show this help.
 
 The installer does not require root and never edits shell startup files.
@@ -56,6 +58,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --bin-dir=*) BIN_DIR=${1#*=}; shift ;;
+    --skip-service-stop) SKIP_SERVICE_STOP=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
@@ -143,16 +146,21 @@ cmp -s "$TEMP_DIR/archive.list" "$TEMP_DIR/expected.list" || fail "archive conta
 tar -xzf "$TEMP_DIR/$ARCHIVE" -C "$TEMP_DIR/extracted"
 SOURCE_DIR="$TEMP_DIR/extracted/$BASE"
 for executable in private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
-  [ -f "$SOURCE_DIR/$executable" ] && [ -x "$SOURCE_DIR/$executable" ] || fail "archive is missing executable $executable"
+  if [ ! -f "$SOURCE_DIR/$executable" ] || [ ! -x "$SOURCE_DIR/$executable" ]; then
+    fail "archive is missing executable $executable"
+  fi
 done
 for alias in pap aci; do
-  [ -L "$SOURCE_DIR/$alias" ] && [ "$(readlink "$SOURCE_DIR/$alias")" = private-ai-proxy ] || fail "archive has an invalid $alias alias"
+  if [ ! -L "$SOURCE_DIR/$alias" ] || [ "$(readlink "$SOURCE_DIR/$alias")" != private-ai-proxy ]; then
+    fail "archive has an invalid $alias alias"
+  fi
 done
 [ "$("$SOURCE_DIR/private-ai-proxy" --version)" = "private-ai-proxy $VERSION" ] || fail "downloaded CLI reports an unexpected version"
 
 VERSIONS_DIR="$INSTALL_DIR/versions"
 TARGET_DIR="$VERSIONS_DIR/$VERSION"
 mkdir -p "$VERSIONS_DIR" "$BIN_DIR"
+versions_real=$(CDPATH='' cd -P "$VERSIONS_DIR" && pwd -P) || fail "cannot resolve $VERSIONS_DIR"
 
 old_executable=""
 for command_name in private-ai-proxy pap aci; do
@@ -160,13 +168,13 @@ for command_name in private-ai-proxy pap aci; do
   if [ -e "$command_path" ] || [ -L "$command_path" ]; then
     [ -L "$command_path" ] || fail "$command_path exists and is not managed by this installer"
     link_target=$(readlink "$command_path")
-    case "$link_target" in
-      "$VERSIONS_DIR"/*/private-ai-proxy) ;;
-      *) fail "$command_path points outside $VERSIONS_DIR" ;;
-    esac
-    link_version=${link_target#"$VERSIONS_DIR"/}
-    link_version=${link_version%/private-ai-proxy}
+    case "$link_target" in /*/private-ai-proxy) ;; *) fail "$command_path has an invalid managed target" ;; esac
+    link_directory=${link_target%/private-ai-proxy}
+    link_version=${link_directory##*/}
     printf '%s' "$link_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[1-9][0-9]*)?$' || fail "$command_path has an invalid managed target"
+    link_versions_real=$(CDPATH='' cd -P "${link_directory%/*}" && pwd -P) || fail "$command_path points outside $VERSIONS_DIR"
+    [ "$link_versions_real" = "$versions_real" ] || fail "$command_path points outside $VERSIONS_DIR"
+    link_target="$VERSIONS_DIR/$link_version/private-ai-proxy"
     if [ -n "$old_executable" ] && [ "$old_executable" != "$link_target" ]; then
       fail "managed command links do not point to the same installation"
     fi
@@ -175,14 +183,20 @@ for command_name in private-ai-proxy pap aci; do
 done
 
 if [ -n "$old_executable" ] && [ -x "$old_executable" ]; then
-  "$old_executable" --yes service stop >/dev/null || fail "cannot stop the existing Private AI Proxy service"
+  if [ "$SKIP_SERVICE_STOP" = false ]; then
+    "$old_executable" --yes service stop >/dev/null || fail "cannot stop the existing Private AI Proxy service"
+  fi
+elif [ "$SKIP_SERVICE_STOP" = true ]; then
+  fail "--skip-service-stop requires an existing installation"
 fi
 
 if [ -e "$TARGET_DIR" ]; then
   [ -d "$TARGET_DIR" ] || fail "$TARGET_DIR exists and is not a directory"
   [ "$("$TARGET_DIR/private-ai-proxy" --version 2>/dev/null || true)" = "private-ai-proxy $VERSION" ] || fail "$TARGET_DIR is not a valid $VERSION installation"
   for executable in private-ai-proxy private-ai-proxy-service private-ai-proxy-helper; do
-    [ -f "$TARGET_DIR/$executable" ] && [ -x "$TARGET_DIR/$executable" ] || fail "$TARGET_DIR is missing executable $executable"
+    if [ ! -f "$TARGET_DIR/$executable" ] || [ ! -x "$TARGET_DIR/$executable" ]; then
+      fail "$TARGET_DIR is missing executable $executable"
+    fi
   done
 else
   STAGE_DIR="$VERSIONS_DIR/.stage-$VERSION-$$"

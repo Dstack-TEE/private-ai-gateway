@@ -142,3 +142,46 @@ Signed desktop app installers, portable CLI archives, and Linux DEB, RPM, and
 Arch packages are published on the
 [GitHub Releases](https://github.com/Dstack-TEE/private-ai-gateway/releases)
 page. Native package managers own upgrades and removal for their installations.
+
+## Update
+
+| Installation | How to update |
+| --- | --- |
+| macOS or Linux install script | Run `pap update`. If a managed command link is missing from PATH, rerun the [installer](#macos-and-linux) with the original directories. |
+| Linux DEB, RPM, or Arch package | Use your package manager. Run `pap doctor` for available CLI package commands. For desktop packages, see [Updates by installation](../apps/desktop/docs/distribution.md#updates-by-installation). |
+| npm | Run `pap update` on macOS or Linux. On Windows, stop the backend with `pap --yes service stop` and rerun the [npm install command](#npm). |
+| Homebrew | Run `brew upgrade dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
+| Windows PowerShell installer | Rerun the [installer](#windows) with the same `-InstallDir` if customized. |
+| Desktop app | Check for updates in Settings > About. For Mac App Store installs, use the App Store. |
+
+## Uninstall
+
+Before removing a CLI installation without a removal hook, quit the desktop
+app if open and run the following as the user who ran Private AI Proxy. If
+login supervision is unavailable, continue with the stop and offline restore.
+
+```sh
+pap --yes service disable
+pap --yes service stop
+pap --yes stop --offline
+```
+
+| Installation | How to remove it |
+| --- | --- |
+| macOS or Linux install script | Delete the `pap`, `aci`, and `private-ai-proxy` links from the [installer's bin directory](#macos-and-linux) and remove its versioned installation directory. |
+| Linux DEB, RPM, or Arch package | Remove `private-ai-proxy-cli` or `private-ai-proxy` with the package manager. Current packages attempt the cleanup above automatically while preserving the login preference. |
+| npm | Run `npm uninstall --global private-ai-proxy`. |
+| Homebrew | Run `brew uninstall dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
+| Windows PowerShell installer | Run `pap --yes cli uninstall` to remove its PATH registration, then delete the [CLI install directory](#windows). |
+| Desktop app | On Windows, use **Settings > Apps > Installed apps**. On macOS, choose **Stop All and Quit**, turn off login supervision as described in [CLI distribution](../apps/desktop/docs/cli-distribution.md) if enabled, then move the app to Trash. |
+
+Linux package removal continues if a cleanup step fails. Package switches may
+trigger cleanup if the package manager removes the conflicting package. A dpkg
+replacement reported as `in-favour` of the other Private AI Proxy package skips
+cleanup.
+
+If you already removed the CLI and an agent still points to the Local API,
+reinstall the same package or use another `pap` installation to retry
+`pap stop --offline` with the original user data. If you explicitly disabled
+login supervision before uninstalling, `pap service enable` turns it back on
+after reinstalling.
