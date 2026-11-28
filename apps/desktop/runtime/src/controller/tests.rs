@@ -1076,13 +1076,15 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
     // A running backend owns the agents; nothing is touched.
     let before = snapshot();
     let backend = lock::instance(&directory).unwrap().unwrap();
-    assert_eq!(restore_agents_offline(helper.clone()), Ok(None));
+    assert_eq!(restore_agents_offline(helper.clone(), false), Ok(None));
     assert_eq!(snapshot(), before);
     assert!(files.read(Agent::ClaudeCode.id()).unwrap().is_some());
     assert!(resumes());
     drop(backend);
 
-    let statuses = restore_agents_offline(helper.clone()).unwrap().unwrap();
+    let statuses = restore_agents_offline(helper.clone(), false)
+        .unwrap()
+        .unwrap();
     let restored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&claude).unwrap()).unwrap();
     assert_eq!(
@@ -1108,7 +1110,10 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
 
     // Restoring again changes nothing.
     let after = snapshot();
-    assert_eq!(restore_agents_offline(helper.clone()), Ok(Some(statuses)));
+    assert_eq!(
+        restore_agents_offline(helper.clone(), false),
+        Ok(Some(statuses))
+    );
     assert_eq!(snapshot(), after);
 
     // The next protected session projects the suspended agent again.

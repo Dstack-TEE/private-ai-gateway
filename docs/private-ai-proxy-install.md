@@ -391,7 +391,7 @@ app if open and run the following as the user who ran Private AI Proxy. If
 login supervision is unavailable, continue with the stop and offline restore.
 
 ```sh
-pap --yes service disable
+pap --yes service disable --for-uninstall
 pap --yes service stop
 pap --yes stop --offline
 ```

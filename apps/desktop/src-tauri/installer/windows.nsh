@@ -237,7 +237,7 @@ FunctionEnd
   StrCpy $R4 "$INSTDIR\private-ai-proxy.exe"
   ${If} ${FileExists} "$R4"
     ${If} $UpdateMode <> 1
-      ExecWait '"$R4" --yes service disable' $R0
+      ExecWait '"$R4" --yes service disable --for-uninstall' $R0
       ${If} $R0 != 0
         !insertmacro PAP_FAIL "The Private AI Proxy login service could not be disabled. Uninstall was cancelled."
       ${EndIf}

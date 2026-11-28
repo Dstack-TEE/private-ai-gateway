@@ -1049,3 +1049,140 @@ fn openclaw_disconnect_prunes_only_empty_selector_containers_created_by_pap() {
         );
     }
 }
+
+#[test]
+fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
+    let catalog = catalog();
+    for agent in [
+        Agent::Codex,
+        Agent::OpenCode,
+        Agent::Pi,
+        Agent::Hermes,
+        Agent::OpenClaw,
+        Agent::OhMyPi,
+    ] {
+        let mut normal = sandbox(&format!("normal-provider-retention-{}", agent.id()));
+        let config = agent.config_path(&normal.home, &ToolEnvironment::Disabled);
+        write(
+            &config,
+            match agent {
+                Agent::Codex => "model = 'native'\n",
+                Agent::OpenCode => "{\"model\":\"other/native\"}",
+                Agent::Pi => "{}",
+                Agent::Hermes => "model:\n  provider: other\n  default: native\n",
+                Agent::OpenClaw => {
+                    "{\"agents\":{\"defaults\":{\"model\":{\"primary\":\"other/native\"}}}}"
+                }
+                Agent::OhMyPi => "theme: dark\n",
+                _ => unreachable!(),
+            },
+        );
+        if agent == Agent::OpenClaw {
+            normal.projector.helper_exe = normal
+                .projector
+                .data_dir
+                .join("helpers")
+                .join(helper_binary_name());
+        }
+        assert!(apply_connect(&normal, agent, &catalog, &claude_options()).authorized);
+        let roots: Vec<_> = normal
+            .projector
+            .load_store()
+            .unwrap()
+            .get(agent.id())
+            .unwrap()
+            .fields
+            .iter()
+            .filter_map(|field| provider_namespace(&field.path).map(|path| path.to_vec()))
+            .collect();
+        assert!(!roots.is_empty(), "{} has no provider journal", agent.id());
+        disconnect(&normal, agent);
+        let restored = doc(&normal, agent);
+        for root in &roots {
+            assert!(restored.contains(&refs(root)), "{}", agent.id());
+        }
+
+        let mut uninstall = sandbox(&format!("uninstall-provider-purge-{}", agent.id()));
+        let config = agent.config_path(&uninstall.home, &ToolEnvironment::Disabled);
+        write(
+            &config,
+            match agent {
+                Agent::Codex => "model = 'native'\n",
+                Agent::OpenCode => "{\"model\":\"other/native\"}",
+                Agent::Pi => "{}",
+                Agent::Hermes => "model:\n  provider: other\n  default: native\n",
+                Agent::OpenClaw => {
+                    "{\"agents\":{\"defaults\":{\"model\":{\"primary\":\"other/native\"}}}}"
+                }
+                Agent::OhMyPi => "theme: dark\n",
+                _ => unreachable!(),
+            },
+        );
+        if agent == Agent::OpenClaw {
+            uninstall.projector.helper_exe = uninstall
+                .projector
+                .data_dir
+                .join("helpers")
+                .join(helper_binary_name());
+        }
+        assert!(apply_connect(&uninstall, agent, &catalog, &claude_options()).authorized);
+        uninstall.projector.mark_uninstall().unwrap();
+        uninstall.projector.reconcile(None).unwrap();
+        let restored = doc(&uninstall, agent);
+        for root in &roots {
+            assert!(!restored.contains(&refs(root)), "{}", agent.id());
+        }
+        assert!(uninstall
+            .projector
+            .load_store()
+            .unwrap()
+            .get(agent.id())
+            .is_none());
+
+        let mut offline = sandbox(&format!("uninstall-disconnected-{}", agent.id()));
+        let config = agent.config_path(&offline.home, &ToolEnvironment::Disabled);
+        write(
+            &config,
+            match agent {
+                Agent::Codex => "model = 'native'\n",
+                Agent::OpenCode => "{\"model\":\"other/native\"}",
+                Agent::Pi => "{}",
+                Agent::Hermes => "model:\n  provider: other\n  default: native\n",
+                Agent::OpenClaw => {
+                    "{\"agents\":{\"defaults\":{\"model\":{\"primary\":\"other/native\"}}}}"
+                }
+                Agent::OhMyPi => "theme: dark\n",
+                _ => unreachable!(),
+            },
+        );
+        if agent == Agent::OpenClaw {
+            offline.projector.helper_exe = offline
+                .projector
+                .data_dir
+                .join("helpers")
+                .join(helper_binary_name());
+        }
+        assert!(apply_connect(&offline, agent, &catalog, &claude_options()).authorized);
+        disconnect(&offline, agent);
+        offline.projector.mark_uninstall().unwrap();
+        offline.projector.reconcile(None).unwrap();
+        assert!(offline
+            .projector
+            .load_store()
+            .unwrap()
+            .get(agent.id())
+            .is_none());
+    }
+    for agent in [Agent::ClaudeCode, Agent::Dsh] {
+        let sandbox = sandbox(&format!("uninstall-no-provider-{}", agent.id()));
+        assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+        sandbox.projector.mark_uninstall().unwrap();
+        sandbox.projector.reconcile(None).unwrap();
+        assert!(sandbox
+            .projector
+            .load_store()
+            .unwrap()
+            .get(agent.id())
+            .is_none());
+    }
+}

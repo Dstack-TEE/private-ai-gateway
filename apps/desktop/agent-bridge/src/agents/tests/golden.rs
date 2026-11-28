@@ -318,6 +318,12 @@ impl Golden {
         self.failures(failures);
     }
 
+    fn mark_uninstall(&mut self) {
+        self.part("mark uninstall");
+        self.projector().mark_uninstall().unwrap();
+        self.observe();
+    }
+
     fn initialize(&mut self) {
         self.part("initialize");
         self.projector().initialize_store().unwrap();
@@ -639,6 +645,17 @@ fn agent_lifecycles_match_their_golden_transcripts() {
         g.reconcile(Some(&repriced));
         g.scan(agent, Some(&repriced));
         g.disconnect_all();
+        scenarios.push(g);
+
+        let mut g = Golden::new(&format!("{} uninstall purges PAP providers", agent.id()));
+        if agent == Agent::OpenClaw {
+            g.stage_helper();
+        }
+        g.mkdir(config(agent).rsplit_once('/').unwrap().0);
+        g.connect(agent, Some(&first), None);
+        g.mark_uninstall();
+        g.reconcile(None);
+        g.scan(agent, None);
         scenarios.push(g);
 
         // Home credentials: configs read the token file, never the helper.

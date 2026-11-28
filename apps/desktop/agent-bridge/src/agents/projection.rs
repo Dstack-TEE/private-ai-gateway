@@ -693,6 +693,7 @@ pub(super) fn project(
     for field in anchor(Some(doc), &exact, &prior_exact)? {
         project_exact(doc, field, &prior_exact, None, &mut edit)?;
     }
+    let empty_document = doc.get_value(&[]).is_none();
     for field in fields.iter().filter(|field| !field.exact) {
         let path = refs(&field.path);
         if agent == Agent::OpenClaw && path == model_selection_paths(agent)[0].path {
@@ -705,6 +706,27 @@ pub(super) fn project(
                         .iter()
                         .any(|field| field.container && field.path == parent)
                 {
+                    owned_fields(&mut edit).push(OwnedField {
+                        path: parent.to_vec(),
+                        container: true,
+                        ..OwnedField::default()
+                    });
+                }
+            }
+        }
+        if empty_document && agent == Agent::OpenClaw && provider_namespace(&field.path).is_some() {
+            for depth in 1..path.len() {
+                let parent = &field.path[..depth];
+                let already_owned = prior
+                    .iter()
+                    .any(|field| field.container && field.path == parent)
+                    || edit.record.as_ref().is_some_and(|record| {
+                        record
+                            .fields
+                            .iter()
+                            .any(|field| field.container && field.path == parent)
+                    });
+                if !doc.contains(&path[..depth]) && !already_owned {
                     owned_fields(&mut edit).push(OwnedField {
                         path: parent.to_vec(),
                         container: true,
@@ -1227,7 +1249,7 @@ pub(super) fn restore(
             changes.extend(change);
             continue;
         }
-        if retain_provider_field(field, &record.fields) {
+        if !record.purge_provider && retain_provider_field(field, &record.fields) {
             let path = refs(&field.path);
             let inactive = inactive_provider_value(field);
             if doc.get_value(&path) == field.value && inactive != field.value {

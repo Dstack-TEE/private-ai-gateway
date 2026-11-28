@@ -49,7 +49,9 @@ off and require the default PAP paths for `pap service enable`. If the backend
 started directly while the manager was unavailable, `pap start` or
 `pap service enable` can move it under its already enabled login service.
 `pap service disable` stops protection, restores agents, and turns off
-supervision. The Linux and direct macOS app uses this same registration for
+supervision. `pap service disable --for-uninstall` also removes provider
+entries PAP created while leaving pre-existing provider settings intact. The
+Linux and direct macOS app uses this same registration for
 **Run in background at login**. **Open at Login** opens the app in the tray.
 On Windows it starts on by default once, and opening the tray starts the
 backend. You can also run `pap start` to turn on protection after restarting
@@ -360,13 +362,16 @@ as `stop --offline`. Both end the saved session and restore agents through the
 same journal and instance lock, including after a crash, supervised shutdown,
 or Windows sign-out. Each connection is kept for the next time you start
 protection.
+Uninstall cleanup records its intent in the connection journal, so a later
+`stop --offline` completes the provider removal if the backend exits first.
 Running it again changes nothing. It holds the backend's instance lock while it
 works and is refused while a backend runs; use `stop` or `service stop` then.
-The Windows uninstaller runs it after `service stop`; if it fails, the
+The Windows uninstaller runs it after `service disable --for-uninstall` and
+`service stop`; if it fails, the
 uninstaller shows why and asks whether to uninstall anyway, keeping the restore
 data (a silent uninstall continues and logs why). If the app data was also
 to be deleted, it cancels instead, since the app data holds the restore data.
-On macOS and Linux, run `pap service disable` before removing a supervised
+On macOS and Linux, run `pap service disable --for-uninstall` before removing a supervised
 CLI or desktop installation, or turn off **Run in background at login** in
 Settings and then choose Stop All and Quit. On Windows, uninstall removes the
 app's Open at Login entry. Mac App Store builds restore
