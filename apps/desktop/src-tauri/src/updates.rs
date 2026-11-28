@@ -4,7 +4,7 @@ use desktop_core::{
     client::{CallError, Client},
     config::UpdateChannel,
     protocol::{rpc, Preference},
-    updates::{self, Installation, UpdateInfo},
+    updates::{self, UpdateInfo},
 };
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
@@ -90,7 +90,7 @@ pub async fn prepare_update(
     // The backend's settings, like every other preference the app reads, so
     // the app and the backend always agree on the file in effect.
     let client = app.state::<Arc<Client>>().inner().clone();
-    let (channel, system_managed) = run_blocking(move || {
+    let (channel, installation) = run_blocking(move || {
         let channel = match client.call(rpc::Settings) {
             Ok(saved) => saved.update_channel.unwrap_or(default),
             Err(error) => {
@@ -100,15 +100,14 @@ pub async fn prepare_update(
                 default
             }
         };
-        Ok((
-            channel,
-            updates::installation() == Installation::DesktopPacman,
-        ))
+        Ok((channel, updates::installation()))
     })
     .await?;
+    let system_managed = installation.desktop_package_managed();
     let mut info = UpdateInfo {
         enabled: configured && !system_managed,
         system_managed,
+        package_manager_channel: installation.linux_repo_managed(),
         current_version,
         channel,
         version: None,
@@ -123,14 +122,9 @@ pub async fn prepare_update(
     }
     let feed = configured_endpoint(&app)?;
     if system_managed {
-        // pacman owns the files: announce the release and its exact upgrade steps.
-        let notice = updates::check(
-            &feed,
-            channel,
-            &info.current_version,
-            Installation::DesktopPacman,
-        )
-        .await?;
+        // The package manager owns the files. Show the upgrade command.
+        let notice = updates::check(&feed, channel, &info.current_version, installation).await?;
+        info.channel = notice.channel;
         info.version = notice.version;
         info.upgrade_commands = notice.commands;
         return Ok(info);
@@ -207,6 +201,9 @@ pub async fn restart_to_update(
     drop(prepared);
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        if updates::installation().desktop_package_managed() {
+            return Err("Updates are managed by the package manager".into());
+        }
         let install = || {
             download
                 .update

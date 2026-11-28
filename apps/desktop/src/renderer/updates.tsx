@@ -100,6 +100,12 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
     },
     meta: { errorTitle: "Could not change the update channel" },
   });
+  if (updates.info?.packageManagerChannel) return <SettingsItem>
+    <ItemContent>
+      <ItemTitle>Update channel</ItemTitle>
+      <ItemDescription>Managed by your package repositories</ItemDescription>
+    </ItemContent>
+  </SettingsItem>;
   return <SettingsItem>
     <ItemContent>
       <ItemTitle><FieldLabel id="update-channel-label">Update channel</FieldLabel></ItemTitle>

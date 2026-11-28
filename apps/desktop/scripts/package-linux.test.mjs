@@ -122,7 +122,9 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
     assert.match(debListing(deb), /\.\/usr\/bin\/pap -> private-ai-proxy$/m);
     assert.match(debListing(deb), /\.\/usr\/bin\/aci -> private-ai-proxy$/m);
     assert.match(debListing(deb), /\.\/usr\/share\/applications\/Private AI Proxy\.desktop$/m);
-    assert.doesNotMatch(debListing(deb), /package-manager/);
+    const marker = "usr/share/private-ai-proxy/package-manager";
+    assert.equal(execFileSync("bsdtar", ["-xOf", "-", `./${marker}`], { input: payloadTar, encoding: "utf8" }), "deb\n");
+    assert.equal(member(rpm, `./${marker}`), "rpm\n");
     const tauri = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
     // Debian Policy 5.6.2: a name and an email address, in every format.
     assert.equal(output("dpkg-deb", ["-f", deb, "Maintainer"]), maintainer);
@@ -142,7 +144,7 @@ test("the Tauri payload ships as DEB, RPM and Arch packages with signed updater 
       assert.equal(query("%{PACKAGER}"), maintainer);
       assert.equal(
         query("[%{FILENAMES}|%{FILEMODES:perms}|%{FILELINKTOS}\n]").replace(/\|l[-rwx]{9}\|/g, "|link|"),
-        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/bin/private-ai-proxy-desktop|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|",
+        "/usr/bin/aci|link|private-ai-proxy\n/usr/bin/pap|link|private-ai-proxy\n/usr/bin/private-ai-proxy|-rwxr-xr-x|\n/usr/bin/private-ai-proxy-desktop|-rwxr-xr-x|\n/usr/lib/systemd/user/private-ai-proxy.service|-rw-r--r--|\n/usr/share/applications/Private AI Proxy.desktop|-rw-r--r--|\n/usr/share/private-ai-proxy|drwxr-xr-x|\n/usr/share/private-ai-proxy/package-manager|-rw-r--r--|",
       );
       assert.match(output("rpm", ["-qp", "--requires", rpm]), /^libwebkit2gtk-4\.1\.so\.0\(\)\(64bit\)$/m);
       assert.match(output("rpm", ["-qp", "--provides", rpm]), /^private-ai-proxy-cli = 1\.2\.3~beta\.4-1$/m);

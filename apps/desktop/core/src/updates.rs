@@ -149,10 +149,14 @@ pub enum Installation {
     DesktopApp,
     /// Desktop app owned by pacman.
     DesktopPacman,
+    /// Desktop app configured to update through its Linux repository.
+    DesktopLinuxRepo,
     /// CLI-only native packages.
     Deb,
     Rpm,
     Pacman,
+    /// CLI-only package configured to update through its Linux repository.
+    LinuxRepo,
     /// CLI installed by the official install script.
     InstallScript,
     WindowsInstallScript,
@@ -177,6 +181,13 @@ impl Installation {
                 | Self::Yarn
                 | Self::WindowsInstallScript
         )
+    }
+    pub fn desktop_package_managed(self) -> bool {
+        matches!(self, Self::DesktopPacman | Self::DesktopLinuxRepo)
+    }
+
+    pub fn linux_repo_managed(self) -> bool {
+        matches!(self, Self::LinuxRepo | Self::DesktopLinuxRepo)
     }
 }
 
@@ -258,6 +269,104 @@ fn windows_script_install(directory: &Path, local_app_data: Option<&Path>) -> bo
         .all(|file| directory.join(file).is_file()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxRepository {
+    Apt,
+    Dnf,
+    Zypper,
+}
+
+impl LinuxRepository {
+    fn detect(root: &Path, manager: &str) -> Option<(Self, UpdateChannel)> {
+        let repositories: &[(Self, &str, &str)] = match manager {
+            "deb" => &[(Self::Apt, "apt/sources.list.d", "sources")],
+            "rpm" => &[
+                (Self::Dnf, "yum.repos.d", "repo"),
+                (Self::Zypper, "zypp/repos.d", "repo"),
+            ],
+            _ => return None,
+        };
+        repositories
+            .iter()
+            .find_map(|&(manager, directory, extension)| {
+                let directory = root.join(directory);
+                let enabled = |suffix: &str| {
+                    fs::read_to_string(
+                        directory.join(format!("{PACKAGE_NAME}{suffix}.{extension}")),
+                    )
+                    .is_ok_and(|contents| {
+                        let (separator, source_key) = if manager == Self::Apt {
+                            (':', "uris")
+                        } else {
+                            ('=', "baseurl")
+                        };
+                        let mut configured = false;
+                        for (key, value) in contents
+                            .lines()
+                            .map(str::trim)
+                            .filter_map(|line| line.split_once(separator))
+                        {
+                            if key.trim().eq_ignore_ascii_case("enabled")
+                                && ["false", "0", "no"]
+                                    .iter()
+                                    .any(|disabled| value.trim().eq_ignore_ascii_case(disabled))
+                            {
+                                return false;
+                            }
+                            configured |= key.trim().eq_ignore_ascii_case(source_key);
+                        }
+                        configured
+                    })
+                };
+                if enabled("-beta") {
+                    Some((manager, UpdateChannel::Beta))
+                } else if enabled("") {
+                    Some((manager, UpdateChannel::Stable))
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn upgrade(self, installation: Installation) -> String {
+        let package = if installation == Installation::DesktopLinuxRepo {
+            PACKAGE_NAME.to_owned()
+        } else {
+            format!("{PACKAGE_NAME}-cli")
+        };
+        match self {
+            Self::Apt => format!("sudo apt update && sudo apt install --only-upgrade {package}"),
+            Self::Dnf => format!("sudo dnf upgrade --refresh {package}"),
+            Self::Zypper => format!("sudo zypper refresh && sudo zypper update {package}"),
+        }
+    }
+}
+
+/// The active repository and suite are controlled by the package manager.
+fn linux_repository() -> Option<(LinuxRepository, UpdateChannel)> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let marker = fs::read_to_string(PACKAGE_MANAGER_MARKER).ok()?;
+    LinuxRepository::detect(Path::new("/etc"), marker.trim())
+}
+
+/// The command to show to a user whose configured repository owns upgrades.
+pub fn linux_repo_update(installation: Installation) -> Option<UpdateNotice> {
+    if !installation.linux_repo_managed() {
+        return None;
+    }
+    let (manager, channel) = linux_repository()?;
+    Some(UpdateNotice {
+        installation,
+        channel,
+        current_version: crate::protocol::BUILD_VERSION.into(),
+        version: None,
+        commands: vec![manager.upgrade(installation)],
+        download_url: None,
+    })
+}
+
 /// Classifies the installation that owns the running executable.
 pub fn installation() -> Installation {
     let Some(executable) = std::env::current_exe().and_then(std::fs::canonicalize).ok() else {
@@ -285,7 +394,19 @@ pub fn installation() -> Installation {
     {
         return Installation::WindowsInstallScript;
     }
-    install
+    if directory == Path::new("/usr/bin")
+        && desktop
+        && install == Installation::DesktopApp
+        && linux_repository().is_some()
+    {
+        Installation::DesktopLinuxRepo
+    } else if matches!(install, Installation::Deb | Installation::Rpm)
+        && linux_repository().is_some()
+    {
+        Installation::LinuxRepo
+    } else {
+        install
+    }
 }
 
 async fn update_owner(
@@ -424,6 +545,7 @@ pub struct UpdateNotice {
 pub struct UpdateInfo {
     pub enabled: bool,
     pub system_managed: bool,
+    pub package_manager_channel: bool,
     pub current_version: String,
     pub channel: UpdateChannel,
     pub version: Option<String>,
@@ -448,6 +570,11 @@ pub async fn check(
     current_version: &str,
     installation: Installation,
 ) -> Result<UpdateNotice, String> {
+    let repository = installation
+        .linux_repo_managed()
+        .then(linux_repository)
+        .flatten();
+    let channel = repository.map_or(channel, |(_, channel)| channel);
     let current = semver::Version::parse(current_version)
         .map_err(|_| "The installed version is invalid".to_string())?;
     let client = reqwest::Client::builder()
@@ -464,8 +591,9 @@ pub async fn check(
     let script = (installation == Installation::InstallScript && latest.is_some())
         .then(ScriptInstallation::current)
         .flatten();
-    let (commands, download_url) = match &latest {
-        Some(version) => upgrade_steps(
+    let (commands, download_url) = match (&latest, repository) {
+        (Some(_), Some((manager, _))) => (vec![manager.upgrade(installation)], None),
+        (Some(version), None) => upgrade_steps(
             installation,
             release_root(configured)?.as_str(),
             &version.to_string(),
@@ -473,7 +601,7 @@ pub async fn check(
             script.as_ref(),
             node,
         )?,
-        None => (Vec::new(), None),
+        (None, _) => (Vec::new(), None),
     };
     Ok(UpdateNotice {
         installation,
@@ -711,7 +839,10 @@ fn upgrade_steps(
     let command = step;
     let stop = STOP_STEP.to_string();
     Ok(match installation {
-        Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
+        Installation::DesktopApp
+        | Installation::SystemPackage
+        | Installation::DesktopLinuxRepo
+        | Installation::LinuxRepo => (Vec::new(), None),
         Installation::DesktopPacman | Installation::Pacman => {
             let file = name(installation == Installation::Pacman, ".pkg.tar.zst");
             let signature = format!("{file}.sig");
@@ -827,6 +958,54 @@ mod tests {
             windows_install_command(Path::new(r"\\?\C:\O'Brien PAP"), "1.2.3-beta.1").unwrap();
         assert!(command
             .contains(r"-Channel beta -Version '1.2.3-beta.1' -InstallDir 'C:\O''Brien PAP'"));
+    }
+
+    #[test]
+    fn linux_repo_channel_and_upgrade_command_follow_enabled_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let etc = temp.path();
+        fs::create_dir_all(etc.join("apt/sources.list.d")).unwrap();
+        fs::create_dir_all(etc.join("zypp/repos.d")).unwrap();
+        let source =
+            |suffix| etc.join(format!("apt/sources.list.d/{PACKAGE_NAME}{suffix}.sources"));
+        fs::write(source(""), "URIs: https://example.test/apt\n").unwrap();
+        for disabled in ["no", "false", "0"] {
+            fs::write(
+                source("-beta"),
+                format!("URIs: https://example.test/apt\nEnabled: {disabled}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                LinuxRepository::detect(etc, "deb"),
+                Some((LinuxRepository::Apt, UpdateChannel::Stable))
+            );
+        }
+        fs::write(
+            source("-beta"),
+            "URIs: https://example.test/apt\nEnabled: yes\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxRepository::detect(etc, "deb"),
+            Some((LinuxRepository::Apt, UpdateChannel::Beta))
+        );
+        assert_eq!(
+            LinuxRepository::Apt.upgrade(Installation::DesktopLinuxRepo),
+            "sudo apt update && sudo apt install --only-upgrade private-ai-proxy"
+        );
+        fs::write(
+            etc.join("zypp/repos.d/private-ai-proxy.repo"),
+            "baseurl=https://example.test/stable\nenabled=1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxRepository::detect(etc, "rpm"),
+            Some((LinuxRepository::Zypper, UpdateChannel::Stable))
+        );
+        assert_eq!(
+            LinuxRepository::Zypper.upgrade(Installation::LinuxRepo),
+            "sudo zypper refresh && sudo zypper update private-ai-proxy-cli"
+        );
     }
 
     #[cfg(unix)]

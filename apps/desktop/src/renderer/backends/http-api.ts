@@ -61,6 +61,7 @@ const platform: UiPlatform = {
     return {
       enabled: false,
       systemManaged: true,
+      packageManagerChannel: notice.installation === "linuxRepo" || notice.installation === "desktopLinuxRepo",
       currentVersion: notice.currentVersion,
       channel: notice.channel,
       version: notice.version,
