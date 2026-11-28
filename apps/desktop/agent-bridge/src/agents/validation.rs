@@ -25,7 +25,7 @@ impl Projector {
     ) -> Option<&'a Connection> {
         record.filter(|record| {
             !record.disconnected()
-                || std::path::absolute(agent.config_path(&self.home, self.tool_env))
+                || std::path::absolute(agent.config_path(&self.home, &self.tool_env))
                     .is_ok_and(|path| record.config_path == path)
         })
     }
@@ -42,16 +42,17 @@ impl Projector {
                 return record.restore_path().map(Path::to_path_buf);
             }
         }
+        self.tool_env.validate(agent, &self.home)?;
         if agent == Agent::OhMyPi {
-            oh_my_pi::validate_host(&self.home, self.tool_env)?;
+            oh_my_pi::validate_host(&self.home, &self.tool_env)?;
         }
         if agent == Agent::Dsh {
-            dsh::validate_host(&self.home, self.tool_env)?;
+            dsh::validate_host(&self.home, &self.tool_env)?;
         }
-        if agent == Agent::Hermes && !hermes_profile_valid(&self.home, self.tool_env) {
+        if agent == Agent::Hermes && !hermes_profile_valid(&self.home, &self.tool_env) {
             return Err("Hermes active_profile must be a profile name using letters, numbers, '_' or '-'; clear it or choose a valid profile before connecting".to_string());
         }
-        let configured = agent.config_path(&self.home, self.tool_env);
+        let configured = agent.config_path(&self.home, &self.tool_env);
         if !configured.is_absolute() {
             return Err("Set the agent config location to an absolute path; desktop and CLI working directories may differ".to_string());
         }
@@ -142,7 +143,7 @@ impl Projector {
         let catalog = Some(connection.catalog);
         let prior = self.current_record(agent, store.get(agent.id()));
         if agent == Agent::OpenClaw {
-            openclaw::validate_host(&self.home, self.tool_env)
+            openclaw::validate_host(&self.home, &self.tool_env)
                 .map_err(AgentError::ConfigurationConflict)?;
             self.openclaw_helper()
                 .map_err(|_| AgentError::HelperUnavailable)?;
@@ -170,7 +171,7 @@ impl Projector {
             AgentError::ConfigurationConflict(if agent.format() == Format::YamlList {
                 format!(
                     "{} cannot be changed safely: {reason}",
-                    agent.config_path(&self.home, self.tool_env).display()
+                    agent.config_path(&self.home, &self.tool_env).display()
                 )
             } else {
                 reason
@@ -178,7 +179,7 @@ impl Projector {
         })?;
         if agent == Agent::Dsh {
             let token = self.tokens.read(agent.id()).ok().flatten();
-            let dsh_home = dsh::home_dir(&self.home, self.tool_env);
+            let dsh_home = dsh::home_dir(&self.home, &self.tool_env);
             if token.is_none_or(|token| !dsh::credential_holds(&dsh_home, &token)) {
                 edit.changes.push(dsh::credential_change());
             }
@@ -217,19 +218,19 @@ impl Projector {
         catalog: Option<&Catalog>,
     ) -> Result<Option<String>, AgentError> {
         if agent == Agent::OhMyPi {
-            let path = agent.config_path(&self.home, self.tool_env);
+            let path = agent.config_path(&self.home, &self.tool_env);
             return oh_my_pi::validate_config(doc, prior)
                 .and_then(|()| oh_my_pi::validate_settings(&path, doc, catalog))
                 .map_err(AgentError::ConfigurationConflict);
         }
         match agent {
-            Agent::Dsh => dsh::validate_config(&dsh::home_dir(&self.home, self.tool_env), doc, prior)
+            Agent::Dsh => dsh::validate_config(&dsh::home_dir(&self.home, &self.tool_env), doc, prior)
                 .map_err(AgentError::ConfigurationConflict),
             Agent::Codex if doc.contains(&["model_providers", "private_ai_proxy", "aws"]) => {
                 Err(AgentError::AuthenticationConflict("Codex's private_ai_proxy provider has AWS authentication, which conflicts with command authentication. Remove that conflict in Codex; it will not be overwritten".to_string()))
             }
             Agent::Pi => {
-                let path = Agent::Pi.config_path(&self.home, self.tool_env).with_file_name("auth.json");
+                let path = Agent::Pi.config_path(&self.home, &self.tool_env).with_file_name("auth.json");
                 let auth = read_auth_document(&path)?;
                 if auth.get("private-ai-proxy").is_some() {
                     return Err(AgentError::AuthenticationConflict("Pi has a stored credential for private-ai-proxy that takes priority over the helper. Resolve it in Pi before connecting; auth.json is left unchanged".to_string()));
@@ -281,9 +282,9 @@ impl Projector {
                 if selected.is_none_or(|id| id.is_empty() || catalog.is_some_and(|catalog| catalog.get(id).is_none_or(|model| !agent.can_use(catalog, model)))) {
                     return Err(AgentError::IncompatibleModel);
                 }
-                let path = Agent::Hermes.config_path(&self.home, self.tool_env);
+                let path = Agent::Hermes.config_path(&self.home, &self.tool_env);
                 let directory = path.parent().ok_or(AgentError::InvalidState)?;
-                let native = hermes_native_dir(&self.home, self.tool_env);
+                let native = hermes_native_dir(&self.home, &self.tool_env);
                 let resolved = directory.canonicalize().unwrap_or_else(|_| directory.to_path_buf());
                 let resolved_native = native.canonicalize().unwrap_or_else(|_| native.clone());
                 let root = if resolved.starts_with(&resolved_native) { native }
@@ -321,21 +322,20 @@ impl Projector {
         };
         let global = self
             .tool_env
-            .then(|| env_path(XDG_CONFIG_HOME))
-            .flatten()
+            .path(XDG_CONFIG_HOME)
             .unwrap_or_else(|| self.home.join(".config"))
             .join("opencode");
-        let target = Agent::OpenCode.config_path(&self.home, self.tool_env);
+        let target = Agent::OpenCode.config_path(&self.home, &self.tool_env);
         let mut paths = vec![
             global.join("config.json"),
             global.join("opencode.json"),
             global.join("opencode.jsonc"),
         ];
-        if self.tool_env {
-            if let Some(path) = env_path(OPENCODE_CONFIG) {
+        if self.tool_env.enabled() {
+            if let Some(path) = self.tool_env.path(OPENCODE_CONFIG) {
                 paths.push(path);
             }
-            if let Some(dir) = env_path(OPENCODE_CONFIG_DIR) {
+            if let Some(dir) = self.tool_env.path(OPENCODE_CONFIG_DIR) {
                 paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
             }
         }
@@ -361,8 +361,11 @@ impl Projector {
             sources.push(path.display().to_string());
             merge_opencode_config(&mut merged, layer);
         }
-        if self.tool_env {
-            if let Some(text) = env::var_os(OPENCODE_CONFIG_CONTENT).filter(|text| !text.is_empty())
+        if self.tool_env.enabled() {
+            if let Some(text) = self
+                .tool_env
+                .value(OPENCODE_CONFIG_CONTENT)
+                .filter(|text| !text.is_empty())
             {
                 let layer = text
                     .to_str()
@@ -378,7 +381,7 @@ impl Projector {
                 merge_opencode_config(&mut merged, layer);
             }
         }
-        let system_dir = opencode_system_config_dir(env::consts::OS);
+        let system_dir = opencode_system_config_dir(env::consts::OS, &self.tool_env);
         if let Some(system_dir) = system_dir {
             for path in [
                 system_dir.join("opencode.json"),
@@ -499,21 +502,20 @@ impl Projector {
         let projected = doc.as_json()?;
         let global = self
             .tool_env
-            .then(|| env_path(XDG_CONFIG_HOME))
-            .flatten()
+            .path(XDG_CONFIG_HOME)
             .unwrap_or_else(|| self.home.join(".config"))
             .join("opencode");
-        let target = Agent::OpenCode.config_path(&self.home, self.tool_env);
+        let target = Agent::OpenCode.config_path(&self.home, &self.tool_env);
         let mut paths = vec![
             global.join("config.json"),
             global.join("opencode.json"),
             global.join("opencode.jsonc"),
         ];
-        if self.tool_env {
-            if let Some(path) = env_path(OPENCODE_CONFIG) {
+        if self.tool_env.enabled() {
+            if let Some(path) = self.tool_env.path(OPENCODE_CONFIG) {
                 paths.push(path);
             }
-            if let Some(dir) = env_path(OPENCODE_CONFIG_DIR) {
+            if let Some(dir) = self.tool_env.path(OPENCODE_CONFIG_DIR) {
                 paths.extend([dir.join("opencode.json"), dir.join("opencode.jsonc")]);
             }
         }
@@ -529,8 +531,8 @@ impl Projector {
             };
             merge_opencode_config(&mut merged, layer);
         }
-        if self.tool_env {
-            if let Some(content) = env::var_os(OPENCODE_CONFIG_CONTENT) {
+        if self.tool_env.enabled() {
+            if let Some(content) = self.tool_env.value(OPENCODE_CONFIG_CONTENT) {
                 merge_opencode_config(&mut merged, parse_jsonc(&content.into_string().ok()?).ok()?);
             }
         }
@@ -550,22 +552,49 @@ impl Projector {
         store: &Store,
         catalog: Option<&Catalog>,
     ) -> AgentStatus {
-        let path = agent.config_path(&self.home, self.tool_env);
-        let installed = detected(agent, &self.home, self.tool_env);
-        let record = self.current_record(agent, store.get(agent.id()));
+        self.for_connection(None, store.get(agent.id()))
+            .status_in_environment(agent, store, catalog)
+    }
+
+    pub(super) fn status_in_environment(
+        &self,
+        agent: Agent,
+        store: &Store,
+        catalog: Option<&Catalog>,
+    ) -> AgentStatus {
+        let environment_error = self.tool_env.validate(agent, &self.home).err();
+        let valid_environment = environment_error.is_none();
+        let tool_env = if valid_environment {
+            &self.tool_env
+        } else {
+            &ToolEnvironment::Disabled
+        };
+        let path = agent.config_path(&self.home, tool_env);
+        let installed = valid_environment && path.parent().is_some_and(Path::is_dir);
+        let record = if valid_environment {
+            self.current_record(agent, store.get(agent.id()))
+        } else {
+            store.get(agent.id())
+        };
         let mut status = AgentStatus {
             id: agent.id().to_string(),
             name: agent.name().to_string(),
             config_path: path.display().to_string(),
-            config_path_source: agent.config_path_source(self.tool_env).map(str::to_string),
+            config_path_source: agent.config_path_source(&self.tool_env).map(str::to_string),
             installed,
             connected: false,
             recorded: record.is_some_and(|record| !record.disconnected()),
             authorized: false,
             attention: None,
-            error: None,
+            error: environment_error,
             repair_action: None,
         };
+        if !valid_environment {
+            if let Some(record) = record {
+                status.config_path = record.config_path.display().to_string();
+            }
+            return status;
+        }
         if agent == Agent::OpenClaw && !installed && record.is_none() {
             return status;
         }
@@ -577,7 +606,7 @@ impl Projector {
             }
         }
         if agent == Agent::OpenClaw && (installed || record.is_some()) {
-            let valid = openclaw::validate_host(&self.home, self.tool_env)
+            let valid = openclaw::validate_host(&self.home, &self.tool_env)
                 .and_then(|()| self.openclaw_helper());
             if let Err(attention) = valid {
                 status.attention = Some(attention);
@@ -718,7 +747,7 @@ impl Projector {
                 && self
                     .merged_opencode_selector(
                         doc.as_ref().unwrap(),
-                        opencode_system_config_dir(env::consts::OS),
+                        opencode_system_config_dir(env::consts::OS, &self.tool_env),
                     )
                     .as_ref()
                     .and_then(ConfigValue::from_json)
@@ -779,7 +808,7 @@ impl Projector {
                     Err(error) => refusal = Some(error.to_string()),
                 }
             }
-            let dsh_home = dsh::home_dir(&self.home, self.tool_env);
+            let dsh_home = dsh::home_dir(&self.home, &self.tool_env);
             if refusal.is_none()
                 && agent == Agent::Dsh
                 && (self.tokens.read(agent.id()).ok().flatten())
@@ -824,6 +853,7 @@ impl Projector {
     }
 
     /// The config text, or `None` when the file does not exist yet.
+    #[cfg(test)]
     pub(super) fn read_config(&self, agent: Agent) -> Result<Option<String>, AgentError> {
         let path = self
             .action_path(agent, None, true)
@@ -852,7 +882,7 @@ impl Projector {
         format!(
             "The {} config at {} is {reason}; fix it before connecting",
             agent.name(),
-            agent.config_path(&self.home, self.tool_env).display()
+            agent.config_path(&self.home, &self.tool_env).display()
         )
     }
 }
@@ -868,10 +898,12 @@ fn helper_fields_hold(agent: Agent, record: &Connection, doc: Option<&ConfigDoc>
         .all(|field| field.holds(owned_value(doc, field).as_ref()))
 }
 
-pub(super) fn opencode_system_config_dir(os: &str) -> Option<PathBuf> {
+pub(super) fn opencode_system_config_dir(os: &str, tool_env: &ToolEnvironment) -> Option<PathBuf> {
     match os {
         "macos" => Some(PathBuf::from("/Library/Application Support/opencode")),
-        "windows" => env::var_os(PROGRAM_DATA).map(|path| PathBuf::from(path).join("opencode")),
+        "windows" => tool_env
+            .path(PROGRAM_DATA)
+            .map(|path| path.join("opencode")),
         _ => Some(PathBuf::from("/etc/opencode")),
     }
 }

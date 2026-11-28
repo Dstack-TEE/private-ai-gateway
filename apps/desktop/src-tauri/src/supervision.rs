@@ -9,8 +9,7 @@ use tokio::sync::{oneshot, Mutex};
 pub(crate) struct StartupNotice(pub(crate) Mutex<Option<oneshot::Receiver<Option<String>>>>);
 
 pub(crate) fn at_startup(client: &Client) -> Option<String> {
-    let overrides = paths::agent_environment::environment_overrides();
-    match supervisor::automatic_blockers(&overrides) {
+    match supervisor::automatic_blockers() {
         supervisor::AutomaticBlockers::Eligible => {}
         blockers @ supervisor::AutomaticBlockers::Environment(_) if !supervisor::enabled() => {
             return supervisor::automatic_skip_notice(blockers);

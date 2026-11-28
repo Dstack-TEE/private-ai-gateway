@@ -19,10 +19,9 @@ pub(crate) trait AgentIntegration {
     /// The catalog's models the agent can work with.
     fn catalog(self, catalog: &Catalog) -> Catalog;
     fn format(self) -> Format;
-    /// The live user-level config file. With `tool_env` each tool's own
-    /// location override is honored.
-    fn config_path(self, home: &Path, tool_env: bool) -> PathBuf;
-    fn config_path_source(self, tool_env: bool) -> Option<&'static str>;
+    /// The live user-level config file. Uses the connection's environment when available.
+    fn config_path(self, home: &Path, tool_env: &ToolEnvironment) -> PathBuf;
+    fn config_path_source(self, tool_env: &ToolEnvironment) -> Option<&'static str>;
     fn note(self, connect: bool) -> &'static str;
 }
 
@@ -65,8 +64,8 @@ impl AgentIntegration for Agent {
         }
     }
 
-    fn config_path(self, home: &Path, tool_env: bool) -> PathBuf {
-        let override_dir = |name: &str| tool_env.then(|| env_path(name)).flatten();
+    fn config_path(self, home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
+        let override_dir = |name: &str| tool_env.path(name);
         match self {
             Agent::OpenClaw => openclaw::config_path(home, tool_env),
             Agent::OhMyPi => oh_my_pi::config_path(home, tool_env),
@@ -83,24 +82,15 @@ impl AgentIntegration for Agent {
                     .join("opencode")
                     .join("opencode.json")
             }),
-            Agent::Pi => override_dir(PI_CODING_AGENT_DIR)
-                .map(|path| match path.strip_prefix("~") {
-                    Ok(suffix) => home.join(suffix),
-                    Err(_) => path,
-                })
-                .unwrap_or_else(|| home.join(".pi").join("agent"))
-                .join("models.json"),
+            Agent::Pi => pi_agent_dir(home, tool_env).join("models.json"),
             Agent::Hermes => hermes_config_path(home, tool_env),
         }
     }
 
-    fn config_path_source(self, tool_env: bool) -> Option<&'static str> {
-        if !tool_env {
-            return None;
-        }
+    fn config_path_source(self, tool_env: &ToolEnvironment) -> Option<&'static str> {
         super::config_path_sources(self)
             .iter()
-            .find(|name| env_path(name).is_some())
+            .find(|name| tool_env.path(name).is_some())
             .copied()
     }
 
@@ -112,7 +102,7 @@ impl AgentIntegration for Agent {
         }
         match self {
             Agent::OpenClaw => "OpenClaw uses a native-host provider and an executable SecretRef for its local token. Restart OpenClaw after applying.",
-            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to its web, headless and acp profiles and the dsh desktop app, and reads the token from dsh's own credential store. Change the default model with `pap agents connect dsh --model <id>`. This app reads DSH_HOME only from its own environment, never in the Mac App Store build, so a DSH_HOME exported in your shell points dsh at a folder this connection does not cover. Also not protected: runs started with --patch, a PRIVATE_AI_PROXY_DSH_TOKEN exported in your shell on older dsh releases, and the sdk and sdk-minimal profiles for embedding dsh, which choose their provider in code. Only new sessions go through the proxy: existing sessions, resumed acp sessions included, keep the provider and model they were recorded with. dsh web and the dsh desktop app apply the change at once; restart running dsh headless or acp processes. DeepSeek web search is turned off while connected; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
+            Agent::Dsh => "DeepSeek Harness applies $DSH_HOME/cordis.patch.yml (~/.dsh by default) to its web, headless and acp profiles and the dsh desktop app, and reads the token from dsh's own credential store. Change the default model with `pap agents connect dsh --model <id>`. The CLI and desktop app use and save the client's DSH_HOME when connecting. The Mac App Store build uses its authorized Home folder. Also not protected: runs started with --patch, a PRIVATE_AI_PROXY_DSH_TOKEN exported in your shell on older dsh releases, and the sdk and sdk-minimal profiles for embedding dsh, which choose their provider in code. Only new sessions go through the proxy: existing sessions, resumed acp sessions included, keep the provider and model they were recorded with. dsh web and the dsh desktop app apply the change at once; restart running dsh headless or acp processes. DeepSeek web search is turned off while connected; search providers you installed yourself, such as Exa or Perplexity, still use your own keys.",
             Agent::OhMyPi => "Oh My Pi uses its own local token and native models YAML. Connect selects a compatible default; Disconnect restores the previous selection while keeping the provider. Restart omp after applying. Named profiles and conflicting overrides are not modified.",
             Agent::Codex if super::codex_service::AVAILABLE => {
                 "Codex will use its official custom model provider with the Responses API, the \
@@ -153,37 +143,12 @@ impl AgentIntegration for Agent {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn enrollment_ignores_default_xdg_config_and_checks_windows_paths_only_on_windows() {
-        const CHILD: &str = "PAP_TEST_AGENT_ENVIRONMENT";
-        if let Ok(case) = env::var(CHILD) {
-            assert_eq!(environment_overridden(), case == "custom" || cfg!(windows));
-            return;
-        }
-        let home = tempfile::tempdir().unwrap();
-        for (case, config) in [
-            ("default", home.path().join(".config")),
-            ("custom", home.path().join("config-override")),
-        ] {
-            let output = std::process::Command::new(env::current_exe().unwrap())
-                .env_clear()
-                .env(CHILD, case)
-                .env("HOME", home.path())
-                .env(XDG_CONFIG_HOME, config)
-                .env(LOCALAPPDATA, home.path())
-                .env(PROGRAM_DATA, home.path())
-                .args(["--exact", "agents::registry::tests::enrollment_ignores_default_xdg_config_and_checks_windows_paths_only_on_windows"])
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stdout)
-            );
-        }
-    }
+pub(super) fn pi_agent_dir(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
+    tool_env
+        .path(PI_CODING_AGENT_DIR)
+        .map(|path| match path.strip_prefix("~") {
+            Ok(suffix) => home.join(suffix),
+            Err(_) => path,
+        })
+        .unwrap_or_else(|| home.join(".pi").join("agent"))
 }

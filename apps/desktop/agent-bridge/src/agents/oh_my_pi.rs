@@ -12,20 +12,17 @@ use serde_json::{json, Value};
 const PROVIDER: &str = "private-ai-proxy";
 const PROVIDER_PATH: &[&str] = &["providers", PROVIDER];
 
-fn agent_dir(home: &Path, tool_env: bool) -> PathBuf {
-    if tool_env {
-        if let Some(path) = env_path(PI_CODING_AGENT_DIR) {
-            return path;
-        }
+fn agent_dir(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
+    if let Some(path) = tool_env.path(PI_CODING_AGENT_DIR) {
+        return path;
     }
     let root = tool_env
-        .then(|| env_path(PI_CONFIG_DIR))
-        .flatten()
+        .path(PI_CONFIG_DIR)
         .unwrap_or_else(|| PathBuf::from(".omp"));
     home.join(root).join("agent")
 }
 
-pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
+pub(super) fn config_path(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
     let dir = agent_dir(home, tool_env);
     let primary = dir.join("models.yml");
     let fallback = dir.join("models.yaml");
@@ -36,28 +33,29 @@ pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
     }
 }
 
-pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
-    if tool_env {
-        // A named profile ignores the ordinary agent-dir override. Do not guess.
-        for key in [OMP_PROFILE, PI_PROFILE] {
-            if env::var(key)
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty() && value.trim() != "default")
-            {
-                return Err("Oh My Pi integration supports the native default profile only; clear named-profile overrides before connecting".into());
-            }
+pub(super) fn validate_host(home: &Path, tool_env: &ToolEnvironment) -> Result<(), String> {
+    // Named profiles ignore the ordinary agent-dir override.
+    for key in [OMP_PROFILE, PI_PROFILE] {
+        if tool_env
+            .unicode(key)
+            .is_some_and(|value| !value.trim().is_empty() && value.trim() != "default")
+        {
+            return Err("Oh My Pi integration supports the native default profile only; clear named-profile overrides before connecting".into());
         }
-        if env_path(PI_CODING_AGENT_DIR).is_some_and(|path| !path.is_absolute()) {
-            return Err("Set PI_CODING_AGENT_DIR to an absolute Oh My Pi directory; relative paths depend on the CLI working directory".into());
-        }
-        if env_path(PI_CONFIG_DIR).is_some_and(|path| {
-            path.is_absolute()
-                || path
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-        }) {
-            return Err("Oh My Pi PI_CONFIG_DIR must be a home-relative directory without parent traversal; use PI_CODING_AGENT_DIR for an absolute override".into());
-        }
+    }
+    if tool_env
+        .path(PI_CODING_AGENT_DIR)
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err("Set PI_CODING_AGENT_DIR to an absolute Oh My Pi directory; relative paths depend on the CLI working directory".into());
+    }
+    if tool_env.path(PI_CONFIG_DIR).is_some_and(|path| {
+        path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+    }) {
+        return Err("Oh My Pi PI_CONFIG_DIR must be a home-relative directory without parent traversal; use PI_CODING_AGENT_DIR for an absolute override".into());
     }
     let dir = agent_dir(home, tool_env);
     if !dir.is_absolute() {
@@ -378,15 +376,15 @@ mod tests {
                 _ => {}
             }
             if matches!(case.as_str(), "relative" | "profile") {
-                assert!(validate_host(home, true).is_err());
+                assert!(validate_host(home, &ToolEnvironment::Process).is_err());
             } else {
-                validate_host(home, true).unwrap();
+                validate_host(home, &ToolEnvironment::Process).unwrap();
                 let expected = match case.as_str() {
                     "root" => home.join("custom/agent/models.yml"),
                     "absolute" => home.join("custom/models.yml"),
                     _ => home.join(".omp/agent/models.yml"),
                 };
-                assert_eq!(config_path(home, true), expected);
+                assert_eq!(config_path(home, &ToolEnvironment::Process), expected);
             }
             return;
         }
@@ -482,7 +480,7 @@ mod tests {
     #[test]
     fn commented_empty_provider_parent_is_preserved() {
         let sandbox = sandbox("omp-comment-parent");
-        let path = config_path(&sandbox.home, false);
+        let path = config_path(&sandbox.home, &ToolEnvironment::Disabled);
         write(&path, "providers: { # important comment\n}\n");
         let options = ConnectOptions::default();
         let preview = sandbox

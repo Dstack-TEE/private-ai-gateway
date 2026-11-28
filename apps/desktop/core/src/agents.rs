@@ -2,7 +2,7 @@
 //! each agent is detected and configured lives in `agent_bridge::agents`.
 
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -77,8 +77,13 @@ pub struct ConnectOptions {
     /// list is discovered natively or generated from that catalog.
     #[serde(default)]
     pub default_model: Option<String>,
-    /// OpenCode executable found on the local client's PATH.
+    /// Filtered shell environment supplied by an owner IPC client.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
+    pub environment: Option<crate::paths::agent_environment::AgentEnvironment>,
+    /// Compatibility with older clients and their connection records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(skip)]
     pub opencode_executable: Option<PathBuf>,
 }
 
@@ -87,18 +92,6 @@ pub struct ConnectOptions {
 pub const OPENCODE_EXECUTABLE_NAMES: &[&str] = &["opencode.exe", "opencode.cmd"];
 #[cfg(not(windows))]
 pub const OPENCODE_EXECUTABLE_NAMES: &[&str] = &["opencode"];
-
-fn opencode_on_path() -> Option<PathBuf> {
-    let cwd = env::current_dir().ok()?;
-    env::split_paths(&env::var_os("PATH")?)
-        .flat_map(|dir| {
-            OPENCODE_EXECUTABLE_NAMES
-                .iter()
-                .map(move |name| dir.join(name))
-        })
-        .map(|path| cwd.join(path))
-        .find(|path| is_opencode_executable(path))
-}
 
 pub fn is_opencode_executable(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -119,14 +112,6 @@ pub fn is_opencode_executable(path: &Path) -> bool {
         #[cfg(not(unix))]
         metadata.is_file()
     })
-}
-
-impl ConnectOptions {
-    pub(crate) fn supply_opencode_executable(&mut self, agent_id: &str, connect: bool) {
-        if connect && agent_id == Agent::OpenCode.id() && self.opencode_executable.is_none() {
-            self.opencode_executable = opencode_on_path().filter(|path| path.to_str().is_some());
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

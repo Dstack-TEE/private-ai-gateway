@@ -45,11 +45,14 @@ pub struct CodexService {
 }
 
 impl Projector {
-    pub fn codex_service(&self) -> CodexService {
-        let config = Agent::Codex.config_path(&self.home, self.tool_env);
-        CodexService {
+    pub fn codex_service(&self) -> Result<CodexService, String> {
+        let store = self.load_store()?;
+        let projector = self.for_connection(None, store.get(Agent::Codex.id()));
+        projector.tool_env.validate(Agent::Codex, &self.home)?;
+        let config = Agent::Codex.config_path(&self.home, &projector.tool_env);
+        Ok(CodexService {
             codex_home: config.parent().unwrap_or(&config).to_path_buf(),
-        }
+        })
     }
 }
 

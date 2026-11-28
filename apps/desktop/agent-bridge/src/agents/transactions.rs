@@ -35,12 +35,19 @@ impl Projector {
             let mut store = self
                 .load_store()
                 .map_err(|_| AgentError::RecordUnavailable)?;
-            let prior = self.current_record(agent, store.get(agent.id()));
-            let executable = self.opencode_executable(agent, connect, options, prior)?;
+            let record = store.get(agent.id());
+            let projector =
+                self.for_connection(options.environment.as_ref().filter(|_| connect), record);
+            let path = projector.action_path(agent, record, connect);
+            if connect {
+                path.as_ref()
+                    .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
+            }
+            let prior = projector.current_record(agent, record);
+            let executable = projector.opencode_executable(agent, connect, options, prior)?;
             let connection =
-                self.connection_catalog(agent, connect, catalog, executable.as_deref());
-            let path = self.action_path(agent, store.get(agent.id()), connect);
-            let (text, read_error) = self.config_text_at(&path);
+                projector.connection_catalog(agent, connect, catalog, executable.as_deref());
+            let (text, read_error) = projector.config_text_at(&path);
             if revision(
                 agent,
                 connect,
@@ -56,6 +63,7 @@ impl Projector {
             if connect {
                 let mut options = ConnectOptions {
                     opencode_executable: executable,
+                    environment: projector.connection_environment(),
                     ..options.clone()
                 };
                 let path = path.map_err(AgentError::ConfigurationConflict)?;
@@ -63,14 +71,18 @@ impl Projector {
                     return Err(AgentError::ConfigurationRead);
                 }
                 if let Some(connection) = connection {
-                    self.require_helper()?;
-                    self.connect(agent, &mut store, text, &path, connection, &options)
+                    projector.require_helper()?;
+                    projector
+                        .connect(agent, &mut store, text, &path, connection, &options)
                         .map_err(ConnectFailure::error)?;
                 } else {
-                    if self.current_record(agent, store.get(agent.id())).is_some() {
-                        self.suspend(agent, &mut store)?;
+                    if projector
+                        .current_record(agent, store.get(agent.id()))
+                        .is_some()
+                    {
+                        projector.suspend(agent, &mut store)?;
                     }
-                    let prior = self.current_record(agent, store.get(agent.id()));
+                    let prior = projector.current_record(agent, store.get(agent.id()));
                     if options.default_model.is_none() {
                         options.default_model =
                             prior.and_then(|record| record.options.default_model.clone());
@@ -294,25 +306,28 @@ impl Projector {
         store: &mut Store,
         catalog: Option<&Catalog>,
     ) -> Result<(), ConnectFailure> {
-        self.require_helper()?;
-        let text = self.read_config(agent)?;
-        let path = self
-            .action_path(agent, store.get(agent.id()), true)
+        let record = store.get(agent.id());
+        let projector = self.for_connection(None, record);
+        projector.require_helper()?;
+        let path = projector
+            .action_path(agent, record, true)
             .map_err(|error| ConnectFailure::Conflict(AgentError::ConfigurationConflict(error)))?;
-        let prior = self.current_record(agent, store.get(agent.id()));
+        let text = projector.read_config_at(&path)?;
+        let prior = projector.current_record(agent, record);
         let options = ConnectOptions {
-            opencode_executable: self.opencode_executable(
+            opencode_executable: projector.opencode_executable(
                 agent,
                 true,
                 &ConnectOptions::default(),
                 prior,
             )?,
+            environment: projector.connection_environment(),
             ..ConnectOptions::default()
         };
-        let connection = self
+        let connection = projector
             .connection_catalog(agent, true, catalog, options.opencode_executable.as_deref())
             .ok_or(AgentError::InvalidState)?;
-        self.connect(agent, store, text, &path, connection, &options)
+        projector.connect(agent, store, text, &path, connection, &options)
     }
 
     pub(super) fn suspend(&self, agent: Agent, store: &mut Store) -> Result<(), AgentError> {

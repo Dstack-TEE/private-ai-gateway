@@ -38,7 +38,9 @@ On supported Linux and macOS CLI installations, `pap start` registers the
 backend with systemd or launchd, as does `pap agents connect` when it starts
 protection. Protection resumes after login and crashes. Both commands report
 automatic registration failures as advisory warnings once protection is
-verified. Automatic registration skips shells with agent or proxy overrides.
+verified. Automatic registration skips shells with HTTP proxy overrides, custom XDG
+directories for PAP itself or settings that PAP cannot forward, such as
+inline OpenCode config.
 The first notice names the variables and gives the `pap service enable`
 command. Configure those variables in the service manager's environment
 first, then run `pap service enable`, which also starts the backend under the
@@ -55,22 +57,19 @@ the machine.
 `pap status` and `pap doctor` show the login service state and explain why
 automatic registration is skipped when applicable.
 
-The backend may see different agent configuration paths than your shell.
-For example, exporting `CODEX_HOME` after the backend has started can point
-Codex at a different file. `pap agents connect` compares the paths for the
-selected agent and refuses a connection when its config path override points
-the two processes at different files. It also checks whether the same
-validation variables are set in both environments. For example, setting
-`OMP_PROFILE` only in the shell can make Oh My Pi read a different profile.
-`pap start`, `pap status`, and `pap doctor` warn about these differences for
-connected agents.
+When you connect an agent, PAP uses your shell's PATH and the agent's
+configuration overrides, such as `CODEX_HOME`. The backend validates and
+saves them with that connection so it can resume after a restart or login.
+Reconnect from the environment you want to use if you change these settings.
+If the configuration file moves, disconnect first so PAP can restore the
+old file. The desktop app on Linux and direct macOS reads the login shell
+environment at startup when opened outside a terminal.
 
-For a supervised backend, match the variable in the service manager's
-environment, then run `pap service restart`. On Linux, use `environment.d` or
-`systemctl --user set-environment`. On macOS, use `launchctl setenv`. For a
-detached backend, run `pap service restart` from a shell with the desired
-settings. With a compatible older backend that lacks override metadata,
-`pap agents connect` prints a warning and continues.
+PAP compares only the presence of `OPENCODE_CONFIG_CONTENT` and
+`PRIVATE_AI_PROXY_DSH_TOKEN`. A mismatch blocks connection. For a systemd
+user service, match the setting using `environment.d` and restart PAP.
+On macOS, `launchctl setenv` applies for the current login. For a detached
+backend, run `pap service restart` from a shell with the desired setting.
 
 See [Standalone CLI](cli-distribution.md#standalone-cli).
 
@@ -750,9 +749,9 @@ management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). The local version response can also include
 `agentPathOverrides` as an object mapping selector names to path strings,
-`agentValidationOverrides` as an array of variable names, and a `supervised`
-boolean. `pap start
---json` and `pap status --json` include `agentPathWarnings` when applicable.
+`agentValidationOverrides` as an array of variable names, an
+`acceptsAgentEnvironment` capability flag and a `supervised` boolean.
+`pap start --json` and `pap status --json` include `agentPathWarnings` when applicable.
 `pap doctor --json` reports the same warnings under `warnings.agentPaths`.
 The `pap status --json` and `pap doctor --json`
 reports include a `loginService` object. Its `enabled` and `active` booleans

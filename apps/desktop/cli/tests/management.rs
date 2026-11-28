@@ -105,7 +105,9 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                 .env("XDG_RUNTIME_DIR", &runtime)
                 .env("PATH", &bin);
             if environment_override {
-                command.env("CODEX_HOME", &custom);
+                command
+                    .env("CODEX_HOME", &custom)
+                    .env("OPENCODE_CONFIG_CONTENT", "{}");
             }
             if reports_paths {
                 command.env("OMP_PROFILE", "work");
@@ -125,7 +127,7 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
             assert_eq!(value["status"], "verified");
             let notice = value["supervisionNotice"].as_str().unwrap();
             if environment_override {
-                assert!(notice.contains("CODEX_HOME"), "{notice}");
+                assert!(notice.contains("OPENCODE_CONFIG_CONTENT"), "{notice}");
             } else {
                 assert!(
                     notice.contains("Could not enable the login service"),
@@ -140,10 +142,7 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                     warning.contains(custom.join("config.toml").to_str().unwrap()),
                     "{warning}"
                 );
-                assert!(
-                    warning.contains("systemctl --user set-environment"),
-                    "{warning}"
-                );
+                assert!(warning.contains("environment.d"), "{warning}");
                 assert!(value["agentPathWarnings"][1]
                     .as_str()
                     .unwrap()
@@ -162,7 +161,10 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                     "Models: No verified catalog\n",
                 )
             );
-            assert!(first_stderr.contains("CODEX_HOME"), "{first_stderr}");
+            assert!(
+                first_stderr.contains("OPENCODE_CONFIG_CONTENT"),
+                "{first_stderr}"
+            );
             assert!(
                 first_stderr.contains("environment first, then run `pap service enable`"),
                 "{first_stderr}"
@@ -177,7 +179,7 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                 environment_override
             );
         } else {
-            assert!(!String::from_utf8_lossy(&second.stderr).contains("CODEX_HOME"));
+            assert!(!String::from_utf8_lossy(&second.stderr).contains("OPENCODE_CONFIG_CONTENT"));
         }
         if check_legacy_connect {
             let outcome = run(&[
@@ -503,77 +505,43 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn agents_connect_checks_the_shell_path_before_starting_protection() {
-    let backend = Backend::start();
-    let home = backend.directory.path().join("home");
-    let default = home.join(".codex");
-    let custom = home.join("custom-codex");
-    for directory in [&default, &custom] {
-        fs::create_dir_all(directory).unwrap();
-        fs::write(directory.join("config.toml"), "model = 'native'\n").unwrap();
-    }
-    let run = |args: &[&str], path: &std::path::Path| {
-        backend
-            .command(args)
-            .env("HOME", &home)
-            .env("CODEX_HOME", path)
-            .output()
-            .unwrap()
-    };
-    let output = run(&["agents", "connect", "codex", "--yes"], &custom);
-    assert_eq!(output.status.code(), Some(1));
-    let error = String::from_utf8_lossy(&output.stderr);
-    for text in [
-        "CODEX_HOME",
-        custom.join("config.toml").to_str().unwrap(),
-        default.join("config.toml").to_str().unwrap(),
-        "pap service restart",
-        "from a shell with the desired CODEX_HOME setting",
-    ] {
-        assert!(error.contains(text), "{error}");
-    }
-    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
-    for directory in [&default, &custom] {
-        assert_eq!(
-            fs::read_to_string(directory.join("config.toml")).unwrap(),
-            "model = 'native'\n"
-        );
-    }
-
-    let preview = run(
-        &["agents", "connect", "codex", "--dry-run", "--json"],
-        &default,
-    );
+fn agents_preview_uses_the_client_config_path() {
+    let backend = Backend::start_in("", true);
+    // Forwarded overrides must be outside world-writable directories.
+    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let custom = root.path().join("custom-codex");
+    let native = "model = 'native'\n";
+    fs::create_dir_all(&custom).unwrap();
+    let config = custom.join("config.toml");
+    fs::write(&config, native).unwrap();
+    let preview = backend
+        .command(&["agents", "connect", "codex", "--dry-run", "--json"])
+        .env("CODEX_HOME", &custom)
+        .output()
+        .unwrap();
     assert_success(&preview);
     let report: Value = serde_json::from_slice(&preview.stdout).unwrap();
-    assert_eq!(
-        report["agent"]["configPath"],
-        default.join("config.toml").to_str().unwrap()
-    );
-    let unrelated = run(&["agents", "connect", "claude-code", "--dry-run"], &custom);
-    assert_success(&unrelated);
-
-    let alias = home.join("codex-alias");
-    std::os::unix::fs::symlink(&default, &alias).unwrap();
-    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
-    fs::remove_file(default.join("config.toml")).unwrap();
-    assert_success(&run(&["agents", "connect", "codex", "--dry-run"], &alias));
+    assert_eq!(report["agent"]["configPath"], config.to_str().unwrap());
+    assert_eq!(report["agent"]["configPathSource"], "CODEX_HOME");
+    assert_eq!(fs::read_to_string(&config).unwrap(), native);
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
 }
 
 #[test]
-fn agents_connect_rejects_shell_only_validation_overrides() {
+fn agents_connect_rejects_shell_only_inline_config() {
     let backend = Backend::start();
     let output = backend
-        .command(&["agents", "connect", "oh-my-pi", "--yes"])
-        .env("OMP_PROFILE", "work")
+        .command(&["agents", "connect", "opencode", "--yes"])
+        .env("OPENCODE_CONFIG_CONTENT", "private-inline-config")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
-        error.contains("OMP_PROFILE is set in one environment only"),
+        error.contains("OPENCODE_CONFIG_CONTENT is set in one environment only"),
         "{error}"
     );
+    assert!(!error.contains("private-inline-config"));
     assert!(error.contains("pap service restart"), "{error}");
     assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
 }

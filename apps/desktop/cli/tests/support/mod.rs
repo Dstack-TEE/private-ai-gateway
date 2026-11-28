@@ -25,11 +25,11 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const KILL_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn isolate_agent_environment(command: &mut Command, home: &Path) {
-    for name in agent_bridge::agents::environment_overrides() {
+    use desktop_core::{agents::Agent, paths::agent_environment::override_sources};
+    for name in Agent::ALL.into_iter().flat_map(override_sources) {
         command.env_remove(name);
     }
     command
-        .env_remove(desktop_core::paths::XDG_CONFIG_HOME)
         .env("HOME", home)
         .env(desktop_core::paths::HOME_OVERRIDE_ENV, home);
     #[cfg(windows)]
@@ -326,6 +326,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct Backend {
     pub directory: Sandbox,
     child: Child,
+    native_paths: bool,
 }
 
 impl Backend {
@@ -335,6 +336,10 @@ impl Backend {
 
     /// Starts with `credentials` as `credentials.toml`, when not empty.
     pub fn start_with_credentials(credentials: &str) -> Self {
+        Self::start_in(credentials, false)
+    }
+
+    pub fn start_in(credentials: &str, native_paths: bool) -> Self {
         let directory = Sandbox::new();
         let binary = |name: &str| directory.path().join(executable(name));
         install(
@@ -377,14 +382,18 @@ impl Backend {
             .unwrap();
         }
         let mut command = Command::new(binary("private-ai-proxy-service"));
-        isolate_agent_environment(&mut command, &home);
+        Self::isolate_backend_environment(&mut command, &home, native_paths);
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(directory.path().join("backend.log")).unwrap())
             .spawn()
             .unwrap();
-        let mut backend = Self { directory, child };
+        let mut backend = Self {
+            directory,
+            child,
+            native_paths,
+        };
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
             let output = backend.command(&["status", "--json"]).output().unwrap();
@@ -420,9 +429,25 @@ impl Backend {
     pub fn cli(&self) -> PathBuf {
         self.directory.path().join(executable("private-ai-proxy"))
     }
+    fn isolate_backend_environment(command: &mut Command, home: &Path, native_paths: bool) {
+        use desktop_core::paths::{APP_DATA_OVERRIDE_ENV, CONFIG_OVERRIDE_ENV, HOME_OVERRIDE_ENV};
+        isolate_agent_environment(command, home);
+        if native_paths {
+            let data = home.join(".private-ai-proxy");
+            command
+                .env_remove(HOME_OVERRIDE_ENV)
+                .env(APP_DATA_OVERRIDE_ENV, &data)
+                .env(CONFIG_OVERRIDE_ENV, data.join("Config"));
+        }
+    }
+
     pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.cli());
-        isolate_agent_environment(&mut command, &self.directory.path().join("home"));
+        Self::isolate_backend_environment(
+            &mut command,
+            &self.directory.path().join("home"),
+            self.native_paths,
+        );
         command.args(args);
         command
     }

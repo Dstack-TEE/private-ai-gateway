@@ -238,7 +238,7 @@ fn start_with_supervision(
     timeout: u64,
 ) -> Result<Value, CallError> {
     let mut state = start(client, profile, timeout)?;
-    let blockers = supervisor::automatic_blockers(&agent_bridge::agents::environment_overrides());
+    let blockers = supervisor::automatic_blockers();
     let notice = match blockers {
         AutomaticBlockers::Eligible => match supervisor::enable() {
             Ok(newly_enabled) => {
@@ -329,7 +329,7 @@ fn add_agent_path_warnings(status: &mut Value, warnings: Vec<String>) {
 }
 
 fn login_service_status() -> supervisor::LoginServiceStatus {
-    supervisor::login_service_status(&agent_bridge::agents::environment_overrides())
+    supervisor::login_service_status()
 }
 
 fn service(client: &Client, global: &Global, command: &Service) -> Result<Value, CallError> {

@@ -55,6 +55,9 @@ pub struct Version {
     /// Names of configuration validation overrides. Values can contain secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_validation_overrides: Option<BTreeSet<String>>,
+    /// Whether the backend accepts native client environment snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts_agent_environment: Option<bool>,
     /// Whether this backend was launched for supervision by the OS service manager.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervised: Option<bool>,
@@ -217,6 +220,10 @@ commands! {
     SetWebUiPassword { password: String } -> AppStateWire;
     RefreshCatalog -> AppStateWire;
     ListAgents -> Vec<AgentStatus>;
+    /// Local discovery for agents that do not yet have a saved connection.
+    InspectAgents {
+        environments: BTreeMap<String, crate::paths::agent_environment::AgentEnvironment>
+    } -> Vec<AgentStatus>;
     PreviewAgent { agent_id: String, connect: bool, options: ConnectOptions } -> AgentPreview;
     ApplyAgent {
         agent_id: String,

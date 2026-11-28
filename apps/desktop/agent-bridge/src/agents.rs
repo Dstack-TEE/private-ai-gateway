@@ -14,6 +14,7 @@ mod codex;
 mod codex_service;
 mod discovery;
 mod dsh;
+mod environment;
 mod error;
 mod projection;
 mod providers;
@@ -24,8 +25,9 @@ mod validation;
 use claude_code::*;
 use codex::*;
 pub use codex_service::{CodexService, StopFailed};
-pub use desktop_core::paths::agent_environment::{environment_overridden, environment_overrides};
+pub use desktop_core::paths::agent_environment::{config_path_sources, validation_sources};
 use discovery::*;
+use environment::ToolEnvironment;
 pub use error::AgentError;
 use opencode::*;
 use projection::*;
@@ -73,22 +75,6 @@ const HELPER_MISSING: &str =
 const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
     Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
 
-/// Path selectors in the same precedence order as agent configuration discovery.
-pub fn config_path_sources(agent: Agent) -> &'static [&'static str] {
-    use registry::*;
-    match agent {
-        Agent::Codex => &[CODEX_HOME],
-        Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR],
-        Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME],
-        Agent::Pi => &[PI_CODING_AGENT_DIR],
-        Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR],
-        Agent::Hermes if cfg!(windows) => &[HERMES_HOME, LOCALAPPDATA],
-        Agent::Hermes => &[HERMES_HOME],
-        Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME],
-        Agent::Dsh => &[DSH_HOME],
-    }
-}
-
 /// Only variables that select a config path. Inline config and tokens can contain secrets.
 pub fn agent_path_overrides() -> BTreeMap<String, String> {
     Agent::ALL
@@ -98,22 +84,6 @@ pub fn agent_path_overrides() -> BTreeMap<String, String> {
             env_path(name).map(|path| (name.into(), path.to_string_lossy().into_owned()))
         })
         .collect()
-}
-
-/// Variables that can change which configuration layers or credentials an agent uses.
-pub fn validation_sources(agent: Agent) -> &'static [&'static str] {
-    use desktop_core::paths::agent_environment::DSH_TOKEN_REF;
-    use registry::*;
-    match agent {
-        Agent::OpenCode if cfg!(windows) => {
-            &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT, PROGRAM_DATA]
-        }
-        Agent::OpenCode => &[OPENCODE_CONFIG_DIR, OPENCODE_CONFIG_CONTENT],
-        Agent::OhMyPi => &[OMP_PROFILE, PI_PROFILE],
-        Agent::OpenClaw => &[OPENCLAW_PROFILE, OPENCLAW_NIX_MODE],
-        Agent::Dsh => &[DSH_TOKEN_REF],
-        _ => &[],
-    }
 }
 
 /// Validation variables may contain secrets. Capture their names alone.
@@ -127,7 +97,7 @@ pub fn agent_validation_overrides() -> BTreeSet<String> {
 }
 
 pub fn shell_config_path(agent: Agent) -> Result<PathBuf, String> {
-    Ok(agent.config_path(&home_dir()?, true))
+    Ok(agent.config_path(&home_dir()?, &ToolEnvironment::Process))
 }
 
 /// File name of the bundled console helper that prints an agent's token.
@@ -324,6 +294,7 @@ struct Edit {
     consumed_secrets: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Projector {
     home: PathBuf,
     data_dir: PathBuf,
@@ -332,7 +303,7 @@ pub struct Projector {
     staged_helper: Option<PathBuf>,
     staged_helper_required: bool,
     endpoint: String,
-    tool_env: bool,
+    tool_env: ToolEnvironment,
     file_credentials: bool,
     tokens: TokenFiles,
     secrets: Arc<dyn SecretStore>,
@@ -393,7 +364,11 @@ impl Projector {
             staged_helper: None,
             staged_helper_required: false,
             endpoint: endpoint.to_string(),
-            tool_env,
+            tool_env: if tool_env {
+                ToolEnvironment::Process
+            } else {
+                ToolEnvironment::Disabled
+            },
             file_credentials: false,
             secrets,
         }
@@ -461,12 +436,45 @@ impl Projector {
         Ok((statuses, tokens))
     }
 
+    pub fn connection_installed(
+        &self,
+        agent: Agent,
+        options: &ConnectOptions,
+    ) -> Result<bool, String> {
+        let store = self.load_store()?;
+        let projector = self.for_connection(options.environment.as_ref(), store.get(agent.id()));
+        Ok(projector.tool_env.validate(agent, &self.home).is_ok()
+            && detected(agent, &self.home, &projector.tool_env))
+    }
+
+    pub fn inspect(
+        &self,
+        catalog: Option<&Catalog>,
+        environments: &BTreeMap<String, desktop_core::paths::agent_environment::AgentEnvironment>,
+    ) -> Result<Vec<AgentStatus>, String> {
+        let store = self.load_store()?;
+        Ok(Agent::ALL
+            .into_iter()
+            .map(|agent| {
+                let record = store
+                    .get(agent.id())
+                    .filter(|record| !record.disconnected());
+                let requested = environments.get(agent.id()).filter(|_| record.is_none());
+                self.for_connection(requested, record)
+                    .status_in_environment(agent, &store, catalog)
+            })
+            .collect())
+    }
+
     /// Startup permission maintenance under the apply lock.
     pub fn initialize_store(&self) -> Result<(), String> {
         lock::with_apply_lock(&self.data_dir, || {
             self.maintain_store_permissions()?;
-            let _ = self.load_store()?;
-            self.repair_codex_provider_name()?;
+            let store = self.load_store()?;
+            let codex = self.for_connection(None, store.get(Agent::Codex.id()));
+            if codex.tool_env.validate(Agent::Codex, &self.home).is_ok() {
+                codex.repair_codex_provider_name()?;
+            }
             Ok(())
         })
     }
@@ -475,7 +483,7 @@ impl Projector {
     /// definitions left by an older connection. Repair only this app's
     /// provider id and only when its required display name is invalid.
     fn repair_codex_provider_name(&self) -> Result<(), String> {
-        let path = Agent::Codex.config_path(&self.home, self.tool_env);
+        let path = Agent::Codex.config_path(&self.home, &self.tool_env);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -520,23 +528,27 @@ impl Projector {
         if connect {
             self.require_helper()?;
         }
-        let path = self.action_path(agent, store.get(agent.id()), connect);
+        let record = store.get(agent.id());
+        let projector =
+            self.for_connection(options.environment.as_ref().filter(|_| connect), record);
+        let path = projector.action_path(agent, store.get(agent.id()), connect);
         if connect {
             path.as_ref()
                 .map_err(|error| AgentError::ConfigurationConflict(error.clone()))?;
         }
-        let (text, read_error) = self.config_text_at(&path);
+        let (text, read_error) = projector.config_text_at(&path);
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
-        let prior = self.current_record(agent, store.get(agent.id()));
-        let executable = self.opencode_executable(agent, connect, options, prior)?;
-        let connection = self.connection_catalog(agent, connect, catalog, executable.as_deref());
+        let prior = projector.current_record(agent, store.get(agent.id()));
+        let executable = projector.opencode_executable(agent, connect, options, prior)?;
+        let connection =
+            projector.connection_catalog(agent, connect, catalog, executable.as_deref());
         let mut restore_problem = path.as_ref().err().cloned();
-        let edit = match self.parse_config(agent, text.as_deref()) {
+        let edit = match projector.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
-            Ok(mut doc) => match self.edit(
+            Ok(mut doc) => match projector.edit(
                 agent,
                 &mut doc,
                 &store,
@@ -564,13 +576,13 @@ impl Projector {
         );
         if agent == Agent::OpenCode
             && connect
-            && self.tool_env
+            && projector.tool_env.enabled()
             && connection.is_some_and(|connection| connection.opencode_version.is_none())
         {
             note.push_str(" PAP could not read the installed OpenCode version and chose the provider shape from the config file.");
         }
         Ok(AgentPreview {
-            agent: self.status(agent, &store, catalog),
+            agent: projector.status_in_environment(agent, &store, catalog),
             connect,
             changes: edit.changes,
             note,
@@ -704,6 +716,15 @@ fn revision(
             OpenCodeVersion::V1 => b"1",
             OpenCodeVersion::V2 => b"2",
         });
+    }
+    if connect {
+        if let Some(environment) = &options.environment {
+            part(
+                serde_json::to_string(environment)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+        }
     }
     if agent == Agent::OpenCode && connect {
         if let Some(executable) = &options.opencode_executable {

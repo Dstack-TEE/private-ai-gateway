@@ -42,10 +42,9 @@ fn key(id: &str) -> EntryKey {
 }
 
 /// `$DSH_HOME` as `resolveDshHome` reads it: blank is unset, `~` is the home.
-pub(super) fn home_dir(home: &Path, tool_env: bool) -> PathBuf {
+pub(super) fn home_dir(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
     let configured = tool_env
-        .then(|| env::var(DSH_HOME).ok())
-        .flatten()
+        .unicode(DSH_HOME)
         .filter(|path| !path.trim().is_empty());
     match configured.as_deref() {
         None => home.join(".dsh"),
@@ -57,16 +56,16 @@ pub(super) fn home_dir(home: &Path, tool_env: bool) -> PathBuf {
     }
 }
 
-pub(super) fn config_path(home: &Path, tool_env: bool) -> PathBuf {
+pub(super) fn config_path(home: &Path, tool_env: &ToolEnvironment) -> PathBuf {
     home_dir(home, tool_env).join("cordis.patch.yml")
 }
 
-pub(super) fn validate_host(home: &Path, tool_env: bool) -> Result<(), String> {
+pub(super) fn validate_host(home: &Path, tool_env: &ToolEnvironment) -> Result<(), String> {
     let dsh_home = home_dir(home, tool_env);
     if !dsh_home.is_absolute() {
         return Err("Set DSH_HOME to an absolute directory; dsh resolves a relative one against the directory it starts in".into());
     }
-    if tool_env && env::var_os(TOKEN_REF).is_some() {
+    if tool_env.value(TOKEN_REF).is_some() {
         return Err(format!(
             "{TOKEN_REF} is set in the environment and would override this connection's credential in dsh; unset it"
         ));
