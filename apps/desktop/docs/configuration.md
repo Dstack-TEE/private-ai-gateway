@@ -240,6 +240,10 @@ owner-only from the moment they are created. Neither file is ever shown by the a
 Anyone who can read your files as you can read it, which is also true of an
 unlocked OS keychain for a process running as you.
 
+On Windows, the OpenClaw integration requires the credential helper to be owned
+by the current user, LocalSystem, or the built-in Administrators group. The
+helper's DACL may grant modification rights only to those principals.
+
 ## Upgrade notes for 0.2.0
 
 - **Credentials leave the OS keychain.** API keys move from the macOS
