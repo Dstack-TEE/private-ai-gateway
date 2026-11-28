@@ -189,6 +189,13 @@ verification.
 
 ## Update
 
+Homebrew formula and global Node package installs use the upgrade command
+printed by `pap update`. The Windows CLI install script prints a PowerShell
+command that reuses the original installation directory. Older installations
+to a custom Windows directory can rerun the original script with
+`-InstallDir` once to record the installation method.
+
+
 | Installation | How to update |
 | --- | --- |
 | macOS or Linux install script | Run `pap update`. If a managed command link is missing from PATH, rerun the [installer](#macos-and-linux) with the original directories. |

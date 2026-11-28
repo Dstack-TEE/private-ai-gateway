@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{self, UpdateChannel};
 
+mod node;
+use node::NodeInstallation;
+
+const PACKAGE_NAME: &str = "private-ai-proxy";
+
 /// The channel feed configured for release builds; development builds have none.
 pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 
@@ -149,10 +154,79 @@ pub enum Installation {
     Pacman,
     /// CLI installed by the official install script.
     InstallScript,
+    WindowsInstallScript,
     /// A native package from a release that did not record its package manager.
     SystemPackage,
+    Homebrew,
     Npm,
+    Pnpm,
+    Bun,
+    Yarn,
     Portable,
+}
+
+impl Installation {
+    pub fn delegates_updates(self) -> bool {
+        matches!(
+            self,
+            Self::Homebrew
+                | Self::Npm
+                | Self::Pnpm
+                | Self::Bun
+                | Self::Yarn
+                | Self::WindowsInstallScript
+        )
+    }
+}
+
+fn tool_output(program: &str, arguments: &[&str]) -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    let mut command = if cfg!(windows) {
+        let mut cmd = Command::new("cmd.exe");
+        // All tool names and arguments are fixed. Node managers can be .cmd
+        // wrappers on Windows, which cannot be launched directly.
+        cmd.args(["/d", "/c", program]);
+        cmd
+    } else {
+        Command::new(program)
+    };
+    let output = command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn homebrew_formula(directory: &Path, prefix: &Path) -> bool {
+    let formula = prefix.join("Cellar").join(PACKAGE_NAME);
+    let formula = fs::canonicalize(&formula).unwrap_or(formula);
+    directory.strip_prefix(formula).is_ok_and(|relative| {
+        relative.components().count() == 2 && relative.file_name() == Some(OsStr::new("libexec"))
+    })
+}
+
+fn windows_script_install(directory: &Path, local_app_data: Option<&Path>) -> bool {
+    fs::read_to_string(directory.join(".private-ai-proxy-install"))
+        .is_ok_and(|marker| marker.trim() == "windows-script")
+        || (local_app_data.is_some_and(|root| {
+            fs::canonicalize(
+                root.join("Programs")
+                    .join(format!("{} CLI", crate::brand::PRODUCT_NAME)),
+            )
+            .is_ok_and(|path| path == directory)
+        }) && [
+            "pap.cmd",
+            "private-ai-proxy-service.exe",
+            "private-ai-proxy-helper.exe",
+        ]
+        .iter()
+        .all(|file| directory.join(file).is_file()))
 }
 
 /// Classifies the installation that owns the running executable.
@@ -168,11 +242,33 @@ pub fn installation() -> Installation {
         ))
         .is_file();
     let package_manager = std::fs::read_to_string(PACKAGE_MANAGER_MARKER).ok();
-    classify(
+    let install = classify(
         directory,
         desktop,
         package_manager.as_deref().map(str::trim),
-    )
+    );
+    if install == Installation::Portable
+        && cfg!(windows)
+        && windows_script_install(
+            directory,
+            std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
+        )
+    {
+        return Installation::WindowsInstallScript;
+    }
+    if install == Installation::Portable
+        && cfg!(any(target_os = "macos", target_os = "linux"))
+        && directory.file_name() == Some(OsStr::new("libexec"))
+        && tool_output("brew", &["--prefix"])
+            .is_some_and(|prefix| homebrew_formula(directory, Path::new(&prefix)))
+    {
+        return Installation::Homebrew;
+    }
+    if install == Installation::Npm {
+        return NodeInstallation::current()
+            .map_or(Installation::Npm, |installation| installation.manager);
+    }
+    install
 }
 
 fn classify(directory: &Path, desktop: bool, package_manager: Option<&str>) -> Installation {
@@ -449,6 +545,34 @@ fn script_steps(
     ])
 }
 
+fn powershell_argument(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn windows_install_command(directory: &Path, version: &str) -> Result<String, String> {
+    let parsed = semver::Version::parse(version).map_err(|_| "The update version is invalid")?;
+    let channel = if parsed.pre.is_empty() {
+        "stable"
+    } else {
+        "beta"
+    };
+    let directory = directory
+        .to_str()
+        .ok_or("The install directory is not UTF-8")?;
+    let unc;
+    let directory = if let Some(network_path) = directory.strip_prefix(r"\\?\UNC\") {
+        unc = format!(r"\\{network_path}");
+        &unc
+    } else {
+        directory.strip_prefix(r"\\?\").unwrap_or(directory)
+    };
+    Ok(format!(
+        "$installer = Join-Path $env:TEMP ('pap-install-' + [guid]::NewGuid() + '.ps1'); try {{ Invoke-WebRequest 'https://redpill.ai/private-ai-proxy/install.ps1' -UseBasicParsing -OutFile $installer -ErrorAction Stop; powershell -ExecutionPolicy Bypass -File $installer -Channel {channel} -Version {} -InstallDir {} }} finally {{ Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue }}",
+        powershell_argument(version),
+        powershell_argument(directory),
+    ))
+}
+
 /// Runs upgrade `steps` in order, in a scratch directory for what they
 /// download, and stops at the first that fails. Each step and its output go
 /// to stderr, leaving stdout to the caller's own result.
@@ -552,18 +676,40 @@ fn upgrade_steps(
                 None,
             )
         }
-        Installation::Npm => (
-            vec![
-                stop,
-                command(&[
-                    "npm",
-                    "install",
-                    "--global",
-                    &format!("private-ai-proxy@{version}"),
-                ])?,
-            ],
-            None,
-        ),
+        Installation::Homebrew => (vec![format!("brew upgrade {PACKAGE_NAME}")], None),
+        Installation::Npm | Installation::Pnpm | Installation::Bun | Installation::Yarn => {
+            let spec = format!("{PACKAGE_NAME}@{version}");
+            let commands = NodeInstallation::current()
+                .and_then(|node| node.words(&spec))
+                .map(|words| {
+                    if cfg!(windows) {
+                        Ok(format!(
+                            "{} {}",
+                            words[0],
+                            words[1..]
+                                .iter()
+                                .map(|word| powershell_argument(word))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        ))
+                    } else {
+                        command(&words)
+                    }
+                })
+                .transpose()?
+                .into_iter()
+                .collect();
+            (commands, None)
+        }
+        Installation::WindowsInstallScript => {
+            let executable = std::env::current_exe()
+                .and_then(fs::canonicalize)
+                .map_err(|_| "Cannot locate the installed CLI")?;
+            let directory = executable
+                .parent()
+                .ok_or("Cannot locate the installation directory")?;
+            (vec![windows_install_command(directory, version)?], None)
+        }
         Installation::InstallScript => (script_steps(version, script, false)?, None),
         Installation::Portable => (
             Vec::new(),
@@ -581,6 +727,35 @@ mod tests {
 
     const FEED: &str =
         "https://example.test/o/r/releases/download/desktop-updates-beta/latest.json";
+
+    #[test]
+    fn homebrew_formula_must_belong_to_the_reported_prefix() {
+        let prefix = Path::new("/custom/brew-prefix");
+        assert!(homebrew_formula(
+            &prefix.join("Cellar/private-ai-proxy/1.2.3/libexec"),
+            prefix
+        ));
+        assert!(!homebrew_formula(
+            Path::new("/other/prefix/Cellar/private-ai-proxy/1.2.3/libexec"),
+            prefix
+        ));
+    }
+
+    #[test]
+    fn windows_script_uses_its_marked_directory_and_quotes_it_in_powershell() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!windows_script_install(temp.path(), None));
+        fs::write(
+            temp.path().join(".private-ai-proxy-install"),
+            "windows-script\r\n",
+        )
+        .unwrap();
+        assert!(windows_script_install(temp.path(), None));
+        let command =
+            windows_install_command(Path::new(r"\\?\C:\O'Brien PAP"), "1.2.3-beta.1").unwrap();
+        assert!(command
+            .contains(r"-Channel beta -Version '1.2.3-beta.1' -InstallDir 'C:\O''Brien PAP'"));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -717,13 +892,9 @@ mod tests {
         let upgrade_steps = |installation, root, version| {
             super::upgrade_steps(installation, root, version, std::env::consts::ARCH, None).unwrap()
         };
-        let (npm, _) = upgrade_steps(Installation::Npm, root, "0.1.8");
         assert_eq!(
-            npm,
-            [
-                "private-ai-proxy --yes service stop",
-                "npm install --global private-ai-proxy@0.1.8"
-            ]
+            upgrade_steps(Installation::Homebrew, root, "0.1.8").0,
+            ["brew upgrade private-ai-proxy"]
         );
         assert_eq!(
             upgrade_steps(Installation::InstallScript, root, "0.1.8-beta.2").0,

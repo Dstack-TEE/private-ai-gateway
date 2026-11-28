@@ -350,7 +350,9 @@ publishing stable releases to the beta feed.
 | CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
 | CLI-only RPM | Same | `pap update` [uses the same key selection as the desktop updater](#linux-release-signing), then runs `sudo rpm -U <package URL>` | As above |
 | CLI-only Arch | Same | `pap update` downloads the package and signature, verifies with `gpgv` against the shipped keyring, and runs `sudo pacman -U ./<file>` | As above |
-| npm | Same | As above with `npm install --global private-ai-proxy@<version>` | As above |
+| Homebrew formula | Homebrew tap | `pap update` prints `brew upgrade private-ai-proxy` | Close any running processes before upgrading |
+| npm, pnpm, Bun, Yarn Classic | Version from `latest.json` | `pap update` prints the manager’s global command. npm targets the prefix of the installed wrapper | As above |
+| Official Windows install script | Same | `pap update` prints the PowerShell installer command for the installed directory and selected version | The installer stops running processes and replaces the CLI registration |
 | Official install script (macOS and Linux) | Same | `pap update` reruns the official installer for the target version using the existing installation root and command link directory. `pap doctor` prints manual steps | `pap update` stops the backend under the update locks and restarts through the updated command link. Manual installs stop protection before switching links |
 | Portable archive | Same | As above with the archive URL; extract it into a fresh directory | As above |
 | Mac App Store | App Store | App Store | MAS has no feed checks |

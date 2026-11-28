@@ -131,6 +131,9 @@ pub(super) fn render(action: &Action, value: &Value) -> String {
             WebUiPassword::Rotate => "Web UI password rotated.".into(),
         },
         Action::Diagnostics { .. } => exported(value),
+        Action::Update if matches!(value["installation"].as_str(), Some("homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "windowsInstallScript")) && value["commands"][0].is_string() => {
+            text(&value["commands"][0])
+        }
         Action::Update => match value["version"].as_str() {
             Some(version) => format!(
                 "Updated {} → {}.{}",
