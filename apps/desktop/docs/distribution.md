@@ -99,8 +99,9 @@ does for existing Mac apps.
 
 Once every package and App Store build processing have succeeded, the run:
 
-1. attaches the signed assets, `latest.json`, `SHA256SUMS` and
-   `SHA256SUMS.asc` to the draft.
+1. attaches the signed packages, the tagged CLI install scripts, `latest.json`,
+   `SHA256SUMS` and `SHA256SUMS.asc` to the draft. It downloads the attached
+   scripts and compares them byte for byte with the tagged source.
    Every file in `SHA256SUMS` gets a signed SLSA build provenance attestation
    (`gh attestation verify <file> --repo Dstack-TEE/private-ai-gateway`).
    `SHA256SUMS.asc` is the OpenPGP signature on the checksum list and has no
@@ -475,9 +476,9 @@ environment `prod`, at `/linux-package-signing`.
    package. Arch upgrades verify the detached signature with `gpgv` before
    local installation. The release job embeds the Tauri signatures in
    `latest.json` and removes those signature files.
-3. It hashes the published files, including the Arch signatures, into
-   `SHA256SUMS`, then signs that file as `SHA256SUMS.asc` before attesting
-   and uploading the release.
+3. It hashes the published files, including the Arch signatures and CLI
+   install scripts, into `SHA256SUMS`, then signs that file as `SHA256SUMS.asc`
+   before attesting and uploading the release.
 
 The OpenPGP signatures carry signing timestamps. Signed RPMs are
 not bit-reproducible even when package entry times are fixed.

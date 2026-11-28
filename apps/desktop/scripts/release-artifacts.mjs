@@ -33,7 +33,13 @@ export const releaseChecksumAssets = ["SHA256SUMS", "SHA256SUMS.asc"];
 
 // Every published file, including the checksum list and its signature.
 export function releaseAssetNames(version) {
-  const names = [...desktopPackages.map((entry) => artifactName({ version, ...entry })), "latest.json", ...releaseChecksumAssets];
+  const names = [
+    ...desktopPackages.map((entry) => artifactName({ version, ...entry })),
+    "install-private-ai-proxy.sh",
+    "install-private-ai-proxy.ps1",
+    "latest.json",
+    ...releaseChecksumAssets,
+  ];
   for (const arch of ["arm64", "x64"]) {
     names.push(
       artifactName({ version, platform: "macos", arch, suffix: ".dmg" }),
