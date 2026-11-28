@@ -12,6 +12,9 @@ use tokio::sync::MutexGuard;
 
 use crate::{distribution, run_blocking};
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub(crate) struct DownloadedUpdate {
     channel: UpdateChannel,
     update: Update,
@@ -204,12 +207,15 @@ pub async fn restart_to_update(
     drop(prepared);
     let client = client.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        client.install_update(|| {
+        let install = || {
             download
                 .update
                 .install(download.bytes)
                 .map_err(|_| "Installation failed.".to_string())
-        })
+        };
+        #[cfg(target_os = "linux")]
+        let install = || linux::install(install);
+        client.install_update(install)
     })
     .await
     .map_err(|_| "The update task could not complete")??;

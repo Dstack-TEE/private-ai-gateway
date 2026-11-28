@@ -7,7 +7,7 @@
 // carry the payload Tauri bundled into its DEB; Tauri itself writes the SemVer
 // string verbatim. Names and descriptions come from tauri.conf.json, as Tauri's do.
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import semver from "semver";
@@ -33,6 +33,7 @@ export const aliases = ["pap", "aci"];
 export const aliasLinks = aliases.map((alias) => ({ src: "private-ai-proxy", dst: `/usr/bin/${alias}`, type: "symlink" }));
 const linuxPreremove = path.join(appRoot, "src-tauri/installer/linux-preremove.sh");
 const userUnit = "private-ai-proxy.service";
+const desktopBinary = "/usr/bin/private-ai-proxy-desktop";
 
 // Tauri names the desktop package after the product and describes it with the
 // bundle metadata; the CLI and Arch packages use the same values.
@@ -58,7 +59,7 @@ const linuxPackages = {
       deb: ["libayatana-appindicator3-1", "libwebkit2gtk-4.1-0", "libgtk-3-0"],
       rpm: ["libayatana-appindicator3.so.1()(64bit)", "libwebkit2gtk-4.1.so.0()(64bit)", "libgtk-3.so.0()(64bit)"],
       archlinux: [
-        "cairo", "dbus", "desktop-file-utils", "gdk-pixbuf2", "glib2", "glibc", "gtk3", "hicolor-icon-theme",
+        "cairo", "dbus", "desktop-file-utils", "gdk-pixbuf2", "glib2", "glibc", "gnupg", "gtk3", "hicolor-icon-theme",
         "libayatana-appindicator", "libgcc", "libsoup3", "pango", "webkit2gtk-4.1",
       ],
     },
@@ -69,7 +70,7 @@ const linuxPackages = {
     other: desktopName,
     provides: false,
     markers: ["deb", "rpm", "archlinux"],
-    depends: { deb: [], rpm: [], archlinux: ["glibc", "libgcc"] },
+    depends: { deb: [], rpm: [], archlinux: ["glibc", "gnupg", "libgcc"] },
   },
 };
 
@@ -92,8 +93,7 @@ export function releaseVersionParts(version) {
 // nfpm otherwise stamps entries with the time it writes each one, so an Arch
 // package's .MTREE and tar headers disagree and `pacman -Qkk` reports altered
 // files. Like GoReleaser's `mtime: "{{ .CommitDate }}"`, every entry gets
-// SOURCE_DATE_EPOCH (reproducible-builds.org) or the commit time, which also
-// makes the packages reproducible.
+// SOURCE_DATE_EPOCH (reproducible-builds.org) or the commit time.
 function packageTime() {
   const epoch = process.env.SOURCE_DATE_EPOCH?.trim()
     || execFileSync("git", ["log", "-1", "--format=%ct"], { cwd: appRoot, encoding: "utf8" }).trim();
@@ -104,7 +104,7 @@ function packageTime() {
 
 // `contents` is the package's payload in nfpm terms; `marker` a file holding
 // the owning package manager, when this format carries one.
-function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) {
+function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, signing }) {
   const definition = linuxPackages[kind];
   if (!definition) throw new Error(`Unsupported Linux package kind ${JSON.stringify(kind)}`);
   if (!packagers[packager]) throw new Error(`Unsupported Linux packager ${JSON.stringify(packager)}`);
@@ -121,6 +121,7 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     rpm: `${definition.other} = ${versions.rpm}`,
     archlinux: `${definition.other}=${versions.arch}`,
   }[packager];
+  const archiveKeyring = "/usr/share/keyrings/private-ai-proxy-archive-keyring";
   return {
     name: definition.name,
     arch: arch === "x64" ? "amd64" : "arm64",
@@ -140,6 +141,11 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
     replaces: packager === "deb" ? [definition.other] : [],
     contents: [
       ...contents,
+      ...(signing ? [{
+        src: packager === "rpm" ? signing.publicKey : signing.keyring,
+        dst: `${archiveKeyring}.${packager === "rpm" ? "asc" : "gpg"}`,
+        file_info: { mode: 0o644 },
+      }] : []),
       ...(marker ? [
         { dst: markerDirectory, type: "dir" },
         { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
@@ -151,16 +157,37 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime }) 
       archlinux: { scripts: { preremove: linuxPreremove } },
     },
     deb: { compression: "xz" },
+    ...(packager === "rpm" && signing ? { rpm: { signature: { key_file: signing.keyFile, key_id: signing.keyId } } } : {}),
     archlinux: { packager: maintainer },
   };
 }
 
+async function releaseSigning() {
+  if (!process.env.RELEASE_CHANNEL) return undefined;
+  const {
+    PAP_LINUX_SIGNING_KEY_FILE: keyFile,
+    PAP_LINUX_SIGNING_PUBLIC_KEY: publicKey,
+    PAP_LINUX_SIGNING_KEYRING: keyring,
+    PAP_LINUX_SIGNING_FINGERPRINT: fingerprint,
+  } = process.env;
+  if (!keyFile || !(await stat(keyFile).catch(() => undefined))?.isFile() || !/^[0-9A-F]{40}$/.test(fingerprint ?? "")) {
+    throw new Error("Missing prepared Linux release signing key. Set LINUX_SIGNING_KEY in desktop-release.");
+  }
+  if (!keyring || !publicKey || !(await stat(keyring).catch(() => undefined))?.isFile()
+    || !(await stat(publicKey).catch(() => undefined))?.isFile()) {
+    throw new Error("Missing Linux release keyring. Prepare it from packaging/linux-signing-key.asc.");
+  }
+  // nfpm accepts a 64-bit OpenPGP key ID, the last 16 digits of a v4 fingerprint.
+  return { keyFile, publicKey, keyring, keyId: fingerprint.slice(-16) };
+}
+
 // Writes `<output>/<artifact name>` in every Linux format and returns the paths.
 export async function buildLinuxPackages({ kind, version, arch, contents, output }) {
+  const signing = await releaseSigning();
+  const mtime = packageTime();
   await mkdir(output, { recursive: true });
   const scratch = await mkdtemp(path.join(output, ".pap-nfpm-"));
   const packages = [];
-  const mtime = packageTime();
   try {
     for (const [packager, { suffix, manager }] of Object.entries(packagers)) {
       let marker;
@@ -169,7 +196,7 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
         await writeFile(marker, `${manager}\n`);
       }
       const config = path.join(scratch, `${packager}.json`);
-      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime })));
+      await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, signing })));
       const target = path.join(output, artifactName({ version, platform: "linux", arch, suffix, cli: kind === "cli" }));
       execFileSync(process.env.NFPM ?? "nfpm", ["package", "--config", config, "--packager", packager, "--target", target], { stdio: "inherit" });
       packages.push(target);
@@ -180,14 +207,18 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
   return packages;
 }
 
-// Repackages the Tauri DEB in `bundleDir/deb` in every Linux format under
-// `output`. When Tauri signed its DEB for the updater, the DEB and RPM the
-// updater installs are signed, so every signature covers the bytes that ship.
+async function tauriPackage(bundleDir, format) {
+  const directory = path.join(bundleDir, format);
+  const built = (await readdir(directory)).filter((name) => name.endsWith(`.${format}`));
+  if (built.length !== 1) throw new Error(`Expected one Tauri ${format.toUpperCase()} in ${directory}; found ${built.length}`);
+  return path.join(directory, built[0]);
+}
+
+// Repackages Tauri's Linux payload in every format under `output`. When
+// Tauri signed its DEB for the updater, sign the final DEB and RPM bytes.
 export async function packageDesktop({ bundleDir, version, arch, output }) {
-  const debDirectory = path.join(bundleDir, "deb");
-  const built = (await readdir(debDirectory)).filter((name) => name.endsWith(".deb"));
-  if (built.length !== 1) throw new Error(`Expected one Tauri DEB in ${debDirectory}; found ${built.length}`);
-  const tauriDeb = path.join(debDirectory, built[0]);
+  const tauriDeb = await tauriPackage(bundleDir, "deb");
+  const tauriRpm = await tauriPackage(bundleDir, "rpm");
   const name = execFileSync("dpkg-deb", ["-f", tauriDeb, "Package"], { encoding: "utf8" }).trim();
   if (name !== linuxPackages.desktop.name) throw new Error(`Tauri built package ${JSON.stringify(name)}, expected ${linuxPackages.desktop.name}`);
   const signed = Boolean(await stat(`${tauriDeb}.sig`).catch(() => undefined));
@@ -199,12 +230,25 @@ export async function packageDesktop({ bundleDir, version, arch, output }) {
   try {
     const root = path.join(scratch, "root");
     execFileSync("dpkg-deb", ["-x", tauriDeb, root], { stdio: "inherit" });
+    // Tauri tags its executable in each native bundle. The tag selects both
+    // the updater manifest target and the package manager used to install it.
+    const debBinary = path.join(scratch, "desktop-deb");
+    await rename(path.join(root, desktopBinary), debBinary);
+    const rpmRoot = path.join(scratch, "rpm");
+    await mkdir(rpmRoot);
+    execFileSync("bsdtar", ["-xf", tauriRpm, "-C", rpmRoot, `.${desktopBinary}`], { stdio: "inherit" });
+    const rpmBinary = path.join(rpmRoot, desktopBinary);
     const unit = (await readFile(path.join(appRoot, "src-tauri/installer", userUnit), "utf8"))
       .replace("ExecStart=/usr/libexec/private-ai-proxy/", "ExecStart=/usr/bin/");
     const unitPath = path.join(scratch, userUnit);
     await writeFile(unitPath, unit);
     const contents = [
       { src: path.join(root, "usr"), dst: "/usr" },
+      ...Object.keys(packagers).map((packager) => ({
+        src: packager === "rpm" ? rpmBinary : debBinary,
+        dst: desktopBinary,
+        packager,
+      })),
       ...aliasLinks,
       { src: unitPath, dst: `/usr/lib/systemd/user/${userUnit}`, file_info: { mode: 0o644 } },
     ];

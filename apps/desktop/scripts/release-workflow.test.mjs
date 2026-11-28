@@ -76,11 +76,16 @@ test("only release tags publish, after every package, in order", async () => {
   const steps = direct.jobs.release.steps.map((step) => step.run ?? "");
   const gate = steps.findIndex((run) => run.includes("create-update-manifest.mjs"));
   assert.notEqual(gate, -1);
+  const sign = steps[gate];
+  assert.ok(sign.indexOf(' --detach-sign "$package"') > -1);
+  assert.ok(sign.indexOf(' --detach-sign "$package"') < sign.indexOf("create-update-manifest.mjs"));
+  assert.ok(sign.indexOf("create-update-manifest.mjs") < sign.indexOf("sha256sum --"));
+  assert.ok(sign.indexOf("sha256sum --") < sign.indexOf("--armor --detach-sign release/SHA256SUMS"));
   const upload = steps.findIndex((run) => run.includes("gh release upload"));
   assert.ok(gate < upload);
   // Provenance and SBOM attestations exist before any asset is public.
   const attestations = direct.jobs.release.steps.flatMap((step, index) => (step.uses?.startsWith("actions/attest@") ? [{ index, ...step.with }] : []));
-  for (const attestation of attestations) assert.ok(attestation.index < upload);
+  for (const attestation of attestations) assert.ok(gate < attestation.index && attestation.index < upload);
   // The download links join the notes after the assets they link are
   // attached, and before the release is public.
   const notes = steps.findIndex((run) => run.includes("release-notes.mjs"));
