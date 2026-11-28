@@ -1,7 +1,13 @@
 //! Capture the login shell once for desktop launches outside a terminal.
 
 use std::{
-    env, ffi::OsString, io, io::IsTerminal, os::unix::ffi::OsStringExt, path::Path, process::Stdio,
+    env,
+    ffi::{CStr, OsString},
+    io::{self, IsTerminal},
+    mem::MaybeUninit,
+    os::unix::ffi::OsStringExt,
+    path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 
@@ -9,8 +15,12 @@ use crate::paths::agent_environment::{capture, ClientEnvironment};
 
 pub(super) fn resolve() -> ClientEnvironment {
     if !io::stdin().is_terminal() && !io::stdout().is_terminal() && !io::stderr().is_terminal() {
-        if let Some(shell) = env::var_os("SHELL") {
-            match super::block_on(read(Path::new(&shell), Duration::from_secs(10))) {
+        let shell = env::var_os("SHELL")
+            .map(PathBuf::from)
+            .filter(|shell| shell.is_absolute())
+            .or_else(account_shell);
+        if let Some(shell) = shell {
+            match super::block_on(read(&shell, Duration::from_secs(10))) {
                 Ok(Ok(values)) => return values,
                 Ok(Err(error)) => {
                     tracing::warn!("Cannot read the login shell environment: {}", error.kind())
@@ -20,6 +30,38 @@ pub(super) fn resolve() -> ClientEnvironment {
         }
     }
     capture(env::var_os)
+}
+
+/// Graphical sessions can omit SHELL. Read the account's login shell.
+fn account_shell() -> Option<PathBuf> {
+    // SAFETY: sysconf has no pointer arguments.
+    let size = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let mut buffer = vec![0_u8; size.max(16_384) as usize];
+    let mut user = MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes to the provided record and buffer.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            user.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: A successful lookup initialized the record. Its strings
+    // live in buffer, which stays alive until the path is copied.
+    let shell = unsafe { user.assume_init().pw_shell };
+    if shell.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r returned a non-null, NUL-terminated shell.
+    let bytes = unsafe { CStr::from_ptr(shell) }.to_bytes();
+    let shell = PathBuf::from(OsString::from_vec(bytes.to_vec()));
+    shell.is_absolute().then_some(shell)
 }
 
 async fn read(shell: &Path, timeout: Duration) -> io::Result<ClientEnvironment> {
