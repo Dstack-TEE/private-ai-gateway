@@ -30,7 +30,7 @@ const { publisher, homepage, shortDescription, longDescription } = app.bundle;
 const compact = (value) => value.replace(/[^a-zA-Z0-9]/g, "");
 const identifier = `${compact(publisher)}.${compact(app.productName)}`;
 const web = `https://github.com/${repository}`;
-const manifestVersion = "1.12.0";
+const manifestVersion = "1.28.0";
 const locale = "en-US";
 const installers = desktopPackages.filter(({ platform }) => platform === "windows");
 const pairs = installers.flatMap((entry) => [

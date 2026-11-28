@@ -73,7 +73,9 @@ for installer in "${installers[@]}"; do
     # A previous run can leave a complete branch without an open PR.
     for manifest in "$directory"/*.yaml; do
       filename="$(basename -- "$manifest")"
-      "${git_command[@]}" show "$branch_tip:$relative/$filename" | cmp - "$manifest"
+      expected_blob="$("${git_command[@]}" hash-object --no-filters "$manifest")"
+      actual_blob="$("${git_command[@]}" rev-parse --verify "$branch_tip:$relative/$filename")"
+      [[ "$actual_blob" == "$expected_blob" ]]
     done
   else
     if [[ "$branch_tip" != "$upstream_tip" ]]; then
@@ -113,7 +115,7 @@ Publish $id version $version using the upstream GitHub release assets.
 - [x] This PR only modifies one (1) manifest
 - [ ] Validated locally with \`winget validate --manifest <path>\`
 - [ ] Tested locally with \`winget install --manifest <path>\`
-- [ ] Confirmed the WinGet repository's current schema requirements
+- [ ] Manifests conform to the [current repository schema](https://github.com/microsoft/winget-pkgs/tree/master/doc/manifest/schema)
 BODY
   jq -n --arg head "$owner:$branch" --arg head_repo "$repository" --arg base "$base" \
     --arg title "$title" --rawfile body "$scratch/pr-body.md" \
