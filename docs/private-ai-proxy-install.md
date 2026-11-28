@@ -136,6 +136,70 @@ npm 9.6.3 and 9.6.4, bundled with Node 20.0 and 20.1, skip the Linux native
 executables even on glibc systems. Upgrade npm if `pap` reports that they are
 missing.
 
+## APT on Debian and Ubuntu
+
+Bootstrap the repository key and verify its primary fingerprint before installing
+it. The fingerprint must be `1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140`.
+
+```sh
+curl -fsSLO https://pkg.redpill.ai/private-ai-proxy-archive-keyring.gpg
+gpg --show-keys --with-fingerprint private-ai-proxy-archive-keyring.gpg
+```
+
+```sh
+sudo install -m 0644 private-ai-proxy-archive-keyring.gpg /usr/share/keyrings/
+curl -fsSLO https://pkg.redpill.ai/apt/private-ai-proxy.sources
+sudo install -m 0644 private-ai-proxy.sources /etc/apt/sources.list.d/
+sudo apt update
+sudo apt install private-ai-proxy
+```
+
+For the CLI without the desktop app, install `private-ai-proxy-cli`. To opt in
+to beta releases, also install the beta source.
+
+```sh
+curl -fsSLO https://pkg.redpill.ai/apt/private-ai-proxy-beta.sources
+sudo install -m 0644 private-ai-proxy-beta.sources /etc/apt/sources.list.d/
+sudo apt update
+```
+
+Run `pap update` for the APT upgrade command, or upgrade during your regular
+system updates. Each package ships the same keyring at the `Signed-By` path so
+upgrades refresh the key.
+
+## DNF and Zypper
+
+Verify the repository key against the same primary fingerprint shown above.
+DNF may also request confirmation of the key for repository metadata.
+
+```sh
+curl -fsSLO https://pkg.redpill.ai/key.asc
+gpg --show-keys --with-fingerprint key.asc
+sudo rpm --import key.asc
+```
+
+On Fedora and other DNF systems:
+
+```sh
+curl -fsSLO https://pkg.redpill.ai/rpm/private-ai-proxy.repo
+sudo install -m 0644 private-ai-proxy.repo /etc/yum.repos.d/
+sudo dnf install private-ai-proxy
+```
+
+On openSUSE systems:
+
+```sh
+sudo zypper addrepo --refresh https://pkg.redpill.ai/rpm/private-ai-proxy.repo
+sudo zypper refresh
+sudo zypper install private-ai-proxy
+```
+
+For the CLI without the desktop app, install `private-ai-proxy-cli`. For
+betas, enable both repositories by repeating the repository setup with
+`private-ai-proxy-beta.repo`. Run `pap update` for the DNF or Zypper upgrade
+command. Remove or disable the beta repository to return to stable. Your
+package manager will upgrade when a newer stable version is available.
+
 ## Desktop app and native packages
 
 Signed desktop app installers, portable CLI archives, and Linux DEB, RPM, and

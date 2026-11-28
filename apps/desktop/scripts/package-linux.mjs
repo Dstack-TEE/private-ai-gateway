@@ -24,9 +24,8 @@ const packagers = {
   archlinux: { suffix: ".pkg.tar.zst", manager: "pacman" },
 };
 // Names the package manager that owns an install, so update notices can print
-// its upgrade command (core/src/updates.rs). The desktop needs it only under
-// pacman, where it disables in-app installation.
-const markerDirectory = "/usr/share/private-ai-proxy";
+// its upgrade command (core/src/updates.rs).
+export const markerDirectory = "/usr/share/private-ai-proxy";
 // `pap` and the legacy `aci` are symlinks, so the executable sees the alias
 // in argv[0].
 export const aliases = ["pap", "aci"];
@@ -40,19 +39,19 @@ const desktopBinary = "/usr/bin/private-ai-proxy-desktop";
 const tauri = JSON.parse(await readFile(path.join(appRoot, "src-tauri/tauri.conf.json"), "utf8"));
 const desktopName = tauri.productName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 const cliName = `${desktopName}-cli`;
+export const archiveKeyring = `/usr/share/keyrings/${desktopName}-archive-keyring`;
 // Debian Policy 5.6.2: the maintainer is a name and an email address. The
 // support contact is package.json's `bugs.email`.
 const { bugs } = JSON.parse(await readFile(path.join(appRoot, "package.json"), "utf8"));
 export const maintainer = `${tauri.bundle.publisher} <${bugs.email}>`;
 
-const linuxPackages = {
+export const linuxPackages = {
   desktop: {
     name: desktopName,
     description: `${tauri.bundle.shortDescription}\n${tauri.bundle.longDescription}`,
     other: cliName,
     // The desktop package includes the CLI, so it stands in for it.
     provides: true,
-    markers: ["archlinux"],
     // The libraries Tauri's bundler declares for WebKitGTK, GTK and the
     // Ayatana tray (tauri-cli src/interface/rust.rs), in each format's terms.
     depends: {
@@ -69,7 +68,6 @@ const linuxPackages = {
     description: `${tauri.productName} command line client and user backend`,
     other: desktopName,
     provides: false,
-    markers: ["deb", "rpm", "archlinux"],
     depends: { deb: [], rpm: [], archlinux: ["glibc", "gnupg", "libgcc"] },
   },
 };
@@ -121,7 +119,6 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, si
     rpm: `${definition.other} = ${versions.rpm}`,
     archlinux: `${definition.other}=${versions.arch}`,
   }[packager];
-  const archiveKeyring = "/usr/share/keyrings/private-ai-proxy-archive-keyring";
   return {
     name: definition.name,
     arch: arch === "x64" ? "amd64" : "arm64",
@@ -146,10 +143,8 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, si
         dst: `${archiveKeyring}.${packager === "rpm" ? "asc" : "gpg"}`,
         file_info: { mode: 0o644 },
       }] : []),
-      ...(marker ? [
-        { dst: markerDirectory, type: "dir" },
-        { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
-      ] : []),
+      { dst: markerDirectory, type: "dir" },
+      { src: marker, dst: `${markerDirectory}/package-manager`, file_info: { mode: 0o644 } },
     ],
     overrides: {
       deb: { scripts: { preremove: linuxPreremove } },
@@ -190,11 +185,8 @@ export async function buildLinuxPackages({ kind, version, arch, contents, output
   const packages = [];
   try {
     for (const [packager, { suffix, manager }] of Object.entries(packagers)) {
-      let marker;
-      if (linuxPackages[kind]?.markers.includes(packager)) {
-        marker = path.join(scratch, `${packager}.marker`);
-        await writeFile(marker, `${manager}\n`);
-      }
+      const marker = path.join(scratch, `${packager}.marker`);
+      await writeFile(marker, `${manager}\n`);
       const config = path.join(scratch, `${packager}.json`);
       await writeFile(config, JSON.stringify(nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, signing })));
       const target = path.join(output, artifactName({ version, platform: "linux", arch, suffix, cli: kind === "cli" }));

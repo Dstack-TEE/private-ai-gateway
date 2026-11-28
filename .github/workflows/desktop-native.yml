@@ -1036,6 +1036,15 @@ jobs:
           if [[ "$CHANNEL" == stable ]]; then prerelease=false latest=true; fi
           gh release edit "$TAG" --draft=false --prerelease="$prerelease" --latest="$latest" --title "Private AI Proxy v$VERSION"
 
+  publish-linux-repos:
+    needs: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux-repos.yml
+    with:
+      tag: ${{ github.ref_name }}
+
   # Beta releases skip the App Store job, and a job whose `if` has no status
   # check function inherits success(), which is false after any skipped
   # dependency, direct or not; so each job after it checks its own result.

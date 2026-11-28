@@ -311,7 +311,7 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
 
 ## Updates by installation
 
-Every Direct installation follows the saved update channel (the desktop app's
+Direct installations with an in-app updater follow the saved update channel (the desktop app's
 **Update channel** toggle, or `pap settings set update-channel beta|stable`); without a saved
 choice it follows the channel of the running build. Each client reads one
 static Tauri manifest, `desktop-updates-<channel>/latest.json`. Stable releases
@@ -344,11 +344,12 @@ publishing stable releases to the beta feed.
 | --- | --- | --- | --- |
 | macOS DMG app | `darwin-<arch>` (`.app.tar.gz`) | In-app: the Tauri updater replaces the app bundle | The owned backend is stopped first. The relaunched app starts the new backend using the same LaunchAgent when enabled |
 | Windows NSIS (current user) | `windows-<arch>` (the updater falls back from `windows-<arch>-nsis`) | In-app: the signed setup runs with `/P /UPDATE /R` | The owned backend is stopped first; the installer hooks stop any remaining backend under the startup lock, keep the user `PATH` entry, and relaunch the app |
-| Linux desktop DEB | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
-| Linux desktop RPM | `linux-<arch>-rpm` | In-app: [reuse the registered key, import the local certificate, or verify a downloaded certificate's fingerprint](#linux-release-signing), then run `rpm -U`. Privileged operations use `pkexec` with the same fallbacks as DEB | As DEB |
+| Linux packages with an APT, DNF, or Zypper repository | Enabled stable and beta repositories | `pap update` and Settings > About show the package manager’s upgrade command | The next launch starts the new backend |
+| Linux desktop DEB without its repository | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
+| Linux desktop RPM without its repository | `linux-<arch>-rpm` | In-app: [reuse the registered key, import the local certificate, or verify a downloaded certificate's fingerprint](#linux-release-signing), then run `rpm -U`. Privileged operations use `pkexec` with the same fallbacks as DEB | As DEB |
 | Arch desktop package | Version from `latest.json` | Settings > About shows how to stop the service, download the package and signature, verify with `gpgv` against the shipped keyring, and install with `sudo pacman -U ./<file>` | The next launch starts the new backend |
-| CLI-only DEB | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
-| CLI-only RPM | Same | `pap update` [uses the same key selection as the desktop updater](#linux-release-signing), then runs `sudo rpm -U <package URL>` | As above |
+| CLI-only DEB without its repository | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
+| CLI-only RPM without its repository | Same | `pap update` [uses the same key selection as the desktop updater](#linux-release-signing), then runs `sudo rpm -U <package URL>` | As above |
 | CLI-only Arch | Same | `pap update` downloads the package and signature, verifies with `gpgv` against the shipped keyring, and runs `sudo pacman -U ./<file>` | As above |
 | Homebrew formula | Homebrew tap | `pap update` prints `brew upgrade private-ai-proxy` | Close any running processes before upgrading |
 | npm, pnpm, Bun, Yarn Classic | Version from `latest.json` | `pap update` prints the manager’s global command. npm targets the prefix of the installed wrapper | As above |
@@ -358,13 +359,13 @@ publishing stable releases to the beta feed.
 | Mac App Store | App Store | App Store | MAS has no feed checks |
 | AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
 
-For package-manager updates, the app and CLI build commands from the compiled
-feed location and validated version. `pap doctor` prints the CLI commands and
-`pap update` runs them. Linux CLI and Arch packages record their owner in
-`/usr/share/private-ai-proxy/package-manager` (`deb`, `rpm` or `pacman`); the
-desktop app disables in-app installation only when that marker says `pacman`. CLI
-packages from releases up to 0.1.7-beta.1 lack the marker and are reported as a
-system package without commands.
+Linux packages record their format in `/usr/share/private-ai-proxy/package-manager`
+(`deb`, `rpm` or `pacman`). If the matching APT, DNF, or Zypper source is
+enabled, the repository configuration sets the update channel, `pap update`
+prints the upgrade command, and the desktop app defers to the package manager.
+Direct Arch installs still use the selected feed and verified release package.
+CLI packages from releases up to 0.1.7-beta.1 lack the marker and are reported
+as a system package without commands.
 
 Native package versions keep prereleases ordered before their stable release:
 DEB and RPM `x.y.z~beta.n` (RPM release `1`, no epoch) and Arch `x.y.zbeta.n`.
@@ -450,6 +451,36 @@ The OpenPGP signatures carry signing timestamps. Signed RPMs are
 not bit-reproducible even when package entry times are fixed.
 The [install guide](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
 shows how to verify release assets.
+
+### APT and RPM repositories
+
+[Publish Linux package repositories](../../../.github/workflows/linux-repos.yml)
+runs after the desktop release publishes its assets. It can also be dispatched
+from the default branch to rebuild the repositories. It uses the
+`desktop-release` environment's existing OpenPGP signing key,
+`PKG_REPO_R2_ACCESS_KEY_ID`, and `PKG_REPO_R2_SECRET_ACCESS_KEY` along with the
+`PKG_REPO_R2_ENDPOINT`, `PKG_REPO_R2_BUCKET`, and `PKG_REPO_URL` variables.
+
+The build reconstructs the latest five signed stable and ten signed beta
+versions from public GitHub release assets. It verifies `SHA256SUMS.asc`
+against the release certificate and checks every package against that list.
+Keep published assets immutable. APT uses `apt-ftparchive` and publishes
+`InRelease`, `Release.gpg` and by-hash package indexes. The RPM trees use
+`createrepo_c`, signed `repomd.xml`, and package and metadata signature
+checks. The beta source adds prereleases alongside the stable source.
+
+The publisher uploads packages and content-addressed indexes before updating
+signed metadata. Immutable files use a one-year cache lifetime. Mutable
+metadata, keyrings and source files use `no-cache`. Keep these cache directives
+on the custom domain. The publisher keeps immutable files from the preceding
+generation so clients already reading its metadata can finish their update.
+A fresh request during the RPM metadata and detached-signature update can be
+rejected and succeed on retry.
+
+APT packages carry the same keyring they use for `Signed-By`, so an upgrade
+refreshes the distribution key. Publish a certificate with both the old and
+new signing subkeys and ship it to clients under the old key before switching
+signers for a planned rotation.
 
 #### Signing key rotation
 
