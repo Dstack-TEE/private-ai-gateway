@@ -413,8 +413,18 @@ Installed RPM updaters use the [public certificate on GitHub `raw/main`](https:/
 This URL is a permanent contract. Keep the file at its current path when
 rotating the key and never move or rename it.
 
-**Primary key fingerprint** — pending key ceremony. Publish the fingerprint
-here, in the install guide, and in release notes after the ceremony.
+The primary key fingerprint is
+`1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140`. The install guide and
+release notes publish the same fingerprint.
+
+The canonical key material is in Infisical project `private-ai-gateway`,
+environment `prod`, at `/linux-package-signing`.
+
+- `LINUX_SIGNING_PRIMARY_KEY` holds the protected primary key.
+- `LINUX_SIGNING_PRIMARY_PASSPHRASE` holds its passphrase.
+- `LINUX_SIGNING_REVOCATION_CERT` holds the primary revocation certificate.
+- `LINUX_SIGNING_KEY` holds the CI signing subkey export.
+- `LINUX_SIGNING_PUBLIC_KEY` holds the public certificate.
 
 1. nfpm signs each RPM while building it. The desktop repackager then
    generates Tauri updater signatures over the final desktop DEB and RPM.
@@ -435,13 +445,18 @@ shows how to verify release assets.
 
 #### Signing key rotation
 
+The current signing subkey has fingerprint
+`123A 6774 08C8 9182 3AF9 1461 E90A 5EC3 7B79 2504`. It expires on
+November 26, 2029 at 11:14 p.m. PST (November 27, 2029 at 07:14 UTC in
+GnuPG's expiry record).
+
 In the second year of the three-year signing subkey's lifetime, use the offline
 primary to extend it in place. With both fingerprints from the offline keyring,
 run `gpg --cert-digest-algo SHA512 --quick-set-expire "$primary_fpr" 3y "$subkey_fpr"`. Export
 the updated public certificate and a fresh signing-subkey-only secret export.
-Update the committed certificate and the environment secret together before
-tagging the next release. This keeps the primary and signing fingerprints
-stable.
+Update the public certificate and subkey export in Infisical, then update the
+committed certificate, the recorded expiry above, and the GitHub environment
+secret before tagging the next release. This keeps both fingerprints stable.
 
 If a subkey is compromised, use the offline primary to revoke it and issue a
 new signing subkey. Replace the environment secret, publish the updated public
@@ -449,7 +464,8 @@ certificate with the revocation, and tell users to refresh their trusted key
 before upgrading. Older RPM versions may require removing the stored copy
 before importing the updated certificate. If the primary is compromised,
 publish its revocation and announce and distribute the replacement primary
-fingerprint through an authenticated channel. Each release links to the
+fingerprint through an authenticated channel. Update the fingerprint in this
+guide, the install guide, and `scripts/release-notes.mjs`. Each release links to the
 certificate from its build commit for verification of historical artifacts.
 
 A feed advances only after its release is public and every manifest URL

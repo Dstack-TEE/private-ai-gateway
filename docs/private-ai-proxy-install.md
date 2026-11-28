@@ -147,8 +147,8 @@ page. Native package managers own upgrades and removal for their installations.
 
 Download `SHA256SUMS` and `SHA256SUMS.asc` alongside the packages. Download the
 Linux public key as `linux-signing-key.asc` from the build commit linked in
-the release notes. Check the fingerprint against your trusted copy of the
-release key before using it.
+the release notes. Verify that its primary fingerprint matches
+`1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140` before using it.
 
 ```bash
 gpg --show-keys --with-fingerprint linux-signing-key.asc

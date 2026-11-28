@@ -11,6 +11,7 @@ import { releaseChannel } from "./release-channel.mjs";
 const downloadsBlock = "desktop-downloads";
 const integrityBlock = "desktop-integrity";
 const macAppStore = "https://apps.apple.com/app/private-ai-proxy/id6814051406";
+const linuxPrimaryFingerprint = "1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140";
 
 const platformTitles = {
   "macos-arm64": "macOS Apple Silicon",
@@ -76,7 +77,7 @@ export async function releaseSections(directory, repository, commit) {
   if (files.has("SHA256SUMS.asc")) {
     const key = `https://github.com/${repository}/blob/${commit}/apps/desktop/packaging/linux-signing-key.asc`;
     integrity.push(
-      `- Verify the [OpenPGP signature](${link("SHA256SUMS.asc")}) on ${checksums} with the [Linux release public key](${key}), then run \`sha256sum --ignore-missing -c SHA256SUMS\` in the download directory.`,
+      `- Verify the [OpenPGP signature](${link("SHA256SUMS.asc")}) on ${checksums} with the [Linux release public key](${key}) (primary fingerprint \`${linuxPrimaryFingerprint}\`), then run \`sha256sum --ignore-missing -c SHA256SUMS\` in the download directory.`,
       "- RPMs have embedded signatures. Arch packages have matching `.pkg.tar.zst.sig` assets. Both use the Linux release key.",
     );
   } else {

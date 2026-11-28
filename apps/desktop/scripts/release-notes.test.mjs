@@ -39,6 +39,7 @@ test("download links lead the notes and integrity details close them", async () 
     assert.match(notes, /\[SHA-256 checksums\]\([^)]+\/desktop-v0\.3\.0\/SHA256SUMS\)/);
     assert.match(notes, /\[OpenPGP signature\]\([^)]+\/desktop-v0\.3\.0\/SHA256SUMS\.asc\)/);
     assert.match(notes, /\[Linux release public key\]\([^)]+\/blob\/a{40}\/apps\/desktop\/packaging\/linux-signing-key\.asc\)/);
+    assert.match(notes, /primary fingerprint `1857 9A14 41C5 278F B2B1 A943 060C 5C65 1FC4 6140`/);
     assert.match(notes, /Developer ID signed and notarized/);
     assert.match(notes, /Build commit: \[`aaaaaaa`\]/);
     // Updater packages are not offered as installers.
