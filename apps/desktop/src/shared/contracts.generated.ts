@@ -185,7 +185,7 @@ revision: number, };
 export type ListenAddress = { address: string, name: string, };
 export type Appearance = "system" | "light" | "dark";
 export type UpdateChannel = "beta" | "stable";
-export type Installation = "desktopApp" | "desktopPacman" | "desktopLinuxRepo" | "deb" | "rpm" | "pacman" | "linuxRepo" | "installScript" | "windowsInstallScript" | "systemPackage" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "portable";
+export type Installation = "desktopApp" | "desktopPacman" | "desktopLinuxRepo" | "desktopAur" | "deb" | "rpm" | "pacman" | "linuxRepo" | "aur" | "installScript" | "windowsInstallScript" | "systemPackage" | "homebrew" | "npm" | "pnpm" | "bun" | "yarn" | "portable";
 export type UpdateNotice = { installation: Installation, channel: UpdateChannel, currentVersion: string,
 /**
  * A newer release in the selected channel.
@@ -194,7 +194,7 @@ version: string | null,
 /**
  * Shell steps that install `version`, when the installation has them.
  */
-commands: Array<string>,
+commands: Array<string>, packageUrl?: string | null,
 /**
  * Portable archive to extract into a fresh directory.
  */
@@ -287,7 +287,11 @@ export type AgentAccessStatus = "authorized" | "authorizationRequired" | "reauth
 /**
  * The desktop app's update check result for the renderer.
  */
-export type UpdateInfo = { enabled: boolean, systemManaged: boolean, packageManagerChannel: boolean, currentVersion: string, channel: UpdateChannel, version: string | null,
+export type UpdateInfo = { enabled: boolean, systemManaged: boolean, packageManagerChannel: boolean,
+/**
+ * A package page for update instructions from its owning repository.
+ */
+packageUrl?: string | null, currentVersion: string, channel: UpdateChannel, version: string | null,
 /**
  * Steps that install `version` when a package manager or the user owns
  * the installation.

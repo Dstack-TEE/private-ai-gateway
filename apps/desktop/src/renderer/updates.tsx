@@ -100,10 +100,10 @@ export function UpdateChannelControl({ updates }: { updates: ReturnType<typeof u
     },
     meta: { errorTitle: "Could not change the update channel" },
   });
-  if (updates.info?.packageManagerChannel) return <SettingsItem>
+  if (updates.info?.packageManagerChannel || updates.info?.packageUrl) return <SettingsItem>
     <ItemContent>
       <ItemTitle>Update channel</ItemTitle>
-      <ItemDescription>Managed by your package repositories</ItemDescription>
+      <ItemDescription>{updates.info.packageUrl ? "Stable releases from the Arch User Repository" : "Managed by your package repositories"}</ItemDescription>
     </ItemContent>
   </SettingsItem>;
   return <SettingsItem>
@@ -132,7 +132,7 @@ export function UpdateControl({ updates, productName, desktop }: { updates: Retu
   return <SettingsItem>
     <ItemContent className="min-w-0">
       <ItemTitle>{productName}</ItemTitle>
-      {manual && <>
+      {manual?.packageUrl ? <ItemDescription>Update with your AUR helper. Package details are at {manual.packageUrl}.</ItemDescription> : manual && <>
         <ItemDescription>{commands.length ? (desktop ? `Quit ${productName}, then run:` : "Run:")
           : manual.downloadUrl ? "Extract this archive into a new directory:" : `Update it from the ${productName} desktop app or its package manager.`}</ItemDescription>
         {(commands.length > 0 || manual.downloadUrl) && <pre className="whitespace-pre-wrap break-all rounded-md bg-muted px-3 py-2 text-xs select-text">{commands.length ? commands.join("\n") : manual.downloadUrl}</pre>}

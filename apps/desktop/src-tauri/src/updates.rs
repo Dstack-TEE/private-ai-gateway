@@ -108,6 +108,7 @@ pub async fn prepare_update(
         enabled: configured && !system_managed,
         system_managed,
         package_manager_channel: installation.linux_repo_managed(),
+        package_url: installation.aur_package_url(),
         current_version,
         channel,
         version: None,

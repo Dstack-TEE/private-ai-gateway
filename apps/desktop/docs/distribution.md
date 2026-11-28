@@ -347,6 +347,7 @@ publishing stable releases to the beta feed.
 | Linux packages with an APT, DNF, or Zypper repository | Enabled stable and beta repositories | `pap update` and Settings > About show the package manager’s upgrade command | The next launch starts the new backend |
 | Linux desktop DEB without its repository | `linux-<arch>-deb` | In-app: `pkexec dpkg -i` (then zenity/kdialog with `sudo -S`, then `sudo`) | The owned backend is stopped first. The relaunched app starts the new backend using the packaged systemd user service when enabled |
 | Linux desktop RPM without its repository | `linux-<arch>-rpm` | In-app: [reuse the registered key, import the local certificate, or verify a downloaded certificate's fingerprint](#linux-release-signing), then run `rpm -U`. Privileged operations use `pkexec` with the same fallbacks as DEB | As DEB |
+| Arch User Repository desktop and CLI packages | Stable releases | Update with an AUR helper or rebuild with `makepkg`. The app shows the AUR package details | The next launch starts the new backend |
 | Arch desktop package | Version from `latest.json` | Settings > About shows how to stop the service, download the package and signature, verify with `gpgv` against the shipped keyring, and install with `sudo pacman -U ./<file>` | The next launch starts the new backend |
 | CLI-only DEB without its repository | Same | `pap doctor` and the web UI show `private-ai-proxy --yes service stop`, `curl -fLO <URL>`, `sudo apt install ./<file>` | User-driven; the next client start runs the new backend |
 | CLI-only RPM without its repository | Same | `pap update` [uses the same key selection as the desktop updater](#linux-release-signing), then runs `sudo rpm -U <package URL>` | As above |
@@ -360,7 +361,7 @@ publishing stable releases to the beta feed.
 | AppImage (legacy) | None | Unsupported; migrate to a native package manually | — |
 
 Linux packages record their format in `/usr/share/private-ai-proxy/package-manager`
-(`deb`, `rpm` or `pacman`). If the matching APT, DNF, or Zypper source is
+(`deb`, `rpm` or `pacman` or `aur`). If the matching APT, DNF, or Zypper source is
 enabled, the repository configuration sets the update channel, `pap update`
 prints the upgrade command, and the desktop app defers to the package manager.
 Direct Arch installs still use the selected feed and verified release package.
@@ -482,6 +483,22 @@ The APT source uses a keyring installed by the administrator under
 package. During a planned rotation, publish the certificate with both signing
 subkeys and ask APT users to refresh their repository keyring before the
 signer changes.
+
+### Arch User Repository
+
+[Publish Arch User Repository packages](../../../.github/workflows/desktop-aur.yml)
+generates `private-ai-proxy-bin` and `private-ai-proxy-cli-bin` for stable releases.
+It checks the upstream signed checksum list, and `makepkg` independently
+checks the source package and its detached OpenPGP signature before building.
+The packages share the upstream dependencies and preserve the uninstall hook.
+They record `aur` as their package manager.
+
+The AUR account must own or co-maintain both pkgbases and have a dedicated
+SSH key. Add the private key as `AUR_SSH_PRIVATE_KEY` in `desktop-release`.
+The publication job skips when the secret is absent. Validate any
+[host key change](https://aur.archlinux.org/) before updating the pinned key.
+The AUR maintainer owns monitoring package comments and handling changes to
+Arch dependencies.
 
 #### Signing key rotation
 

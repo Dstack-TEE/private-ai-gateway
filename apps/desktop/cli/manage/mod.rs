@@ -1330,8 +1330,12 @@ fn settings_diagnostics(
 fn update(client: &Client) -> Result<Value, CallError> {
     use desktop_core::updates::{self, Installation};
 
-    if let Some(notice) = updates::linux_repo_update(updates::installation()) {
+    let installation = updates::installation();
+    if let Some(notice) = updates::linux_repo_update(installation) {
         return value(notice);
+    }
+    if let Some(package_url) = installation.aur_package_url() {
+        return Ok(json!({ "packageUrl": package_url }));
     }
     let notice = update_notice()?;
     if notice.installation.delegates_updates() && !notice.commands.is_empty() {
