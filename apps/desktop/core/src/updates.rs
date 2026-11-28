@@ -981,6 +981,55 @@ mod tests {
             .contains(r"-Channel beta -Version '1.2.3-beta.1' -InstallDir 'C:\O''Brien PAP'"));
     }
 
+    #[test]
+    fn linux_repo_channel_and_upgrade_command_follow_enabled_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let etc = temp.path();
+        fs::create_dir_all(etc.join("apt/sources.list.d")).unwrap();
+        fs::create_dir_all(etc.join("zypp/repos.d")).unwrap();
+        let source = |suffix| {
+            etc.join(format!(
+                "apt/sources.list.d/{DESKTOP_PACKAGE}{suffix}.sources"
+            ))
+        };
+        fs::write(source(""), "URIs: https://example.test/apt\n").unwrap();
+        fs::write(
+            source("-beta"),
+            "URIs: https://example.test/apt\nEnabled: no\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxRepository::detect(etc, "deb"),
+            Some((LinuxRepository::Apt, UpdateChannel::Stable))
+        );
+        fs::write(
+            source("-beta"),
+            "URIs: https://example.test/apt\nEnabled: yes\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxRepository::detect(etc, "deb"),
+            Some((LinuxRepository::Apt, UpdateChannel::Beta))
+        );
+        assert_eq!(
+            LinuxRepository::Apt.upgrade(Installation::DesktopLinuxRepo),
+            "sudo apt update && sudo apt install --only-upgrade private-ai-proxy"
+        );
+        fs::write(
+            etc.join("zypp/repos.d/private-ai-proxy.repo"),
+            "baseurl=https://example.test/stable\nenabled=1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxRepository::detect(etc, "rpm"),
+            Some((LinuxRepository::Zypper, UpdateChannel::Stable))
+        );
+        assert_eq!(
+            LinuxRepository::Zypper.upgrade(Installation::LinuxRepo),
+            "sudo zypper refresh && sudo zypper update private-ai-proxy-cli"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn steps_run_in_order_and_stop_at_the_first_failure() {
