@@ -19,6 +19,7 @@ For developers and evaluators who send requests to a deployment.
 | Choose between `pap`, the desktop app, and the TypeScript verifier | [ACI clients](../clients/README.md) | Index |
 | Verify artifacts in a browser, or pin `fetch` in a Node or Bun SDK | [`@phala/aci-verifier`](../clients/verifier-ts/README.md) | Reference |
 | Look up a route, its streaming and E2EE support, and its errors | [HTTP API reference](api-reference.md) | Reference |
+| Encrypt requests end to end, or move a client off the legacy E2EE scheme | [Migrate to E2EE v2.1](e2ee-v2.1-migration.md) | How-to |
 
 ## Use Private AI Proxy
 

@@ -283,3 +283,135 @@ fn receipt_payload_signature_and_envelope_match_the_published_vector() {
         &signature
     ));
 }
+
+// ---- E2EE v2.1 (e2ee-v2-test-vectors.md, "Version 2.1") ---------------------
+
+const V21_CLIENT_SEED: [u8; 32] = [0x04; 32];
+const V21_CLIENT_PUB: &str = "ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b";
+const V21_REQUEST_SECRET: [u8; 32] = [0x0a; 32];
+const V21_NONCE: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+const V21_FIELD_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"messages.0.content","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request.v2.1","ts":1750000000}"#;
+const V21_FIELD_CIPHERTEXT: &str = "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d0606060606060606060606067c3f905a1e58cb237be461eb622de6935599cbae71e1e1";
+const V21_BODY: &str = r#"{"model":"demo-model","temperature":0.7,"messages":[{"role":"user","content":"50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d0606060606060606060606067c3f905a1e58cb237be461eb622de6935599cbae71e1e1"}]}"#;
+const V21_BODY_JCS: &str = r#"{"messages":[{"content":"50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d0606060606060606060606067c3f905a1e58cb237be461eb622de6935599cbae71e1e1","role":"user"}],"model":"demo-model","temperature":0.7}"#;
+const V21_BODY_DIGEST: &str = "dc75693896a5b40b45592667704f41ff057a5063c92e3117d930b98049032da5";
+const V21_REQUEST_KEY_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","client_pub_key":"ac01b2209e86354fb853237b5de0f4fab13c7fcbf433a61c019369617fecf10b","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.request-key.v2.1","ts":1750000000}"#;
+const V21_REQUEST_KEY: &str = "13be4feaeaf204c7fd3358fc9c00721881d174278128227ec674f37f7fe97b6d080808080808080808080808d4c43624763b8e0079b38271adfa9fae2e78243bb0fa918cd95421605c3b82b5bd7ac017cda0e8ac1c9836d409013e2369dd90e254dbbe44006ff09d098c5f212ff666088c3724c5c51b43e51576c633";
+const V21_RESPONSE_AAD: &str = r#"{"algo":"x25519-aes-256-gcm-hkdf-sha256-v2.1","field":"choices.0.message.content","id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","purpose":"aci.e2ee.response.v2.1","ts":1750000000}"#;
+const V21_RESPONSE_CIPHERTEXT: &str = "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e";
+
+const V21_RESPONSE_OBJECT: &str = r#"{"choices":[{"index":0,"message":{"content":"57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d4210b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28ccdc25655e089f8e","role":"assistant"}}],"id":"chatcmpl-123"}"#;
+const V21_RESPONSE_MAC: &str = "139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e";
+
+#[test]
+fn e2ee_v2_1_vectors_open_with_the_library_constructions() {
+    use private_ai_gateway::aci::e2ee::{decrypt_x25519, E2eeKdf, E2EE_ALGO_X25519_AESGCM_V2_1};
+
+    let aad = |value: serde_json::Value| {
+        String::from_utf8(private_ai_gateway::aci::digest::jcs_bytes(&value).unwrap()).unwrap()
+    };
+    assert_eq!(
+        aad(serde_json::json!({
+            "purpose": "aci.e2ee.request.v2.1", "algo": E2EE_ALGO_X25519_AESGCM_V2_1,
+            "model": "demo-model", "field": "messages.0.content",
+            "nonce": V21_NONCE, "ts": 1_750_000_000u64,
+        })),
+        V21_FIELD_AAD
+    );
+    assert_eq!(
+        aad(serde_json::json!({
+            "purpose": "aci.e2ee.request-key.v2.1", "algo": E2EE_ALGO_X25519_AESGCM_V2_1,
+            "model": "demo-model", "client_pub_key": V21_CLIENT_PUB,
+            "nonce": V21_NONCE, "ts": 1_750_000_000u64,
+        })),
+        V21_REQUEST_KEY_AAD
+    );
+    let client = x25519_secret_key_from_bytes(&V21_CLIENT_SEED).unwrap();
+    assert_eq!(x25519_public_key_hex(&client), V21_CLIENT_PUB);
+
+    // The body digest covers the JCS form, whatever order the client sent.
+    let body: serde_json::Value = serde_json::from_str(V21_BODY).unwrap();
+    let body_jcs = serde_json_canonicalizer::to_vec(&body).unwrap();
+    assert_eq!(std::str::from_utf8(&body_jcs).unwrap(), V21_BODY_JCS);
+    assert_eq!(sha256_hex(&body_jcs), format!("sha256:{V21_BODY_DIGEST}"));
+
+    // The service opens the request key, then the field under its secret.
+    let service = x25519_secret_key_from_bytes(&E2EE_SEED).unwrap();
+    let opened = decrypt_x25519(
+        &service,
+        V21_REQUEST_KEY,
+        V21_REQUEST_KEY_AAD.as_bytes(),
+        E2eeKdf::V2_1RequestKey,
+    )
+    .unwrap();
+    assert_eq!(&opened[..32], V21_REQUEST_SECRET.as_slice());
+    assert_eq!(hex::encode(&opened[32..]), V21_BODY_DIGEST);
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V21_REQUEST_SECRET,
+    };
+    assert_eq!(
+        decrypt_x25519(
+            &service,
+            V21_FIELD_CIPHERTEXT,
+            V21_FIELD_AAD.as_bytes(),
+            kdf
+        )
+        .unwrap(),
+        br#""hello""#
+    );
+
+    // The client opens the reply with its private key and the same secret.
+    assert_eq!(
+        decrypt_x25519(
+            &client,
+            V21_RESPONSE_CIPHERTEXT,
+            V21_RESPONSE_AAD.as_bytes(),
+            kdf
+        )
+        .unwrap(),
+        b"plain-answer"
+    );
+
+    // The response MAC is HMAC-SHA256 over the object's JCS form.
+    let object: serde_json::Value = serde_json::from_str(V21_RESPONSE_OBJECT).unwrap();
+    assert_eq!(
+        hex::encode(private_ai_gateway::aci::e2ee::v2_1_response_mac(
+            &V21_REQUEST_SECRET,
+            &serde_json_canonicalizer::to_vec(&object).unwrap()
+        )),
+        V21_RESPONSE_MAC
+    );
+}
+
+#[test]
+fn e2ee_v2_1_stream_vector_matches_the_gateway_mac_and_opens_for_the_client() {
+    use private_ai_gateway::aci::e2ee::{decrypt_x25519, v2_1_response_mac, E2eeKdf};
+    let mac = |object: serde_json::Value| {
+        hex::encode(v2_1_response_mac(
+            &V21_REQUEST_SECRET,
+            &serde_json_canonicalizer::to_vec(&object).unwrap(),
+        ))
+    };
+    let delta = "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f3330d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa4780983433";
+    assert_eq!(
+        mac(serde_json::json!({"id": "chatcmpl-123",
+            "choices": [{"index": 0, "delta": {"content": delta}}]})),
+        "902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b"
+    );
+    assert_eq!(
+        mac(serde_json::json!({"id": "chatcmpl-123",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})),
+        "c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e"
+    );
+    let aad = private_ai_gateway::aci::digest::jcs_bytes(&serde_json::json!({
+        "purpose": "aci.e2ee.response.v2.1", "algo": "x25519-aes-256-gcm-hkdf-sha256-v2.1",
+        "model": "demo-model", "id": "chatcmpl-123", "field": "choices.0.delta.content",
+        "nonce": V21_NONCE, "ts": 1_750_000_000u64,
+    }))
+    .unwrap();
+    let client = x25519_secret_key_from_bytes(&V21_CLIENT_SEED).unwrap();
+    let kdf = E2eeKdf::V2_1Field {
+        request_secret: &V21_REQUEST_SECRET,
+    };
+    assert_eq!(decrypt_x25519(&client, delta, &aad, kdf).unwrap(), b"Hello");
+}

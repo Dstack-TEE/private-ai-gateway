@@ -74,6 +74,8 @@ pub enum UpstreamVerificationError {
 pub enum E2eeError {
     #[error("missing E2EE header")]
     HeaderMissing,
+    #[error("an E2EE v2.1 header is repeated or not visible ASCII")]
+    InvalidHeader,
     #[error("invalid E2EE signing algorithm")]
     InvalidSigningAlgo,
     #[error("invalid E2EE version")]
@@ -92,6 +94,8 @@ pub enum E2eeError {
     InvalidPayloadModel,
     #[error("E2EE decryption failed")]
     DecryptionFailed,
+    #[error("request body does not match the E2EE v2.1 request key")]
+    BodyMismatch,
     #[error("E2EE encryption failed")]
     EncryptionFailed,
 }

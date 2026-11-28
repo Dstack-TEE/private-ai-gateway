@@ -38,6 +38,11 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/aci-verifier.min.js"
     },
+    "./e2ee": {
+      "types": "./dist/e2ee.d.ts",
+      "import": "./dist/e2ee.js",
+      "default": "./dist/e2ee.js"
+    },
     "./node": {
       "types": "./dist/node/index.d.ts",
       "import": "./dist/node/index.js",

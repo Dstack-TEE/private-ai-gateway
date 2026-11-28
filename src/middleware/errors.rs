@@ -178,6 +178,7 @@ fn classify(err: &ServiceError) -> (u16, Option<&'static str>, Option<String>) {
 fn e2ee_error_type(err: &E2eeError) -> &'static str {
     match err {
         E2eeError::HeaderMissing => "e2ee_header_missing",
+        E2eeError::InvalidHeader => "e2ee_invalid_header",
         E2eeError::InvalidSigningAlgo => "e2ee_invalid_signing_algo",
         E2eeError::InvalidVersion => "e2ee_invalid_version",
         E2eeError::InvalidPublicKey => "e2ee_invalid_public_key",
@@ -187,6 +188,7 @@ fn e2ee_error_type(err: &E2eeError) -> &'static str {
         E2eeError::InvalidTimestamp => "e2ee_invalid_timestamp",
         E2eeError::InvalidPayloadModel => "e2ee_invalid_payload_model",
         E2eeError::DecryptionFailed => "e2ee_decryption_failed",
+        E2eeError::BodyMismatch => "e2ee_body_mismatch",
         E2eeError::EncryptionFailed => "internal_error",
     }
 }

@@ -40,6 +40,7 @@ async fn e2ee_only_passes_the_exact_done_marker_and_dispatches_complete_final_li
             client_public_key_hex: "11".repeat(32),
             nonce: None,
             timestamp: None,
+            request_secret: None,
         };
         let mut owner = ResponseOwner::new(
             ResponseInput::Events(Box::pin(DecodedStream::new(
@@ -78,6 +79,7 @@ fn buffered_e2ee_preserves_upstream_decoding_failures() {
         client_public_key_hex: "11".repeat(32),
         nonce: None,
         timestamp: None,
+        request_secret: None,
     };
     let error = super::super::e2ee_crypto::encrypt_e2ee_final_response(
         b"data: \xff\n\n",

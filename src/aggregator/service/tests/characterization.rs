@@ -549,6 +549,7 @@ async fn capture_with_upstream(
         ),
         nonce: Some("01".repeat(32)),
         timestamp: Some(1_700_000_000),
+        request_secret: None,
     });
     let response = if case.direct_idle || case.direct {
         let StreamingForwardResult::Stream(forward) = service
@@ -831,6 +832,7 @@ async fn capture_buffered_sse(source: &str, encrypted: bool) -> Value {
         ),
         nonce: Some("01".repeat(32)),
         timestamp: Some(1_700_000_000),
+        request_secret: None,
     });
     let result = service
         .finalize_middleware_receipt(

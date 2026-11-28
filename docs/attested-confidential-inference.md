@@ -222,8 +222,8 @@ a relying party checks:
    client established in the admitted renewal family, with that keyset still
    valid at `served_at`.
 3. `request.received.body_hash` matches the plaintext request wire body. For
-   E2EE v2, it instead matches the compact JSON body reconstructed after
-   replacing encrypted fields with their decrypted values.
+   E2EE v2 and v2.1, it instead matches the compact JSON body reconstructed
+   after replacing encrypted fields with their decrypted values.
 4. `response.returned.body_hash` matches the exact bytes received from the
    wire, including ordered SSE framing and any encrypted response fields.
 5. A required aggregated request has an `upstream.verified` event with
@@ -263,7 +263,7 @@ pin never silently accepts a new channel. The wire behavior is in
 audit and pinning commands are in the
 [quickstart](quickstart.md#4-use-it-as-a-local-endpoint).
 
-## E2EE v2
+## E2EE v2 and v2.1
 
 E2EE v2 is an optional compatibility extension that encrypts supported content
 fields between the client and the attested gateway workload. The quote-bound
@@ -271,11 +271,19 @@ fields between the client and the attested gateway workload. The quote-bound
 ciphertext to its model, field path, nonce, timestamp, direction, and response
 ID.
 
-E2EE v2 protects content across infrastructure in front of the gateway TEE. It
-does not hide content from accepted workloads on the inference path, and it
-does not define encryption for every API field or endpoint. It covers Chat
+Version 2.1 is the one to use. It adds a per-request secret that the client
+seals to the gateway key along with a digest of the request body. An
+intermediary in front of the gateway, such as a relay that terminates the
+client's TLS, then cannot read replies, inject or edit messages, or downgrade
+the request. Version 2 resists only intermediaries that observe traffic without
+changing it. The gateway lists each v2.1 key under its own `algo` in the
+attested keyset. A client that finds one uses v2.1 and never falls back.
+
+Neither version hides content from accepted workloads on the inference path,
+and neither defines encryption for every API field or endpoint. Both cover Chat
 Completions, Completions, and Embeddings as specified in the
-[E2EE v2 protocol](../spec/e2ee-v2.md).
+[E2EE v2 protocol](../spec/e2ee-v2.md). V2.1 also encrypts tool-call
+arguments. To adopt it, see [Migrate to E2EE v2.1](e2ee-v2.1-migration.md).
 
 The extension is frozen and supported through at least February 10, 2027.
 E2EE v3 is the planned replacement.

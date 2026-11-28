@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Regenerate the deterministic values in the ACI, E2EE v2, and proxy-image
-binding vector docs.
+"""Regenerate the deterministic values in the ACI, E2EE v2 and v2.1, and
+proxy-image binding vector docs.
 
 Every value in the test-vectors doc is reproduced here from first principles —
 an implementation independent of the Rust reference — so the doc, the
@@ -18,12 +18,16 @@ the reference implementation's wire order.
 """
 
 import hashlib
+import hmac
 import json
 
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
+    X25519PublicKey,
 )
 
 import base64
@@ -210,6 +214,125 @@ RESPONSE_AAD = jcs({
     "ts": 1750000000,
 })
 
+# ---- E2EE v2.1 (E2EE v2 spec §10) ------------------------------------------
+# Every random input is fixed so the ciphertexts are reproducible. Real clients
+# and services draw them fresh for every request and every field.
+V21_ALGO = "x25519-aes-256-gcm-hkdf-sha256-v2.1"
+V21_REQUEST_SECRET = bytes([0x0A]) * 32
+V21_CLIENT_KEY, V21_CLIENT_PUB = x25519_from_seed(bytes([0x04]) * 32)
+V21_FIELD_EPH, _ = x25519_from_seed(bytes([0x05]) * 32)
+V21_FIELD_NONCE = bytes([0x06]) * 12
+V21_REQUEST_KEY_EPH, _ = x25519_from_seed(bytes([0x07]) * 32)
+V21_REQUEST_KEY_NONCE = bytes([0x08]) * 12
+V21_RESPONSE_EPH, _ = x25519_from_seed(bytes([0x09]) * 32)
+V21_RESPONSE_NONCE = bytes([0x0B]) * 12
+
+
+def x25519_seal(eph, recipient_pub_hex, plaintext, aad, salt, info, nonce):
+    """E2EE v2 §4 X25519 field: ephemeral pub || nonce || ciphertext || tag."""
+    recipient = X25519PublicKey.from_public_bytes(bytes.fromhex(recipient_pub_hex))
+    shared = eph.exchange(recipient)
+    key = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=info).derive(shared)
+    eph_pub = eph.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return (eph_pub + nonce + AESGCM(key).encrypt(nonce, plaintext, aad)).hex()
+
+
+V21_FIELD_AAD = jcs({
+    "purpose": "aci.e2ee.request.v2.1",
+    "algo": V21_ALGO,
+    "model": "demo-model",
+    "field": "messages.0.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+# v2.1 whole content is the JSON encoding of the content value (§10.5).
+V21_FIELD_CIPHERTEXT = x25519_seal(
+    V21_FIELD_EPH, E2EE_PUB, json.dumps("hello").encode(), V21_FIELD_AAD,
+    V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", V21_FIELD_NONCE)
+V21_BODY = {
+    "model": "demo-model",
+    "temperature": 0.7,
+    "messages": [{"role": "user", "content": V21_FIELD_CIPHERTEXT}],
+}
+# RFC 8785 JCS. Python's float repr matches the ECMAScript form JCS requires
+# for this body's numbers; other bodies may need a full JCS library.
+V21_BODY_JCS = jcs(V21_BODY)
+V21_BODY_DIGEST = hashlib.sha256(V21_BODY_JCS).digest()
+V21_REQUEST_KEY_AAD = jcs({
+    "purpose": "aci.e2ee.request-key.v2.1",
+    "algo": V21_ALGO,
+    "model": "demo-model",
+    "client_pub_key": V21_CLIENT_PUB,
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+V21_REQUEST_KEY = x25519_seal(
+    V21_REQUEST_KEY_EPH, E2EE_PUB, V21_REQUEST_SECRET + V21_BODY_DIGEST,
+    V21_REQUEST_KEY_AAD, None, b"aci.e2ee.v2.1.x25519.request-key",
+    V21_REQUEST_KEY_NONCE)
+V21_RESPONSE_AAD = jcs({
+    "purpose": "aci.e2ee.response.v2.1",
+    "algo": V21_ALGO,
+    "model": "demo-model",
+    "id": "chatcmpl-123",
+    "field": "choices.0.message.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+V21_RESPONSE_CIPHERTEXT = x25519_seal(
+    V21_RESPONSE_EPH, V21_CLIENT_PUB, b"plain-answer", V21_RESPONSE_AAD,
+    V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", V21_RESPONSE_NONCE)
+
+V21_RESPONSE_OBJECT = {
+    "id": "chatcmpl-123",
+    "choices": [{"index": 0, "message": {"role": "assistant", "content": V21_RESPONSE_CIPHERTEXT}}],
+}
+V21_MAC_KEY = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                   info=b"aci.e2ee.v2.1.response-mac").derive(V21_REQUEST_SECRET)
+V21_RESPONSE_MAC = hmac.new(V21_MAC_KEY, jcs(V21_RESPONSE_OBJECT), hashlib.sha256).hexdigest()
+
+# A two-event stream: one encrypted delta, one readable-only finish event.
+V21_STREAM_AAD = jcs({
+    "purpose": "aci.e2ee.response.v2.1",
+    "algo": V21_ALGO,
+    "model": "demo-model",
+    "id": "chatcmpl-123",
+    "field": "choices.0.delta.content",
+    "nonce": TEST_NONCE,
+    "ts": 1750000000,
+})
+V21_STREAM_CIPHERTEXT = x25519_seal(
+    x25519_from_seed(bytes([0x0C]) * 32)[0], V21_CLIENT_PUB, b"Hello", V21_STREAM_AAD,
+    V21_REQUEST_SECRET, b"aci.e2ee.v2.1.x25519", bytes([0x0D]) * 12)
+
+
+def v21_mac(obj):
+    return hmac.new(V21_MAC_KEY, jcs(obj), hashlib.sha256).hexdigest()
+
+
+def v21_event(obj):
+    """One SSE `data:` line carrying `obj` plus its MAC, as JCS."""
+    return "data: " + jcs({**obj, "e2ee_mac": v21_mac(obj)}).decode() + "\n\n"
+
+
+V21_EVENT_1 = {"id": "chatcmpl-123",
+               "choices": [{"index": 0, "delta": {"content": V21_STREAM_CIPHERTEXT}}]}
+V21_EVENT_2 = {"id": "chatcmpl-123",
+               "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+V21_STREAM = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2) + "data: [DONE]\n\n"
+# Rejected: a readable member edited after the MAC.
+V21_REJECT_EDITED = v21_event(V21_EVENT_1) + v21_event(V21_EVENT_2).replace(
+    '"finish_reason":"stop"', '"finish_reason":"length"') + "data: [DONE]\n\n"
+# Rejected: a validly MAC'd event from another response under the same secret.
+V21_REJECT_SPLICED = v21_event(V21_EVENT_1) + v21_event(
+    {**V21_EVENT_2, "id": "chatcmpl-124"}) + "data: [DONE]\n\n"
+# Rejected: an event without a MAC.
+V21_REJECT_NO_MAC = ("data: " + jcs(V21_EVENT_1).decode() + "\n\n"
+                     + v21_event(V21_EVENT_2) + "data: [DONE]\n\n")
+# Rejected: an SSE line other than `data:` or a comment.
+V21_REJECT_FOREIGN_LINE = "id: 1\n" + V21_STREAM
+
 # ---- Published constants (must match the spec vector documents) -------------
 PINNED = {
     "receipt-1 public key": (RECEIPT_PUB,
@@ -239,6 +362,33 @@ PINNED = {
         '{"algo":"x25519-aes-256-gcm-hkdf-sha256","field":"choices.0.message.content",'
         '"id":"chatcmpl-123","model":"demo-model","nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",'
         '"purpose":"aci.e2ee.response.v2","ts":1750000000}'),
+    "v2.1 body digest": (V21_BODY_DIGEST.hex(),
+        "dc75693896a5b40b45592667704f41ff057a5063c92e3117d930b98049032da5"),
+    "v2.1 request field ciphertext": (V21_FIELD_CIPHERTEXT,
+        "50a61409b1ddd0325e9b16b700e719e9772c07000b1bd7786e907c653d20495d"
+        "0606060606060606060606067c3f905a1e58cb237be461eb622de6935599cbae"
+        "71e1e1"),
+    "v2.1 X-E2EE-Request-Key": (V21_REQUEST_KEY,
+        "13be4feaeaf204c7fd3358fc9c00721881d174278128227ec674f37f7fe97b6d"
+        "080808080808080808080808d4c43624763b8e0079b38271adfa9fae2e78243b"
+        "b0fa918cd95421605c3b82b5bd7ac017cda0e8ac1c9836d409013e2369dd90e2"
+        "54dbbe44006ff09d098c5f212ff666088c3724c5c51b43e51576c633"),
+    "v2.1 response MAC": (V21_RESPONSE_MAC,
+        "139caafa035982d63cbdcce428a560af4752fcfc31bf91fb3b633ffd193e1d7e"),
+    "v2.1 stream delta ciphertext": (V21_STREAM_CIPHERTEXT,
+        "97c3b10b4d6c133a78ea5dcc1cf6421d3f81ae37b1f628ce14ca6fce7730f333"
+        "0d0d0d0d0d0d0d0d0d0d0d0df4e9f89190a3ecafd2eb8d3b91503afa47809834"
+        "33"),
+    "v2.1 stream event 1 MAC": (v21_mac(V21_EVENT_1),
+        "902a797ccc56ecd1574b988d207f3866072f4752cd1d748968b085eb4426fb5b"),
+    "v2.1 stream event 2 MAC": (v21_mac(V21_EVENT_2),
+        "c512289034800b6ee774ffe28f76e1156c3b3ce78d7f549f46314f8cd390843e"),
+    "v2.1 spliced event MAC": (v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}),
+        "f7e12cef22bb7334f112385f17352dacfeca09cf5d3bac59d7cc06f18b13a328"),
+    "v2.1 response field ciphertext": (V21_RESPONSE_CIPHERTEXT,
+        "57db4b359f23ae5e146e4e2512056704722506348c150c14753d0c933d04d421"
+        "0b0b0b0b0b0b0b0b0b0b0b0b7faa9fc1dab7d51b7151db2c848775112941ae28"
+        "ccdc25655e089f8e"),
 }
 
 
@@ -288,6 +438,24 @@ def main():
     print("== E2EE v2 §6 AAD ==")
     print("request AAD =", REQUEST_AAD.decode())
     print("response AAD =", RESPONSE_AAD.decode())
+    print()
+    print("== E2EE v2.1 §10 ==")
+    print("client X25519 (seed 04*32) pub =", V21_CLIENT_PUB)
+    print("request field AAD =", V21_FIELD_AAD.decode())
+    print("request field ciphertext =", V21_FIELD_CIPHERTEXT)
+    print("body JCS =", V21_BODY_JCS.decode())
+    print("body digest =", V21_BODY_DIGEST.hex())
+    print("request-key AAD =", V21_REQUEST_KEY_AAD.decode())
+    print("X-E2EE-Request-Key =", V21_REQUEST_KEY)
+    print("response field AAD =", V21_RESPONSE_AAD.decode())
+    print("response field ciphertext =", V21_RESPONSE_CIPHERTEXT)
+    print("response object JCS =", jcs(V21_RESPONSE_OBJECT).decode())
+    print("response MAC =", V21_RESPONSE_MAC)
+    print("stream delta ciphertext =", V21_STREAM_CIPHERTEXT)
+    print("stream event 1 MAC =", v21_mac(V21_EVENT_1))
+    print("stream event 2 MAC =", v21_mac(V21_EVENT_2))
+    print("spliced event MAC =", v21_mac({**V21_EVENT_2, "id": "chatcmpl-124"}))
+    print("stream =", repr(V21_STREAM))
     return 0 if ok else 1
 
 

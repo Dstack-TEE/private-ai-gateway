@@ -4,21 +4,23 @@ use sha2::{Digest, Sha256};
 use super::config::normalize_downstream_domain;
 use super::e2ee_crypto::{
     decrypt_request_payload, legacy_public_keys_match, normalize_legacy_public_key_for_replay,
-    validate_aci_e2ee_nonce, validate_aci_payload_model, E2eeFieldCrypto,
+    request_body_digest, request_key_aad, validate_aci_e2ee_nonce, validate_aci_payload_model,
+    E2eeFieldCrypto,
 };
-use super::wire::{E2eeAadMode, E2eeDecryptor};
+use super::wire::{E2eeAadMode, E2eeDecryptor, RequestSecret};
 use super::{
     AciService, E2eeError, E2eePreparedRequest, E2eeReplayKey, E2eeRequestContext,
     E2eeRequestParts, ServiceError,
 };
 
 use crate::aci::e2ee::{
-    is_aci_e2ee_suite, normalize_aci_e2ee_public_key_hex, E2EE_ALGO_LEGACY_ECDSA,
-    E2EE_ALGO_LEGACY_ED25519, E2EE_VERSION_V1, E2EE_VERSION_V2,
+    is_aci_e2ee_suite, is_aci_e2ee_v2_1_suite, normalize_aci_e2ee_public_key_hex, E2eeKdf,
+    E2EE_ALGO_LEGACY_ECDSA, E2EE_ALGO_LEGACY_ED25519, E2EE_REQUEST_SECRET_LEN, E2EE_VERSION_V1,
+    E2EE_VERSION_V2, E2EE_VERSION_V2_1,
 };
 use crate::aci::identity::{attestation_statement, report_data, SealedWorkloadKeyset};
 use crate::aci::keys::{LEGACY_ALGO_ECDSA, LEGACY_ALGO_ED25519};
-use crate::aci::types::{AttestationEnvelope, AttestationReport};
+use crate::aci::types::{AttestationEnvelope, AttestationReport, KeyedPublicKey};
 
 const E2EE_TIMESTAMP_WINDOW_SECONDS: u64 = 300;
 
@@ -257,13 +259,26 @@ impl AciService {
         }
 
         let version = parts.version.ok_or(E2eeError::HeaderMissing)?;
-        if version != E2EE_VERSION_V2 {
-            return Err(E2eeError::InvalidVersion);
-        }
+        let (aad_mode, version) = match version {
+            E2EE_VERSION_V2 => {
+                // A v2 request never carries the v2.1 request key: a client that
+                // sends one expects v2.1's protection, which v2 does not give.
+                if parts.request_key.is_some() {
+                    return Err(E2eeError::InvalidVersion);
+                }
+                (E2eeAadMode::AciV2, E2EE_VERSION_V2)
+            }
+            E2EE_VERSION_V2_1 => (E2eeAadMode::AciV2_1, E2EE_VERSION_V2_1),
+            _ => return Err(E2eeError::InvalidVersion),
+        };
         let client_public_key = parts.client_public_key.ok_or(E2eeError::HeaderMissing)?;
         let model_public_key = parts.model_public_key.ok_or(E2eeError::HeaderMissing)?;
         let nonce = parts.nonce.ok_or(E2eeError::HeaderMissing)?;
         let timestamp = parts.timestamp.ok_or(E2eeError::HeaderMissing)?;
+        let request_key = match aad_mode {
+            E2eeAadMode::AciV2_1 => Some(parts.request_key.ok_or(E2eeError::HeaderMissing)?),
+            _ => None,
+        };
 
         validate_aci_e2ee_nonce(nonce)?;
         let timestamp = timestamp
@@ -273,16 +288,21 @@ impl AciService {
             return Err(E2eeError::InvalidTimestamp);
         }
 
-        // The client selects an E2EE v2 §4 suite by the `algo` of the keyset
-        // entry it encrypts to (§7). Match `X-Model-Pub-Key` against each suite entry
-        // under that suite's own normalization; the first match fixes the suite.
+        // The client selects a suite by the `algo` of the keyset entry it
+        // encrypts to (§7): a v2 suite for v2, a v2.1 entry for v2.1. Match
+        // `X-Model-Pub-Key` against each such entry under that suite's own
+        // normalization; the first match fixes the suite.
+        let selects = match aad_mode {
+            E2eeAadMode::AciV2_1 => is_aci_e2ee_v2_1_suite,
+            _ => is_aci_e2ee_suite,
+        };
         let keyset = self.current_keyset();
         let selected_key = keyset
             .keyset()
             .e2ee_public_keys
             .iter()
             .find(|key| {
-                is_aci_e2ee_suite(&key.algo)
+                selects(&key.algo)
                     && normalize_aci_e2ee_public_key_hex(&key.algo, model_public_key)
                         .ok()
                         .zip(normalize_aci_e2ee_public_key_hex(&key.algo, &key.public_key_hex).ok())
@@ -299,13 +319,32 @@ impl AciService {
         let mut payload: Value =
             serde_json::from_slice(body).map_err(|_| E2eeError::DecryptionFailed)?;
         let request_model = validate_aci_payload_model(&payload)?;
+        let request_secret = match request_key {
+            Some(request_key) => Some(self.open_e2ee_request_key(
+                selected_key,
+                request_key,
+                &payload,
+                &request_model,
+                &client_public_key_hex,
+                nonce,
+                timestamp,
+            )?),
+            None => None,
+        };
+        let kdf = match &request_secret {
+            Some(secret) => E2eeKdf::V2_1Field {
+                request_secret: &secret.0,
+            },
+            None => E2eeKdf::V2,
+        };
         let crypto = E2eeFieldCrypto {
             keys: self.keys.as_ref(),
-            decryptor: E2eeDecryptor::AciV2 {
+            decryptor: E2eeDecryptor::Aci {
                 key_id: selected_key.key_id.as_str(),
+                kdf,
             },
             algo: selected_key.algo.as_str(),
-            aad_mode: E2eeAadMode::AciV2,
+            aad_mode,
             model: &request_model,
             nonce: Some(nonce),
             timestamp: Some(timestamp),
@@ -317,15 +356,58 @@ impl AciService {
         Ok(E2eePreparedRequest {
             decrypted_body,
             context: E2eeRequestContext {
-                version: E2EE_VERSION_V2.to_string(),
+                version: version.to_string(),
                 algo: selected_key.algo.clone(),
-                aad_mode: E2eeAadMode::AciV2,
+                aad_mode,
                 request_model,
                 client_public_key_hex,
                 nonce: Some(nonce.to_string()),
                 timestamp: Some(timestamp),
+                request_secret,
             },
         })
+    }
+
+    /// Open the v2.1 `X-E2EE-Request-Key` header and check that it was made
+    /// for exactly this body. Its plaintext is the 32-byte request secret
+    /// followed by the 32-byte body digest.
+    #[allow(clippy::too_many_arguments)]
+    fn open_e2ee_request_key(
+        &self,
+        selected_key: &KeyedPublicKey,
+        request_key: &str,
+        payload: &Value,
+        request_model: &str,
+        client_public_key_hex: &str,
+        nonce: &str,
+        timestamp: u64,
+    ) -> Result<RequestSecret, E2eeError> {
+        let aad = request_key_aad(
+            &selected_key.algo,
+            request_model,
+            client_public_key_hex,
+            nonce,
+            timestamp,
+        )?;
+        let plaintext = self
+            .keys
+            .decrypt_e2ee(
+                &selected_key.key_id,
+                request_key,
+                &aad,
+                E2eeKdf::V2_1RequestKey,
+            )
+            .map_err(|_| E2eeError::DecryptionFailed)?;
+        if plaintext.len() != 2 * E2EE_REQUEST_SECRET_LEN {
+            return Err(E2eeError::DecryptionFailed);
+        }
+        let (secret, digest) = plaintext.split_at(E2EE_REQUEST_SECRET_LEN);
+        if digest != request_body_digest(payload)?.as_slice() {
+            return Err(E2eeError::BodyMismatch);
+        }
+        Ok(RequestSecret(
+            secret.try_into().expect("request secret length is checked"),
+        ))
     }
 
     pub(super) fn prepare_legacy_e2ee_request(
@@ -372,6 +454,7 @@ impl AciService {
         if (!version_header.is_empty() && version_header != E2EE_VERSION_V1)
             || parts.nonce.is_some_and(|n| !n.trim().is_empty())
             || parts.timestamp.is_some_and(|t| !t.trim().is_empty())
+            || parts.request_key.is_some()
         {
             return Err(E2eeError::InvalidVersion);
         }
@@ -405,6 +488,7 @@ impl AciService {
                 client_public_key_hex,
                 nonce: None,
                 timestamp: None,
+                request_secret: None,
             },
         })
     }

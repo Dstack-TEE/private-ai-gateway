@@ -156,7 +156,10 @@ impl AciService {
             subject: config.subject.clone(),
             not_after: config.keyset_not_after,
             receipt_signing_keys: keys.receipt_keys(),
-            e2ee_public_keys: keys.e2ee_keys(),
+            e2ee_public_keys: advertised_e2ee_keys(
+                keys.e2ee_keys(),
+                &config.service_capabilities.supported_e2ee_versions,
+            ),
             tls_public_keys,
         };
         validate_keyset(&unsealed, &config)?;
@@ -257,6 +260,29 @@ impl AciService {
             .render()
             .map_err(|e| ServiceError::Metrics(e.to_string()))
     }
+}
+
+/// The keyset's E2EE entries. When the service terminates v2.1, each v2 suite
+/// key is also listed under its v2.1 `algo`, same `key_id` and key material.
+/// That entry is the quote-bound signal a client relies on to require v2.1.
+fn advertised_e2ee_keys(
+    keys: Vec<crate::aci::types::KeyedPublicKey>,
+    supported_versions: &[String],
+) -> Vec<crate::aci::types::KeyedPublicKey> {
+    use crate::aci::e2ee::{v2_1_algo_for, E2EE_VERSION_V2_1};
+    if !supported_versions.iter().any(|v| v == E2EE_VERSION_V2_1) {
+        return keys;
+    }
+    let v2_1 = keys
+        .iter()
+        .filter_map(|key| {
+            v2_1_algo_for(&key.algo).map(|algo| crate::aci::types::KeyedPublicKey {
+                algo: algo.to_string(),
+                ..key.clone()
+            })
+        })
+        .collect::<Vec<_>>();
+    keys.into_iter().chain(v2_1).collect()
 }
 
 /// Keyset seal-time rules a library consumer could otherwise violate: this

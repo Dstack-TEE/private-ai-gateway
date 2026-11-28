@@ -7,8 +7,8 @@
  * compose measurement (id-4). Also exposes the individual checks: report
  * binding (§9.1 checks 2–3), receipts and body hashes (§9.3), and sessions
  * (§8, §9.3). Every check other than the quote uses Web Crypto (Ed25519 and
- * SHA-256). E2EE v2 field encryption is specified by §6 but is not constructed
- * by this verifier package.
+ * SHA-256). {@link createE2eeFetch} is an E2EE v2.1 client (X25519) for a
+ * service you verified.
  */
 
 // Crypto primitives (Web Crypto)
@@ -61,7 +61,12 @@ export type {
   ReceiptTranscript,
   TranscriptOptions,
   VerifyServiceOptions,
+  ChannelBinding,
 } from './transcript.js';
+
+// E2EE v2.1 client (E2EE spec §10)
+export { createE2eeFetch, E2eeError, E2EE_V2_1_X25519 } from './e2ee.js';
+export type { E2eeFetch, E2eeFetchOptions } from './e2ee.js';
 
 // Errors
 export { AciError, AciFormatError } from './errors.js';

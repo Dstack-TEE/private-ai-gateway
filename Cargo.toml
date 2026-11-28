@@ -46,6 +46,7 @@ base64 = "0.22"
 chacha20poly1305 = "0.10"
 flate2 = "1"
 hkdf = "0.12"
+hmac = "0.12"
 # RFC 9180 HPKE (base mode, DHKEM-X25519 / HKDF-SHA256 / ChaCha20Poly1305) for
 # the 0G Private Computer E2EE protocol; 0.12 reuses the RustCrypto versions above.
 hpke = { version = "0.12", default-features = false, features = ["alloc", "x25519"] }

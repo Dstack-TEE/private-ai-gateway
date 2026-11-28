@@ -1,6 +1,6 @@
 # E2EE v2 compatibility protocol
 
-> **Version:** `2`
+> **Versions:** `2` and `2.1`
 > **Status:** supported, frozen compatibility protocol
 > **Audience:** client and service implementers maintaining E2EE v2 interoperability
 > **Conformance language:** MUST, SHOULD, and MAY are used in the RFC 2119 sense
@@ -10,6 +10,16 @@ and an attested inference workload, on top of TLS. It is a client-facing
 transport extension to [Attested Confidential Inference (ACI)](aci.md), not
 part of the core `aci/1` protocol.
 
+Version 2.1 (§10) adds a per-request secret that the client seals to the
+service key, together with a digest of the request body. Every field key in
+both directions depends on the secret, and every response object carries a MAC
+keyed from it. An intermediary that can rewrite headers and bodies in front of
+the workload can therefore neither read replies, change what the model
+receives, nor change a response object. Version 2 does not protect against such
+an intermediary: it can replace `X-Client-Pub-Key` with its own key and add
+messages encrypted to the service key. Clients use v2.1 whenever the attested
+keyset lists a v2.1 key.
+
 > **Warning:** E2EE v2 will be replaced by E2EE v3. The reference gateway
 > supports v2 through at least February 10, 2027. V2 clients should plan to
 > migrate once v3 is specified.
@@ -18,9 +28,9 @@ part of the core `aci/1` protocol.
 
 | Item | Policy |
 | --- | --- |
-| Current status | Supported for existing and in-development v2 clients. |
-| Compatibility window | The reference gateway will support v2 through at least **February 10, 2027**, six months from this policy's publication on August 10, 2026. |
-| Evolution | V2 is frozen except for security, correctness, and interoperability fixes. New features will not expand its wire contract. |
+| Current status | v2 and v2.1 are supported. New and updated clients use v2.1. |
+| Compatibility window | The reference gateway will support v2 and v2.1 through at least **February 10, 2027**, six months from this policy's publication on August 10, 2026. |
+| Evolution | V2 and v2.1 are frozen except for security, correctness, and interoperability fixes. New features will not expand their wire contracts. |
 | Planned successor | E2EE v3 is intended to replace v2. Its protocol and migration path will be specified separately. |
 
 V2 clients can rely on the contract in this document during the compatibility
@@ -37,9 +47,9 @@ client selects an E2EE key from that quote-bound keyset.
 An ACI service advertises supported client-facing encryption extensions in
 `service_capabilities.supported_e2ee_versions` and publishes their keys in
 `workload_keyset.e2ee_public_keys` ([ACI §3.1](aci.md#31-workload-keyset) and
-[§4.1](aci.md#41-response)). A service conforms to this extension when it
-advertises `"2"` and follows this document. E2EE v2 is not required for core
-`aci/1` conformance.
+[§4.1](aci.md#41-response)). A service conforms to v2 when it advertises `"2"`
+and follows this document, and to v2.1 when it also advertises `"2.1"`, lists
+v2.1 keys, and follows §10. E2EE is not required for core `aci/1` conformance.
 
 A service advertising v2 MUST support `POST /v1/chat/completions` for both
 buffered and streaming responses. It SHOULD support v2 on the other prompt
@@ -64,7 +74,8 @@ A v2 request sends all five headers:
 | `X-E2EE-Timestamp` | Current Unix time in seconds (§7). |
 
 A v2 request MUST NOT send `X-Signing-Algo`. That header selects the pre-ACI
-legacy compatibility path, not E2EE v2.
+legacy compatibility path, not E2EE v2. A v2.1 request sends one more header
+(§10.2).
 
 ### 3.2 Response headers
 
@@ -122,8 +133,9 @@ OpenAI-compatible. Each encrypted location has a **field path**: member names
 and array indexes from the body root joined with `.`, such as
 `messages.3.content`, `messages.1.content.0.image_url.url`,
 `choices.0.message.content`, or `data.4.embedding`. For `choices` and `data`,
-the index is the entry's `index` member when present and its array position
-otherwise. The field path is part of the AAD (§6), so ciphertext cannot be
+the index is the entry's `index` member when it is a non-negative integer and
+its array position otherwise. V2 reads `index` as an integer only; v2.1 reads
+it by JSON number value (§10.5). The field path is part of the AAD (§6), so ciphertext cannot be
 moved to another location.
 
 Request locations:
@@ -262,8 +274,9 @@ a different status.
 
 | Type | Status | Meaning |
 | --- | --- | --- |
-| `e2ee_header_missing` | 400 | Some but not all five required v2 headers are present. |
-| `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, or the service does not terminate v2. |
+| `e2ee_header_missing` | 400 | Some but not all required headers are present: five for v2, six for v2.1. |
+| `e2ee_invalid_header` | 400 | v2.1: an E2EE request header is repeated or not visible ASCII. |
+| `e2ee_invalid_version` | 400 | Unsupported `X-E2EE-Version`, the service does not terminate that version, or a v2 or legacy request carries `X-E2EE-Request-Key`. |
 | `e2ee_invalid_public_key` | 400 | A supplied public key is not valid for the selected suite. |
 | `e2ee_model_key_mismatch` | 400 | `X-Model-Pub-Key` is not an attested service E2EE key. |
 | `e2ee_invalid_nonce` | 400 | `X-E2EE-Nonce` is not exactly 64 hexadecimal characters. |
@@ -271,22 +284,250 @@ a different status.
 | `e2ee_invalid_timestamp` | 400 | `X-E2EE-Timestamp` is malformed or outside the acceptance window. |
 | `e2ee_invalid_payload_model` | 400 | The request's top-level `model` is absent or not a string. |
 | `e2ee_decryption_failed` | 400 | A ciphertext is malformed, AEAD authentication fails, or decrypted content cannot be restored. |
+| `e2ee_body_mismatch` | 400 | v2.1: the request body does not match the digest sealed in `X-E2EE-Request-Key`. |
 | `e2ee_unsupported_endpoint` | 400 | V2 headers were sent to an endpoint this protocol does not define. |
 
-## 10. Protocol constants
+## 10. Version 2.1
 
-| Set | Values |
+Version 2.1 keeps §3–§9 for the X25519 suite and adds a **request secret**:
+32 random bytes the client creates for each request. The client seals the
+secret, together with a digest of the request body, to the service key. Every
+field key in both directions mixes the secret in, and every response object
+carries a MAC keyed from it. Without the secret, an intermediary cannot:
+
+- read replies, even after replacing `X-Client-Pub-Key` with its own key;
+- add, remove, reorder, or edit request messages, or change readable request
+  parameters such as `max_tokens`, `tools`, or a message `role`;
+- change, add, or remove anything inside a response object, including readable
+  members such as a tool call's `name`, `finish_reason`, or `usage`;
+- downgrade the request to v2, because fields sealed under v2.1 do not open
+  under the v2 key derivation.
+
+V2.1 protects listed fields and the integrity of the JSON body, not the whole
+HTTP message. §10.8 lists what it leaves readable or unauthenticated.
+
+### 10.1 Keys and selection
+
+A service that terminates v2.1 advertises `"2.1"` in `supported_e2ee_versions`
+and lists its X25519 key in `e2ee_public_keys` under the `algo`
+`x25519-aes-256-gcm-hkdf-sha256-v2.1`. Curve, encodings, and AEAD are those of
+`x25519-aes-256-gcm-hkdf-sha256` (§4). V2.1 has no secp256k1 suite. The v2.1
+entry MAY carry the same key material and `key_id` as a v2 entry; the reference
+gateway lists its X25519 key a second time this way.
+
+The v2.1 entry is what tells a client that v2.1 is available. The quote does
+not cover `service_capabilities` ([ACI §4.1](aci.md#41-response)), but it does
+cover the keyset, so an intermediary cannot remove a v2.1 entry from a report
+the client verified with a fresh nonce. A client that finds one:
+
+- MUST use v2.1 for every E2EE request to that service;
+- MUST NOT fall back to v2, the legacy path, or plaintext after an error, a
+  timeout, or a missing capability. Error responses are not authenticated, so
+  anyone on the path can forge them;
+- MUST reject a successful response that fails §10.6, including one marked
+  `X-E2EE-Applied: false`.
+
+### 10.2 Request headers
+
+A v2.1 request sends the five §3.1 headers, with `X-E2EE-Version: 2.1` and
+`X-Model-Pub-Key` set to the v2.1 entry's key, plus:
+
+| Header | Value |
 | --- | --- |
-| Version | `2` |
-| Request AAD purpose | `aci.e2ee.request.v2` |
-| Response AAD purpose | `aci.e2ee.response.v2` |
-| HKDF info | `aci.e2ee.v2.x25519`, `aci.e2ee.v2.secp256k1` |
-| Algorithms | `x25519-aes-256-gcm-hkdf-sha256`, `secp256k1-aes-256-gcm-hkdf-sha256` |
+| `X-E2EE-Request-Key` | The sealed request secret and body digest (§10.3), in the §4 field encoding. |
+
+A v2 request MUST NOT send `X-E2EE-Request-Key`; the service refuses a v2 or
+legacy request that carries it, whatever its value, with
+`e2ee_invalid_version`. For a v2.1 request (no `X-Signing-Algo`,
+`X-E2EE-Version: 2.1`) the service refuses a repeated or non-visible-ASCII
+E2EE header with `e2ee_invalid_header`, so a malformed header cannot change
+the request's mode. V2 and legacy requests read headers as before v2.1.
+
+### 10.3 Request key
+
+The client:
+
+1. Draws a fresh 32-byte request secret from a CSPRNG.
+2. Encrypts every request field (§10.5) with the v2.1 field key (§10.4).
+3. Computes `body_digest = SHA-256(JCS(body))` over the final JSON request
+   body, with the ciphertext fields in place. JCS is RFC 8785, including its
+   number formatting. The body MUST be I-JSON (RFC 7493), so integers stay
+   within ±2^53.
+4. Seals the 64 bytes `request_secret || body_digest` to the service key with
+   the §4 construction, the request-key HKDF info (§10.4), and this AAD:
+
+```text
+aad = JCS({
+  "purpose":        "aci.e2ee.request-key.v2.1",
+  "algo":           "x25519-aes-256-gcm-hkdf-sha256-v2.1",
+  "model":          <request model>,
+  "client_pub_key": <X-Client-Pub-Key as 32-byte lowercase hex>,
+  "nonce":          <X-E2EE-Nonce>,
+  "ts":             <X-E2EE-Timestamp, integer>
+})
+```
+
+A replaced `X-Client-Pub-Key` therefore fails to open the request key.
+
+The digest covers the parsed JSON, not its bytes. An intermediary may
+re-serialize the body, changing whitespace or member order, without breaking
+it. Any change to a value, member, or array entry breaks it.
+
+### 10.4 Key derivation
+
+V2.1 fields use the §4 X25519 ECDH and wire format. The HKDF step differs, and
+a third key authenticates responses:
+
+```text
+field key       = HKDF-SHA256(salt = request_secret, ikm = ecdh_shared_secret,
+                              info = "aci.e2ee.v2.1.x25519", len = 32)
+request-key key = HKDF-SHA256(salt = none, ikm = ecdh_shared_secret,
+                              info = "aci.e2ee.v2.1.x25519.request-key", len = 32)
+MAC key         = HKDF-SHA256(salt = none, ikm = request_secret,
+                              info = "aci.e2ee.v2.1.response-mac", len = 32)
+```
+
+The service still encrypts each response field to `X-Client-Pub-Key` with a
+fresh ephemeral key. Reading a reply therefore takes both the client's private
+key and the request secret. Clients SHOULD use a fresh client key per request.
+
+### 10.5 Fields
+
+Field AAD is the §6 object with the purposes `aci.e2ee.request.v2.1` and
+`aci.e2ee.response.v2.1`, and `algo` set to the v2.1 algo.
+
+V2.1 encrypts all §5 locations, plus:
+
+| Direction | Field path | Plaintext |
+| --- | --- | --- |
+| request | `messages.{m}.reasoning`, `messages.{m}.reasoning_content` | the string |
+| request | `messages.{m}.tool_calls.{t}.function.arguments` | the string |
+| buffered response | `choices.{i}.message.refusal` | the string |
+| buffered response | `choices.{i}.message.tool_calls.{t}.function.arguments` | the string |
+| streaming response | `choices.{i}.delta.refusal` | the string |
+| streaming response | `choices.{i}.delta.tool_calls.{t}.function.arguments` | the string |
+| any response | `choices.{i}.logprobs` | its compact JSON |
+
+`{t}` is the tool call's `index` member, and the `choices` and `data` index
+(§5) is the entry's `index` member, when it is a non-negative safe integer
+(at most 2^53 − 1) by JSON number value, so `1.0` is `1`; otherwise it is the
+array position. The client MUST encrypt every request string at these locations.
+
+A whole-content `messages.{m}.content` plaintext is the JSON encoding of the
+content value: a JSON string for text, a JSON array for structured content. The
+service restores it by parsing that JSON and rejects anything else with
+`e2ee_decryption_failed`. Text that happens to look like a JSON array therefore
+stays text, unlike v2's restoration rule (§5).
+
+V2.1 does not encrypt `prediction` or the deprecated `functions` and
+`function_call` members. A client sends them readable, bound by the body
+digest (§10.8).
+
+### 10.6 Response MAC
+
+The service adds a member `e2ee_mac` to every response object it encrypts: the
+buffered JSON body, and the JSON of each SSE `data:` event. Its value is the
+lowercase-hex HMAC-SHA256, under the MAC key (§10.4), of the JCS form of the
+object without `e2ee_mac`, computed after the fields are encrypted.
+
+The client MUST, for each response object:
+
+1. require the response kind to match the request: an SSE stream for
+   `"stream": true`, a JSON body otherwise. Embeddings are always a JSON
+   body, whatever `stream` says;
+2. require `e2ee_mac` and check it, then remove it;
+3. require `choices` and `data`, when present, to be arrays;
+4. in a stream, require every event's `id` to equal the first event's;
+5. decrypt every §5 and §10.5 location that is present.
+
+In a stream, the client passes `data: [DONE]` through, ignores SSE comment
+lines, and rejects any other line. Error responses (HTTP 4xx and 5xx) carry no
+MAC and are not authenticated.
+
+### 10.7 Service processing
+
+The service checks a v2.1 request in this order and rejects it at the first
+failure, before any upstream request:
+
+1. Required headers and version (§3.1, §10.2).
+2. Nonce format and timestamp window (§7).
+3. `X-Model-Pub-Key` equals the v2.1 entry: `e2ee_model_key_mismatch`.
+4. `X-Client-Pub-Key` is a valid X25519 key: `e2ee_invalid_public_key`.
+5. The body is JSON (`e2ee_decryption_failed`) with a string `model`
+   (`e2ee_invalid_payload_model`).
+6. `X-E2EE-Request-Key` opens under the §10.3 AAD and holds 64 bytes:
+   `e2ee_decryption_failed`.
+7. The body is I-JSON, with no integer beyond ±2^53, and the sealed digest
+   equals `SHA-256(JCS(body))` of the received body: `e2ee_body_mismatch`.
+8. Every field opens under the v2.1 field key: `e2ee_decryption_failed`.
+9. The replay tuple is unused (§7): `e2ee_replay_detected`.
+
+V2 and v2.1 share replay state for the same key material. A successful v2.1
+response carries `X-E2EE-Version: 2.1` and the v2.1 algo in `X-E2EE-Algo`.
+Receipts follow §8 unchanged.
+
+### 10.8 Limits
+
+V2.1 is field-level encryption with a body digest and a response MAC. It
+does not protect the whole HTTP message, and these limits are inherent to that
+design:
+
+- Only the §5 and §10.5 locations are encrypted. Every other member stays
+  readable: roles, message count, model, sampling parameters, tool
+  definitions, usage counts, ciphertext lengths, and members such as
+  `suffix`, `metadata`, `content_blocks`, `prediction`, `functions`,
+  `function_call`, provider error text,
+  and response members such as `reasoning_details`, `images`, or
+  `audio.transcript`. The body digest and the response MAC stop changes to
+  them, not reading them. Do not put private text in them.
+- The authority and path, the HTTP status, and all headers are not
+  authenticated. Error responses carry no MAC (§10.6).
+- The body digest covers JCS, which normalizes numbers: `1`, `1.0`, and `1e0`
+  hash alike, so an intermediary can rewrite one as another undetected.
+- A stream can still lose, repeat, or reorder whole events, or end early;
+  events carry no sequence number. The receipt's `response.returned.body_hash`
+  covers the exact stream (§8), so detecting this takes a receipt check over
+  the raw bytes received.
+- Ciphertext is hex, so each encrypted field roughly doubles in size, plus a
+  fixed overhead per field.
+- The receipt's `request.received.body_hash` (§8) is an unkeyed hash of the
+  restored plaintext body. Anyone who can read a receipt and knows the rest of
+  the request can confirm a guess of a short encrypted input. The receipt
+  format is unchanged.
+- Two exchanges that plaintext accepts fail. A request with nothing to
+  encrypt, such as token-id-only `input` or `prompt`, is refused with
+  `e2ee_decryption_failed` (§5). An upstream response whose `content` or
+  tool-call `arguments` is neither a string nor null cannot be encrypted: a
+  buffered response fails with HTTP 500, and a stream is aborted at that event
+  with no receipt published.
+- An intermediary can still drop or delay requests.
+- Replay state lives in the service process. A service restart inside the
+  timestamp window lets an earlier request run again. The intermediary still
+  cannot read the new reply.
+- The service key is long-lived. Anyone who later obtains it can open recorded
+  request keys and requests. Replies also need the client's private key.
+
+A future version is expected to encrypt the whole request and response body
+instead, with HPKE ([RFC 9180](https://www.rfc-editor.org/rfc/rfc9180)) or
+Oblivious HTTP ([RFC 9458](https://www.rfc-editor.org/rfc/rfc9458)), which
+removes the field-level limits above.
+
+## 11. Protocol constants
+
+| Set | v2 | v2.1 |
+| --- | --- | --- |
+| Version | `2` | `2.1` |
+| Request AAD purpose | `aci.e2ee.request.v2` | `aci.e2ee.request.v2.1` |
+| Response AAD purpose | `aci.e2ee.response.v2` | `aci.e2ee.response.v2.1` |
+| Request-key AAD purpose | — | `aci.e2ee.request-key.v2.1` |
+| HKDF info | `aci.e2ee.v2.x25519`, `aci.e2ee.v2.secp256k1` | `aci.e2ee.v2.1.x25519`, `aci.e2ee.v2.1.x25519.request-key`, `aci.e2ee.v2.1.response-mac` |
+| Response MAC member | — | `e2ee_mac` |
+| Algorithms | `x25519-aes-256-gcm-hkdf-sha256`, `secp256k1-aes-256-gcm-hkdf-sha256` | `x25519-aes-256-gcm-hkdf-sha256-v2.1` |
 
 Unknown versions and algorithms MUST be rejected. Implementations MUST NOT
 guess, negotiate a downgrade, or reinterpret one suite as another.
 
-## 11. References
+## 12. References
 
 Normative for this compatibility protocol:
 
@@ -295,3 +536,5 @@ Normative for this compatibility protocol:
 - RFC 5869: HKDF.
 - NIST SP 800-38D: AES-GCM.
 - RFC 8785: JSON Canonicalization Scheme (JCS).
+- RFC 7493: The I-JSON Message Format.
+- RFC 2104: HMAC.
