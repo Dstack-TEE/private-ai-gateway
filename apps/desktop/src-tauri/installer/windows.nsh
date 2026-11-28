@@ -23,6 +23,7 @@ Var PapStartupLockPath
   !insertmacro PAP_RELEASE_STARTUP_LOCK
   DetailPrint "${MESSAGE}"
   ${IfNot} ${Silent}
+  ${AndIf} $PassiveMode != 1
     MessageBox MB_ICONSTOP|MB_OK "${MESSAGE}"
   ${EndIf}
   SetErrorLevel 1
@@ -136,10 +137,81 @@ Var PapStartupLockPath
   ${EndIf}
 !macroend
 
+; sizeof(STARTUPINFOW) depends on the NSIS stub, not the bundled app's architecture.
+!if ${NSIS_PTR_SIZE} == 8
+  !define PAP_STARTUP_INFO_SIZE 104
+!else
+  !define PAP_STARTUP_INFO_SIZE 68
+!endif
+
+Function PapRegisterCli
+  Push $R1
+  Push $R2
+  Push $R3
+  Push $R4
+  Push $R5
+
+  ; LPTR allocates a zeroed STARTUPINFOW. The other struct is PROCESS_INFORMATION.
+  System::Call 'kernel32::LocalAlloc(i 0x40, p ${PAP_STARTUP_INFO_SIZE}) p.R1'
+  System::Call '*(p 0, p 0, i 0, i 0) p.R2'
+  StrCpy $R0 "could not allocate process state"
+  ${If} $R1 != 0
+  ${AndIf} $R2 != 0
+    System::Call '*$R1(i ${PAP_STARTUP_INFO_SIZE})'
+    StrCpy $R3 '"$INSTDIR\private-ai-proxy.exe" cli install'
+
+    ; ExecWait uses CREATE_DEFAULT_ERROR_MODE, which allows loader dialogs.
+    ; Inherit SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX instead.
+    System::Call 'kernel32::GetErrorMode() i.R4'
+    IntOp $R5 $R4 | 3
+    System::Call 'kernel32::SetErrorMode(i R5)'
+    System::Call 'kernel32::CreateProcessW(w "$INSTDIR\private-ai-proxy.exe", w R3, p 0, p 0, i 0, i 0x08000000, p 0, w "$INSTDIR", p R1, p R2) i.R3 ?e'
+    Pop $R5
+    System::Call 'kernel32::SetErrorMode(i R4)'
+    ${If} $R3 == 0
+      StrCpy $R0 "could not start (Windows error $R5)"
+    ${Else}
+      System::Call '*$R2(p .R3, p .R4)'
+      System::Call 'kernel32::CloseHandle(p R4)'
+      ; Use a wall-clock deadline independent of any output from the CLI.
+      System::Call 'kernel32::WaitForSingleObject(p R3, i 30000) i.R5'
+      ${If} $R5 == 0
+        System::Call 'kernel32::GetExitCodeProcess(p R3, *i .R4) i.R5'
+        ${If} $R5 == 0
+          StrCpy $R0 "could not read its exit code"
+        ${ElseIf} $R4 == 0
+          StrCpy $R0 0
+        ${Else}
+          StrCpy $R0 "exit code $R4"
+        ${EndIf}
+      ${Else}
+        StrCpy $R0 "did not finish (wait result $R5)"
+        System::Call 'kernel32::TerminateProcess(p R3, i 1) i.R5'
+        ${If} $R5 != 0
+          System::Call 'kernel32::WaitForSingleObject(p R3, i 5000)'
+        ${EndIf}
+      ${EndIf}
+      System::Call 'kernel32::CloseHandle(p R3)'
+    ${EndIf}
+  ${EndIf}
+  ${If} $R1 != 0
+    System::Call 'kernel32::LocalFree(p R1)'
+  ${EndIf}
+  ${If} $R2 != 0
+    System::Free $R2
+  ${EndIf}
+
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+FunctionEnd
+
 !macro NSIS_HOOK_POSTINSTALL
-  ExecWait '"$INSTDIR\private-ai-proxy.exe" cli install' $R0
+  Call PapRegisterCli
   ${If} $R0 != 0
-    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its CLI could not be registered in the current user's PATH."
+    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its CLI could not be registered in the current user's PATH ($R0)."
   ${EndIf}
   ${IfNot} ${FileExists} "$INSTDIR\pap.cmd"
     !insertmacro PAP_FAIL "Private AI Proxy was installed, but its pap shortcut is missing."
