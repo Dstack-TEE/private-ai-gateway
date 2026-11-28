@@ -175,6 +175,18 @@ impl Projector {
     pub fn reconcile(&self, catalog: Option<&Catalog>) -> Result<Vec<(String, String)>, String> {
         lock::with_apply_lock(&self.data_dir, || {
             let mut store = self.load_store()?;
+            if catalog.is_some() {
+                let mut cleared = false;
+                for record in store.values_mut() {
+                    if record.purge_provider {
+                        record.purge_provider = false;
+                        cleared = true;
+                    }
+                }
+                if cleared {
+                    self.save_store(&store)?;
+                }
+            }
             let mut failures = Vec::new();
             for agent in Agent::ALL {
                 let Some(mut record) = store.get(agent.id()).cloned() else {

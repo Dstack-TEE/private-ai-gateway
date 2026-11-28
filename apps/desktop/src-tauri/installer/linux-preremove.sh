@@ -61,7 +61,7 @@ elif [ "$cleanup" -eq 1 ] && [ -x "$pap" ]; then
       printf '%s\n' "private-ai-proxy: could not disable the $user user service during package removal" >&2
     run_for_user service stop ||
       printf '%s\n' "private-ai-proxy: could not stop the $user user backend during package removal" >&2
-    run_for_user stop --offline ||
+    run_for_user stop --offline --for-uninstall ||
       printf '%s\n' "private-ai-proxy: could not restore $user agent settings during package removal" >&2
   done
 fi

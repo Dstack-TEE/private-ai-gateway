@@ -254,7 +254,7 @@ FunctionEnd
     ; restores them, as the service stop above does.
     ${If} $UpdateMode <> 1
       ; The reason goes to the uninstall details.
-      nsExec::ExecToLog '"$R4" --yes stop --offline'
+      nsExec::ExecToLog '"$R4" --yes stop --offline --for-uninstall'
       Pop $R0
       ${If} $R0 != 0
         ; The restore can keep failing (a damaged agent config or restore
@@ -263,9 +263,9 @@ FunctionEnd
         ${If} $DeleteAppDataCheckboxState = 1
           !insertmacro PAP_FAIL "Your coding agents could not be restored: see details. Uninstall was cancelled because deleting the app data would also delete the original agent settings and keys needed to restore them. Fix the problem shown in the details and retry, or uninstall without deleting the app data."
         ${EndIf}
-        DetailPrint "Your coding agents could not be restored. The restore data stays in the app data folder; after reinstalling, pap stop --offline finishes it once the problem above is fixed."
+        DetailPrint "Your coding agents could not be restored. The restore data stays in the app data folder; after reinstalling, pap stop --offline --for-uninstall finishes it once the problem above is fixed."
         ${IfNot} ${Silent}
-          ${IfNot} ${Cmd} `MessageBox MB_YESNO|MB_ICONEXCLAMATION "Your coding agents could not be restored: see details. Uninstall anyway?$\n$\nThe restore data stays in %APPDATA%, and running pap stop --offline after reinstalling finishes it once the problem in the details is fixed." IDYES`
+          ${IfNot} ${Cmd} `MessageBox MB_YESNO|MB_ICONEXCLAMATION "Your coding agents could not be restored: see details. Uninstall anyway?$\n$\nThe restore data stays in %APPDATA%, and running pap stop --offline --for-uninstall after reinstalling finishes it once the problem in the details is fixed." IDYES`
             !insertmacro PAP_FAIL "Uninstall was cancelled. Your coding agents were not restored: see details."
           ${EndIf}
         ${EndIf}

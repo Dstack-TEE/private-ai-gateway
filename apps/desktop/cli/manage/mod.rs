@@ -85,7 +85,14 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             }
             state
         }
-        Action::Stop { offline: false } => {
+        Action::Stop {
+            offline: false,
+            for_uninstall: true,
+        } => return Err("--for-uninstall requires --offline".into()),
+        Action::Stop {
+            offline: false,
+            for_uninstall: false,
+        } => {
             if !client.is_running()? {
                 return Err(
                     "Backend is not running. Run pap stop --offline to restore agents without it."
@@ -94,7 +101,10 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
             }
             value(client.call(rpc::Stop)?)?
         }
-        Action::Stop { offline: true } => restore_agents_offline(&client, false)?,
+        Action::Stop {
+            offline: true,
+            for_uninstall,
+        } => restore_agents_offline(&client, *for_uninstall)?,
         Action::Profiles { command } => profiles(&client, global, command)?,
         Action::Agents { command } => agents(&client, global, command)?,
         Action::Models {
@@ -381,41 +391,36 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
                 return Ok(json!({"startAtLogin": false, "supported": false}));
             }
             if cfg!(windows) && *for_uninstall {
-                if client.is_running()? {
-                    confirm(
-                        global,
-                        "Stop the backend and remove PAP-created agent providers?",
-                    )?;
-                    client.shutdown_installed_for_uninstall()?;
-                } else {
-                    restore_agents_offline(client, true)?;
-                }
+                confirm(
+                    global,
+                    "Stop the backend and remove PAP-created agent providers?",
+                )?;
+                uninstall_cleanup(client)?;
                 return Ok(json!({"startAtLogin": false}));
             }
-            let disable = if *for_uninstall {
-                supervisor::unregister
-            } else {
-                supervisor::disable
-            };
+            if *for_uninstall {
+                confirm(
+                    global,
+                    "Stop the backend and remove PAP-created agent providers?",
+                )?;
+                let cleanup = uninstall_cleanup(client);
+                let supervisor = supervisor::unregister();
+                cleanup?;
+                supervisor?;
+                return Ok(json!({"startAtLogin": false}));
+            }
+            let disable = supervisor::disable;
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if supervisor::enabled() && client.is_running()? {
-                if *for_uninstall {
-                    client.shutdown_installed_for_uninstall()?;
-                } else {
-                    client.shutdown_installed()?;
-                }
+                client.shutdown_installed()?;
                 disable()?;
             } else {
                 disable()?;
                 if client.is_running()? {
-                    if *for_uninstall {
-                        client.shutdown_installed_for_uninstall()?;
-                    } else {
-                        client.shutdown_installed()?;
-                    }
+                    client.shutdown_installed()?;
                 } else {
-                    restore_agents_offline(client, *for_uninstall)?;
+                    restore_agents_offline(client, false)?;
                 }
             }
             Ok(json!({"startAtLogin": false}))
@@ -439,6 +444,33 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             Err(format!("Run {} directly", backend.display()).into())
         }
         Service::Status => status(client),
+    }
+}
+
+fn uninstall_cleanup(client: &Client) -> Result<(), CallError> {
+    if !client.is_running()? {
+        restore_agents_offline(client, true)?;
+        return Ok(());
+    }
+    match client.shutdown_installed_for_uninstall() {
+        Ok(()) => Ok(()),
+        Err(uninstall_error) => {
+            if client.is_running()? {
+                client.shutdown_installed().map_err(|fallback_error| {
+                    format!(
+                        "Uninstall shutdown failed: {uninstall_error}; fallback shutdown failed: {fallback_error}"
+                    )
+                })?;
+            }
+            restore_agents_offline(client, true)
+                .map(|_| ())
+                .map_err(|fallback_error| {
+                format!(
+                    "Uninstall shutdown failed: {uninstall_error}; offline purge failed: {fallback_error}"
+                )
+                .into()
+            })
+        }
     }
 }
 

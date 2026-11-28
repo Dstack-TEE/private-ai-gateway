@@ -26,7 +26,7 @@ Windows install and upgrade hooks call `private-ai-proxy --yes service stop`
 before replacing files. The uninstall hook calls
 `private-ai-proxy --yes service disable --for-uninstall`, then
 `private-ai-proxy --yes service stop`, before removing files. It then calls
-`private-ai-proxy --yes stop --offline`, which restores agents that a backend
+`private-ai-proxy --yes stop --offline --for-uninstall`, which restores agents that a backend
 that was not running left pointed at the Local API and completes uninstall
 provider cleanup. In-app updates run the
 installer with `/UPDATE`, which never runs the uninstaller, so they keep agents
@@ -112,8 +112,7 @@ crash. A shutdown signal while supervised preserves its protection session
 and agent routing, and protection resumes after verification on the next start.
 `pap service disable` stops the backend, ends protection, restores agents, and
 turns off supervision. Before uninstalling a supervised desktop app or CLI,
-run `pap service disable --for-uninstall` or turn off **Run in background at
-login** in Settings and stop protection. The uninstall form removes provider
+run `pap service disable --for-uninstall`. The uninstall form removes provider
 entries PAP created while preserving pre-existing provider settings.
 
 Automatic registration skips shells with agent or proxy settings such as

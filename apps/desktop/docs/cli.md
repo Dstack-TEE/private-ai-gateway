@@ -363,7 +363,8 @@ same journal and instance lock, including after a crash, supervised shutdown,
 or Windows sign-out. Each connection is kept for the next time you start
 protection.
 Uninstall cleanup records its intent in the connection journal, so a later
-`stop --offline` completes the provider removal if the backend exits first.
+`stop --offline --for-uninstall` completes the provider removal if the backend
+exits first.
 Running it again changes nothing. It holds the backend's instance lock while it
 works and is refused while a backend runs; use `stop` or `service stop` then.
 The Windows uninstaller runs it after `service disable --for-uninstall` and

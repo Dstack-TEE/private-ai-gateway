@@ -1175,9 +1175,14 @@ fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
     }
     for agent in [Agent::ClaudeCode, Agent::Dsh] {
         let sandbox = sandbox(&format!("uninstall-no-provider-{}", agent.id()));
+        let config = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
         assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
         sandbox.projector.mark_uninstall().unwrap();
         sandbox.projector.reconcile(None).unwrap();
+        assert!(!config.exists(), "{} config survived uninstall", agent.id());
+        if agent == Agent::Dsh {
+            assert!(!config.with_file_name(dsh::CREDENTIALS_FILE).exists());
+        }
         assert!(sandbox
             .projector
             .load_store()
@@ -1185,4 +1190,79 @@ fn uninstall_purges_pap_provider_fields_but_disconnect_retains_them() {
             .get(agent.id())
             .is_none());
     }
+}
+
+#[test]
+fn uninstall_keeps_user_provider_edits_and_restores_previous_values() {
+    let sandbox = sandbox("uninstall-provider-edits");
+    let agent = Agent::Codex;
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
+    write(
+        &path,
+        "model = 'native'\n[model_providers.private_ai_proxy]\nname = 'Original'\n",
+    );
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    let mut config = doc(&sandbox, agent);
+    config
+        .set_str(
+            &["model_providers", "private_ai_proxy", "user_edit"],
+            "keep-me",
+        )
+        .unwrap();
+    write(&path, &config.render().unwrap());
+    sandbox.projector.mark_uninstall().unwrap();
+    sandbox.projector.reconcile(None).unwrap();
+    let restored = doc(&sandbox, agent);
+    assert_eq!(
+        restored.get_str(&["model_providers", "private_ai_proxy", "name"]),
+        Some("Original".into())
+    );
+    assert_eq!(
+        restored.get_str(&["model_providers", "private_ai_proxy", "user_edit"]),
+        Some("keep-me".into())
+    );
+}
+
+#[test]
+fn stop_then_uninstall_purges_retained_provider_and_created_file() {
+    let sandbox = sandbox("stop-before-uninstall");
+    let agent = Agent::Codex;
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    assert!(sandbox.projector.reconcile(None).unwrap().is_empty());
+    assert!(path.exists());
+    sandbox.projector.mark_uninstall().unwrap();
+    sandbox.projector.reconcile(None).unwrap();
+    assert!(!path.exists());
+    assert!(sandbox
+        .projector
+        .load_store()
+        .unwrap()
+        .get(agent.id())
+        .is_none());
+}
+
+#[test]
+fn a_failed_uninstall_does_not_reconnect_a_disconnected_agent_on_start() {
+    let sandbox = sandbox("uninstall-flag-cleared-on-start");
+    let agent = Agent::Codex;
+    let path = agent.config_path(&sandbox.home, &ToolEnvironment::Disabled);
+    let catalog = catalog();
+    assert!(apply_connect(&sandbox, agent, &catalog, &claude_options()).authorized);
+    disconnect(&sandbox, agent);
+    sandbox.projector.mark_uninstall().unwrap();
+    write(&path, "invalid = [\n");
+    assert!(!sandbox.projector.reconcile(None).unwrap().is_empty());
+    sandbox.projector.reconcile(Some(&catalog)).unwrap();
+    let record = sandbox
+        .projector
+        .load_store()
+        .unwrap()
+        .get(agent.id())
+        .cloned()
+        .unwrap();
+    assert!(record.disconnected());
+    assert!(!record.purge_provider);
 }

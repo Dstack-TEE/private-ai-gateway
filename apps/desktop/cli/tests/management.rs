@@ -274,7 +274,9 @@ case "$2" in
   start)
     "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
     printf '%s\n' "$!" >"$HOME/managed-pid" ;;
-  disable) /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
+  disable)
+    [ "${PAP_FAIL_DISABLE:-}" = 1 ] && exit 7
+    /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
   *) exit 2 ;;
 esac
 "#;
@@ -298,6 +300,20 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
             .unwrap();
         assert_success(&output);
     };
+    let run_with_unavailable_supervisor = |args: &[&str]| {
+        let output = Command::new(&cli)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", &bin)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env("PAP_FIXTURE_BACKEND", &backend)
+            .env("PAP_FAIL_DISABLE", "1")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        output
+    };
     let uninstall = ["--yes", "service", "disable", "--for-uninstall"];
     run(&["service", "enable"]);
     run(&["--yes", "service", "disable"]);
@@ -308,6 +324,7 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
     run(&["service", "enable"]);
     assert!(unit.is_file());
     assert!(!marker.exists());
+    run_with_unavailable_supervisor(&["--yes", "service", "disable", "--for-uninstall"]);
     run(&uninstall);
     assert!(!unit.exists());
     assert!(!home.join("enabled").exists());
