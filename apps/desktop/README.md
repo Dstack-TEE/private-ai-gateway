@@ -118,8 +118,8 @@ retryable.
 
 A backend that is not running restores nothing, so agents it left projected
 (for example after an update installed without relaunching the app) keep
-pointing at the Local API until `pap stop --offline --for-uninstall` restores them without a
-backend. The Windows uninstaller runs it; in-app updates never do. Moving the
+pointing at the Local API until `pap stop --offline` restores them without a
+backend. The Windows uninstaller runs `pap stop --offline --for-uninstall`; in-app updates never do. Moving the
 macOS app to the Trash and removing a Linux package run nothing, so choose Stop
 All and Quit in the app, or run `pap --yes service disable --for-uninstall`,
 then `pap stop --offline --for-uninstall`, before removing it.
