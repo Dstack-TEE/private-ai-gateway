@@ -57,7 +57,7 @@ elif [ "$cleanup" -eq 1 ] && [ -x "$pap" ]; then
       printf '%s\n' "private-ai-proxy: runuser is unavailable, so $user cleanup was skipped during package removal" >&2
       continue
     fi
-    run_for_user service disable ||
+    run_for_user service disable --for-uninstall ||
       printf '%s\n' "private-ai-proxy: could not disable the $user user service during package removal" >&2
     run_for_user service stop ||
       printf '%s\n' "private-ai-proxy: could not stop the $user user backend during package removal" >&2

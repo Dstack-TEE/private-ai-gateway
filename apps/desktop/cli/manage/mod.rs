@@ -338,18 +338,23 @@ fn service(client: &Client, global: &Global, command: &Service) -> Result<Value,
             client.handoff_to_supervisor()?;
             Ok(json!({"startAtLogin": true}))
         }
-        Service::Disable => {
+        Service::Disable { for_uninstall } => {
             // Windows uses the app's login item and has no backend registration.
             if cfg!(windows) {
                 return Ok(json!({"startAtLogin": false}));
             }
+            let disable = if *for_uninstall {
+                desktop_core::supervisor::unregister
+            } else {
+                desktop_core::supervisor::disable
+            };
             // Quit through IPC before booting out a launch agent, which would
             // otherwise preserve the session when it receives the signal.
             if desktop_core::supervisor::enabled() && client.is_running()? {
                 client.shutdown_installed()?;
-                desktop_core::supervisor::disable()?;
+                disable()?;
             } else {
-                desktop_core::supervisor::disable()?;
+                disable()?;
                 if client.is_running()? {
                     client.shutdown_installed()?;
                 } else {

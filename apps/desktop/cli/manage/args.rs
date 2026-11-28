@@ -115,7 +115,11 @@ pub enum Service {
     /// Use the service manager's environment and start the backend at login and after a crash (Linux and macOS).
     Enable,
     /// Stop the backend, restore agent configurations and turn off login supervision.
-    Disable,
+    Disable {
+        /// Package removal clears the registration while preserving the user's preference.
+        #[arg(long, hide = true)]
+        for_uninstall: bool,
+    },
     /// Run the backend in the foreground, as the login service does.
     #[command(hide = true)]
     Run,
