@@ -28,6 +28,8 @@ if [[ "$row" == ubuntu-npm-nvm ]]; then
 fi
 unit=private-ai-proxy.service
 snapshot_dir=/home/tester/.pap-e2e-config-before
+opencode_config=/home/tester/.config/opencode/opencode.json
+opencode_snapshot="$snapshot_dir/opencode.json"
 
 as_tester() {
   local command
@@ -65,10 +67,8 @@ if [[ "$phase" == prepare || "$phase" == all ]]; then
   chown -R tester:tester /home/tester/e2e
   rm -rf "$snapshot_dir"
   mkdir -p "$snapshot_dir"
-  if [[ -d /home/tester/.config/opencode ]]; then
-    cp -a /home/tester/.config/opencode "$snapshot_dir/"
-  else
-    touch "$snapshot_dir/opencode.missing"
+  if [[ -e "$opencode_config" ]]; then
+    cp "$opencode_config" "$opencode_snapshot"
   fi
   if [[ "$skip_request" == true ]]; then
     echo "SKIPPED request: --skip-request was supplied"
@@ -226,23 +226,30 @@ for dotfile in .bashrc .profile .bash_profile; do
   fi
 done
 assert_opencode_restored() {
-  jq '
-    def prune:
-      if type == "object" then with_entries(.value |= prune) | with_entries(select(.value != {} and .value != null))
-      elif type == "array" then map(prune)
-      else . end;
-    del(.autoupdate, .["$schema"]) | prune
-  ' "$1"
-}
-if [[ -e "$snapshot_dir/opencode.missing" ]]; then
-  if [[ -e /home/tester/.config/opencode/opencode.json ]]; then
-    diff -u <(printf '{}\n') <(assert_opencode_restored /home/tester/.config/opencode/opencode.json)
-  else
-    test ! -e /home/tester/.config/opencode
+  local snapshot="$1" config="$2" expected='{}' actual='{}'
+  local normalize='
+    if length == 1 and (.[0] | type) == "object" then
+      .[0] | del(.autoupdate, .["$schema"])
+    else
+      error("Expected one OpenCode configuration object")
+    end
+  '
+  if [[ -e "$snapshot" ]]; then
+    if [[ ! -e "$config" ]]; then
+      echo "Uninstall removed the original OpenCode config" >&2
+      return 1
+    fi
+    expected="$(jq -csSe "$normalize" "$snapshot")" || return 1
   fi
-else
-  diff -u <(assert_opencode_restored "$snapshot_dir/opencode/opencode.json") <(assert_opencode_restored /home/tester/.config/opencode/opencode.json)
-fi
+  if [[ -e "$config" || -L "$config" ]]; then
+    actual="$(jq -csSe "$normalize" "$config")" || return 1
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "Uninstall did not restore the OpenCode config" >&2
+    return 1
+  fi
+}
+assert_opencode_restored "$opencode_snapshot" "$opencode_config"
 rm -rf "$snapshot_dir"
 rm -rf /home/tester/.pap-e2e-dotfiles-before
 echo "[$row] PASS"
