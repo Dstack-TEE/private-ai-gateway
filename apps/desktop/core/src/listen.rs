@@ -4,7 +4,7 @@
 //! explicitly allowed network access, and an all-interfaces listener needs a
 //! client host so the advertised URL is reachable.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 
 use url::{Host, Url};
 
@@ -17,6 +17,27 @@ pub struct ResolvedListen {
     pub bind: SocketAddr,
     /// The URL clients use: `http://<client host or listen address>:<port>`.
     pub endpoint: String,
+}
+
+impl ResolvedListen {
+    /// Replace a requested OS-assigned port with the port the listener owns.
+    pub fn record_bound_port(&mut self, listener: &TcpListener) -> Result<(), String> {
+        if self.bind.port() == 0 {
+            let port = listener
+                .local_addr()
+                .map_err(|error| format!("Cannot read the bound address: {error}"))?
+                .port();
+            let host = self
+                .config
+                .client_host
+                .as_deref()
+                .unwrap_or(&self.config.listen_address);
+            self.endpoint = http_endpoint(host, port)?;
+            self.bind.set_port(port);
+            self.config.port = port;
+        }
+        Ok(())
+    }
 }
 
 /// Validates the address, confirmation and client host. Port ranges are the caller's policy.

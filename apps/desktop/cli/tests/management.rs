@@ -1,7 +1,6 @@
 //! Real binaries and isolated user state; no UI, provider calls, or OS secrets.
 mod support;
 
-use desktop_core::config::WEB_UI_DEFAULT_PORT;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -246,16 +245,7 @@ fn package_uninstall_preserves_the_login_preference_and_allows_enrollment_again(
     }
     let config = home.join(".config/private-ai-proxy");
     fs::create_dir_all(&config).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    fs::write(
-        config.join("config.toml"),
-        format!("[local-api]\nport = {port}\n"),
-    )
-    .unwrap();
+    fs::write(config.join("config.toml"), "[local-api]\nport = 0\n").unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
@@ -1029,17 +1019,12 @@ fn assert_user_unit_handoff(failure: Option<(&str, &str)>) {
         fs::create_dir_all(directory).unwrap();
     }
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
     let gateway = TcpListener::bind("127.0.0.1:0").unwrap();
     gateway.set_nonblocking(true).unwrap();
     let gateway_addr = gateway.local_addr().unwrap();
     fs::write(
         config.join("config.toml"),
-        format!("active-profile = \"test\"\n[local-api]\nport = {port}\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"https://{gateway_addr}\"\n"),
+        format!("active-profile = \"test\"\n[local-api]\nport = 0\n[profiles.test]\nname = \"Test\"\nprovider = \"custom\"\nremote-url = \"https://{gateway_addr}\"\n"),
     )
     .unwrap();
     desktop_core::private_fs::write_private(
@@ -1184,7 +1169,12 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
         assert_ne!(status["backend"]["processId"], detached);
         assert_eq!(status["gateway"]["sessionId"], "handoff-session");
         assert_eq!(status["gateway"]["sessionActive"], true);
-        assert!(TcpStream::connect(("127.0.0.1", port)).is_ok());
+        let authority = status["gateway"]["proxyUrl"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("http://")
+            .unwrap();
+        assert!(TcpStream::connect(authority).is_ok());
         assert!(!home.join("managed-pid").exists());
         let _reverifying = wait_for_verification();
         run(&["service", "stop", "--yes"]);
@@ -1319,7 +1309,6 @@ const WEB_PASSWORD: &str = "correct horse battery staple";
 
 #[test]
 fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
-    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
     let status = &backend.run(&["status"])["gateway"]["webUi"];
     assert_eq!(status["enabled"], false);
@@ -1388,7 +1377,9 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
         assert!(!text.contains(&password), "{name} contains the password");
     }
 
-    let occupied = TcpListener::bind(("127.0.0.1", WEB_UI_DEFAULT_PORT)).unwrap();
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = occupied.local_addr().unwrap().port();
+    backend.run(&["settings", "set", "web-ui.port", &port.to_string(), "--yes"]);
     // --yes enables the web UI through the same setting; the bind conflict stays in state.
     let failed = backend.web(&["app", "open", "--web", "--yes", "--json"]);
     assert!(!failed.status.success());
@@ -1399,10 +1390,7 @@ fn web_ui_opens_with_a_generated_password_only_local_clients_read() {
         // Development builds without `npm run build:web` report this instead of serving.
         return;
     }
-    assert_eq!(
-        error,
-        format!("Port {WEB_UI_DEFAULT_PORT} is already in use on 127.0.0.1")
-    );
+    assert_eq!(error, format!("Port {port} is already in use on 127.0.0.1"));
     drop(occupied);
 
     let authority = backend.enable_web_ui().unwrap();
@@ -1491,7 +1479,6 @@ const LEGACY_HASH: &str =
 
 #[test]
 fn a_password_hash_from_an_earlier_version_signs_in_until_replaced() {
-    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend =
         Backend::start_with_credentials(&format!("[web-ui]\npassword-hash = \"{LEGACY_HASH}\"\n"));
     // Only the hash is known, so there is nothing to show.
@@ -1593,7 +1580,6 @@ fn app_open_fails_fast_while_an_update_holds_the_startup_gate() {
 #[cfg(target_os = "linux")]
 #[test]
 fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
-    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
     let set = |key: &str, value: &str| {
         backend
@@ -1626,8 +1612,7 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
         "127.0.0.2",
         "--yes",
     ]);
-    let second = format!("127.0.0.2:{WEB_UI_DEFAULT_PORT}");
-    assert_eq!(state["webUi"]["url"], format!("http://{second}"));
+    let second = web_ui_authority(&state["webUi"], "127.0.0.2");
     let deadline = Instant::now() + Duration::from_secs(5);
     while TcpStream::connect(&first).is_ok() {
         assert!(
@@ -1652,7 +1637,6 @@ fn web_ui_listener_fails_closed_and_rebinds_with_fresh_sessions() {
 /// the browser request that asked for it.
 #[test]
 fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
-    let _port = port_lock(WEB_UI_DEFAULT_PORT);
     let backend = Backend::start();
     assert_success(&backend.set_web_ui_password(WEB_PASSWORD));
     let Some(authority) = backend.enable_web_ui() else {
@@ -1660,7 +1644,7 @@ fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
     };
     let token = web_session(&authority, WEB_PASSWORD);
     let config = json!({
-        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": WEB_UI_DEFAULT_PORT }
+        "config": { "enabled": true, "listenAddress": "127.0.0.1", "port": 0 }
     });
     let started = Instant::now();
     let (status, body) = http(
@@ -1676,10 +1660,16 @@ fn a_browser_saves_the_web_ui_settings_without_waiting_on_itself() {
         "saving took {:?}",
         started.elapsed()
     );
-    assert_eq!(
-        body["result"]["webUi"]["url"],
-        format!("http://{authority}")
-    );
+    let rebound = web_ui_authority(&body["result"]["webUi"], "127.0.0.1");
+    web_session(&rebound, WEB_PASSWORD);
+}
+
+fn web_ui_authority(status: &Value, host: &str) -> String {
+    let port = status["port"].as_u64().unwrap();
+    assert!(port > 0, "{status}");
+    let authority = format!("{host}:{port}");
+    assert_eq!(status["url"], format!("http://{authority}"), "{status}");
+    authority
 }
 
 /// Signs in to the web UI at `authority` and returns its session cookie.
@@ -1701,6 +1691,7 @@ fn web_session(authority: &str, password: &str) -> String {
 impl Backend {
     /// Enables the listener and returns its authority when the assets are built.
     fn enable_web_ui(&self) -> Option<String> {
+        self.run(&["settings", "set", "web-ui.port", "0", "--yes"]);
         let state = self.run(&["settings", "set", "web-ui.enabled", "true", "--yes"]);
         let web_ui = &state["webUi"];
         if web_ui["error"]
@@ -1709,9 +1700,7 @@ impl Backend {
         {
             return None;
         }
-        let authority = format!("127.0.0.1:{WEB_UI_DEFAULT_PORT}");
-        assert_eq!(web_ui["url"], format!("http://{authority}"), "{web_ui}");
-        Some(authority)
+        Some(web_ui_authority(web_ui, "127.0.0.1"))
     }
 
     /// Runs as a remote shell so no browser is launched.
@@ -1846,8 +1835,7 @@ fn reset_settings_preserves_user_data_and_requires_explicit_consent() {
     assert_ne!(backend.web_ui_password(), WEB_PASSWORD);
 }
 
-/// Use fixed ports to avoid racing ephemeral binds. The file lock coordinates
-/// test processes sharing a port and must outlive the backend.
+/// Coordinates tests that need to bind the product's default Local API port.
 fn port_lock(port: u16) -> fs::File {
     let path = std::env::temp_dir().join(format!("private-ai-proxy-test-{port}.lock"));
     let lock = fs::File::create(path).unwrap();

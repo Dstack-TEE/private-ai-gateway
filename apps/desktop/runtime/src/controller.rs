@@ -284,9 +284,9 @@ impl DesktopRuntime {
         let profiles = settings.profile_views(&snapshot);
         let credential_saved =
             crate::verifier_session::active_key_saved(&profiles, &snapshot.config.active_profile);
-        let local = settings_config::resolve_local_api(snapshot.config.local_api.clone())
+        let mut local = settings_config::resolve_local_api(snapshot.config.local_api.clone())
             .map_err(|error| format!("The Local API settings are invalid: {error}"))?;
-        let listener = proxy::bind_std(local.bind);
+        let listener = endpoint::bind_local_api(&mut local);
         let (proxy_events_tx, proxy_events) = tokio::sync::mpsc::channel::<ProxyEvent>(256);
         let proxy = ProxyState::new(proxy_events_tx, proxy::VERIFICATION_WAIT)?;
         let (usage, usage_error) = match UsageStore::open(data_dir.join(USAGE_DATABASE)) {

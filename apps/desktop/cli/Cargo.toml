@@ -70,6 +70,7 @@ windows-result = "0.100"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Environment", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+desktop-core = { package = "private-ai-proxy-core", path = "../core", features = ["test-ephemeral-ports"] }
 k256 = { version = "0.14", features = ["ecdsa"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs"] }
 regex = "1"

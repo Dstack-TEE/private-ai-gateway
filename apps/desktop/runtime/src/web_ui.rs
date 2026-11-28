@@ -67,12 +67,12 @@ impl WebUi {
     pub(crate) fn start(
         &self,
         runtime: Arc<crate::controller::DesktopRuntime>,
-        listen: &ResolvedListen,
-    ) -> Result<String, String> {
+        mut listen: ResolvedListen,
+    ) -> Result<ResolvedListen, String> {
         let shutdown = CancellationToken::new();
         let server = server::start(
             runtime,
-            listen,
+            &mut listen,
             self.auth.clone(),
             self.throttle.clone(),
             shutdown.clone(),
@@ -81,15 +81,15 @@ impl WebUi {
         if let Ok(mut running) = self.running.lock() {
             *running = Some((shutdown, server));
         }
-        Ok(listen.endpoint.clone())
+        Ok(listen)
     }
 
     #[cfg(not(feature = "web-ui"))]
     pub(crate) fn start(
         &self,
         _runtime: Arc<crate::controller::DesktopRuntime>,
-        _listen: &ResolvedListen,
-    ) -> Result<String, String> {
+        _listen: ResolvedListen,
+    ) -> Result<ResolvedListen, String> {
         Err("The web UI is not included in this build".into())
     }
 

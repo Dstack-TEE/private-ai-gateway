@@ -729,7 +729,7 @@ fn management_with_a_backend() {
     let fails = |code: i32, args: &[&str]| pap(args).assert().code(code).stdout_eq("");
 
     json(&["settings", "show"]).stdout_eq(str![[r#"
-{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
+{"files":{"config":"[ROOT]/home/.private-ai-proxy/Config/config.toml","credentials":"[ROOT]/home/.private-ai-proxy/Config/credentials.toml","error":null,"warnings":[]},"settings":{"active-profile":"[PROFILE]","connect-on-launch":false,"appearance":"system","notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":0},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182},"profiles":{"[PROFILE]":{"name":"Work","provider":"phala","remote-url":"https://inference.phala.com"}}},"webUi":{"enabled":false,"listenAddress":"127.0.0.1","allowNetworkAccess":false,"port":4182}}
 
 "#]]);
     json(&["profiles", "list"]).stdout_eq(str![[r#"
@@ -803,7 +803,7 @@ For more information, try '--help'.
 "#]]);
     let deprecated = json(&["settings", "set", "autoCliRegistration", "false", "--yes"]);
     deprecated.stdout_eq(str![[r#"
-{"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":[PORT]},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
+{"connect-on-launch":false,"appearance":"system","auto-cli-registration":false,"notifications":{"enabled":true,"gateway":true,"local-api":true,"verification":true},"local-api":{"listen-address":"127.0.0.1","allow-network-access":false,"port":0},"web-ui":{"enabled":false,"listen-address":"127.0.0.1","allow-network-access":false,"port":4182}}
 
 "#]]).stderr_eq(str![[r#"
 warning: `autoCliRegistration` is deprecated and will be removed in 0.3; use `auto-cli-registration`

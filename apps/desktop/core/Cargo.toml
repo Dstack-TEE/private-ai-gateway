@@ -11,6 +11,8 @@ default = []
 mac-app-store = ["dep:objc2", "dep:objc2-foundation"]
 # The HTTP serving loop the backend's listeners share.
 server = ["dep:axum", "dep:tower-service", "hyper/server", "hyper-util/server-graceful"]
+# Allow integration test backends to request OS-assigned listener ports.
+test-ephemeral-ports = []
 
 [lib]
 name = "desktop_core"

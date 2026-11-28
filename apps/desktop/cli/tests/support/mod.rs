@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::{
     env, fs,
     io::{self, Read, Write},
-    net::TcpListener,
+    net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
     time::{Duration, Instant},
@@ -364,14 +364,9 @@ impl Backend {
         let data = home.join(".private-ai-proxy");
         let settings = data.join("Config");
         desktop_core::private_fs::create_private_dir(&settings).unwrap();
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         desktop_core::private_fs::write_private(
             &settings.join("config.toml"),
-            &format!("# Kept by every write.\n\n[local-api]\nport = {port}\n"),
+            "# Kept by every write.\n\n[local-api]\nport = 0\n",
         )
         .unwrap();
         if !credentials.is_empty() {
@@ -403,6 +398,12 @@ impl Backend {
             if output.status.success() {
                 let state: Value = serde_json::from_slice(&output.stdout).unwrap();
                 if !state["backend"].is_null() {
+                    let gateway = &state["gateway"];
+                    let port = gateway["localApi"]["port"].as_u64().unwrap();
+                    assert!(port > 0, "{gateway}");
+                    let authority = format!("127.0.0.1:{port}");
+                    assert_eq!(gateway["proxyUrl"], format!("http://{authority}"));
+                    assert!(TcpStream::connect(&authority).is_ok(), "{gateway}");
                     break;
                 }
             }
