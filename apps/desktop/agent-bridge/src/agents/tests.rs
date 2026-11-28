@@ -132,6 +132,7 @@ pub(super) fn write_executable(path: &Path, text: &str) {
 fn claude_options() -> ConnectOptions {
     ConnectOptions {
         default_model: Some("openai/gpt-oss-20b".to_string()),
+        ..ConnectOptions::default()
     }
 }
 

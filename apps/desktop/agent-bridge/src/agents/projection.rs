@@ -1461,6 +1461,7 @@ pub(super) fn connection_options(
             .is_some_and(|model| agent.can_use(catalog, model))
     });
     ConnectOptions {
+        opencode_executable: options.opencode_executable.clone(),
         default_model: preferred
             .or_else(|| preferred_default.then(|| PREFERRED_DEFAULT_MODEL.to_string()))
             .or_else(|| {

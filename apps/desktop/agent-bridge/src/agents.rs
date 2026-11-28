@@ -472,7 +472,9 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
-        let connection = self.connection_catalog(agent, connect, catalog);
+        let prior = self.current_record(agent, store.get(agent.id()));
+        let executable = self.opencode_executable(agent, connect, options, prior)?;
+        let connection = self.connection_catalog(agent, connect, catalog, executable.as_deref());
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match self.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
@@ -645,6 +647,11 @@ fn revision(
             OpenCodeVersion::V1 => b"1",
             OpenCodeVersion::V2 => b"2",
         });
+    }
+    if agent == Agent::OpenCode && connect {
+        if let Some(executable) = &options.opencode_executable {
+            part(executable.as_os_str().as_encoded_bytes());
+        }
     }
     hex::encode(hasher.finalize())
 }

@@ -2,6 +2,7 @@
 //! 2's `providers` shape.
 
 use super::*;
+use desktop_core::agents::{is_opencode_executable, OPENCODE_EXECUTABLE_NAMES};
 use std::{
     io::{Read, Seek},
     iter,
@@ -17,17 +18,19 @@ pub(super) enum OpenCodeVersion {
 }
 
 impl OpenCodeVersion {
-    fn detect(user_home: &Path) -> Option<Self> {
+    fn detect(user_home: &Path, recorded: Option<&Path>) -> Option<Self> {
         let path = env::var_os("PATH").unwrap_or_default();
         let path_dirs = || env::split_paths(&path).filter(|dir| dir.is_absolute());
-        #[cfg(not(windows))]
-        let names = ["opencode"];
-        #[cfg(windows)]
-        let names = ["opencode.exe", "opencode.cmd"];
-        let executable = path_dirs()
-            .chain(opencode_install_dirs(user_home))
-            .flat_map(|dir| names.map(|name| dir.join(name)))
-            .find(|candidate| executable_metadata(candidate).is_some())?;
+        let executable = recorded.map(Path::to_path_buf).or_else(|| {
+            path_dirs()
+                .chain(opencode_install_dirs(user_home))
+                .flat_map(|dir| {
+                    OPENCODE_EXECUTABLE_NAMES
+                        .iter()
+                        .map(move |name| dir.join(name))
+                })
+                .find_map(|candidate| validate_opencode_executable(&candidate).ok())
+        })?;
         let child_path =
             env::join_paths(iter::once(executable.parent()?.to_path_buf()).chain(path_dirs()))
                 .ok()?;
@@ -90,6 +93,95 @@ impl OpenCodeVersion {
             _ => None,
         }
     }
+}
+
+fn validate_opencode_executable(path: &Path) -> io::Result<PathBuf> {
+    let invalid = || io::Error::from(io::ErrorKind::PermissionDenied);
+    if !path.is_absolute() {
+        return Err(invalid());
+    }
+    let resolved = path.canonicalize()?;
+    if !is_opencode_executable(path) {
+        return Err(invalid());
+    }
+    let parent = path.parent().ok_or_else(invalid)?.canonicalize()?;
+    let normalized = parent.join(path.file_name().ok_or_else(invalid)?);
+    let paths = [path, resolved.as_path(), normalized.as_path()];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        let user = unsafe { libc::geteuid() };
+        let file = fs::metadata(&resolved)?;
+        if (file.uid() != user && file.uid() != 0) || file.mode() & 0o002 != 0 {
+            return Err(invalid());
+        }
+        for dir in paths.into_iter().flat_map(|path| path.ancestors().skip(1)) {
+            if fs::metadata(dir)?.mode() & 0o002 != 0 {
+                return Err(invalid());
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use desktop_core::windows_acl;
+        use windows_sys::Win32::{
+            Foundation::{GENERIC_ALL, GENERIC_WRITE},
+            Storage::FileSystem::{
+                DELETE, FILE_ADD_FILE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_WRITE_DATA,
+                WRITE_DAC, WRITE_OWNER,
+            },
+        };
+        let acl = |path: &Path| {
+            windows_acl::read(&windows_acl::open_for_inspection(path)?).map_err(|_| invalid())
+        };
+        let trusted = |acl: &windows_acl::Acl, sid: &str| {
+            sid == acl.current_user_sid || windows_acl::TRUSTED_SIDS.contains(&sid)
+        };
+        let writes = |acl: &windows_acl::Acl, mask, check_sid: &dyn Fn(&str) -> bool| {
+            // ACEs marked inherit-only do not apply to this entry.
+            acl.aces.iter().any(|ace| {
+                ace.kind == 0
+                    && ace.flags & 0x08 == 0
+                    && ace.mask & mask != 0
+                    && check_sid(&ace.sid)
+            })
+        };
+        const COMMON_WRITE: u32 = GENERIC_ALL | GENERIC_WRITE | DELETE | WRITE_DAC | WRITE_OWNER;
+        let file = acl(&resolved)?;
+        if !trusted(&file, &file.owner_sid)
+            || writes(
+                &file,
+                COMMON_WRITE | FILE_WRITE_DATA | FILE_APPEND_DATA,
+                &|sid| !trusted(&file, sid),
+            )
+        {
+            return Err(invalid());
+        }
+        for dir in paths.into_iter().flat_map(|path| path.ancestors().skip(1)) {
+            if dir.as_os_str().is_empty() {
+                continue;
+            }
+            if writes(
+                &acl(dir)?,
+                COMMON_WRITE | FILE_ADD_FILE | FILE_DELETE_CHILD,
+                &|sid| {
+                    matches!(
+                        sid,
+                        "S-1-1-0" | "S-1-5-11" | "S-1-5-32-545" | "S-1-5-32-546"
+                    )
+                },
+            ) {
+                return Err(invalid());
+            }
+        }
+    }
+    // Keep the command name and adjacent runtime, while dropping temporary
+    // directory symlinks such as a version manager's per-shell bin directory.
+    #[cfg(unix)]
+    return Ok(normalized);
+    #[cfg(windows)]
+    Ok(path.to_path_buf())
 }
 
 fn opencode_install_dirs(home: &Path) -> Vec<PathBuf> {
@@ -155,13 +247,38 @@ impl Projector {
         agent: Agent,
         connect: bool,
         catalog: Option<&'a Catalog>,
+        executable: Option<&Path>,
     ) -> Option<ConnectionCatalog<'a>> {
         catalog.map(|catalog| ConnectionCatalog {
             catalog,
             opencode_version: (agent == Agent::OpenCode && connect && self.tool_env)
-                .then(|| OpenCodeVersion::detect(&self.home))
+                .then(|| OpenCodeVersion::detect(&self.home, executable))
                 .flatten(),
         })
+    }
+
+    pub(super) fn opencode_executable(
+        &self,
+        agent: Agent,
+        connect: bool,
+        requested: &ConnectOptions,
+        prior: Option<&Connection>,
+    ) -> Result<Option<PathBuf>, AgentError> {
+        if agent != Agent::OpenCode || !connect || !self.tool_env {
+            return Ok(None);
+        }
+        if let Some(path) = &requested.opencode_executable {
+            match validate_opencode_executable(path) {
+                Ok(path) => return Ok(Some(path)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(AgentError::ConfigurationConflict(
+                    "The OpenCode executable must use an absolute path, be owned by you or the system, and be protected from public writes".into(),
+                )),
+            }
+        }
+        Ok(prior
+            .and_then(|record| record.options.opencode_executable.as_ref())
+            .and_then(|path| validate_opencode_executable(path).ok()))
     }
 }
 

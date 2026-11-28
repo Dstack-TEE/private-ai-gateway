@@ -19,7 +19,7 @@ fn interrupted_two_file_connection_restores_from_the_persisted_journal() {
             &Store::new(),
             sandbox
                 .projector
-                .connection_catalog(agent, true, Some(&catalog)),
+                .connection_catalog(agent, true, Some(&catalog), None),
             &ConnectOptions::default(),
         )
         .unwrap();

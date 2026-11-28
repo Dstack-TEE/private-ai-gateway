@@ -776,6 +776,7 @@ fn recovery_keeps_agent_routes_and_tokens_but_pauses_their_requests() {
     let projector = runtime.current_projector().unwrap();
     let options = ConnectOptions {
         default_model: Some("test/model".into()),
+        ..ConnectOptions::default()
     };
     let preview = projector
         .preview(agent, true, Some(&catalog), &options)
@@ -1019,6 +1020,7 @@ fn offline_restore_follows_the_journal_only_while_no_backend_runs() {
     let projector = runtime.current_projector().unwrap();
     let options = ConnectOptions {
         default_model: Some("test/model".into()),
+        ..ConnectOptions::default()
     };
     for agent in [Agent::ClaudeCode, Agent::Codex] {
         let preview = projector
