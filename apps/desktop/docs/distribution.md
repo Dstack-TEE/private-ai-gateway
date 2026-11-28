@@ -326,7 +326,10 @@ with `public_repo` and write access to the fork. Set both in the
 `desktop-release` environment. The workflow logs a skip when either is absent.
 It uses Komac for a dry run and opens one pull request per package using
 GitHub’s [documented `head` and `head_repo` fields](https://docs.github.com/en/rest/pulls/pulls#create-a-pull-request).
-Microsoft maintainers review each submission.
+GitHub syncs the fork when needed, then creates the submission branch on the
+server at the upstream commit before the workflow pushes the new manifest.
+Commits use the authenticated maintainer's GitHub identity. Microsoft
+maintainers review each submission.
 
 Use the same script for the first submission, with GitHub CLI authenticated
 as a maintainer of the organization fork. For the selected `redpill-ai` fork:

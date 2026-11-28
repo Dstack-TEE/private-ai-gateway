@@ -1080,6 +1080,8 @@ jobs:
     uses: ./.github/workflows/desktop-winget.yml
     with:
       tag: ${{ github.ref_name }}
+    secrets:
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
 
   publish-npm:
     needs: update-feed

@@ -6,6 +6,9 @@ on:
       tag:
         required: true
         type: string
+    secrets:
+      WINGET_TOKEN:
+        required: false
 
 permissions:
   contents: read
