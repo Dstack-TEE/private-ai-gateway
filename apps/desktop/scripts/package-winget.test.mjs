@@ -6,13 +6,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { load } from "js-yaml";
 
 import { binaries } from "./package-cli.mjs";
 import { artifactName, desktopPackages } from "./release-artifacts.mjs";
 
 const hasZipTools = ["zip", "unzip"].every((command) => spawnSync(command, ["-v"]).status === 0);
 
-test("writes the WinGet version, installer, and default locale filenames for both packages", {
+test("writes WinGet manifests with valid filenames, scope, and runtime dependencies", {
   skip: process.platform === "win32" || !hasZipTools,
 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pap-winget-test-"));
@@ -72,5 +73,12 @@ if (command === "api") {
     assert.deepEqual((await readdir(directory)).sort(), [
       `${id}.installer.yaml`, `${id}.locale.en-US.yaml`, `${id}.yaml`,
     ]);
+    const manifest = load(await readFile(path.join(directory, `${id}.installer.yaml`), "utf8"));
+    assert.equal(manifest.Scope, id.endsWith(".CLI") ? undefined : "user");
+    for (const installer of manifest.Installers) {
+      assert.deepEqual(installer.Dependencies.PackageDependencies, [
+        { PackageIdentifier: `Microsoft.VCRedist.2015+.${installer.Architecture}` },
+      ]);
+    }
   }
 });
