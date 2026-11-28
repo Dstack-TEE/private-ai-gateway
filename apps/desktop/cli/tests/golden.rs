@@ -568,7 +568,7 @@ fn management_without_a_backend() {
         .assert()
         .success()
         .stdout_eq(str![[r#"
-{"backend":null,"status":"not_running","loginService":{"state":"unsupported","detail":"Unavailable with PAP path overrides"}}
+{"backend":null,"status":"not_running","loginService":{"enabled":false,"active":false,"reason":"path_overrides","detail":"Unavailable with PAP path overrides"}}
 
 "#]]);
     fails(1, &["status", "--watch"]).stderr_eq(str![[r#"
@@ -579,6 +579,15 @@ error: Backend is not running. Run pap service start.
 {"error":{"code":"command_failed","message":"Backend is not running. Run pap service start."}}
 
 "#]]);
+    for args in [
+        &["models", "list", "--json"][..],
+        &["models", "list", "--refresh", "--json"][..],
+    ] {
+        fails(1, args).stderr_eq(str![[r#"
+{"error":{"code":"command_failed","message":"Backend is not running. Run pap start to verify the service and enable protection."}}
+
+"#]]);
+    }
     fails(
         1,
         &[
@@ -886,7 +895,7 @@ Backend is already running.
 
 "#]]);
     json(&["service", "status"]).stdout_eq(str![[r#"
-{"backend":null,"status":"not_running","loginService":{"state":"unsupported","detail":"Unavailable with PAP path overrides"}}
+{"backend":null,"status":"not_running","loginService":{"enabled":false,"active":false,"reason":"path_overrides","detail":"Unavailable with PAP path overrides"}}
 
 "#]]);
     pap(&["service", "stop", "--yes"])

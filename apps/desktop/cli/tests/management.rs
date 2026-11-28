@@ -84,6 +84,18 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
             }
             assert!(first_stderr.is_empty(), "{first_stderr}");
         } else {
+            assert_eq!(
+                String::from_utf8_lossy(&first.stdout),
+                concat!(
+                    "Protected\n",
+                    "Profile: Test (test)\n",
+                    "Service: custom | http://127.0.0.1\n",
+                    "Service credential: Saved (credentials.toml)\n",
+                    "Local API: Not listening\n",
+                    "Network access: Loopback only\n",
+                    "Models: No verified catalog\n",
+                )
+            );
             assert!(first_stderr.contains("CODEX_HOME"), "{first_stderr}");
             assert!(
                 first_stderr.contains("environment first, then run `pap service enable`"),
@@ -833,8 +845,12 @@ case "$1" in
       unit_state=disabled
       [ ! -e "$HOME/enabled" ] || unit_state=enabled
       pid=0
-      if [ -f "$HOME/managed-pid" ]; then read -r pid <"$HOME/managed-pid"; fi
-      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$pid"
+      active_state=inactive
+      if [ -f "$HOME/managed-pid" ]; then
+        read -r pid <"$HOME/managed-pid"
+        active_state=active
+      fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nActiveState=%s\nMainPID=%s\n' "$unit" "$unit_state" "$active_state" "$pid"
     else
       printf 'LoadState=not-found\nDropInPaths=\n'
     fi ;;
@@ -902,18 +918,31 @@ printf '{"data":"%s"}\n{"data":[[75],[]]}\n{"data":[[],[]]}\n{"data":[[],[]]}\n'
     assert!(home.join("managed-pid").exists());
     assert_eq!(
         run(&["status"])["loginService"],
-        json!({"state": "active", "detail": "Enabled (active)"})
+        json!({"enabled": true, "active": true, "reason": null, "detail": "Enabled (active)"})
     );
+    // Disabling a systemd unit does not stop a running service.
+    fs::remove_file(home.join("enabled")).unwrap();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"enabled": false, "active": true, "reason": null, "detail": "Active (disabled at login)"})
+    );
+    fs::write(home.join("enabled"), "").unwrap();
     drop(wait_for_verification());
     run(&["service", "stop", "--yes"]);
     fs::remove_file(home.join("managed-pid")).unwrap();
+    assert_eq!(
+        run(&["status"])["loginService"],
+        json!({"enabled": true, "active": false, "reason": null, "detail": "Enabled (inactive)"})
+    );
     usage.save_active_session("handoff-session", 1).unwrap();
     fs::write(home.join("no-bus"), "").unwrap();
     let detached = run(&["service", "start"])["processId"].clone();
     assert_eq!(
         run(&["status"])["loginService"],
         json!({
-            "state": "unavailable",
+            "enabled": false,
+            "active": false,
+            "reason": "service_manager_unavailable",
             "detail": "Unavailable because no user service manager is running",
         })
     );

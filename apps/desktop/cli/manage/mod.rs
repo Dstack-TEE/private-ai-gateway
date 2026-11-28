@@ -95,6 +95,12 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         Action::Models {
             command: Models::List { refresh },
         } => {
+            if !client.is_running()? {
+                return Err(
+                    "Backend is not running. Run pap start to verify the service and enable protection."
+                        .into(),
+                );
+            }
             let state = if *refresh {
                 client.call(rpc::RefreshCatalog)?.state
             } else {

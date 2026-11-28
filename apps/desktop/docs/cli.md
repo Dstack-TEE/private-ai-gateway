@@ -50,7 +50,8 @@ started directly while the manager was unavailable, `pap start` or
 supervision. The Linux and direct macOS app uses this same registration for
 **Run in background at login**. **Open at Login** opens the app in the tray.
 On Windows it starts on by default once, and opening the tray starts the
-backend. You can also run `pap service start` after restarting the machine.
+backend. You can also run `pap start` to turn on protection after restarting
+the machine.
 `pap status` and `pap doctor` show the login service state and explain why
 automatic registration is skipped when applicable.
 See [Standalone CLI](cli-distribution.md#standalone-cli).
@@ -730,13 +731,14 @@ not a parsing contract.
 management API's `GET /api/version` answers it: `apiVersion`, `product`,
 `version`, `instanceId`, `processId` and `executable` (0.1 named the first
 field `protocolVersion`). The `pap status --json` and `pap doctor --json`
-reports include a `loginService` object with a stable `state` and a
-human-readable `detail`. The state is `active` when the enabled service is
-running, `enabled` when it is idle, `disabled` when registration is off, or
-`skipped` when automatic registration does not apply. It is `unsupported`
-when the installation or PAP path overrides prevent use of a login service,
-`unavailable` when no user service manager is running, and `error` when
-inspection fails. `pap start --json` and
+reports include a `loginService` object. Its `enabled` and `active` booleans
+report login registration and current activity independently. They describe
+the login service managed by the OS. The `reason` field is `null` for an
+ordinary state, or one of `disabled_by_user`, `skipped_environment_overrides`,
+`automatic_registration_unavailable`, `path_overrides`, `unsupported`,
+`service_manager_unavailable`, or `inspection_failed`. When PAP cannot inspect
+the service, both booleans are false and the reason explains why. The
+`detail` field contains human-readable text. `pap start --json` and
 `pap agents connect --json` include `supervisionNotice` when they produce an
 automatic registration warning. A command that fails prints
 `{"error": {"code": "CODE", "message": "MESSAGE"}}` on stderr. `error.code` is

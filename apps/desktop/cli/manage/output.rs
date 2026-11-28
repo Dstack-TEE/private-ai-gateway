@@ -37,9 +37,8 @@ pub(super) fn print_raw(bytes: &[u8]) -> Result<(), CallError> {
 /// The human rendering of `action`'s result `value`; details by default.
 pub(super) fn render(action: &Action, value: &Value) -> String {
     match action {
-        Action::Status { .. } | Action::Stop { offline: false } => status(value),
-        Action::Start { .. } => {
-            format!("{}\nConnect an agent with pap agents connect <id>.", status(value))
+        Action::Status { .. } | Action::Start { .. } | Action::Stop { offline: false } => {
+            status(value)
         }
         Action::Stop { offline: true } => agents(value),
         Action::Service { command } => match command {
@@ -214,7 +213,7 @@ fn status(value: &Value) -> String {
         if let Some(status) = login_service {
             result.push_str(&format!("\nLogin service: {status}"));
         }
-        result.push_str("\nStart backend (resumes protection that was on): pap service start\nRestore agents without it: pap stop --offline\nStart protection: pap start");
+        result.push_str("\nStart protection: pap start\nStart management backend (resumes saved protection): pap service start\nRestore agents without it: pap stop --offline");
         return result;
     }
     let state = value.get("gateway").unwrap_or(value);
@@ -531,7 +530,7 @@ mod tests {
     #[test]
     fn doctor_omits_empty_errors_and_warnings() {
         let value = serde_json::json!({
-            "loginService": {"state": "active", "detail": "Enabled (active)"},
+            "loginService": {"enabled": true, "active": true, "reason": null, "detail": "Enabled (active)"},
             "errors": {},
             "warnings": {},
         });
