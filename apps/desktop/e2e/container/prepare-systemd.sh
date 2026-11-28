@@ -58,7 +58,8 @@ loginctl enable-linger tester
 
 case "$row" in
   ubuntu-script-npm)
-    runuser -u tester -- env HOME=/home/tester PATH=/home/tester/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    # The installer runs the extracted CLI to verify its version. /tmp is noexec.
+    runuser -u tester -- env HOME=/home/tester TMPDIR=/var/tmp PATH=/home/tester/.local/bin:/usr/local/bin:/usr/bin:/bin \
       bash -ec '
         installer="$(mktemp)"
         trap '\''rm "$installer"'\'' EXIT
