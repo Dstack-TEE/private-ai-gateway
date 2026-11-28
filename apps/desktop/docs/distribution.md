@@ -322,8 +322,9 @@ payload for Redistributable DLL imports. The Windows npm packages repack the
 same verified CLI binaries.
 
 The NSIS post-install hook gives CLI registration 30 seconds to complete. It
-suppresses Windows loader dialogs, releases the startup lock on failure, and
-returns a nonzero installer status if registration fails.
+suppresses Windows loader dialogs and releases the startup lock before finishing
+the installation. If registration fails, the installer details show how to
+retry with `private-ai-proxy cli install` from the installed executable.
 
 When bootstrapping from a release that predates signed checksums, pass
 `--legacy` to `scripts/package-winget.mjs`. It retains the legacy installers'

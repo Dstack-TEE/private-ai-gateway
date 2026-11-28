@@ -210,16 +210,25 @@ FunctionEnd
 
 !macro NSIS_HOOK_POSTINSTALL
   Call PapRegisterCli
-  ${If} $R0 != 0
-    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its CLI could not be registered in the current user's PATH ($R0)."
-  ${EndIf}
-  ${IfNot} ${FileExists} "$INSTDIR\pap.cmd"
-    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its pap shortcut is missing."
-  ${EndIf}
-  ${IfNot} ${FileExists} "$INSTDIR\aci.cmd"
-    !insertmacro PAP_FAIL "Private AI Proxy was installed, but its aci shortcut is missing."
+  ${If} $R0 == 0
+    ${IfNot} ${FileExists} "$INSTDIR\pap.cmd"
+      StrCpy $R0 "the pap shortcut is missing"
+    ${ElseIfNot} ${FileExists} "$INSTDIR\aci.cmd"
+      StrCpy $R0 "the aci shortcut is missing"
+    ${EndIf}
   ${EndIf}
   !insertmacro PAP_RELEASE_STARTUP_LOCK
+
+  ; Tauri has already installed the app. A CLI warning must allow it to finish and relaunch.
+  ${If} $R0 != 0
+    DetailPrint "Private AI Proxy was installed, but could not register command-line access ($R0)."
+    DetailPrint 'To retry in PowerShell, run: & "$INSTDIR\private-ai-proxy.exe" cli install'
+    ${IfNot} ${Silent}
+    ${AndIf} $PassiveMode != 1
+      SetDetailsView show
+    ${EndIf}
+    ClearErrors
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

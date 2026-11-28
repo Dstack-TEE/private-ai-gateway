@@ -105,20 +105,18 @@ try {
   ], { env: nsisEnv, timeout: 20_000, windowsHide: true });
   await buildFixture(fixture);
 
-  // The real registration hook must return a failure for a missing, failing,
-  // or hung CLI. Use the same install directory for each attempt.
+  // Installation must complete for a missing, failing, or hung CLI.
   const failedInstall = path.join(scratch, "failed-install");
   const childPidFile = path.join(scratch, "registration-child-pid");
   await mkdir(failedInstall);
   const launchRegistration = (pidFile = "", timeout = 10_000) => execute(fixture, ["/S"], {
     env: { ...env, PAP_TEST_CLI_DIR: failedInstall, PAP_TEST_CLI_PID: pidFile }, timeout, windowsHide: true,
   });
-  const registrationFailed = (error) => error.code === 1 && !error.killed;
-  await assert.rejects(launchRegistration(), registrationFailed);
+  await launchRegistration();
   await buildFixture(path.join(failedInstall, "private-ai-proxy.exe"), ["-DPAP_CLI_STUB"]);
-  await assert.rejects(launchRegistration(), registrationFailed);
+  await launchRegistration();
   try {
-    await assert.rejects(launchRegistration(childPidFile, 40_000), registrationFailed);
+    await launchRegistration(childPidFile, 40_000);
     const child = Number(await readFile(childPidFile, "utf8"));
     assert.ok(Number.isInteger(child) && child > 0);
     assert.throws(() => process.kill(child, 0), { code: "ESRCH" });

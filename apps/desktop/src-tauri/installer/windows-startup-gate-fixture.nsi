@@ -24,6 +24,7 @@ SectionEnd
 !include "windows.nsh"
 
 Section
+  StrCpy $PassiveMode 0
   !insertmacro PAP_ACQUIRE_STARTUP_LOCK
   ReadEnvStr $INSTDIR "PAP_TEST_CLI_DIR"
   ${If} $INSTDIR != ""
