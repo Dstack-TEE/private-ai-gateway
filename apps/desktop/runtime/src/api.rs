@@ -65,6 +65,16 @@ pub(crate) fn version() -> &'static Version {
             executable: std::env::current_exe()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            agent_path_overrides: Some(
+                if cfg!(all(target_os = "macos", feature = "mac-app-store"))
+                    || desktop_core::paths::env_path(desktop_core::paths::HOME_OVERRIDE_ENV)
+                        .is_some()
+                {
+                    Default::default()
+                } else {
+                    agent_bridge::agents::agent_path_overrides()
+                },
+            ),
         }
     })
 }
@@ -412,6 +422,7 @@ mod tests {
             "instanceId",
             "processId",
             "executable",
+            "agentPathOverrides",
         ] {
             assert!(body.get(field).is_some(), "{field}");
         }

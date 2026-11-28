@@ -98,16 +98,10 @@ impl AgentIntegration for Agent {
         if !tool_env {
             return None;
         }
-        let vars = match self {
-            Agent::Codex => &[CODEX_HOME][..],
-            Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR][..],
-            Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME][..],
-            Agent::Pi | Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR][..],
-            Agent::Hermes => &[HERMES_HOME][..],
-            Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME][..],
-            Agent::Dsh => &[DSH_HOME][..],
-        };
-        vars.iter().find(|name| env_path(name).is_some()).copied()
+        super::config_path_sources(self)
+            .iter()
+            .find(|name| env_path(name).is_some())
+            .copied()
     }
 
     fn note(self, connect: bool) -> &'static str {

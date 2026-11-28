@@ -20,7 +20,12 @@ fn sandbox_teardown_watchdog() {
 #[cfg(target_os = "linux")]
 #[test]
 fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
-    for (json, environment_override) in [(false, true), (true, true), (true, false)] {
+    for (json, environment_override, reports_paths) in [
+        (false, true, false),
+        (true, true, false),
+        (true, false, false),
+        (true, true, true),
+    ] {
         let sandbox = support::Sandbox::new();
         let root = sandbox.path();
         let home = root.join("home");
@@ -49,24 +54,145 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let server = verified_backend_fixture(socket_path, &cli, 6);
+        let state = desktop_core::contracts::AppState {
+            backend_connected: Some(true),
+            status: desktop_core::contracts::VerificationStatus::Verified,
+            config: desktop_core::contracts::StartConfig {
+                remote_url: "http://127.0.0.1".into(),
+            },
+            profiles: vec![desktop_core::contracts::ConfidentialProfile {
+                id: "test".into(),
+                name: "Test".into(),
+                provider: desktop_core::contracts::ServiceProvider::Custom,
+                remote_url: "http://127.0.0.1".into(),
+                auth: desktop_core::contracts::ProfileAuth::ApiKey,
+                credential_saved: true,
+                credential_ref: None,
+                verified_at: None,
+            }],
+            active_profile_id: "test".into(),
+            api_key_saved: true,
+            ..Default::default()
+        };
+        let state =
+            serde_json::to_string(&desktop_core::contracts::AppStateWire::from(state)).unwrap();
+        let mut version = serde_json::json!({
+            "apiVersion": desktop_core::protocol::API_VERSION,
+            "product": desktop_core::brand::APP_IDENTIFIER,
+            "version": desktop_core::protocol::BUILD_VERSION,
+            "instanceId": "test-instance",
+            "processId": std::process::id(),
+            "executable": cli,
+        });
+        if reports_paths {
+            version["agentPathOverrides"] = json!({});
+        }
+        let version = version.to_string();
+        let check_legacy_connect = json && environment_override && !reports_paths;
+        let expected_requests = if reports_paths {
+            18
+        } else if check_legacy_connect {
+            14
+        } else {
+            8
+        };
+        let applied = json!({
+            "result": {
+                "id": "codex", "name": "Codex",
+                "configPath": home.join(".codex/config.toml"),
+                "installed": true, "recorded": true, "connected": true,
+                "authorized": true,
+            }
+        });
+        let agents = json!({"result": [&applied["result"]]}).to_string();
+        let applied = applied.to_string();
+        let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = 0;
+            while requests < expected_requests && Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(100)))
+                    .unwrap();
+                loop {
+                    let mut request = Vec::new();
+                    let mut byte = [0; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        if stream.read_exact(&mut byte).is_err() {
+                            break;
+                        }
+                        request.push(byte[0]);
+                    }
+                    if request.is_empty() || !request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    let request = String::from_utf8_lossy(&request);
+                    let body_length = request
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then_some(value.trim())
+                        })
+                        .and_then(|length| length.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0; body_length];
+                    stream.read_exact(&mut body).unwrap();
+                    let path = request
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap();
+                    let response_body = match path {
+                        desktop_core::protocol::VERSION_PATH => version.clone(),
+                        "/api/rpc/apply_agent" => applied.clone(),
+                        "/api/rpc/get_state" => format!("{{\"result\":{state}}}"),
+                        "/api/rpc/list_agents" => agents.clone(),
+                        _ => panic!("unexpected request {path}"),
+                    };
+                    let body = response_body.as_bytes();
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                    requests += 1;
+                    if requests >= expected_requests {
+                        break;
+                    }
+                }
+            }
+            assert_eq!(requests, expected_requests);
+        });
 
-        let run = |extra: &[&str]| {
-            let mut args = vec!["start"];
-            args.extend_from_slice(extra);
+        let custom = home.join("custom");
+        let run = |args: &[&str]| {
             let mut command = std::process::Command::new(&cli);
             command
-                .args(&args)
+                .args(args)
                 .env_clear()
                 .env("HOME", &home)
                 .env("XDG_RUNTIME_DIR", &runtime)
                 .env("PATH", &bin);
             if environment_override {
-                command.env("CODEX_HOME", "/custom");
+                command.env("CODEX_HOME", &custom);
             }
             command.output().unwrap()
         };
-        let args: &[&str] = if json { &["--json"] } else { &[] };
+        let args: &[&str] = if json {
+            &["start", "--json"]
+        } else {
+            &["start"]
+        };
         let first = run(args);
         assert_eq!(first.status.code(), Some(0), "{first:?}");
         let first_stderr = String::from_utf8_lossy(&first.stderr);
@@ -83,6 +209,14 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
                 );
             }
             assert!(first_stderr.is_empty(), "{first_stderr}");
+            if reports_paths {
+                let warning = value["agentPathWarnings"][0].as_str().unwrap();
+                assert!(warning.contains("CODEX_HOME"), "{warning}");
+                assert!(
+                    warning.contains(custom.join("config.toml").to_str().unwrap()),
+                    "{warning}"
+                );
+            }
         } else {
             assert_eq!(
                 String::from_utf8_lossy(&first.stdout),
@@ -112,6 +246,40 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
             );
         } else {
             assert!(!String::from_utf8_lossy(&second.stderr).contains("CODEX_HOME"));
+        }
+        if check_legacy_connect {
+            let outcome = run(&[
+                "agents",
+                "connect",
+                "codex",
+                "--revision",
+                "test-preview",
+                "--yes",
+                "--json",
+            ]);
+            assert_success(&outcome);
+            let report: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+            assert_eq!(report["connected"], true);
+            let warning = String::from_utf8_lossy(&outcome.stderr);
+            assert_eq!(warning.lines().count(), 1);
+            assert!(
+                warning.contains("does not report agent path overrides"),
+                "{warning}"
+            );
+        }
+        if reports_paths {
+            let outcome = run(&["status", "--json"]);
+            assert_success(&outcome);
+            let report: Value = serde_json::from_slice(&outcome.stdout).unwrap();
+            let warning = report["agentPathWarnings"][0].as_str().unwrap();
+            assert!(
+                warning.contains(custom.join("config.toml").to_str().unwrap()),
+                "{warning}"
+            );
+            assert!(
+                warning.contains(home.join(".codex/config.toml").to_str().unwrap()),
+                "{warning}"
+            );
         }
         server.join().unwrap();
     }
@@ -356,6 +524,58 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
         .unwrap()
         .iter()
         .all(|agent| agent["recorded"] == false));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn agents_connect_checks_the_shell_path_before_starting_protection() {
+    let backend = Backend::start();
+    let home = backend.directory.path().join("home");
+    let default = home.join(".codex");
+    let custom = home.join("custom-codex");
+    for directory in [&default, &custom] {
+        fs::create_dir_all(directory).unwrap();
+        fs::write(directory.join("config.toml"), "model = 'native'\n").unwrap();
+    }
+    let run = |args: &[&str], path: &std::path::Path| {
+        backend
+            .command(args)
+            .env("HOME", &home)
+            .env("CODEX_HOME", path)
+            .output()
+            .unwrap()
+    };
+    let output = run(&["agents", "connect", "codex", "--yes"], &custom);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    for text in [
+        "CODEX_HOME",
+        custom.join("config.toml").to_str().unwrap(),
+        default.join("config.toml").to_str().unwrap(),
+        "pap service restart",
+    ] {
+        assert!(error.contains(text), "{error}");
+    }
+    assert_eq!(backend.run(&["status"])["gateway"]["sessionActive"], false);
+    for directory in [&default, &custom] {
+        assert_eq!(
+            fs::read_to_string(directory.join("config.toml")).unwrap(),
+            "model = 'native'\n"
+        );
+    }
+
+    let preview = run(
+        &["agents", "connect", "codex", "--dry-run", "--json"],
+        &default,
+    );
+    assert_success(&preview);
+    let report: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    assert_eq!(
+        report["agent"]["configPath"],
+        default.join("config.toml").to_str().unwrap()
+    );
+    let unrelated = run(&["agents", "connect", "claude-code", "--dry-run"], &custom);
+    assert_success(&unrelated);
 }
 
 #[cfg(unix)]

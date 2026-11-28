@@ -530,13 +530,39 @@ impl Client {
 
     /// Sends one typed request and decodes exactly its declared response.
     pub fn call<C: Call>(&self, request: C) -> Result<C::Response, CallError> {
-        let value = self.execute(request.into())?;
+        self.call_to(request, None)
+    }
+
+    /// Rejects a replacement backend before sending a request checked against
+    /// the original backend's version handshake.
+    pub fn call_in_instance<C: Call>(
+        &self,
+        request: C,
+        instance_id: &str,
+    ) -> Result<C::Response, CallError> {
+        self.call_to(request, Some(instance_id))
+    }
+
+    fn call_to<C: Call>(
+        &self,
+        request: C,
+        instance_id: Option<&str>,
+    ) -> Result<C::Response, CallError> {
+        let value = self.execute_on(request.into(), instance_id)?;
         serde_json::from_value(value)
             .map_err(|_| CallError::Local("Unexpected management response shape".into()))
     }
 
     /// Runs one command and returns its result as sent.
-    pub fn execute(&self, mut command: Command) -> Result<Value, CallError> {
+    pub fn execute(&self, command: Command) -> Result<Value, CallError> {
+        self.execute_on(command, None)
+    }
+
+    fn execute_on(
+        &self,
+        mut command: Command,
+        instance_id: Option<&str>,
+    ) -> Result<Value, CallError> {
         match &mut command {
             Command::PreviewAgent {
                 agent_id,
@@ -555,6 +581,11 @@ impl Client {
         }
         block_on(async {
             let mut connection = open_current().await?;
+            if instance_id.is_some_and(|expected| expected != connection.version.instance_id) {
+                return Err(
+                    "The backend restarted. Retry the command to check the new backend.".into(),
+                );
+            }
             if let Command::SetAgentConnection { agent_id, connect } = &command {
                 let mut options = ConnectOptions::default();
                 options.supply_opencode_executable(agent_id, *connect);

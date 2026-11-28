@@ -34,7 +34,9 @@ pub(crate) use registry::AgentIntegration;
 
 use std::{
     collections::BTreeMap,
-    env, fs, io,
+    env,
+    ffi::OsString,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -72,6 +74,34 @@ const HELPER_MISSING: &str =
                               agents cannot be connected";
 const RESTORE_PATH_MISSING: &str = "The connection record has no valid absolute config path. \
     Access is disabled. Automatic restoration is unsafe; the recovery record is retained.";
+
+/// Path selectors in the same precedence order as agent configuration discovery.
+pub fn config_path_sources(agent: Agent) -> &'static [&'static str] {
+    use registry::*;
+    match agent {
+        Agent::Codex => &[CODEX_HOME],
+        Agent::ClaudeCode => &[CLAUDE_CONFIG_DIR],
+        Agent::OpenCode => &[OPENCODE_CONFIG, XDG_CONFIG_HOME],
+        Agent::Pi => &[PI_CODING_AGENT_DIR],
+        Agent::OhMyPi => &[PI_CODING_AGENT_DIR, PI_CONFIG_DIR],
+        Agent::Hermes => &[HERMES_HOME],
+        Agent::OpenClaw => &[OPENCLAW_CONFIG_PATH, OPENCLAW_STATE_DIR, OPENCLAW_HOME],
+        Agent::Dsh => &[DSH_HOME],
+    }
+}
+
+/// Only variables that select a config path. Inline config and tokens can contain secrets.
+pub fn agent_path_overrides() -> BTreeMap<String, OsString> {
+    Agent::ALL
+        .into_iter()
+        .flat_map(config_path_sources)
+        .filter_map(|&name| env_path(name).map(|path| (name.into(), path.into_os_string())))
+        .collect()
+}
+
+pub fn shell_config_path(agent: Agent) -> Result<PathBuf, String> {
+    Ok(agent.config_path(&home_dir()?, true))
+}
 
 /// File name of the bundled console helper that prints an agent's token.
 pub fn helper_binary_name() -> &'static str {

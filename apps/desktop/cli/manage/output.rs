@@ -248,6 +248,9 @@ fn status(value: &Value) -> String {
     if let Some(status) = login_service {
         lines.push(format!("Login service: {status}"));
     }
+    for warning in value["agentPathWarnings"].as_array().into_iter().flatten() {
+        lines.push(format!("Warning: {}", text(warning)));
+    }
     let profile = state["profiles"].as_array().and_then(|profiles| {
         profiles
             .iter()

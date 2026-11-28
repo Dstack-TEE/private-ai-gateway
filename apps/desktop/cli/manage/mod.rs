@@ -20,6 +20,7 @@ use serde_json::{json, Map, Value};
 use crate::Global;
 
 mod account;
+mod agent_paths;
 mod args;
 mod install;
 mod output;
@@ -78,7 +79,11 @@ pub fn run(global: &Global, action: &Action) -> Result<(), CallError> {
         } => status(&client)?,
         Action::Service { command } => service(&client, global, command)?,
         Action::Start { profile, timeout } => {
-            start_with_supervision(&client, global, profile.as_deref(), *timeout)?
+            let mut state = start_with_supervision(&client, global, profile.as_deref(), *timeout)?;
+            if let Ok(version) = client.version() {
+                add_agent_path_warnings(&mut state, agent_paths::warnings(&client, &version));
+            }
+            state
         }
         Action::Stop { offline: false } => {
             if !client.is_running()? {
@@ -305,12 +310,22 @@ fn watch_status(global: &Global) -> Result<(), CallError> {
 
 fn status(client: &Client) -> Result<Value, CallError> {
     let mut status = if client.is_running()? {
-        json!({"backend": client.version()?, "gateway": AppStateWire::from(client.state()?)})
+        let version = client.version()?;
+        let mut status =
+            json!({"backend": version, "gateway": AppStateWire::from(client.state()?)});
+        add_agent_path_warnings(&mut status, agent_paths::warnings(client, &version));
+        status
     } else {
         json!({"backend": null, "status": "not_running"})
     };
     status["loginService"] = json!(login_service_status());
     Ok(status)
+}
+
+fn add_agent_path_warnings(status: &mut Value, warnings: Vec<String>) {
+    if !warnings.is_empty() {
+        status["agentPathWarnings"] = json!(warnings);
+    }
 }
 
 fn login_service_status() -> supervisor::LoginServiceStatus {
@@ -771,29 +786,43 @@ fn agent_change(
     dry_run: bool,
     revision: Option<&str>,
 ) -> Result<Value, CallError> {
-    desktop_core::agents::Agent::from_id(id)?;
+    let agent = desktop_core::agents::Agent::from_id(id)?;
+    let running = connect && client.is_running()?;
+    let mut checked_backend = if running {
+        Some(agent_paths::check(client, agent)?)
+    } else {
+        None
+    };
     let options = ConnectOptions {
         default_model: model,
         ..ConnectOptions::default()
     };
     if dry_run {
-        return value(client.call(rpc::PreviewAgent {
+        let request = rpc::PreviewAgent {
             agent_id: id.into(),
             connect,
             options,
-        })?);
+        };
+        return value(if let Some(version) = &checked_backend {
+            agent_paths::warn_if_unreported(version);
+            client.call_in_instance(request, &version.instance_id)?
+        } else {
+            client.call(request)?
+        });
     }
     // The preview needs the verified catalog. Get consent to start it before
     // presenting or applying any agent configuration changes.
-    let supervision_notice =
-        if connect && (!client.is_running()? || !client.state()?.is_protected()) {
-            confirm(global, "Start protection before connecting this agent?")?;
-            start_with_supervision(client, global, None, 90)?
-                .get("supervisionNotice")
-                .cloned()
-        } else {
-            None
-        };
+    let supervision_notice = if connect && (!running || !client.state()?.is_protected()) {
+        confirm(global, "Start protection before connecting this agent?")?;
+        let state = start_with_supervision(client, global, None, 90)?;
+        checked_backend = Some(agent_paths::check(client, agent)?);
+        state.get("supervisionNotice").cloned()
+    } else {
+        None
+    };
+    if let Some(version) = &checked_backend {
+        agent_paths::warn_if_unreported(version);
+    }
     let revision = match revision {
         Some(revision) => {
             confirm(
@@ -815,12 +844,17 @@ fn agent_change(
             preview.revision
         }
     };
-    let status = client.call(rpc::ApplyAgent {
+    let request = rpc::ApplyAgent {
         agent_id: id.into(),
         connect,
         revision,
         options,
-    })?;
+    };
+    let status = if let Some(version) = &checked_backend {
+        client.call_in_instance(request, &version.instance_id)?
+    } else {
+        client.call(request)?
+    };
     // Success would mean the agent is routed; it still uses its own provider.
     if connect && status.recorded && !status.connected {
         let next = if client.state()?.session_active {
@@ -1171,6 +1205,14 @@ fn doctor(client: &Client) -> Value {
     );
     let logs = doctor_check(&mut errors, "logs", desktop_core::paths::logs_dir());
     let mut warnings = Map::new();
+    if backend_running == true {
+        if let Ok(version) = client.version() {
+            let paths = agent_paths::warnings(client, &version);
+            if !paths.is_empty() {
+                warnings.insert("agentPaths".into(), json!(paths));
+            }
+        }
+    }
     let settings = settings_diagnostics(client, &mut errors, &mut warnings);
     // Update availability is advisory: an offline check never fails the doctor.
     let update =
