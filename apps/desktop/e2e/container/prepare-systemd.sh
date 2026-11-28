@@ -59,7 +59,12 @@ loginctl enable-linger tester
 case "$row" in
   ubuntu-script-npm)
     runuser -u tester -- env HOME=/home/tester PATH=/home/tester/.local/bin:/usr/local/bin:/usr/bin:/bin \
-      bash -c 'curl -fsSL https://redpill.ai/private-ai-proxy/install.sh | sh -- --channel "$1" --version "$2" --install-dir "$HOME/.local/share/private-ai-proxy-custom" --bin-dir "$HOME/.local/bin"' _ "$channel" "$version"
+      bash -ec '
+        installer="$(mktemp)"
+        trap '\''rm "$installer"'\'' EXIT
+        curl -fsSL -o "$installer" https://redpill.ai/private-ai-proxy/install.sh
+        sh "$installer" --channel "$1" --version "$2" --install-dir "$HOME/.local/share/private-ai-proxy-custom" --bin-dir "$HOME/.local/bin"
+      ' _ "$channel" "$version"
     ;;
   ubuntu-npm-nvm)
     runuser -u tester -- env HOME=/home/tester PATH=/usr/local/bin:/usr/bin:/bin PROFILE=/dev/null \
