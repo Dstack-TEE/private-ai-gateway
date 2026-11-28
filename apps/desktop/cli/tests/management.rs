@@ -54,42 +54,11 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(bin.join("systemctl"), fs::Permissions::from_mode(0o700)).unwrap();
 
-        let state = desktop_core::contracts::AppState {
-            backend_connected: Some(true),
-            status: desktop_core::contracts::VerificationStatus::Verified,
-            config: desktop_core::contracts::StartConfig {
-                remote_url: "http://127.0.0.1".into(),
-            },
-            profiles: vec![desktop_core::contracts::ConfidentialProfile {
-                id: "test".into(),
-                name: "Test".into(),
-                provider: desktop_core::contracts::ServiceProvider::Custom,
-                remote_url: "http://127.0.0.1".into(),
-                auth: desktop_core::contracts::ProfileAuth::ApiKey,
-                credential_saved: true,
-                credential_ref: None,
-                verified_at: None,
-            }],
-            active_profile_id: "test".into(),
-            api_key_saved: true,
-            ..Default::default()
+        let version_metadata = if reports_paths {
+            json!({"agentPathOverrides": {}, "agentValidationOverrides": [], "supervised": true})
+        } else {
+            json!({})
         };
-        let state =
-            serde_json::to_string(&desktop_core::contracts::AppStateWire::from(state)).unwrap();
-        let mut version = serde_json::json!({
-            "apiVersion": desktop_core::protocol::API_VERSION,
-            "product": desktop_core::brand::APP_IDENTIFIER,
-            "version": desktop_core::protocol::BUILD_VERSION,
-            "instanceId": "test-instance",
-            "processId": std::process::id(),
-            "executable": cli,
-        });
-        if reports_paths {
-            version["agentPathOverrides"] = json!({});
-            version["agentValidationOverrides"] = json!([]);
-            version["supervised"] = json!(true);
-        }
-        let version = version.to_string();
         let check_legacy_connect = json && environment_override && !reports_paths;
         let expected_requests = if reports_paths {
             18
@@ -115,73 +84,16 @@ fn start_reports_skipped_or_failed_supervision_without_failing_protection() {
         })
         .to_string();
         let applied = applied.to_string();
-        let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut requests = 0;
-            while requests < expected_requests && Instant::now() < deadline {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(100)))
-                    .unwrap();
-                loop {
-                    let mut request = Vec::new();
-                    let mut byte = [0; 1];
-                    while !request.ends_with(b"\r\n\r\n") {
-                        if stream.read_exact(&mut byte).is_err() {
-                            break;
-                        }
-                        request.push(byte[0]);
-                    }
-                    if request.is_empty() || !request.ends_with(b"\r\n\r\n") {
-                        break;
-                    }
-                    let request = String::from_utf8_lossy(&request);
-                    let body_length = request
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then_some(value.trim())
-                        })
-                        .and_then(|length| length.parse::<usize>().ok())
-                        .unwrap_or(0);
-                    let mut body = vec![0; body_length];
-                    stream.read_exact(&mut body).unwrap();
-                    let path = request
-                        .lines()
-                        .next()
-                        .unwrap()
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap();
-                    let response_body = match path {
-                        desktop_core::protocol::VERSION_PATH => version.clone(),
-                        "/api/rpc/apply_agent" => applied.clone(),
-                        "/api/rpc/get_state" => format!("{{\"result\":{state}}}"),
-                        "/api/rpc/list_agents" => agents.clone(),
-                        _ => panic!("unexpected request {path}"),
-                    };
-                    let body = response_body.as_bytes();
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(body).unwrap();
-                    requests += 1;
-                    if requests >= expected_requests {
-                        break;
-                    }
-                }
-            }
-            assert_eq!(requests, expected_requests);
-        });
+        let server = verified_backend_fixture(
+            socket_path,
+            &cli,
+            expected_requests,
+            version_metadata,
+            &[
+                ("/api/rpc/apply_agent", applied),
+                ("/api/rpc/list_agents", agents),
+            ],
+        );
 
         let custom = home.join("custom");
         let run = |args: &[&str]| {
@@ -329,6 +241,18 @@ fn package_uninstall_preserves_the_login_preference_and_allows_enrollment_again(
     for directory in [&bin, &runtime, &data] {
         fs::create_dir_all(directory).unwrap();
     }
+    let config = home.join(".config/private-ai-proxy");
+    fs::create_dir_all(&config).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    fs::write(
+        config.join("config.toml"),
+        format!("[local-api]\nport = {port}\n"),
+    )
+    .unwrap();
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy"), &cli);
     support::install(env!("CARGO_BIN_EXE_private-ai-proxy-service"), &backend);
@@ -343,12 +267,21 @@ case "$2" in
     if [ -f "$unit" ]; then
       state=disabled
       [ ! -f "$HOME/enabled" ] || state=enabled
-      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nMainPID=%s\n' "$unit" "$state" "$PAP_FIXTURE_PID"
+      pid=0
+      active=inactive
+      if [ -f "$HOME/managed-pid" ]; then
+        read -r pid <"$HOME/managed-pid"
+        active=active
+      fi
+      printf 'LoadState=loaded\nFragmentPath=%s\nDropInPaths=\nNeedDaemonReload=no\nUnitFileState=%s\nActiveState=%s\nMainPID=%s\n' "$unit" "$state" "$active" "$pid"
     else
       printf 'LoadState=not-found\nDropInPaths=\n'
     fi ;;
   enable) : > "$HOME/enabled" ;;
-  disable) /bin/rm "$HOME/enabled" ;;
+  start)
+    "$PAP_FIXTURE_BACKEND" --supervised </dev/null >"$HOME/backend.log" 2>&1 &
+    printf '%s\n' "$!" >"$HOME/managed-pid" ;;
+  disable) /bin/rm -f "$HOME/enabled" "$HOME/managed-pid" ;;
   *) exit 2 ;;
 esac
 "#;
@@ -366,7 +299,7 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
             .env("HOME", &home)
             .env("PATH", &bin)
             .env("XDG_RUNTIME_DIR", &runtime)
-            .env("PAP_FIXTURE_PID", std::process::id().to_string())
+            .env("PAP_FIXTURE_BACKEND", &backend)
             .args(args)
             .output()
             .unwrap();
@@ -391,7 +324,13 @@ printf '%s\n' '{"data":"on-failure"}' '{"data":[[75],[]]}' '{"data":[[],[]]}' '{
     let socket_dir = socket_path.parent().unwrap();
     fs::create_dir_all(socket_dir).unwrap();
     fs::set_permissions(socket_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let server = verified_backend_fixture(socket_path, &backend, 4);
+    // Exercise re-enrollment with a verified backend and no live provider.
+    fs::write(
+        home.join("managed-pid"),
+        format!("{}\n", std::process::id()),
+    )
+    .unwrap();
+    let server = verified_backend_fixture(socket_path, &backend, 5, json!({}), &[]);
     run(&["start"]);
     assert!(unit.is_file());
     assert!(home.join("enabled").exists());
@@ -403,6 +342,8 @@ fn verified_backend_fixture(
     socket_path: std::path::PathBuf,
     cli: &std::path::Path,
     expected_requests: usize,
+    version_metadata: Value,
+    additional_responses: &[(&'static str, String)],
 ) -> std::thread::JoinHandle<()> {
     let state = desktop_core::contracts::AppState {
         backend_connected: Some(true),
@@ -425,15 +366,26 @@ fn verified_backend_fixture(
         ..Default::default()
     };
     let state = serde_json::to_string(&desktop_core::contracts::AppStateWire::from(state)).unwrap();
-    let version = serde_json::json!({
+    let mut version = json!({
         "apiVersion": desktop_core::protocol::API_VERSION,
         "product": desktop_core::brand::APP_IDENTIFIER,
         "version": desktop_core::protocol::BUILD_VERSION,
         "instanceId": "test-instance",
         "processId": std::process::id(),
         "executable": cli,
-    })
-    .to_string();
+    });
+    let mut extra = version_metadata;
+    version
+        .as_object_mut()
+        .unwrap()
+        .append(extra.as_object_mut().unwrap());
+    let version = version.to_string();
+    let state = format!("{{\"result\":{state}}}");
+    let mut responses = additional_responses.to_vec();
+    responses.extend([
+        (desktop_core::protocol::VERSION_PATH, version),
+        ("/api/rpc/get_state", state),
+    ]);
     let listener = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
     std::thread::spawn(move || {
@@ -478,11 +430,10 @@ fn verified_backend_fixture(
                     .split_whitespace()
                     .nth(1)
                     .unwrap();
-                let response_body = if path == desktop_core::protocol::VERSION_PATH {
-                    version.clone()
-                } else {
-                    format!("{{\"result\":{state}}}")
-                };
+                let response_body = responses
+                    .iter()
+                    .find_map(|(route, response)| (*route == path).then_some(response))
+                    .unwrap_or_else(|| panic!("unexpected request {path}"));
                 let body = response_body.as_bytes();
                 write!(
                     stream,
