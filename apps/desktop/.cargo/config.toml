@@ -1,0 +1,4 @@
+[target.'cfg(all(target_os = "windows", target_env = "msvc"))']
+# Cargo exposes crt-static to native build scripts so their C code uses /MT.
+# This also supplies the CRT for the Tauri shell in place of its linker override.
+rustflags = ["-C", "target-feature=+crt-static"]

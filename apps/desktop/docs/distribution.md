@@ -316,9 +316,20 @@ every 0.1.6 installation, read. In the beta feed it rewrites only `latest.json`.
 after stable desktop releases. It derives the package identifiers from the
 Tauri publisher and product name and uses the released x64 and ARM64 NSIS
 installers and CLI ZIPs. The portable manifest exposes `pap` and retains the
-service and helper executables next to it. When bootstrapping from a release that predates signed checksums, pass
-`--legacy` to `scripts/package-winget.mjs`. This also verifies each downloaded
-installer against the asset SHA-256 recorded by GitHub.
+service and helper executables next to it. The desktop Cargo workspace links the
+MSVC CRT statically. Windows packaging checks the CLI ZIP and the installed NSIS
+payload for Redistributable DLL imports. The Windows npm packages repack the
+same verified CLI binaries.
+
+The NSIS post-install hook gives CLI registration 30 seconds to complete. It
+suppresses Windows loader dialogs and releases the startup lock before finishing
+the installation. If registration fails, the installer details show how to
+retry with `private-ai-proxy cli install` from the installed executable.
+
+When bootstrapping from a release that predates signed checksums, pass
+`--legacy` to `scripts/package-winget.mjs`. It retains the legacy installers'
+Redistributable dependency and verifies each downloaded installer against the
+asset SHA-256 recorded by GitHub.
 
 The maintainer creates an organization-owned fork of
 [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs). Set

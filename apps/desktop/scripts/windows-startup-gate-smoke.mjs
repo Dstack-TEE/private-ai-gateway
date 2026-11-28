@@ -96,12 +96,36 @@ try {
   const nsisEnv = Object.fromEntries(Object.entries(env).filter(
     ([key]) => !["NSISDIR", "NSISCONFDIR"].includes(key.toUpperCase()),
   ));
-  await execute(makeNsis, [
+  const buildFixture = (output, defines = []) => execute(makeNsis, [
     `-DBUNDLEID=${identifier}`,
     `-DHOOKS_DIR=${path.join(appRoot, "src-tauri/installer")}`,
-    `-DOUTPUT=${fixture}`,
+    `-DOUTPUT=${output}`,
+    ...defines,
     path.join(appRoot, "src-tauri/installer/windows-startup-gate-fixture.nsi"),
   ], { env: nsisEnv, timeout: 20_000, windowsHide: true });
+  await buildFixture(fixture);
+
+  // Installation must complete for a missing, failing, or hung CLI.
+  const failedInstall = path.join(scratch, "failed-install");
+  const childPidFile = path.join(scratch, "registration-child-pid");
+  await mkdir(failedInstall);
+  const launchRegistration = (pidFile = "", timeout = 10_000) => execute(fixture, ["/S"], {
+    env: { ...env, PAP_TEST_CLI_DIR: failedInstall, PAP_TEST_CLI_PID: pidFile }, timeout, windowsHide: true,
+  });
+  await launchRegistration();
+  await buildFixture(path.join(failedInstall, "private-ai-proxy.exe"), ["-DPAP_CLI_STUB"]);
+  await launchRegistration();
+  try {
+    await launchRegistration(childPidFile, 40_000);
+    const child = Number(await readFile(childPidFile, "utf8"));
+    assert.ok(Number.isInteger(child) && child > 0);
+    assert.throws(() => process.kill(child, 0), { code: "ESRCH" });
+  } finally {
+    const child = Number(await readFile(childPidFile, "utf8").catch(() => ""));
+    if (child > 0) {
+      try { process.kill(child); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    }
+  }
 
   gate = spawn(fixture, ["/S"], { env, stdio: "ignore", windowsHide: true });
   await once(gate, "spawn");

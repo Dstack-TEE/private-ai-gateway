@@ -13,7 +13,7 @@ import { artifactName, desktopPackages } from "./release-artifacts.mjs";
 
 const hasZipTools = ["zip", "unzip"].every((command) => spawnSync(command, ["-v"]).status === 0);
 
-test("writes WinGet manifests with valid filenames, scope, and runtime dependencies", {
+test("writes WinGet filenames and scope and retains runtime dependencies for legacy releases", {
   skip: process.platform === "win32" || !hasZipTools,
 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "pap-winget-test-"));

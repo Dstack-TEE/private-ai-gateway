@@ -3,13 +3,34 @@ Name "Private AI Proxy startup gate fixture"
 OutFile "${OUTPUT}"
 SilentInstall silent
 RequestExecutionLevel user
+Var PassiveMode
 
 !include "LogicLib.nsh"
+
+!ifdef PAP_CLI_STUB
+Section
+  ReadEnvStr $0 "PAP_TEST_CLI_PID"
+  ${If} $0 != ""
+    FileOpen $1 "$0" w
+    System::Call 'kernel32::GetCurrentProcessId() i.r2'
+    FileWrite $1 "$2"
+    FileClose $1
+    Sleep 120000
+  ${EndIf}
+  SetErrorLevel 7
+SectionEnd
+!else
 !addincludedir "${HOOKS_DIR}"
 !include "windows.nsh"
 
 Section
+  StrCpy $PassiveMode 0
   !insertmacro PAP_ACQUIRE_STARTUP_LOCK
+  ReadEnvStr $INSTDIR "PAP_TEST_CLI_DIR"
+  ${If} $INSTDIR != ""
+    !insertmacro NSIS_HOOK_POSTINSTALL
+    Return
+  ${EndIf}
   ReadEnvStr $R4 "PAP_GATE_ACQUIRED"
   ClearErrors
   FileOpen $R5 "$R4" w
@@ -31,3 +52,4 @@ pap_gate_timeout:
 pap_gate_release:
   !insertmacro PAP_RELEASE_STARTUP_LOCK
 SectionEnd
+!endif

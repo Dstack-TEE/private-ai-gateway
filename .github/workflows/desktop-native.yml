@@ -527,6 +527,7 @@ jobs:
           if [[ '${{ matrix.cli_platform }}' == windows ]]; then
             native_tar="$(cygpath -u "$WINDIR")/System32/tar.exe"
             "$native_tar" -x -f "release/${base}.zip" -C "$scratch"
+            pwsh -NoProfile -File scripts/check-windows-crt.ps1 -Path "$(cygpath -w "$scratch/$base")"
           else
             tar -x -z -f "release/${base}.tar.gz" -C "$scratch"
           fi
@@ -642,7 +643,9 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
           }
           try {
+            & ./scripts/check-windows-crt.ps1 -Path $installers[0].FullName
             Run-Installer $installers[0].FullName "/S /D=$installDir"
+            & ./scripts/check-windows-crt.ps1 -Path $installDir
             if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
               $executables = @(Get-ChildItem "$installDir/*.exe" | Where-Object { $_.Name -ne 'uninstall.exe' })
               if ($executables.Count -ne 4) { throw "Expected four installed executables, found $($executables.Count)" }
