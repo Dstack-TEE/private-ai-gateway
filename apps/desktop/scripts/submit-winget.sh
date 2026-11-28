@@ -45,11 +45,6 @@ for installer in "${installers[@]}"; do
     continue
   fi
   existing="$(gh api --method GET "repos/$upstream/pulls" -f "head=$owner:$branch" -f state=open --jq '.[0].html_url // empty')"
-  if [[ -n "$existing" ]]; then
-    echo "$id $version already has an open pull request: $existing"
-    continue
-  fi
-
   branch_tip="$(gh api "repos/$fork/git/matching-refs/heads/$branch" \
     --jq ".[] | select(.ref == \"$ref\") | .object.sha")"
   if [[ -z "$branch_tip" ]]; then
@@ -69,13 +64,29 @@ for installer in "${installers[@]}"; do
     branch_tip="$("${git_command[@]}" rev-parse FETCH_HEAD)"
   fi
 
+  write_manifests=false
+  legacy_files=()
   if "${git_command[@]}" cat-file -e "$branch_tip:$relative" 2>/dev/null; then
-    # A previous run can leave a complete branch without an open PR.
     for manifest in "$directory"/*.yaml; do
       filename="$(basename -- "$manifest")"
       expected_blob="$("${git_command[@]}" hash-object --no-filters "$manifest")"
-      actual_blob="$("${git_command[@]}" rev-parse --verify "$branch_tip:$relative/$filename")"
-      [[ "$actual_blob" == "$expected_blob" ]]
+      actual_blob="$("${git_command[@]}" rev-parse --quiet --verify "$branch_tip:$relative/$filename" || true)"
+      legacy_blob=
+      if [[ "$filename" == "$id.locale."*.yaml ]]; then
+        legacy="$id.${filename#"$id.locale."}"
+        legacy_blob="$("${git_command[@]}" rev-parse --quiet --verify "$branch_tip:$relative/$legacy" || true)"
+        if [[ -n "$legacy_blob" ]]; then
+          if [[ "$legacy_blob" != "$expected_blob" ]]; then
+            echo "$fork:$branch has different content in $relative/$legacy" >&2
+            exit 1
+          fi
+          legacy_files+=("$relative/$legacy")
+        fi
+      fi
+      if [[ "$actual_blob" != "$expected_blob" && ( -n "$actual_blob" || -z "$legacy_blob" ) ]]; then
+        echo "$fork:$branch has a missing or different manifest at $relative/$filename" >&2
+        exit 1
+      fi
     done
   else
     if [[ "$branch_tip" != "$upstream_tip" ]]; then
@@ -84,14 +95,32 @@ for installer in "${installers[@]}"; do
       status="$(gh api "repos/$upstream/compare/$branch_tip...$upstream_tip" --jq .status)"
       [[ "$status" == ahead || "$status" == identical ]]
     fi
+    write_manifests=true
+  fi
+  message="Publish $id version $version"
+  if (( ${#legacy_files[@]} > 0 )); then
+    # The old branch uses the same blobs. Seed the sparse checkout from the
+    # local manifests so the blobless clone does not fetch them.
+    "${git_command[@]}" hash-object -w --no-filters "$directory"/*.yaml >/dev/null
+    message="Fix locale manifest filename for $id version $version"
+    write_manifests=true
+  fi
+  if [[ "$write_manifests" == true ]]; then
     "${git_command[@]}" sparse-checkout set --no-cone "/$relative/"
     "${git_command[@]}" switch --quiet --detach "$branch_tip"
+    if (( ${#legacy_files[@]} > 0 )); then
+      "${git_command[@]}" rm --quiet -- "${legacy_files[@]}"
+    fi
     mkdir -p "$scratch/checkout/$relative"
     cp -- "$directory"/*.yaml "$scratch/checkout/$relative/"
     "${git_command[@]}" add -- "$relative"
     "${git_command[@]}" -c "user.name=$author" -c "user.email=$author_email" \
-      commit --quiet -m "Publish $id version $version"
+      commit --quiet -m "$message"
     "${git_command[@]}" push --quiet fork "HEAD:$ref"
+  fi
+  if [[ -n "$existing" ]]; then
+    echo "$id $version already has an open pull request: $existing"
+    continue
   fi
 
   prior_versions="$("${git_command[@]}" ls-tree --name-only "$upstream_tip:${relative%/*}" 2>/dev/null || true)"
