@@ -114,7 +114,7 @@ mod tests {
         let current = current_user_sid().unwrap();
         let private = format!("(A;;FA;;;{current})");
         // FW includes READ_CONTROL. Deny only FILE_WRITE_DATA when exercising
-        // policy on a readable ACL; separately deny the inspector's read rights.
+        // policy on a readable ACL.
         for (name, acl, allowed) in [
             ("private", format!("D:P{private}"), true),
             (
@@ -125,9 +125,11 @@ mod tests {
             ("read", format!("D:P{private}(A;;FR;;;WD)"), true),
             ("write", format!("D:P{private}(A;;FW;;;WD)"), false),
             ("deny", format!("D:P(D;;0x00000002;;;WD){private}"), true),
+            // OWNER RIGHTS (OW) makes the READ_CONTROL (RC) denial apply
+            // even when the runner owns the file.
             (
                 "deny-inspection",
-                format!("D:P(D;;FRFW;;;WD){private}"),
+                format!("D:P(D;;RC;;;OW)(D;;RC;;;WD){private}"),
                 false,
             ),
             (
