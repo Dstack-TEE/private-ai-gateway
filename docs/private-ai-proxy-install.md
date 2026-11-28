@@ -167,28 +167,34 @@ rpmkeys -Kv "$rpm_file"
 
 Confirm that the signature reports `OK`, then run `sudo rpm -U "$rpm_file"`.
 
-For an Arch package, download the matching `.pkg.tar.zst.sig` into the same
-directory. Set `arch_file` to the package filename and `key_fingerprint` to
-the verified primary fingerprint. Verify the signature and add the key to
-pacman's local trust store before installing.
+For an Arch package, set `arch_file` to the downloaded package basename.
+Save its matching `.pkg.tar.zst.sig` as `$arch_file.sig.download` so pacman
+leaves verification to `gpgv`. Use the shipped keyring. For a first install or
+an upgrade from an older package without a keyring, use the keyring you created
+above from the verified public certificate.
 
 ```bash
-gpgv --keyring "$PWD/private-ai-proxy-archive-keyring.gpg" "$arch_file.sig" "$arch_file" &&
-  sudo pacman-key --add linux-signing-key.asc &&
-  sudo pacman-key --lsign-key "$key_fingerprint" &&
-  sudo pacman -U "$arch_file"
+keyring=/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg
+if [ ! -f "$keyring" ]; then
+  keyring="$PWD/private-ai-proxy-archive-keyring.gpg"
+fi
+gpgv --keyring "$keyring" "$arch_file.sig.download" "./$arch_file" &&
+  sudo pacman -U "./$arch_file"
 ```
 
-Use the signed checksum list to verify downloaded DEBs. The DEBs install the
-Linux release keyring at `/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg`
-for APT repository metadata verification.
+The commands use the default Arch policy that permits local installs after
+external verification. Use the signed checksum list to verify downloaded
+DEBs. DEBs also ship the binary keyring for APT repository metadata
+verification.
 
 ## Update
 
 | Installation | How to update |
 | --- | --- |
 | macOS or Linux install script | Run `pap update`. If a managed command link is missing from PATH, rerun the [installer](#macos-and-linux) with the original directories. |
-| Linux DEB, RPM, or Arch package | Use your package manager. Run `pap doctor` for available CLI package commands. For desktop packages, see [Updates by installation](../apps/desktop/docs/distribution.md#updates-by-installation). |
+| Linux DEB package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the APT commands. |
+| Linux RPM package | Desktop installs update from Settings > About. For CLI-only installs, run `pap update` or use `pap doctor` to see the RPM commands. The updater [reuses the registered key, imports the local certificate, or checks the fingerprint of a downloaded certificate](../apps/desktop/docs/distribution.md#linux-release-signing) before `rpm -U`. Older desktop RPMs may need a [manual upgrade](#verify-linux-packages) first. |
+| Linux Arch package | Follow Settings > About for desktop installs or run `pap update` for CLI-only installs. Download the package and detached signature, verify the signature with `gpgv` against the shipped keyring, then install the local file with `pacman -U`. For older packages without a keyring, follow [Verify Linux packages](#verify-linux-packages). |
 | npm | Run `pap update` on macOS or Linux. On Windows, stop the backend with `pap --yes service stop` and rerun the [npm install command](#npm). |
 | Homebrew | Run `brew upgrade dstack-tee/private-ai/private-ai-proxy` for the CLI or add `--cask` for the app. |
 | Windows PowerShell installer | Rerun the [installer](#windows) with the same `-InstallDir` if customized. |

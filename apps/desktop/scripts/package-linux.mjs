@@ -59,7 +59,7 @@ const linuxPackages = {
       deb: ["libayatana-appindicator3-1", "libwebkit2gtk-4.1-0", "libgtk-3-0"],
       rpm: ["libayatana-appindicator3.so.1()(64bit)", "libwebkit2gtk-4.1.so.0()(64bit)", "libgtk-3.so.0()(64bit)"],
       archlinux: [
-        "cairo", "dbus", "desktop-file-utils", "gdk-pixbuf2", "glib2", "glibc", "gtk3", "hicolor-icon-theme",
+        "cairo", "dbus", "desktop-file-utils", "gdk-pixbuf2", "glib2", "glibc", "gnupg", "gtk3", "hicolor-icon-theme",
         "libayatana-appindicator", "libgcc", "libsoup3", "pango", "webkit2gtk-4.1",
       ],
     },
@@ -70,7 +70,7 @@ const linuxPackages = {
     other: desktopName,
     provides: false,
     markers: ["deb", "rpm", "archlinux"],
-    depends: { deb: [], rpm: [], archlinux: ["glibc", "libgcc"] },
+    depends: { deb: [], rpm: [], archlinux: ["glibc", "gnupg", "libgcc"] },
   },
 };
 
@@ -121,6 +121,7 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, si
     rpm: `${definition.other} = ${versions.rpm}`,
     archlinux: `${definition.other}=${versions.arch}`,
   }[packager];
+  const archiveKeyring = "/usr/share/keyrings/private-ai-proxy-archive-keyring";
   return {
     name: definition.name,
     arch: arch === "x64" ? "amd64" : "arm64",
@@ -140,9 +141,9 @@ function nfpmConfig(kind, packager, { version, arch, contents, marker, mtime, si
     replaces: packager === "deb" ? [definition.other] : [],
     contents: [
       ...contents,
-      ...(packager === "deb" && signing ? [{
-        src: signing.keyring,
-        dst: "/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg",
+      ...(signing ? [{
+        src: packager === "rpm" ? signing.publicKey : signing.keyring,
+        dst: `${archiveKeyring}.${packager === "rpm" ? "asc" : "gpg"}`,
         file_info: { mode: 0o644 },
       }] : []),
       ...(marker ? [
@@ -165,17 +166,19 @@ async function releaseSigning() {
   if (!process.env.RELEASE_CHANNEL) return undefined;
   const {
     PAP_LINUX_SIGNING_KEY_FILE: keyFile,
+    PAP_LINUX_SIGNING_PUBLIC_KEY: publicKey,
     PAP_LINUX_SIGNING_KEYRING: keyring,
     PAP_LINUX_SIGNING_FINGERPRINT: fingerprint,
   } = process.env;
   if (!keyFile || !(await stat(keyFile).catch(() => undefined))?.isFile() || !/^[0-9A-F]{40}$/.test(fingerprint ?? "")) {
     throw new Error("Missing prepared Linux release signing key. Set LINUX_SIGNING_KEY in desktop-release.");
   }
-  if (!keyring || !(await stat(keyring).catch(() => undefined))?.isFile()) {
+  if (!keyring || !publicKey || !(await stat(keyring).catch(() => undefined))?.isFile()
+    || !(await stat(publicKey).catch(() => undefined))?.isFile()) {
     throw new Error("Missing Linux release keyring. Prepare it from packaging/linux-signing-key.asc.");
   }
   // nfpm accepts a 64-bit OpenPGP key ID, the last 16 digits of a v4 fingerprint.
-  return { keyFile, keyring, keyId: fingerprint.slice(-16) };
+  return { keyFile, publicKey, keyring, keyId: fingerprint.slice(-16) };
 }
 
 // Writes `<output>/<artifact name>` in every Linux format and returns the paths.

@@ -237,8 +237,9 @@ Unsigned Windows builds are valid release artifacts but may trigger stronger
 SmartScreen warnings. macOS direct-download builds are signed with a
 Developer ID certificate and notarized.
 
-Linux release RPMs carry embedded signatures. Arch packages ship detached
-`.pkg.tar.zst.sig` files, and DEBs install the archive keyring for APT.
+Linux release RPMs carry embedded signatures and install the armored public
+certificate. Arch releases ship detached `.pkg.tar.zst.sig` files. DEB and
+Arch packages install the binary keyring for APT or `gpgv`.
 See [Linux release signing](distribution.md#linux-release-signing) for the
 release order and key rotation procedure.
 
@@ -253,10 +254,7 @@ AppImage installations cannot automatically change bundle type and require a
 manual migration to a native package.
 
 Arch packages use the standard `.pkg.tar.zst` format for x86_64 and aarch64.
-Download the package and its matching `.pkg.tar.zst.sig` to the same directory
-and [trust the release key](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
-before installing or upgrading a desktop app package.
-
-```bash
-sudo pacman -U ./private-ai-proxy-<version>-linux-<arch>.pkg.tar.zst
-```
+Download the package and its matching signature, verify with `gpgv` and the
+release keyring, then install the local file with `sudo pacman -U`.
+The [install guide](../../../docs/private-ai-proxy-install.md#verify-linux-packages)
+has the commands for first installs and upgrades.

@@ -1,33 +1,45 @@
 use std::{
     io::{self, Write},
+    path::Path,
     process::{Command, ExitStatus, Stdio},
 };
 
-use desktop_core::updates::RPM_SIGNING_KEY_URL;
+use desktop_core::updates::prepare_rpm_signing_key;
 use tauri::utils::{config::BundleType, platform::bundle_type};
 
-const IMPORT_ARGS: [&str; 3] = ["rpm", "--import", RPM_SIGNING_KEY_URL];
+const IMPORT_ARGS: [&str; 2] = ["rpm", "--import"];
 
 pub(super) fn install(install_package: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     // Match Tauri's installer selection. The plugin owns its privileged package
     // installation, so importing a key can require a separate authorization.
-    install_for_bundle(bundle_type(), Command::new, install_package)
+    install_for_bundle(
+        bundle_type(),
+        || {
+            let scratch = tempfile::tempdir().map_err(|_| "Could not prepare the RPM update.")?;
+            if let Some(key) = prepare_rpm_signing_key(scratch.path())? {
+                import_rpm_key(&Command::new, &key)?;
+            }
+            Ok(())
+        },
+        install_package,
+    )
 }
 
 fn install_for_bundle(
     bundle: Option<BundleType>,
-    command: impl Fn(&'static str) -> Command,
+    prepare_rpm: impl FnOnce() -> Result<(), String>,
     install_package: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     if matches!(bundle, Some(BundleType::Rpm)) {
-        import_rpm_key(&command)?;
+        prepare_rpm()?;
     }
     install_package()
 }
 
-fn import_rpm_key(command: &impl Fn(&'static str) -> Command) -> Result<(), String> {
+fn import_rpm_key(command: &impl Fn(&'static str) -> Command, key: &Path) -> Result<(), String> {
     if command("pkexec")
         .args(IMPORT_ARGS)
+        .arg(key)
         .status()
         .is_ok_and(|status| status.success())
     {
@@ -59,13 +71,14 @@ fn import_rpm_key(command: &impl Fn(&'static str) -> Command) -> Result<(), Stri
             .map(|output| output.stdout)
     });
     if password.is_some_and(|password| {
-        sudo_with_password(command("sudo"), password).is_ok_and(|status| status.success())
+        sudo_with_password(command("sudo"), key, password).is_ok_and(|status| status.success())
     }) {
         return Ok(());
     }
 
     if command("sudo")
         .args(IMPORT_ARGS)
+        .arg(key)
         .status()
         .is_ok_and(|status| status.success())
     {
@@ -75,13 +88,18 @@ fn import_rpm_key(command: &impl Fn(&'static str) -> Command) -> Result<(), Stri
     }
 }
 
-fn sudo_with_password(mut sudo: Command, mut password: Vec<u8>) -> io::Result<ExitStatus> {
+fn sudo_with_password(
+    mut sudo: Command,
+    key: &Path,
+    mut password: Vec<u8>,
+) -> io::Result<ExitStatus> {
     if !password.ends_with(b"\n") {
         password.push(b'\n');
     }
     let mut child = sudo
         .arg("-S")
         .args(IMPORT_ARGS)
+        .arg(key)
         .stdin(Stdio::piped())
         .spawn()?;
     let sent = child
@@ -98,7 +116,9 @@ fn sudo_with_password(mut sudo: Command, mut password: Vec<u8>) -> io::Result<Ex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::Path};
+    use std::fs;
+
+    const KEY: &str = "/test/linux-signing-key.asc";
 
     fn recorder(
         log: &Path,
@@ -140,10 +160,11 @@ mod tests {
     fn imports_the_rpm_key_before_installing() {
         let scratch = tempfile::tempdir().unwrap();
         let log = scratch.path().join("commands");
-        install_for_bundle(Some(BundleType::Rpm), recorder(&log, "0", "1", ""), || {
+        let import = || import_rpm_key(&recorder(&log, "0", "1", ""), Path::new(KEY));
+        install_for_bundle(Some(BundleType::Rpm), import, || {
             assert_eq!(
                 fs::read_to_string(&log).unwrap(),
-                format!("pkexec rpm --import {RPM_SIGNING_KEY_URL}\n")
+                format!("pkexec rpm --import {KEY}\n")
             );
             Ok(())
         })
@@ -154,7 +175,8 @@ mod tests {
     fn installs_deb_without_an_rpm_key_import() {
         let scratch = tempfile::tempdir().unwrap();
         let log = scratch.path().join("commands");
-        install_for_bundle(Some(BundleType::Deb), recorder(&log, "1", "1", ""), || {
+        let import = || import_rpm_key(&recorder(&log, "1", "1", ""), Path::new(KEY));
+        install_for_bundle(Some(BundleType::Deb), import, || {
             assert!(!log.exists());
             Ok(())
         })
@@ -165,7 +187,8 @@ mod tests {
     fn does_not_install_when_rpm_key_import_fails() {
         let scratch = tempfile::tempdir().unwrap();
         let log = scratch.path().join("commands");
-        let error = install_for_bundle(Some(BundleType::Rpm), recorder(&log, "1", "1", ""), || {
+        let import = || import_rpm_key(&recorder(&log, "1", "1", ""), Path::new(KEY));
+        let error = install_for_bundle(Some(BundleType::Rpm), import, || {
             panic!("installation must wait for a successful import")
         })
         .unwrap_err();
@@ -174,17 +197,17 @@ mod tests {
             "Could not import the Private AI Proxy RPM signing key."
         );
         let commands = fs::read_to_string(&log).unwrap();
-        assert!(commands.ends_with(&format!("sudo rpm --import {RPM_SIGNING_KEY_URL}\n")));
+        assert!(commands.ends_with(&format!("sudo rpm --import {KEY}\n")));
     }
 
     #[test]
     fn can_import_with_graphical_sudo_when_pkexec_fails() {
         let scratch = tempfile::tempdir().unwrap();
         let log = scratch.path().join("commands");
-        let command = recorder(&log, "1", "0", "test password");
-        install_for_bundle(Some(BundleType::Rpm), command, || {
+        let import = || import_rpm_key(&recorder(&log, "1", "0", "test password"), Path::new(KEY));
+        install_for_bundle(Some(BundleType::Rpm), import, || {
             let commands = fs::read_to_string(&log).unwrap();
-            assert!(commands.ends_with(&format!("sudo -S rpm --import {RPM_SIGNING_KEY_URL}\n")));
+            assert!(commands.ends_with(&format!("sudo -S rpm --import {KEY}\n")));
             Ok(())
         })
         .unwrap();

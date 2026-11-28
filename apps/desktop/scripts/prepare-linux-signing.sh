@@ -36,12 +36,14 @@ if [[ ! "$fingerprint" =~ ^[0-9A-F]{40}$ ]]; then
 fi
 
 # Verify the signing subkey against the checked-in public key before packaging.
-"${gpg_command[@]}" --output "$signing/archive-keyring.gpg" --dearmor "$public_key"
+cp -- "$public_key" "$signing/archive-keyring.asc"
+"${gpg_command[@]}" --output "$signing/archive-keyring.gpg" --dearmor "$signing/archive-keyring.asc"
 "${gpg_command[@]}" --pinentry-mode loopback --passphrase '' --local-user "$fingerprint!" \
   --output "$signing/check.sig" --detach-sign /dev/null
 gpgv --homedir "$gnupg" --keyring "$signing/archive-keyring.gpg" "$signing/check.sig" /dev/null
 
 # Only paths and the public subkey fingerprint go into the workflow environment.
 printf 'PAP_LINUX_SIGNING_KEY_FILE=%s\n' "$signing/key.asc"
+printf 'PAP_LINUX_SIGNING_PUBLIC_KEY=%s\n' "$signing/archive-keyring.asc"
 printf 'PAP_LINUX_SIGNING_KEYRING=%s\n' "$signing/archive-keyring.gpg"
 printf 'PAP_LINUX_SIGNING_FINGERPRINT=%s\n' "$fingerprint"

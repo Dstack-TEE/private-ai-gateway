@@ -22,8 +22,48 @@ pub const RELEASE_FEED: Option<&str> = option_env!("TAURI_UPDATER_ENDPOINT");
 const INVALID_FEED: &str = "Updates are not configured correctly for this build";
 const PACKAGE_MANAGER_MARKER: &str = "/usr/share/private-ai-proxy/package-manager";
 
-/// Public certificate URL used by installed RPM updaters.
-pub const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
+const ARCH_KEYRING: &str = "/usr/share/keyrings/private-ai-proxy-archive-keyring.gpg";
+const RPM_SIGNING_KEY_URL: &str = "https://github.com/Dstack-TEE/private-ai-gateway/raw/main/apps/desktop/packaging/linux-signing-key.asc";
+const RPM_SIGNING_FINGERPRINT: &str = "18579A1441C5278FB2B1A943060C5C651FC46140";
+const RPM_SIGNING_KEY_FILE: &str = "/usr/share/keyrings/private-ai-proxy-archive-keyring.asc";
+// RPM 4 uses the primary fingerprint's low 32 bits and the creation time in hex.
+const RPM_SIGNING_KEY_PACKAGE: &str = "gpg-pubkey-1fc46140-6b0a7f59";
+const RPM_KEY_SCRIPT: &str = include_str!("updates/rpm-key.sh");
+
+fn rpm_key_command<'a>(mode: &'a str, argument: &'a str) -> [&'a str; 10] {
+    [
+        "sh",
+        "-c",
+        RPM_KEY_SCRIPT,
+        "pap-rpm-key",
+        RPM_SIGNING_FINGERPRINT,
+        RPM_SIGNING_KEY_PACKAGE,
+        RPM_SIGNING_KEY_FILE,
+        RPM_SIGNING_KEY_URL,
+        mode,
+        argument,
+    ]
+}
+
+/// Resolve a local RPM certificate, downloading and checking it if needed.
+/// A missing result means the certificate is already in the RPM keyring.
+#[cfg(target_os = "linux")]
+pub fn prepare_rpm_signing_key(scratch: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    let scratch = scratch
+        .to_str()
+        .ok_or("The update directory is not UTF-8")?;
+    let [program, arguments @ ..] = rpm_key_command("prepare", scratch);
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|_| "Could not check the Private AI Proxy RPM signing key.")?;
+    if !output.status.success() {
+        return Err("Could not download or verify the Private AI Proxy RPM signing key.".into());
+    }
+    let path = String::from_utf8(output.stdout)
+        .map_err(|_| "Could not read the Private AI Proxy RPM signing key path.")?;
+    Ok((!path.is_empty()).then(|| path.into()))
+}
 
 pub fn channel_name(channel: UpdateChannel) -> &'static str {
     match channel {
@@ -468,33 +508,39 @@ fn upgrade_steps(
     let stop = STOP_STEP.to_string();
     Ok(match installation {
         Installation::DesktopApp | Installation::SystemPackage => (Vec::new(), None),
-        Installation::DesktopPacman => (
-            vec![
-                stop,
-                command(&[
-                    "sudo",
-                    "pacman",
-                    "-U",
-                    &asset(&name(false, ".pkg.tar.zst"))?,
-                ])?,
-            ],
-            None,
-        ),
-        Installation::Pacman => (
-            vec![
-                stop,
-                command(&["sudo", "pacman", "-U", &asset(&name(true, ".pkg.tar.zst"))?])?,
-            ],
-            None,
-        ),
-        Installation::Rpm => (
-            vec![
-                stop,
-                command(&["sudo", "rpm", "--import", RPM_SIGNING_KEY_URL])?,
-                command(&["sudo", "rpm", "-U", &asset(&name(true, ".rpm"))?])?,
-            ],
-            None,
-        ),
+        Installation::DesktopPacman | Installation::Pacman => {
+            let file = name(installation == Installation::Pacman, ".pkg.tar.zst");
+            let signature = format!("{file}.sig");
+            // pacman checks an adjacent .sig against its own keyring. Give the
+            // download a different name so gpgv can verify it with our keyring.
+            let detached = format!("{signature}.download");
+            (
+                vec![
+                    stop,
+                    command(&["curl", "-fLO", &asset(&file)?])?,
+                    command(&["curl", "-fL", "-o", &detached, &asset(&signature)?])?,
+                    // Keep verification and installation in one step so copied
+                    // commands also refuse to install when verification fails.
+                    command(&[
+                        "sh",
+                        "-c",
+                        r#"gpgv --keyring "$1" "$2" "$3" && sudo pacman -U "$3""#,
+                        "pap-arch-update",
+                        ARCH_KEYRING,
+                        &detached,
+                        &format!("./{file}"),
+                    ])?,
+                ],
+                None,
+            )
+        }
+        Installation::Rpm => {
+            let package = asset(&name(true, ".rpm"))?;
+            (
+                vec![stop, command(&rpm_key_command("install", &package))?],
+                None,
+            )
+        }
         Installation::Deb => {
             let file = name(true, ".deb");
             (
@@ -691,15 +737,51 @@ mod tests {
             (Vec::new(), None)
         );
         if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            for (installation, file) in [
+                (
+                    Installation::DesktopPacman,
+                    "private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst",
+                ),
+                (
+                    Installation::Pacman,
+                    "private-ai-proxy-cli-0.1.8-beta.2-linux-x64.pkg.tar.zst",
+                ),
+            ] {
+                let (commands, _) = upgrade_steps(installation, root, "0.1.8-beta.2");
+                assert_eq!(
+                    commands[..3],
+                    [
+                        STOP_STEP.to_string(),
+                        format!("curl -fLO {root}desktop-v0.1.8-beta.2/{file}"),
+                        format!("curl -fL -o {file}.sig.download {root}desktop-v0.1.8-beta.2/{file}.sig"),
+                    ]
+                );
+                let install = shlex::split(&commands[3]).unwrap();
+                assert_eq!(
+                    install[2],
+                    r#"gpgv --keyring "$1" "$2" "$3" && sudo pacman -U "$3""#
+                );
+                assert_eq!(
+                    install[4..],
+                    [
+                        ARCH_KEYRING.to_string(),
+                        format!("{file}.sig.download"),
+                        format!("./{file}")
+                    ]
+                );
+            }
+            let (rpm, _) = upgrade_steps(Installation::Rpm, root, "0.1.8");
+            let rpm = shlex::split(&rpm[1]).unwrap();
+            assert_eq!(rpm[2], RPM_KEY_SCRIPT);
             assert_eq!(
-                upgrade_steps(Installation::DesktopPacman, root, "0.1.8-beta.2").0[1],
-                "sudo pacman -U https://example.test/o/r/releases/download/desktop-v0.1.8-beta.2/private-ai-proxy-0.1.8-beta.2-linux-x64.pkg.tar.zst"
-            );
-            assert_eq!(
-                upgrade_steps(Installation::Rpm, root, "0.1.8").0[1..],
+                rpm[4..],
                 [
-                    format!("sudo rpm --import {RPM_SIGNING_KEY_URL}"),
-                    "sudo rpm -U https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.rpm".to_string(),
+                    RPM_SIGNING_FINGERPRINT,
+                    RPM_SIGNING_KEY_PACKAGE,
+                    RPM_SIGNING_KEY_FILE,
+                    RPM_SIGNING_KEY_URL,
+                    "install",
+                    "https://example.test/o/r/releases/download/desktop-v0.1.8/private-ai-proxy-cli-0.1.8-linux-x64.rpm",
                 ]
             );
             assert_eq!(
