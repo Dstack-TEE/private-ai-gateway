@@ -107,8 +107,13 @@ CI, or `--run` for a completed `desktop-native.yml` package-only workflow run.
 Both paths verify `SHA256SUMS` or the GitHub artifact digest before
 installation. Keep `--tag` for a published release. The install-script and
 nvm/npm rows are tag-only because package-only artifacts do not contain the
-published install script or npm package. The signed-update step is reported
-as skipped because it requires a release signed for the build under test.
+published install script or npm package. Native rows rely on the package
+manager's removal hook for cleanup. The script and npm rows follow the
+manual uninstall sequence, starting with `pap --yes service disable
+--for-uninstall`. All rows check that uninstall removes the user service and
+command links and restores the OpenCode configuration. The signed-update step
+is reported as skipped because it requires a release signed for the build
+under test.
 
 ## Versions
 

@@ -13,7 +13,7 @@ uid="$(id -u tester)"
 case "$row" in
   ubuntu-deb-opencode|fedora-rpm-bun|arch-pacman-opencode) pap=/usr/bin/pap ;;
   ubuntu-script-npm) pap=/home/tester/.local/bin/pap ;;
-  ubuntu-npm-nvm) pap="$(find /home/tester/.nvm/versions/node -path '*/bin/pap' -type f -print -quit)" ;;
+  ubuntu-npm-nvm) pap="$(find /home/tester/.nvm/versions/node -path '*/bin/pap' -print -quit)" ;;
 esac
 test -x "$pap"
 agent_path=/home/tester/.local/bin:/home/tester/.npm-global/bin:/home/tester/.opencode/bin:/home/tester/.bun/bin:/usr/local/bin:/usr/bin:/bin
@@ -178,9 +178,14 @@ echo "[$row] update"
 echo "SKIPPED update: no older package was supplied for this run"
 
 echo "[$row] uninstall"
-check "$pap" service disable --yes
-check "$pap" service stop --yes
-check "$pap" stop --offline --yes
+case "$row" in
+  ubuntu-script-npm|ubuntu-npm-nvm)
+    check "$pap" --yes service disable --for-uninstall
+    check "$pap" --yes service stop
+    check "$pap" --yes stop --offline
+    ;;
+esac
+# The native package managers run the per-user cleanup in the removal hook.
 case "$row" in
   ubuntu-deb-opencode) apt-get remove -y private-ai-proxy-cli >/dev/null ;;
   fedora-rpm-bun) dnf remove -y private-ai-proxy-cli >/dev/null ;;
@@ -188,18 +193,26 @@ case "$row" in
   ubuntu-script-npm) rm -f /home/tester/.local/bin/{pap,aci,private-ai-proxy}; rm -rf /home/tester/.local/share/private-ai-proxy-custom ;;
   ubuntu-npm-nvm) check npm uninstall --global private-ai-proxy >/dev/null ;;
 esac
-if userctl is-active "$unit" >/dev/null 2>&1; then
-  echo "service remains active after uninstall" >&2
+active_state="$(userctl show "$unit" --property=ActiveState --value)"
+if [[ "$active_state" != inactive ]]; then
+  echo "Expected an inactive service after uninstall, got $active_state" >&2
   exit 1
 fi
-test ! -e /usr/lib/systemd/user/$unit
-test ! -e /home/tester/.config/systemd/user/$unit
-for link in pap aci private-ai-proxy; do
-  test ! -e "/home/tester/.local/bin/$link"
+for unit_path in "/usr/lib/systemd/user/$unit" "/home/tester/.config/systemd/user/$unit" \
+  "/home/tester/.config/systemd/user/default.target.wants/$unit"; do
+  if [[ -e "$unit_path" || -L "$unit_path" ]]; then
+    echo "Uninstall left unit file or link $unit_path" >&2
+    exit 1
+  fi
 done
-case "$row" in
-  ubuntu-deb-opencode|fedora-rpm-bun|arch-pacman-opencode) test ! -e /usr/bin/pap ;;
-esac
+for bin_dir in /home/tester/.local/bin "${pap%/*}"; do
+  for link in pap aci private-ai-proxy; do
+    if [[ -e "$bin_dir/$link" || -L "$bin_dir/$link" ]]; then
+      echo "Uninstall left command or link $bin_dir/$link" >&2
+      exit 1
+    fi
+  done
+done
 test ! -e /home/tester/.local/share/private-ai-proxy-custom
 if [[ -d /home/tester/.nvm/versions/node ]] && find /home/tester/.nvm/versions/node -path '*/bin/pap' -print -quit | grep -q .; then
   echo "npm installation left a pap link" >&2
