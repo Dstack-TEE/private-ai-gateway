@@ -383,6 +383,9 @@ impl Backend {
         }
         let mut command = Command::new(binary("private-ai-proxy-service"));
         Self::isolate_backend_environment(&mut command, &home, native_paths);
+        if native_paths {
+            command.arg("--supervised");
+        }
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())

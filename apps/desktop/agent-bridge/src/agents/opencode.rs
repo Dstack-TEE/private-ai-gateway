@@ -93,7 +93,7 @@ impl OpenCodeVersion {
 }
 
 fn validate_opencode_executable(path: &Path) -> io::Result<PathBuf> {
-    environment::trusted_path(path, false)?;
+    environment::trusted_path(path, true)?;
     if !is_opencode_executable(path) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }

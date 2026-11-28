@@ -3,7 +3,7 @@ use desktop_core::paths::agent_environment::{
     forwarded_sources, sensitive, AgentEnvironment, DSH_HOME, HERMES_HOME, OMP_PROFILE,
     OPENCLAW_NIX_MODE, OPENCLAW_PROFILE, PATH, PI_CODING_AGENT_DIR, PI_CONFIG_DIR, PI_PROFILE,
 };
-use std::{borrow::Cow, ffi::OsString, path::Component};
+use std::{borrow::Cow, ffi::OsString};
 
 /// Look up configuration without changing the backend process environment.
 #[derive(Clone)]
@@ -43,11 +43,11 @@ impl ToolEnvironment {
         self.value(PATH)
             .filter(|_| matches!(self, Self::Client(_)))
             .into_iter()
-            .flat_map(|path| trusted_search_paths(&path))
+            .flat_map(|path| absolute_search_paths(&path))
             .chain(
                 env::var_os(PATH)
                     .into_iter()
-                    .flat_map(|path| trusted_search_paths(&path)),
+                    .flat_map(|path| absolute_search_paths(&path)),
             )
     }
 
@@ -78,9 +78,14 @@ impl ToolEnvironment {
                 },
                 _ => PathBuf::from(value),
             };
-            trusted_path(&path, true).map_err(|_| {
-                format!("{name} must select an absolute path owned by you or the system and protected from public writes")
-            })?;
+            match trusted_path(&path, false) {
+                Ok(_) => {}
+                // The agent's directory or config file may not exist yet.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(format!(
+                    "{name} must select an absolute path owned by you or the system and protected from public writes"
+                )),
+            }
         }
         Ok(())
     }
@@ -110,7 +115,7 @@ impl Projector {
         };
         let mut environment = environment.as_ref().clone();
         if let Some(path) = environment.get_mut(PATH) {
-            *path = env::join_paths(trusted_search_paths(path.as_ref()))
+            *path = env::join_paths(absolute_search_paths(path.as_ref()))
                 .ok()
                 .and_then(|path| path.into_string().ok())
                 .unwrap_or_default();
@@ -119,48 +124,50 @@ impl Projector {
     }
 }
 
-fn trusted_search_paths(path: &std::ffi::OsStr) -> Vec<PathBuf> {
+fn absolute_search_paths(path: &std::ffi::OsStr) -> Vec<PathBuf> {
     env::split_paths(path)
-        .filter(|dir| dir.is_dir())
-        .filter_map(|dir| {
-            let resolved = trusted_path(&dir, false).ok()?;
-            Some(if cfg!(windows) { dir } else { resolved })
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| {
+            if cfg!(windows) {
+                dir
+            } else {
+                // Keep version manager paths usable after per-shell links vanish.
+                dir.canonicalize().unwrap_or(dir)
+            }
         })
         .collect()
 }
 
-/// Inspect the existing part of a supplied path, including both sides of
-/// directory symlinks. Agent configs may be created by the first connection.
-pub(super) fn trusted_path(path: &Path, allow_missing: bool) -> io::Result<PathBuf> {
+/// Check the selected path itself. Executable probes also keep the original
+/// protection against public writes to directories that can replace the file.
+pub(super) fn trusted_path(path: &Path, check_ancestors: bool) -> io::Result<PathBuf> {
     let invalid = || io::Error::from(io::ErrorKind::PermissionDenied);
-    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+    if !path.is_absolute() {
         return Err(invalid());
     }
-    let mut existing = path;
-    let resolved = loop {
-        match fs::symlink_metadata(existing) {
-            Ok(_) => break existing.canonicalize()?,
-            Err(error) if allow_missing && error.kind() == io::ErrorKind::NotFound => {
-                existing = existing.parent().ok_or_else(invalid)?;
-            }
-            Err(error) => return Err(error),
-        }
+    let resolved = path.canonicalize()?;
+    let ancestors = || {
+        let parent = path.parent().ok_or_else(invalid)?.canonicalize()?;
+        let normalized = parent.join(path.file_name().ok_or_else(invalid)?);
+        Ok::<_, io::Error>([path.to_path_buf(), resolved.clone(), normalized])
     };
-    let parent = existing.parent().map(Path::canonicalize).transpose()?;
-    let normalized = match (parent, existing.file_name()) {
-        (Some(parent), Some(name)) => parent.join(name),
-        _ => resolved.clone(),
-    };
-    let paths = [existing, resolved.as_path(), normalized.as_path()];
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         // SAFETY: geteuid has no preconditions.
         let user = unsafe { libc::geteuid() };
-        for path in paths.into_iter().flat_map(Path::ancestors) {
-            let metadata = fs::metadata(path)?;
-            if ![user, 0].contains(&metadata.uid()) || metadata.mode() & 0o002 != 0 {
-                return Err(invalid());
+        let metadata = fs::metadata(&resolved)?;
+        if ![user, 0].contains(&metadata.uid()) || metadata.mode() & 0o002 != 0 {
+            return Err(invalid());
+        }
+        if check_ancestors {
+            for dir in ancestors()?
+                .iter()
+                .flat_map(|path| path.ancestors().skip(1))
+            {
+                if fs::metadata(dir)?.mode() & 0o002 != 0 {
+                    return Err(invalid());
+                }
             }
         }
     }
@@ -201,23 +208,28 @@ pub(super) fn trusted_path(path: &Path, allow_missing: bool) -> io::Result<PathB
         {
             return Err(invalid());
         }
-        for dir in paths.into_iter().flat_map(|path| path.ancestors().skip(1)) {
-            if dir.as_os_str().is_empty() {
-                continue;
-            }
-            if writes(
-                &acl(dir)?,
-                COMMON_WRITE | FILE_ADD_FILE | FILE_DELETE_CHILD,
-                &|sid| {
-                    matches!(
-                        sid,
-                        "S-1-1-0" | "S-1-5-11" | "S-1-5-32-545" | "S-1-5-32-546"
-                    )
-                },
-            ) {
-                return Err(invalid());
+        if check_ancestors {
+            for dir in ancestors()?
+                .iter()
+                .flat_map(|path| path.ancestors().skip(1))
+            {
+                if dir.as_os_str().is_empty() {
+                    continue;
+                }
+                if writes(
+                    &acl(dir)?,
+                    COMMON_WRITE | FILE_ADD_FILE | FILE_DELETE_CHILD,
+                    &|sid| {
+                        matches!(
+                            sid,
+                            "S-1-1-0" | "S-1-5-11" | "S-1-5-32-545" | "S-1-5-32-546"
+                        )
+                    },
+                ) {
+                    return Err(invalid());
+                }
             }
         }
     }
-    Ok(resolved.join(path.strip_prefix(existing).map_err(|_| invalid())?))
+    Ok(resolved)
 }

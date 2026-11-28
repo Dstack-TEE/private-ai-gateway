@@ -505,15 +505,30 @@ fn agents_connect_starts_protection_only_with_consent_and_outside_dry_run() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn agents_preview_uses_the_client_config_path() {
+fn listing_and_preview_show_the_client_config_path_under_supervision() {
     let backend = Backend::start_in("", true);
-    // Forwarded overrides must be outside world-writable directories.
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
-    let custom = root.path().join("custom-codex");
+    let custom = backend.directory.path().join("custom-codex");
     let native = "model = 'native'\n";
     fs::create_dir_all(&custom).unwrap();
     let config = custom.join("config.toml");
     fs::write(&config, native).unwrap();
+    assert_eq!(backend.run(&["status"])["backend"]["supervised"], true);
+
+    let list = backend
+        .command(&["agents", "list", "--json"])
+        .env("CODEX_HOME", &custom)
+        .output()
+        .unwrap();
+    assert_success(&list);
+    let statuses: Vec<Value> = serde_json::from_slice(&list.stdout).unwrap();
+    let codex = statuses
+        .iter()
+        .find(|agent| agent["id"] == "codex")
+        .unwrap();
+    assert_eq!(codex["installed"], true);
+    assert_eq!(codex["configPath"], config.to_str().unwrap());
+    assert_eq!(codex["configPathSource"], "CODEX_HOME");
+
     let preview = backend
         .command(&["agents", "connect", "codex", "--dry-run", "--json"])
         .env("CODEX_HOME", &custom)
@@ -678,6 +693,15 @@ fn assert_desktop_follower(scenario: FollowerScenario) {
     let ready = sandbox.join("follower.ready");
     let fixture = sandbox.join("desktop-follower");
     let home = sandbox.join("home");
+    let shell = sandbox.join("shell");
+    let shell_started = sandbox.join("shell-started");
+    fs::write(
+        &shell,
+        "#!/bin/sh\nprintf started > \"$PAP_TEST_SHELL_STARTED\"\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
     support::install(std::env::current_exe().unwrap().to_str().unwrap(), &fixture);
     let mut follower = std::process::Command::new(fixture)
         .args([
@@ -687,6 +711,11 @@ fn assert_desktop_follower(scenario: FollowerScenario) {
             "--nocapture",
         ])
         .env("PAP_TEST_FOLLOW_READY", &ready)
+        .env("SHELL", &shell)
+        .env("PAP_TEST_SHELL_STARTED", &shell_started)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .env(desktop_core::paths::HOME_OVERRIDE_ENV, &home)
         .spawn()
         .unwrap();
@@ -696,6 +725,10 @@ fn assert_desktop_follower(scenario: FollowerScenario) {
             loop {
                 if let Ok(instance) = fs::read_to_string(&ready) {
                     if !instance.is_empty() && instance != previous {
+                        assert!(
+                            !shell_started.exists(),
+                            "Backend attachment ran the login shell"
+                        );
                         return instance;
                     }
                 }

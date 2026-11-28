@@ -62,8 +62,10 @@ configuration overrides, such as `CODEX_HOME`. The backend validates and
 saves them with that connection so it can resume after a restart or login.
 Reconnect from the environment you want to use if you change these settings.
 If the configuration file moves, disconnect first so PAP can restore the
-old file. The desktop app on Linux and direct macOS reads the login shell
-environment at startup when opened outside a terminal.
+old file. `pap agents list` uses your shell's overrides to discover agents
+that have no saved connection. On Linux and direct macOS, the desktop app
+reads the login shell once when it first needs agent settings after a
+graphical launch.
 
 PAP compares only the presence of `OPENCODE_CONFIG_CONTENT` and
 `PRIVATE_AI_PROXY_DSH_TOKEN`. A mismatch blocks connection. For a systemd

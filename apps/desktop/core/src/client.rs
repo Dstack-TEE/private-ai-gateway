@@ -336,7 +336,6 @@ impl Client {
             let Some(client) = weak.upgrade() else {
                 return;
             };
-            client.agent_environment();
             before_start(&client);
             match Self::ensure_service_in_mode(StartMode::AppStartup)
                 .and_then(|_| client.state().map_err(String::from))
@@ -594,7 +593,9 @@ impl Client {
             } => Some(Agent::from_id(agent_id)?),
             _ => None,
         };
-        let inspect = matches!(command, Command::ListAgents {}) && self.desktop;
+        let inspect = matches!(command, Command::ListAgents {});
+        // Only agent requests need the shell snapshot. Backend startup and
+        // state updates can proceed independently of the login shell.
         let environment = (connecting.is_some() || inspect).then(|| self.agent_environment());
         block_on(async {
             let mut connection = open_current().await?;

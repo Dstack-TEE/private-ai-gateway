@@ -411,7 +411,7 @@ fn client_paths_are_scoped_and_validated_before_projection() {
 
     let mut sandbox = sandbox("agent-environment");
     sandbox.projector.tool_env = ToolEnvironment::Process;
-    let root = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("codex");
     let path = dir.join("config.toml");
     write(&path, "model = 'native'\n");
@@ -437,9 +437,9 @@ fn client_paths_are_scoped_and_validated_before_projection() {
         path.to_str().unwrap()
     );
 
-    for (name, value) in [
-        (CODEX_HOME, "relative"),
-        (OPENCODE_CONFIG_CONTENT, "inline"),
+    for (agent, name, value) in [
+        (Agent::Codex, CODEX_HOME, "relative"),
+        (Agent::OpenCode, OPENCODE_CONFIG_CONTENT, "inline"),
     ] {
         assert!(matches!(
             sandbox
@@ -537,10 +537,15 @@ fn opencode_installed_major_moves_only_the_journaled_provider() {
     });
     write(&config, &original.to_string());
     let catalog = catalog();
+    let shell = tempfile::tempdir().unwrap();
     let options = ConnectOptions {
         environment: (location == "client-path").then(|| {
+            // Some version managers expose their bin directory through a
+            // per-shell link in a shared temporary directory.
+            let shell_bin = shell.path().join("bin");
+            std::os::unix::fs::symlink(&bin, &shell_bin).unwrap();
             BTreeMap::from([
-                ("PATH".into(), bin.to_str().unwrap().into()),
+                ("PATH".into(), shell_bin.to_str().unwrap().into()),
                 (
                     "XDG_CONFIG_HOME".into(),
                     config
