@@ -466,6 +466,7 @@ fn digest(bytes: &[u8]) -> String {
 fn options(model: Option<&str>) -> ConnectOptions {
     ConnectOptions {
         default_model: model.map(str::to_string),
+        ..ConnectOptions::default()
     }
 }
 

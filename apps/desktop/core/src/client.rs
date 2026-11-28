@@ -29,6 +29,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::{
+    agents::{AgentPreview, ConnectOptions},
     contracts::AppState,
     protocol::{self, rpc, Call, Command, ErrorCode, ShutdownMode, Version},
     sse::DataLines,
@@ -529,9 +530,57 @@ impl Client {
     }
 
     /// Runs one command and returns its result as sent.
-    pub fn execute(&self, command: Command) -> Result<Value, CallError> {
+    pub fn execute(&self, mut command: Command) -> Result<Value, CallError> {
+        match &mut command {
+            Command::PreviewAgent {
+                agent_id,
+                connect,
+                options,
+            }
+            | Command::ApplyAgent {
+                agent_id,
+                connect,
+                options,
+                ..
+            } => {
+                options.supply_opencode_executable(agent_id, *connect);
+            }
+            _ => {}
+        }
         block_on(async {
             let mut connection = open_current().await?;
+            if let Command::SetAgentConnection { agent_id, connect } = &command {
+                let mut options = ConnectOptions::default();
+                options.supply_opencode_executable(agent_id, *connect);
+                if options.opencode_executable.is_some() {
+                    // Use the owner-only RPCs when the local desktop has a
+                    // path to pass. Browser connections keep the single RPC.
+                    let preview = connection
+                        .call(
+                            &rpc::PreviewAgent {
+                                agent_id: agent_id.clone(),
+                                connect: *connect,
+                                options: options.clone(),
+                            }
+                            .into(),
+                        )
+                        .await?;
+                    let preview: AgentPreview = serde_json::from_value(preview).map_err(|_| {
+                        CallError::Local("Unexpected management response shape".into())
+                    })?;
+                    return connection
+                        .call(
+                            &rpc::ApplyAgent {
+                                agent_id: agent_id.clone(),
+                                connect: *connect,
+                                revision: preview.revision,
+                                options,
+                            }
+                            .into(),
+                        )
+                        .await;
+                }
+            }
             connection.call(&command).await
         })?
     }

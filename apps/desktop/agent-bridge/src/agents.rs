@@ -472,11 +472,20 @@ impl Projector {
         if connect && read_error.is_some() {
             return Err(AgentError::ConfigurationRead);
         }
+        let prior = self.current_record(agent, store.get(agent.id()));
+        let executable = self.opencode_executable(agent, connect, options, prior)?;
+        let connection = self.connection_catalog(agent, connect, catalog, executable.as_deref());
         let mut restore_problem = path.as_ref().err().cloned();
         let edit = match self.parse_config(agent, text.as_deref()) {
             _ if !connect && path.is_err() => Edit::default(),
             Ok(_) if connect && catalog.is_none() => Edit::default(),
-            Ok(mut doc) => match self.edit(agent, connect, &mut doc, &store, catalog, options) {
+            Ok(mut doc) => match self.edit(
+                agent,
+                &mut doc,
+                &store,
+                connection.filter(|_| connect),
+                options,
+            ) {
                 Ok(edit) => edit,
                 Err(error) if !connect && store.contains_key(agent.id()) => {
                     restore_problem = Some(error.to_string());
@@ -492,23 +501,29 @@ impl Projector {
             }
             Err(error) => return Err(error),
         };
+        let mut note = restore_problem.map_or_else(
+            || agent.note(connect).to_string(),
+            |reason| format!("Access will be revoked before restoration is attempted. {reason}"),
+        );
+        if agent == Agent::OpenCode
+            && connect
+            && self.tool_env
+            && connection.is_some_and(|connection| connection.opencode_version.is_none())
+        {
+            note.push_str(" PAP could not read the installed OpenCode version and chose the provider shape from the config file.");
+        }
         Ok(AgentPreview {
             agent: self.status(agent, &store, catalog),
             connect,
             changes: edit.changes,
-            note: restore_problem.map_or_else(
-                || agent.note(connect).to_string(),
-                |reason| {
-                    format!("Access will be revoked before restoration is attempted. {reason}")
-                },
-            ),
+            note,
             revision: revision(
                 agent,
                 connect,
                 path.as_deref().ok(),
                 text.as_deref(),
                 store.get(agent.id()),
-                catalog,
+                connection,
                 options,
             ),
         })
@@ -591,7 +606,7 @@ fn revision(
     path: Option<&Path>,
     text: Option<&str>,
     record: Option<&Connection>,
-    catalog: Option<&Catalog>,
+    connection: Option<ConnectionCatalog<'_>>,
     options: &ConnectOptions,
 ) -> String {
     let mut hasher = Sha256::new();
@@ -616,8 +631,8 @@ fn revision(
             .as_bytes(),
     );
     part(
-        catalog
-            .map_or("", |catalog| catalog.revision.as_str())
+        connection
+            .map_or("", |connection| connection.catalog.revision.as_str())
             .as_bytes(),
     );
     part(
@@ -627,6 +642,17 @@ fn revision(
             .unwrap_or_default()
             .as_bytes(),
     );
+    if let Some(version) = connection.and_then(|connection| connection.opencode_version) {
+        part(match version {
+            OpenCodeVersion::V1 => b"1",
+            OpenCodeVersion::V2 => b"2",
+        });
+    }
+    if agent == Agent::OpenCode && connect {
+        if let Some(executable) = &options.opencode_executable {
+            part(executable.as_os_str().as_encoded_bytes());
+        }
+    }
     hex::encode(hasher.finalize())
 }
 

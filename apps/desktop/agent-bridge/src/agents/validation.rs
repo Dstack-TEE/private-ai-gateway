@@ -115,13 +115,12 @@ impl Projector {
     pub(super) fn edit(
         &self,
         agent: Agent,
-        connect: bool,
         doc: &mut ConfigDoc,
         store: &Store,
-        catalog: Option<&Catalog>,
+        connection: Option<ConnectionCatalog<'_>>,
         options: &ConnectOptions,
     ) -> Result<Edit, AgentError> {
-        if !connect {
+        let Some(connection) = connection else {
             let record = store.get(agent.id()).ok_or(AgentError::InvalidState)?;
             let mut edit = restore(agent, doc, record, self.secrets.as_ref())?;
             if let Some(journal) = &record.selection {
@@ -139,10 +138,8 @@ impl Projector {
                 }
             }
             return Ok(edit);
-        }
-        if catalog.is_none() {
-            return Err(AgentError::InvalidState);
-        }
+        };
+        let catalog = Some(connection.catalog);
         let prior = self.current_record(agent, store.get(agent.id()));
         if agent == Agent::OpenClaw {
             openclaw::validate_host(&self.home, self.tool_env)
@@ -166,27 +163,8 @@ impl Projector {
             options: &options,
         };
         let mut fields = fields(agent, &inputs)?;
-        if agent == Agent::OpenCode && self.opencode_v2_config(doc) {
-            if let Some(field) = fields
-                .iter_mut()
-                .find(|field| field.path == ["provider", "private-ai-proxy"])
-            {
-                if let Some(ConfigValue::Json(provider)) = field.value.take() {
-                    field.path = owned(&["providers", "private-ai-proxy"]);
-                    field.value = Some(ConfigValue::Json(opencode_provider_v2(
-                        &provider,
-                        catalog.ok_or(AgentError::InvalidState)?,
-                    )));
-                }
-            }
-            if prior.is_some_and(|record| {
-                record
-                    .fields
-                    .iter()
-                    .any(|field| field.path == owned(&["provider", "private-ai-proxy"]))
-            }) {
-                fields.push(absent(&["provider", "private-ai-proxy"]));
-            }
+        if agent == Agent::OpenCode {
+            project_opencode_shape(&mut fields, doc, prior, connection);
         }
         let mut edit = project(doc, &fields, prior, agent).map_err(|reason| {
             AgentError::ConfigurationConflict(if agent.format() == Format::YamlList {
@@ -333,12 +311,8 @@ impl Projector {
     }
 
     /// OpenCode 1.18.29+ deep-merges these process-level sources in order.
-    /// OpenCode 2 reads the same V1 files and normalizes them in memory, but
-    /// its native `providers` entry overlays the V1 `provider` one we write,
-    /// so no source may define `providers.private-ai-proxy`. The projection
-    /// keeps writing V1 keys for OpenCode 1 compatibility.
-    /// Keep the original write/restore path: selecting JSONC instead would
-    /// strand old connection journals, and our JSON writer edits strict JSON only.
+    /// OpenCode 2 also normalizes legacy and native provider entries, so
+    /// only the projected shape may define `private-ai-proxy` across them.
     /// Project/managed/remote sources need CLI context; references stay opaque
     /// here so inspection never reads an API key file or executes anything.
     pub(super) fn check_opencode_merge(&self, doc: &ConfigDoc) -> Result<(), String> {
@@ -515,14 +489,6 @@ impl Projector {
             }
         }
         matches(pattern.as_bytes(), value.as_bytes())
-    }
-
-    fn opencode_v2_config(&self, doc: &ConfigDoc) -> bool {
-        doc.contains(&["providers"])
-            || doc.contains(&["policies"])
-            || doc
-                .get_str(&["$schema"])
-                .is_some_and(|schema| schema.contains("/v2/"))
     }
 
     pub(super) fn merged_opencode_selector(

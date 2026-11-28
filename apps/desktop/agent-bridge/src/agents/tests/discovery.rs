@@ -1215,6 +1215,7 @@ fn omp_enabled_models_treat_non_chat_matches_as_advisory() {
         &catalog,
         &ConnectOptions {
             default_model: Some("phala/qwen".into()),
+            ..ConnectOptions::default()
         },
     );
     assert!(

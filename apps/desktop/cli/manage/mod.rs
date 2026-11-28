@@ -707,6 +707,7 @@ fn agent_change(
 ) -> Result<Value, CallError> {
     let options = ConnectOptions {
         default_model: model,
+        ..ConnectOptions::default()
     };
     if dry_run {
         return value(client.call(rpc::PreviewAgent {

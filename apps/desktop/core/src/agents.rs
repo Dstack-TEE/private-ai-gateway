@@ -1,6 +1,11 @@
 //! Supported coding agents and the agent shapes shared by every client. How
 //! each agent is detected and configured lives in `agent_bridge::agents`.
 
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
@@ -72,6 +77,56 @@ pub struct ConnectOptions {
     /// list is discovered natively or generated from that catalog.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// OpenCode executable found on the local client's PATH.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_executable: Option<PathBuf>,
+}
+
+/// Match OpenCode's executable names, including the npm shim on Windows.
+#[cfg(windows)]
+pub const OPENCODE_EXECUTABLE_NAMES: &[&str] = &["opencode.exe", "opencode.cmd"];
+#[cfg(not(windows))]
+pub const OPENCODE_EXECUTABLE_NAMES: &[&str] = &["opencode"];
+
+fn opencode_on_path() -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    env::split_paths(&env::var_os("PATH")?)
+        .flat_map(|dir| {
+            OPENCODE_EXECUTABLE_NAMES
+                .iter()
+                .map(move |name| dir.join(name))
+        })
+        .map(|path| cwd.join(path))
+        .find(|path| is_opencode_executable(path))
+}
+
+pub fn is_opencode_executable(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    OPENCODE_EXECUTABLE_NAMES.iter().any(|expected| {
+        if cfg!(windows) {
+            name.eq_ignore_ascii_case(expected)
+        } else {
+            name == *expected
+        }
+    }) && fs::metadata(path).is_ok_and(|metadata| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        metadata.is_file()
+    })
+}
+
+impl ConnectOptions {
+    pub(crate) fn supply_opencode_executable(&mut self, agent_id: &str, connect: bool) {
+        if connect && agent_id == Agent::OpenCode.id() && self.opencode_executable.is_none() {
+            self.opencode_executable = opencode_on_path().filter(|path| path.to_str().is_some());
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

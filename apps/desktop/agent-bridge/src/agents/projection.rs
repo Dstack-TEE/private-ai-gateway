@@ -725,11 +725,7 @@ pub(super) fn project(
             && still_ours.is_none()
             && !prior.iter().any(|recorded| {
                 recorded.path == field.path
-                    || (agent == Agent::OpenCode
-                        && ((recorded.path == owned(&["provider", "private-ai-proxy"])
-                            && field.path == owned(&["providers", "private-ai-proxy"]))
-                            || (recorded.path == owned(&["providers", "private-ai-proxy"])
-                                && field.path == owned(&["provider", "private-ai-proxy"]))))
+                    && (agent != Agent::OpenCode || recorded.value.is_some())
             })
         {
             return Err(format!("The {} provider already exists outside this connection. Leave it unchanged and resolve the ownership conflict before connecting", agent.name()));
@@ -1465,6 +1461,7 @@ pub(super) fn connection_options(
             .is_some_and(|model| agent.can_use(catalog, model))
     });
     ConnectOptions {
+        opencode_executable: options.opencode_executable.clone(),
         default_model: preferred
             .or_else(|| preferred_default.then(|| PREFERRED_DEFAULT_MODEL.to_string()))
             .or_else(|| {

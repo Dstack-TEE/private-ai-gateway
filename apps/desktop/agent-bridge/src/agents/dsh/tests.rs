@@ -13,6 +13,7 @@ fn private(path: &Path, text: &str) {
 fn options(model: &str) -> ConnectOptions {
     ConnectOptions {
         default_model: Some(model.to_string()),
+        ..ConnectOptions::default()
     }
 }
 
