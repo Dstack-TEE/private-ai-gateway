@@ -128,7 +128,7 @@ impl From<CallError> for String {
 pub struct Client {
     states: watch::Sender<AppState>,
     expected_shutdown: Mutex<Option<String>>,
-    desktop: bool,
+    resolve_agent_environment: fn() -> ClientEnvironment,
     agent_environment: OnceLock<ClientEnvironment>,
 }
 
@@ -161,7 +161,7 @@ impl Client {
         Self {
             states,
             expected_shutdown: Mutex::new(None),
-            desktop: false,
+            resolve_agent_environment: || agent_environment::capture(std::env::var_os),
             agent_environment: OnceLock::new(),
         }
     }
@@ -324,10 +324,16 @@ impl Client {
         handle: tokio::runtime::Handle,
         before_start: impl FnOnce(&Self) + Send + 'static,
     ) -> Arc<Self> {
-        let client = Arc::new(Self {
-            desktop: true,
-            ..Self::new()
-        });
+        let client = Self::new();
+        #[cfg(any(
+            target_os = "linux",
+            all(target_os = "macos", not(feature = "mac-app-store"))
+        ))]
+        let client = Self {
+            resolve_agent_environment: shell_environment::resolve,
+            ..client
+        };
+        let client = Arc::new(client);
         client
             .states
             .send_modify(|state| state.backend_connected = Some(false));
@@ -671,16 +677,8 @@ impl Client {
     }
 
     fn agent_environment(&self) -> &ClientEnvironment {
-        self.agent_environment.get_or_init(|| {
-            #[cfg(any(
-                target_os = "linux",
-                all(target_os = "macos", not(feature = "mac-app-store"))
-            ))]
-            if self.desktop {
-                return shell_environment::resolve();
-            }
-            agent_environment::capture(std::env::var_os)
-        })
+        self.agent_environment
+            .get_or_init(self.resolve_agent_environment)
     }
 
     pub fn agent_secret_mismatch(&self, agent: Agent, version: &Version) -> Option<String> {
