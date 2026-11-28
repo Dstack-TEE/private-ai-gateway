@@ -492,6 +492,7 @@ jobs:
           if [[ '${{ matrix.cli_platform }}' == windows ]]; then
             native_tar="$(cygpath -u "$WINDIR")/System32/tar.exe"
             "$native_tar" -x -f "release/${base}.zip" -C "$scratch"
+            pwsh -NoProfile -File scripts/check-windows-crt.ps1 -Path "$(cygpath -w "$scratch/$base")"
           else
             tar -x -z -f "release/${base}.tar.gz" -C "$scratch"
           fi
@@ -531,6 +532,8 @@ jobs:
             extract "release/private-ai-proxy-${VERSION}-linux-${{ matrix.cli_arch }}.$suffix" "desktop-$suffix"
             grep -Fx 'ExecStart=/usr/bin/private-ai-proxy-service --supervised' "$scratch/desktop-$suffix/usr/lib/systemd/user/private-ai-proxy.service"
           done
+          # Node expands the template literal in this inline script.
+          # shellcheck disable=SC2016
           expected_pkgver="$(node --input-type=module -e 'import { releaseVersionParts } from "./scripts/package-linux.mjs"; process.stdout.write(`${releaseVersionParts(process.argv[1]).arch}-1`)' "$VERSION")"
           grep -Fx "pkgver = $expected_pkgver" "$scratch/cli-pkg.tar.zst/.PKGINFO"
           grep -Fx 'pkgname = private-ai-proxy' "$scratch/desktop-pkg.tar.zst/.PKGINFO"
@@ -607,7 +610,9 @@ jobs:
             if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
           }
           try {
+            & ./scripts/check-windows-crt.ps1 -Path $installers[0].FullName
             Run-Installer $installers[0].FullName "/S /D=$installDir"
+            & ./scripts/check-windows-crt.ps1 -Path $installDir
             if (![string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
               $executables = @(Get-ChildItem "$installDir/*.exe" | Where-Object { $_.Name -ne 'uninstall.exe' })
               if ($executables.Count -ne 4) { throw "Expected four installed executables, found $($executables.Count)" }
@@ -743,6 +748,8 @@ jobs:
           export TAURI_CHECK_KEYRING_HOME="$scratch"
           export XDG_RUNTIME_DIR="$scratch/runtime"
           mkdir -m 700 "$XDG_RUNTIME_DIR"
+          # The child shell expands the variables inside this session.
+          # shellcheck disable=SC2016
           dbus-run-session -- bash -euc '
             HOME="$TAURI_CHECK_KEYRING_HOME" gnome-keyring-daemon --foreground --unlock --components=secrets <<< ci-check-only &
             keyring_pid=$!
